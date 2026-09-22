@@ -9,6 +9,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::Duration;
 
 use super::clock::Deadline;
 use super::identity::{pidfd_open, pidfd_send_signal};
@@ -136,10 +137,8 @@ impl FdMap {
     /// always passes and which works once it is armed. What remains is the
     /// window inside bubblewrap's startup between clearing ours and arming its
     /// own: a supervisor killed in that instant still leaves an orphan on pid
-    /// 1 holding this run's descriptors. Closing it needs either a change in
-    /// bubblewrap or a descriptor bubblewrap blocks on during setup
-    /// (`--userns-block-fd`, which moves the uid-map write to the supervisor).
-    /// Neither belongs in this closure.
+    /// 1 holding this run's descriptors. The production platform closes that
+    /// window with [`super::watch`]'s blocked bootstrap and outside pidfd watcher.
     ///
     /// Then every descriptor above stdio is marked close-on-exec, so nothing
     /// the supervisor happens to hold — the gate, control and trace channels
@@ -148,6 +147,16 @@ impl FdMap {
     /// or above the configured reserve base and every target below it, so no `dup2` can
     /// clobber a later source.
     pub fn apply(&self, command: &mut Command) {
+        self.apply_with_parent_death(command, true);
+    }
+
+    /// Only for the outside lifetime watcher: it must survive its parent long
+    /// enough to kill the backend through the inherited pidfd.
+    pub(crate) fn apply_watcher(&self, command: &mut Command) {
+        self.apply_with_parent_death(command, false);
+    }
+
+    fn apply_with_parent_death(&self, command: &mut Command, parent_death: bool) {
         let moves: Vec<(RawFd, RawFd)> = self
             .moves
             .iter()
@@ -163,11 +172,11 @@ impl FdMap {
             command.pre_exec(move || {
                 // SAFETY: PR_SET_PDEATHSIG takes scalars and dereferences
                 // nothing.
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) < 0 {
+                if parent_death && libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 // SAFETY: getppid takes no arguments and cannot fail.
-                if libc::getppid() != supervisor {
+                if parent_death && libc::getppid() != supervisor {
                     // The supervisor died in the fork window, so the signal
                     // this child just armed will never arrive. Leave before
                     // becoming the orphan that holds the run's descriptors.
@@ -255,6 +264,20 @@ pub fn wait_until(pid: libc::pid_t, deadline: Deadline) -> io::Result<WaitOutcom
         return Ok(WaitOutcome::Exited);
     }
 }
+
+/// Reap `child` if it ends before `deadline`, without ever blocking on it.
+///
+/// Every caller has already asked the child to die or knows it is dying, so
+/// the wait is bounded; on expiry the child is left to its owner. Not for use
+/// while a tracer thread owns this process's `waitpid`.
+pub fn reap_until(child: &mut Child, deadline: Deadline) {
+    while matches!(child.try_wait(), Ok(None)) && !deadline.expired() {
+        std::thread::sleep(REAP_STEP);
+    }
+}
+
+/// The poll interval of [`reap_until`].
+const REAP_STEP: Duration = Duration::from_millis(1);
 
 /// What a bounded run produced.
 #[derive(Debug)]

@@ -84,6 +84,28 @@ impl AuditWriter {
         self.limit_hits += 1;
     }
 
+    /// Records why a requested ceiling stays unapplied: the explanatory
+    /// wrapper note §6.4 asks for when a preferred controller is missing.
+    pub fn record_limit_unapplied(&mut self, key: &str, reason: &str) {
+        let event = Event::limit_note(
+            &self.attempt_id,
+            0, // assigned by the shared wrapper stream writer
+            SystemTime::now(),
+            crate::platform::elapsed_since_start_ns(),
+            key,
+            reason,
+        );
+        if let Some(trace) = self.trace.as_ref() {
+            let written = match trace.lock() {
+                Ok(mut sink) => sink.write_event(&event, Priority::Normal),
+                Err(_) => Ok(()),
+            };
+            if written.is_err() {
+                self.lost_frames += 1;
+            }
+        }
+    }
+
     /// Events emitted for one coverage class so far.
     #[must_use]
     pub fn count(&self, class: CoverageClass) -> u64 {
@@ -798,6 +820,29 @@ mod tests {
                 .collect();
             assert_eq!(seqs, expected);
         }
+    }
+
+    #[test]
+    fn an_unapplied_ceiling_leaves_an_explanatory_wrapper_note() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
+        let mut writer = AuditWriter::new("att_test", Some(trace), b"/work/space", b"/tmp");
+        writer.record_limit_unapplied("pids", "no delegated cgroup");
+        let events: Vec<Value> = std::fs::read_to_string(file.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 1);
+        let note = &events[0];
+        assert_eq!(note["source"], "wrapper");
+        assert_eq!(note["operation"], "note");
+        assert_eq!(note["fields"]["kind"], "limit");
+        assert_eq!(note["fields"]["key"], "pids");
+        assert_eq!(note["fields"]["applied"], false);
+        assert_eq!(note["fields"]["reason"], "no delegated cgroup");
+        // A wrapper note consumes no audit sequence and counts in no class.
+        assert_eq!(writer.count(CoverageClass::Exec), 0);
     }
 
     #[test]

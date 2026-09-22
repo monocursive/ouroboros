@@ -565,7 +565,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         },
     )?;
     let request = plan_request(&plan);
-    let capabilities = ctx.platform.probe(&request);
+    let capabilities = ctx.platform.probe_all(&request);
     let ready = plan
         .resolved
         .requirements
@@ -1175,6 +1175,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 record.outcome.kind = OutcomeKind::Unknown;
                 record.outcome.code = None;
                 record.outcome.signal = None;
+                // A resource event the supervisor itself acted on is the
+                // cause even when the target's own end is not observable:
+                // the ambiguity is the outcome's kind, not its cause.
+                if let Some(cause) = running.limit_cause() {
+                    record.outcome.cause.get_or_insert(cause);
+                }
                 record.outcome.cause.get_or_insert(reason);
                 break;
             }
@@ -1190,6 +1196,19 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         outcome_error.get_or_insert(error);
     }
     let tree = running.wait_tree(TREE_BUDGET);
+    for limit in running.final_limits() {
+        if let Some(recorded) = record
+            .applied
+            .limits
+            .iter_mut()
+            .find(|row| row.key == limit.key)
+        {
+            *recorded = limit;
+        }
+    }
+    if let Some(cause) = running.limit_cause() {
+        record.outcome.cause.get_or_insert(cause);
+    }
     if let Some(summary) = running.observer_summary() {
         record.observer = summary.to_observer_record();
         record.coverage = summary.to_coverage();

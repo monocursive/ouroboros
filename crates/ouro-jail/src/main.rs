@@ -447,6 +447,10 @@ fn internal_subcommand() -> Option<ExitCode> {
     let first = args.get(1)?;
     match first.to_str()? {
         #[cfg(target_os = "linux")]
+        "__watch" => ouro_jail::platform::linux::watch::watcher_main(),
+        #[cfg(target_os = "linux")]
+        "__backend" => ouro_jail::platform::linux::watch::bootstrap_main(&args[2..]),
+        #[cfg(target_os = "linux")]
         "__launch" => ouro_jail::platform::linux::launch::launch_main(&args[2..]),
         #[cfg(target_os = "linux")]
         "__probe-inside" => ouro_jail::platform::linux::probe::probe_inside_main(&args[2..]),

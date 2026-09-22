@@ -1549,7 +1549,7 @@ fn this_hosts_backend_version_is_the_pinned_one() {
 // ===========================================================================
 
 #[test]
-fn a_delegated_leaf_from_a_session_scope_records_the_kernels_own_answer() {
+fn a_delegated_leaf_records_the_kernels_own_answer() {
     if !reference_host("a systemd-delegated cgroup subtree") {
         return;
     }
@@ -1582,11 +1582,8 @@ fn a_delegated_leaf_from_a_session_scope_records_the_kernels_own_answer() {
     assert!(root.ends_with("user@1001.service"), "{}", root.display());
 
     // From an SSH session scope the common-ancestor rule forbids the move.
-    assert!(
-        !attempt.common_ancestor_ok,
-        "this test describes the session-scope case; own cgroup was {own}"
-    );
     match attempt.status {
+        cgroup::LeafStatus::Moved if attempt.common_ancestor_ok => {}
         cgroup::LeafStatus::MoveFailed { errno } => {
             assert!(
                 errno == libc::EACCES || errno == libc::EPERM,
@@ -1598,9 +1595,9 @@ fn a_delegated_leaf_from_a_session_scope_records_the_kernels_own_answer() {
                 ouro_jail::platform::linux::sys::errno_name(errno)
             );
         }
-        ref other => panic!("expected the move to be refused, got {other}"),
+        ref other => panic!("unexpected placement result: {other}"),
     }
-    assert!(!attempt.moved(), "no false claim of success");
+    assert_eq!(attempt.moved(), attempt.common_ancestor_ok);
     cleanup.expect("the leaf must be removed again");
     assert!(
         !attempt.path.as_ref().unwrap().exists(),
@@ -1626,6 +1623,31 @@ fn the_probes_report_the_statuses_this_host_warrants() {
         results.iter().map(|r| (r.name, r)).collect();
     assert_eq!(by_name.len(), probe::PROBE_NAMES.len());
 
+    // The cgroup rows depend on the session, not only on the host: a leaf can
+    // be created and populated only from inside the delegated user subtree,
+    // which the conformance driver enters with `systemd-run --user --scope`
+    // and a plain SSH session does not. Derive the expectation from those two
+    // facts rather than from the probe under test.
+    // SAFETY: getuid takes no arguments and cannot fail.
+    let in_delegation = cgroup::delegated_root(unsafe { libc::getuid() }).is_some_and(|root| {
+        let relative = format!(
+            "/{}",
+            root.strip_prefix(cgroup::CGROUP_ROOT)
+                .expect("the delegated root lies beneath the cgroup mount")
+                .display()
+        );
+        cgroup::own_cgroup().is_ok_and(|own| cgroup::common_ancestor_ok(&own, &relative))
+    });
+    assert!(
+        in_delegation || !ouro_fixture::harness::live_required(),
+        "conformance runs inside the delegated user scope; this session is outside it"
+    );
+    let cgroup_status = if in_delegation {
+        ProbeStatus::Available
+    } else {
+        ProbeStatus::Unavailable
+    };
+
     let expected = [
         ("bwrap_present", ProbeStatus::Available),
         ("user_namespace", ProbeStatus::Available),
@@ -1634,8 +1656,11 @@ fn the_probes_report_the_statuses_this_host_warrants() {
         ("mount_readonly_bind", ProbeStatus::Available),
         ("seccomp_filter_load", ProbeStatus::Available),
         ("ptrace_seize_descendant", ProbeStatus::Available),
-        // Not delegated to a login session: the move is refused.
-        ("cgroup_delegated_leaf", ProbeStatus::Unavailable),
+        ("observer_closed_set", ProbeStatus::Available),
+        ("cgroup_delegated_leaf", cgroup_status),
+        ("cgroup_pids", cgroup_status),
+        ("cgroup_memory", cgroup_status),
+        ("cgroup_cpu", cgroup_status),
         // `available` here means the restriction is on.
         ("apparmor_userns_restriction", ProbeStatus::Available),
         // Which is why nesting is denied.

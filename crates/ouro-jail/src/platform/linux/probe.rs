@@ -31,7 +31,7 @@ use super::sys::{empty_stat, errno_name};
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
 /// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 10] = [
+pub const PROBE_NAMES: [&str; 14] = [
     "bwrap_present",
     "user_namespace",
     "pid_namespace",
@@ -39,7 +39,11 @@ pub const PROBE_NAMES: [&str; 10] = [
     "mount_readonly_bind",
     "seccomp_filter_load",
     "ptrace_seize_descendant",
+    "observer_closed_set",
     "cgroup_delegated_leaf",
+    "cgroup_pids",
+    "cgroup_memory",
+    "cgroup_cpu",
     "apparmor_userns_restriction",
     "nested_user_namespace",
 ];
@@ -138,7 +142,11 @@ pub fn run_one(name: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         "mount_readonly_bind" => probe_readonly_bind(jail_exe, bwrap),
         "seccomp_filter_load" => probe_seccomp(jail_exe, bwrap),
         "ptrace_seize_descendant" => probe_ptrace_seize(),
-        "cgroup_delegated_leaf" => probe_cgroup_leaf(),
+        "observer_closed_set" => probe_observer(jail_exe),
+        "cgroup_delegated_leaf" => probe_cgroup_leaf("cgroup_delegated_leaf", None),
+        "cgroup_pids" => probe_cgroup_leaf("cgroup_pids", Some("pids")),
+        "cgroup_memory" => probe_cgroup_leaf("cgroup_memory", Some("mem")),
+        "cgroup_cpu" => probe_cgroup_leaf("cgroup_cpu", Some("cpu")),
         "apparmor_userns_restriction" => probe_apparmor(),
         "nested_user_namespace" => probe_nested_userns(jail_exe, bwrap),
         _ => ProbeResult::new(
@@ -619,59 +627,219 @@ fn last() -> i32 {
     super::sys::last_errno()
 }
 
-fn probe_cgroup_leaf() -> ProbeResult {
-    const NAME: &str = "cgroup_delegated_leaf";
+fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResult {
     const MECHANISM: &str = "cgroup-v2-delegated";
+    let mut limits = crate::policy::LimitsSnapshot {
+        wall: None,
+        pids: None,
+        mem: None,
+        cpu: None,
+    };
+    let ceiling = |value: &str| {
+        Some(crate::policy::LimitCeiling {
+            value: value.to_owned(),
+            required: true,
+        })
+    };
+    match controller {
+        Some("pids") => limits.pids = ceiling("16"),
+        Some("mem") => limits.mem = ceiling("67108864"),
+        Some("cpu") => limits.cpu = ceiling("100"),
+        _ => {}
+    }
+    let mut leaf = match cgroup::ExecutionCgroup::create(&limits) {
+        Ok(leaf) => leaf,
+        Err(err) => {
+            return ProbeResult::new(
+                name,
+                ProbeStatus::Unavailable,
+                MECHANISM,
+                "cgroup_unavailable",
+                err.to_string(),
+            );
+        }
+    };
     // SAFETY: fork; the child calls only `pause`, which is
     // async-signal-safe, and never returns.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
+        // The probe must not leave a fixture on doctor death.
+        unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+        }
         loop {
             // SAFETY: pause takes no arguments and is async-signal-safe.
             unsafe { libc::pause() };
         }
     }
     if pid < 0 {
-        return ProbeResult::error(NAME, MECHANISM, format!("fork: {}", errno_name(last())));
+        return ProbeResult::error(name, MECHANISM, format!("fork: {}", errno_name(last())));
     }
 
-    let attempt = cgroup::try_leaf(&format!("ouro-probe-{}.leaf", own_pid()), pid, "pids");
-    // SAFETY: `pid` is this process's own child.
+    let deadline = Deadline::after(PROBE_DEADLINE);
+    let measured = (|| -> io::Result<()> {
+        leaf.place(pid)?;
+        if !leaf.populated()? {
+            return Err(io::Error::other("placement was not populated"));
+        }
+        leaf.kill()?;
+        while leaf.populated()? {
+            if deadline.expired() {
+                return Err(io::Error::other("cgroup.kill exceeded probe deadline"));
+            }
+            nap();
+        }
+        Ok(())
+    })();
     unsafe {
         libc::kill(pid, libc::SIGKILL);
+    }
+    loop {
         let mut status = 0;
-        libc::waitpid(pid, &raw mut status, 0);
+        let rc = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+        if rc == pid || rc < 0 {
+            break;
+        }
+        if deadline.expired() {
+            return ProbeResult::error(name, MECHANISM, "probe child could not be reaped");
+        }
+        nap();
     }
-    let cleanup = cgroup::remove_leaf(&attempt);
+    match measured.and_then(|()| leaf.remove()) {
+        Ok(()) => ProbeResult::new(
+            name,
+            ProbeStatus::Available,
+            MECHANISM,
+            "ok",
+            "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+        ),
+        Err(err) => ProbeResult::new(
+            name,
+            ProbeStatus::Unavailable,
+            MECHANISM,
+            "cgroup_probe_failed",
+            err.to_string(),
+        ),
+    }
+}
 
-    let mut evidence = format!(
-        "own cgroup {}, delegated root {}, common-ancestor rule {}: {}",
-        attempt.own_cgroup.as_deref().unwrap_or("unknown"),
-        attempt
-            .delegated_root
-            .as_ref()
-            .map_or_else(|| "none".to_owned(), |p| p.display().to_string()),
-        if attempt.common_ancestor_ok {
-            "permits the move"
-        } else {
-            "forbids the move"
-        },
-        attempt.status
-    );
-    if let Err(e) = cleanup {
-        evidence.push_str(&format!("; cleanup failed: {e}"));
+fn probe_observer(jail_exe: &Path) -> ProbeResult {
+    use super::tracer::{ClosedOp, Tracer, TracerConfig, TracerEvent};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::process::Stdio;
+    const NAME: &str = "observer_closed_set";
+    let deadline = Deadline::after(PROBE_DEADLINE);
+    let measured = (|| -> io::Result<()> {
+        let temp = OwnedTempDir::new("observer-probe")?;
+        let target = temp.path.join("created");
+        let (release_r, release_w) = exec::pipe()?;
+        let (_error_r, error_w) = exec::pipe()?;
+        let mut fds = FdMap::new();
+        fds.add(release_r, 12)?;
+        fds.add(error_w, 13)?;
+        let mut command = Command::new(jail_exe);
+        command
+            .args([
+                "__launch",
+                "--release-fd",
+                "12",
+                "--error-fd",
+                "13",
+                "--narrow",
+                "--",
+            ])
+            .arg(jail_exe)
+            .arg(INSIDE_SUBCOMMAND)
+            .arg(format!("create=write:{}", target.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        fds.apply(&mut command);
+        let mut child = command.spawn()?;
+        drop(fds);
+        let pid = child.id() as i32;
+        let pidfd = match identity::pidfd_open(pid) {
+            Ok(fd) => fd,
+            Err(error) => {
+                let _ = child.kill();
+                exec::reap_until(&mut child, deadline);
+                return Err(error);
+            }
+        };
+        let measured = (|| -> io::Result<()> {
+            loop {
+                let syscall = std::fs::read_to_string(format!("/proc/{pid}/syscall"))?;
+                if syscall
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    == Some(libc::SYS_read)
+                {
+                    break;
+                }
+                if deadline.expired() {
+                    return Err(io::Error::other("observer launcher did not block"));
+                }
+                nap();
+            }
+            let tracer = Tracer::attach(pid, TracerConfig::default()).map_err(io::Error::other)?;
+            std::fs::File::from(release_w).write_all(&[1])?;
+            let mut matched = 0;
+            let mut exited = false;
+            let mut observe =
+                |event: TracerEvent| match event {
+                    TracerEvent::Syscall {
+                        op: ClosedOp::Open,
+                        args,
+                        ret,
+                        ..
+                    } if args.path.as_ref().is_some_and(|path| {
+                        path.bytes == target.as_os_str().as_encoded_bytes()
+                    }) && ret >= 0 =>
+                    {
+                        matched += 1
+                    }
+                    TracerEvent::Exit { pid: seen, .. } if seen == pid => exited = true,
+                    _ => {}
+                };
+            while !deadline.expired() {
+                match tracer.events().recv_timeout(Duration::from_millis(10)) {
+                    Ok(TracerEvent::Finished) => break,
+                    Ok(event) => observe(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(_) => {}
+                }
+            }
+            let summary = tracer.finish_within_draining(deadline.remaining(), observe);
+            if matched != 1 || !exited || summary.loss.total() != 0 || !target.exists() {
+                return Err(io::Error::other(
+                    "observer did not pair the fixture result without loss",
+                ));
+            }
+            Ok(())
+        })();
+        // The tracer normally reaps it; if attachment failed, clean it here.
+        let _ = identity::pidfd_send_signal(pidfd.as_raw_fd(), libc::SIGKILL);
+        exec::reap_until(&mut child, deadline);
+        measured
+    })();
+    match measured {
+        Ok(()) => ProbeResult::new(
+            NAME,
+            ProbeStatus::Available,
+            "ptrace-seccomp",
+            "ok",
+            "attached blocked launcher; one successful create matched the fixture, final exit observed, zero loss",
+        ),
+        Err(err) => ProbeResult::new(
+            NAME,
+            ProbeStatus::Unavailable,
+            "ptrace-seccomp",
+            "observer_probe_failed",
+            err.to_string(),
+        ),
     }
-    let status = if attempt.moved() {
-        ProbeStatus::Available
-    } else {
-        ProbeStatus::Unavailable
-    };
-    let reason = if attempt.moved() {
-        "ok"
-    } else {
-        "cgroup_move_refused"
-    };
-    ProbeResult::new(NAME, status, MECHANISM, reason, evidence)
 }
 
 /// Path of the Ubuntu sysctl that restricts unprivileged user namespaces.

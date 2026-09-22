@@ -113,8 +113,11 @@ fix that landed and the contract or test that pins it.
 | README claimed nothing was implemented and J0 was all `not_started` | README states the J0/J1 landing and what J1 enforces | — |
 | P04's credential-special-files sub-clause had no code path in J1 | Scoped to J3 in §16; J1 refuses credential-bearing launch profiles fail-closed | §16 |
 
-Deferred with reasons: per-attempt cgroup limits (J2, and explicit ceilings
-refuse rather than run unenforced until then); receipt-fsync on a worker
+The per-attempt cgroup and parent-death deferrals above are resolved by
+[J2 authority](j2-authority.md): explicit ceilings enforce when the corresponding
+controller/placement/kill probes succeed, and otherwise refuse.
+
+Still deferred with reasons: receipt-fsync on a worker
 thread with the 5-second budget (§13.3 — the synchronous write is bounded by
 the filesystem; the thread split lands with J4's failure-injection work where
 it can be tested); per-pid birth identity on audit events (J4).

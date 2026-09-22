@@ -2773,10 +2773,11 @@ fn r9_deny_read_grants_are_enforced_as_masks() {
     );
 }
 
-/// M-K/§6.4: an explicit pids ceiling is a required limit; this slice cannot
-/// enforce it, so it refuses instead of running unbounded.
+/// M-K/§6.4: an explicit pids ceiling is a required limit. It runs only when
+/// the delegated pids controller enforces it (J2) and refuses otherwise,
+/// never running unbounded.
 #[test]
-fn r9_an_explicit_pids_ceiling_refuses_until_it_can_be_enforced() {
+fn r9_an_explicit_pids_ceiling_runs_only_when_enforced() {
     if !live() {
         return;
     }
@@ -2795,8 +2796,30 @@ fn r9_an_explicit_pids_ceiling_refuses_until_it_can_be_enforced() {
         ])
         .run()
         .expect("run");
-    assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
-    assert!(!marker.exists(), "the target ran without the ceiling");
+    let available = ouro_jail::platform::linux::probe::run_one(
+        "cgroup_pids",
+        &harness::jail_path(),
+        Path::new("bwrap"),
+    )
+    .status
+        == ouro_jail::platform::linux::probe::ProbeStatus::Available;
+    if available {
+        assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+        assert!(marker.exists());
+        let receipt = settled(&run);
+        let limit = receipt["applied"]["limits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == "pids")
+            .unwrap();
+        assert_eq!(limit["required"], true);
+        assert_eq!(limit["applied"], true);
+        assert_eq!(limit["mechanism"], "pids.max");
+    } else {
+        assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
+        assert!(!marker.exists(), "the target ran without the ceiling");
+    }
 }
 
 /// north-star §4.4: requiring all_descendants on Linux refuses (125) rather

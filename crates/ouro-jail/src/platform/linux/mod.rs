@@ -33,3 +33,5 @@ pub mod probe;
 pub mod sys;
 #[cfg(target_os = "linux")]
 pub mod tracer;
+#[cfg(target_os = "linux")]
+pub mod watch;

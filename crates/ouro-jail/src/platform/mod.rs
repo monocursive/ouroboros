@@ -245,8 +245,15 @@ pub trait Platform {
         None
     }
 
-    /// Measures the capabilities the plan needs. `doctor` and `run` share it.
+    /// Measures the capabilities the plan needs; a run asks for nothing else.
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability>;
+
+    /// Measures every capability this platform can probe, for `doctor`, which
+    /// reports the host and not only the plan (§14.1). A platform whose probe
+    /// set is exactly the plan's leaves the default.
+    fn probe_all(&self, plan: &PlanRequest) -> Vec<Capability> {
+        self.probe(plan)
+    }
 
     /// Creates the boundary and the blocked launcher.
     ///
@@ -292,6 +299,16 @@ pub trait PreparedExecution {
 
 /// A released execution (§4).
 pub trait RunningExecution {
+    /// Final kernel-measured tree ceilings, including counter-based hits.
+    fn final_limits(&self) -> Vec<crate::records::AppliedLimit> {
+        Vec::new()
+    }
+
+    /// A resource event that actually caused termination, never inferred from
+    /// an exit code or from ordinary CPU bandwidth throttling.
+    fn limit_cause(&self) -> Option<String> {
+        None
+    }
     /// Waits for the next event, up to `deadline`.
     fn wait(&mut self, deadline: Deadline) -> RunEvent;
 

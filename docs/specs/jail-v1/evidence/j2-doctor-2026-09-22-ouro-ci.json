@@ -1,0 +1,210 @@
+{
+  "capabilities": [
+    {
+      "evidence_ref": "bwrap_present,pid_namespace",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "pid-namespace",
+      "name": "tree_termination",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "ptrace_seize_descendant,observer_closed_set",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "ptrace",
+      "name": "closed_set_observation",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "filesystem_containment",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "seccomp_filter_load",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "seccomp-bpf",
+      "name": "syscall_filter",
+      "reason_code": "ok",
+      "scope": "process",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "network_namespace",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "network-namespace",
+      "name": "network_none",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "protected_coverage:existing_and_root",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "supervisor",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "boottime-deadline",
+      "name": "limit:wall",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bubblewrap 0.11.1",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "bubblewrap",
+      "name": "bwrap_present",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531837, inside 4026532428",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "user-namespace",
+      "name": "user_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531836, inside 4026532429; NSpid 2; /proc shows 1,2",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "pid-namespace",
+      "name": "pid_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "interfaces inside: lo",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "network-namespace",
+      "name": "network_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "write into a read-only bind failed EROFS",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "mount_readonly_bind",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "Seccomp mode 2, AF_UNIX socket EPERM, allowed write ok, filter sha256:080c1ad7c8a8d2503c87b5c77649ba1500c820d0267fbec381bc75fd57c98049",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "seccomp-bpf",
+      "name": "seccomp_filter_load",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "seized pid 673430, stopped with signal 5, detached",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "ptrace",
+      "name": "ptrace_seize_descendant",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "attached blocked launcher; one successful create matched the fixture, final exit observed, zero loss",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "ptrace-seccomp",
+      "name": "observer_closed_set",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_delegated_leaf",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_pids",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_memory",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_cpu",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "/proc/sys/kernel/apparmor_restrict_unprivileged_userns = 1",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "apparmor",
+      "name": "apparmor_userns_restriction",
+      "reason_code": "restriction_on",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "a nested bubblewrap exited Some(1): bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.; bare unshare(CLONE_NEWUSER) inside: ok",
+      "measured_at": "2026-09-22T16:56:50Z",
+      "mechanism": "nested-bubblewrap",
+      "name": "nested_user_namespace",
+      "reason_code": "nested_sandbox_denied",
+      "scope": "host",
+      "status": "unavailable"
+    }
+  ],
+  "component": "ouro-jail",
+  "platform": {
+    "arch": "x86_64",
+    "kernel": "Linux 7.0.0-31-generic",
+    "os": "linux"
+  },
+  "ready": true,
+  "requirements": [
+    "tree_termination",
+    "closed_set_observation",
+    "filesystem_containment",
+    "syscall_filter",
+    "network_none",
+    "protected_coverage:existing_and_root",
+    "limit:wall"
+  ],
+  "version": "0.1.0"
+}

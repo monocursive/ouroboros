@@ -546,9 +546,11 @@ fn directory_is_empty(dir: &OwnedFd) -> Result<bool, i32> {
 /// One row of the mount table the receipt records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountRow {
-    /// `ro-bind`, `bind`, `symlink`, `proc`, `dev` or `placeholder`.
+    /// `ro-bind`, `bind`, `symlink`, `proc`, `dev`, `cwd`, `tmpfs-mask` or
+    /// `placeholder`.
     pub kind: &'static str,
-    /// The host source, or the symlink target, or nothing for `proc`/`dev`.
+    /// The host source, or the symlink target, or nothing for a mount with no
+    /// source (`proc`, `dev`, `cwd`, `tmpfs-mask`).
     pub source: Option<OsString>,
     /// The path inside the sandbox.
     pub destination: OsString,
@@ -576,6 +578,9 @@ pub struct BwrapPlan {
     pub etc_paths: Vec<PathBuf>,
     /// The writable workspace, mounted at the same path inside.
     pub workspace: PathBuf,
+    /// None exposes only an empty working directory, never undeclared inputs.
+    /// Some(true) is writable; Some(false) is read-only.
+    pub workspace_access: Option<bool>,
     /// The scratch directory, mounted at `/tmp` inside.
     pub scratch: PathBuf,
     /// Source descriptors for each row of `mount_table`, populated by preparation.
@@ -674,6 +679,7 @@ impl BwrapPlan {
             roots,
             etc_paths,
             workspace: workspace.to_owned(),
+            workspace_access: Some(true),
             scratch: scratch.to_owned(),
             mount_fds: Vec::new(),
             env: vec![
@@ -735,14 +741,36 @@ impl BwrapPlan {
             source: None,
             destination: OsString::from("/dev"),
         });
-        let mut writable = self.extra_rw_binds.clone();
-        writable.push((self.scratch.clone(), PathBuf::from(SCRATCH_INSIDE_PATH)));
-        writable.push((self.workspace.clone(), self.workspace.clone()));
-        writable.sort_by_key(|(_, destination)| destination.components().count());
-        for (source, destination) in writable {
+        // The base roots, ancestors before descendants. The workspace is one
+        // of them in whichever mode the plan grants it: a read-only workspace
+        // sits under any writable grant inside it rather than covering it,
+        // and an ungranted one is an empty tmpfs mounted after a scratch at
+        // /tmp that would otherwise hide it, then sealed read-only by the
+        // argv once every grant beneath it is in place.
+        let mut base: Vec<(&'static str, Option<PathBuf>, PathBuf)> = self
+            .extra_rw_binds
+            .iter()
+            .map(|(source, destination)| ("bind", Some(source.clone()), destination.clone()))
+            .collect();
+        base.push((
+            "bind",
+            Some(self.scratch.clone()),
+            PathBuf::from(SCRATCH_INSIDE_PATH),
+        ));
+        base.push(match self.workspace_access {
+            Some(true) => ("bind", Some(self.workspace.clone()), self.workspace.clone()),
+            Some(false) => (
+                "ro-bind",
+                Some(self.workspace.clone()),
+                self.workspace.clone(),
+            ),
+            None => ("cwd", None, self.workspace.clone()),
+        });
+        base.sort_by_key(|(_, _, destination)| destination.components().count());
+        for (kind, source, destination) in base {
             rows.push(MountRow {
-                kind: "bind",
-                source: Some(source.into_os_string()),
+                kind,
+                source: source.map(PathBuf::into_os_string),
                 destination: destination.into_os_string(),
             });
         }
@@ -856,6 +884,7 @@ impl BwrapPlan {
                     "tmpfs-mask" => "--tmpfs",
                     "proc" => "--proc",
                     "dev" => "--dev",
+                    "cwd" => "--tmpfs",
                     _ => unreachable!("mount table kind"),
                 };
                 if let Some(fd) = fd {
@@ -870,6 +899,12 @@ impl BwrapPlan {
                     push(&[OsStr::new(flag), &row.destination]);
                 }
             }
+            if self.workspace_access.is_none() {
+                // Every grant inside the empty working directory is mounted
+                // by now; seal it before the root.
+                push(&[OsStr::new("--remount-ro"), self.workspace.as_os_str()]);
+            }
+            push(&[OsStr::new("--remount-ro"), OsStr::new("/")]);
             push(&[OsStr::new("--chdir"), self.workspace.as_os_str()]);
             if let Some(fd) = self.seccomp_fd {
                 push(&[OsStr::new("--seccomp"), OsStr::new(&fd.to_string())]);
@@ -1102,6 +1137,87 @@ mod tests {
         let position = |path: &str| rendered.argv.iter().position(|arg| arg == path).unwrap();
         assert!(position("/external") < position("/external/secrets"));
         assert!(position("/external/secrets") < position("/external/secrets/hidden"));
+    }
+
+    fn argv_text(plan: &BwrapPlan) -> String {
+        let mut text = plan
+            .render()
+            .unwrap()
+            .argv
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.push(' ');
+        text
+    }
+
+    #[test]
+    fn the_root_is_sealed_after_every_mount_and_before_chdir() {
+        let text = argv_text(&sample_plan());
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        assert!(at("--ro-bind /usr/local/bin/ouro-jail /run/ouro/jail ") < at("--remount-ro / "));
+        assert!(at("--remount-ro / ") < at("--chdir /work/space "));
+        assert!(!text.contains("--remount-ro /work/space "));
+    }
+
+    #[test]
+    fn an_ungranted_workspace_is_a_sealed_empty_tmpfs_above_scratch() {
+        let mut plan = sample_plan();
+        plan.workspace = PathBuf::from("/tmp/work/space");
+        plan.workspace_access = None;
+        plan.protected.clear();
+        plan.extra_ro_binds.push((
+            PathBuf::from("/tmp/work/space/input"),
+            PathBuf::from("/tmp/work/space/input"),
+        ));
+        let rows = plan.mount_table();
+        let index = |path: &str| rows.iter().position(|row| row.destination == path).unwrap();
+        assert!(index("/tmp") < index("/tmp/work/space"));
+        assert!(index("/tmp/work/space") < index("/tmp/work/space/input"));
+        assert_eq!(rows[index("/tmp/work/space")].kind, "cwd");
+        assert_eq!(rows[index("/tmp/work/space")].source, None);
+        let text = argv_text(&plan);
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        assert!(at("--bind /scratch/dir /tmp ") < at("--tmpfs /tmp/work/space "));
+        assert!(at("--tmpfs /tmp/work/space ") < at("--ro-bind /tmp/work/space/input "));
+        assert!(at("--ro-bind /tmp/work/space/input ") < at("--remount-ro /tmp/work/space "));
+        assert!(at("--remount-ro /tmp/work/space ") < at("--remount-ro / "));
+        assert!(at("--remount-ro / ") < at("--chdir /tmp/work/space "));
+        assert!(!text.contains("--bind /tmp/work/space /tmp/work/space "));
+        assert!(!text.contains("--dir "));
+    }
+
+    #[test]
+    fn a_read_only_workspace_sits_under_writable_grants_inside_it() {
+        let mut plan = sample_plan();
+        plan.workspace_access = Some(false);
+        plan.protected.clear();
+        plan.extra_rw_binds.push((
+            PathBuf::from("/work/space/out"),
+            PathBuf::from("/work/space/out"),
+        ));
+        let rows = plan.mount_table();
+        let index = |path: &str| rows.iter().position(|row| row.destination == path).unwrap();
+        assert_eq!(rows[index("/work/space")].kind, "ro-bind");
+        assert_eq!(rows[index("/work/space/out")].kind, "bind");
+        assert!(index("/work/space") < index("/work/space/out"));
+        let text = argv_text(&plan);
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        assert!(
+            at("--ro-bind /work/space /work/space ")
+                < at("--bind /work/space/out /work/space/out ")
+        );
+        assert!(!text.contains("--remount-ro /work/space "));
     }
 
     #[test]

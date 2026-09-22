@@ -1339,6 +1339,45 @@ impl Event {
         }
     }
 
+    /// A wrapper limit note (`fields.kind = limit`): why a requested ceiling
+    /// is recorded unapplied (§6.4).
+    #[must_use]
+    pub fn limit_note(
+        attempt_id: &str,
+        source_seq: u64,
+        observed_at: SystemTime,
+        monotonic_ns: u128,
+        key: &str,
+        reason: &str,
+    ) -> Self {
+        let mut fields = serde_json::Map::new();
+        fields.insert("kind".to_owned(), serde_json::Value::from("limit"));
+        fields.insert("key".to_owned(), serde_json::Value::from(key));
+        fields.insert("applied".to_owned(), serde_json::Value::from(false));
+        fields.insert("reason".to_owned(), serde_json::Value::from(reason));
+        Event {
+            schema: SCHEMA_EVENT.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+            source: EventSource::Wrapper,
+            source_seq,
+            observed_at: rfc3339_utc(observed_at),
+            monotonic_ns: monotonic_ns.to_string(),
+            operation: "note".to_owned(),
+            stage: EventStage::Result,
+            decision: None,
+            outcome: Some(EventOutcome {
+                ok: Some(true),
+                return_value: None,
+                errno: None,
+                completion: Completion::Wrapper,
+                bytes_in: None,
+                bytes_out: None,
+                duration_ms: None,
+            }),
+            fields,
+        }
+    }
+
     /// A wrapper coverage-gap note (`fields.kind = coverage_gap`).
     #[must_use]
     pub fn coverage_gap_note(

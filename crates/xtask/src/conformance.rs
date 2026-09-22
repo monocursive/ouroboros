@@ -169,7 +169,8 @@ pub fn i02_command(run_dir: &str) -> String {
 pub fn doctor_command(run_dir: &str) -> String {
     let p = run_path(run_dir);
     format!(
-        "cd {p} && ./target/release/ouro-jail doctor --json > doctor.json 2> doctor.stderr; \
+        "cd {p} && XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet \
+         ./target/release/ouro-jail doctor --json > doctor.json 2> doctor.stderr; \
          rc=$?; cat doctor.stderr 1>&2; exit $rc"
     )
 }
@@ -192,7 +193,7 @@ pub fn doctor_command(run_dir: &str) -> String {
 pub fn test_command(run_dir: &str, jobs: u32) -> String {
     let p = run_path(run_dir);
     format!(
-        "cd {p} && OURO_CONFORMANCE=1 \
+        "cd {p} && XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet env OURO_CONFORMANCE=1 \
          OURO_JAIL_BIN=$PWD/target/release/ouro-jail \
          OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture \
          {REMOTE_CARGO} test --workspace --release -j{jobs} --no-fail-fast \

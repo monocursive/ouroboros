@@ -60,20 +60,21 @@ seccomp_filter_load = "available"
 # evidence/tracer-spike-2026-09-22-ouro-ci.txt §1 (15,109 closed-set events,
 # 30,220 stops, zero gaps); backend-evaluation.md §2.1.
 ptrace_seize_descendant = "available"
+observer_closed_set = "available"
 
-# An SSH session lives in `/user.slice/user-<uid>.slice/session-N.scope`, which
-# systemd owns as root and does not delegate, so no leaf can be created there,
-# and the cgroup common-ancestor rule forbids moving into the delegated
-# `user@1001.service` subtree from outside it. Measured 2026-09-22 as ouro-ci:
-# `cat /proc/self/cgroup` reports `session-31.scope`, that directory is
-# `drwxr-xr-x root root`, and `mkdir` inside it returns "Permission denied",
-# while `user@1001.service` is `ouro-ci`-owned with `cpu memory pids` in
-# `cgroup.subtree_control` (evidence/reference-host-2026-09-22-ouro-ci.txt
-# lines `cgroup_user_*`). jail-v1 §6.4 lets `tool` run without a cgroup when
-# the ptrace observer supplies tree scope, so this row is expected to be
-# unavailable rather than to refuse; the systemd `--user --scope` route that
-# would change it is J2 (L03/L04).
-cgroup_delegated_leaf = "unavailable"
+# J2 runs doctor/tests inside `systemd-run --user --scope`, with
+# XDG_RUNTIME_DIR=/run/user/$(id -u). Remeasured as ouro-ci 2026-09-22:
+# the delegated user@1001.service has cpu/memory/pids enabled. Each doctor
+# probe creates a unique leaf, sets/reads its control, places a fixture,
+# invokes cgroup.kill, verifies populated=0, reaps and removes the leaf.
+# An ordinary SSH session is still outside that subtree and cannot move in.
+# Full measurement and tests: evidence/j2-doctor-2026-09-22-ouro-ci.json and
+# evidence/j2-test-log-2026-09-22-ouro-ci.txt, run 20260922T165552Z-e89a3f7918c2,
+# which includes the J2 review fixes recorded in j2-authority.md.
+cgroup_delegated_leaf = "available"
+cgroup_pids = "available"
+cgroup_memory = "available"
+cgroup_cpu = "available"
 
 # Informational, and deliberately phrased so `available` means THE RESTRICTION
 # IS ON: `kernel.apparmor_restrict_unprivileged_userns` is 1, which permits

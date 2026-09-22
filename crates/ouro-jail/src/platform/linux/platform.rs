@@ -10,6 +10,9 @@
 //! launcher → target. The launcher is this same binary, bound read-only at
 //! `/run/ouro/jail` and re-executed with the hidden `__launch` subcommand, so
 //! nothing but the target's own code runs after the boundary is closed.
+//! An outside watcher is a sibling of bubblewrap; its pidfds close the backend's
+//! startup parent-death window. A resource leaf includes bubblewrap, namespace
+//! init and the target tree, while the supervisor/observer/watcher stay outside.
 
 use std::ffi::{OsStr, OsString};
 use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
@@ -43,8 +46,9 @@ use crate::supervisor::TREE_BUDGET;
 
 use super::audit::AuditWriter;
 use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome};
+use super::cgroup::ExecutionCgroup;
 use super::clock::{self, boottime_ns};
-use super::exec::{self, FdMap};
+use super::exec::{self, FdMap, reap_until};
 use super::fs as jfs;
 use super::identity;
 use super::probe::{self, ProbeResult, ProbeStatus};
@@ -54,7 +58,7 @@ use super::tracer::{Tracer, TracerConfig, TracerEvent, TracerSummary};
 /// Descriptor the seccomp program is handed to bubblewrap on.
 const SECCOMP_FD: RawFd = 10;
 /// Descriptor bubblewrap writes its JSON status to.
-const STATUS_FD: RawFd = 11;
+pub(crate) const STATUS_FD: RawFd = 11;
 /// Descriptor the launcher blocks reading.
 const RELEASE_FD: RawFd = 12;
 /// Descriptor the launcher writes a failed exec's errno to.
@@ -73,6 +77,9 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const SETTLE_GRACE: Duration = Duration::from_millis(500);
 /// Longest single block inside `wait`, so every source is re-checked often.
 const WAIT_STEP: Duration = Duration::from_millis(10);
+/// How often the execution cgroup's counters are read while the target runs;
+/// they are always read once more before an outcome is classified.
+const LIMIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The Linux platform.
 #[derive(Clone, Debug)]
@@ -163,7 +170,7 @@ fn inputs_for(
             CapabilityScope::Tree,
         )),
         REQ_CLOSED_SET_OBSERVATION => Some((
-            &["ptrace_seize_descendant"],
+            &["ptrace_seize_descendant", "observer_closed_set"],
             "ptrace",
             CapabilityScope::Tree,
         )),
@@ -188,6 +195,22 @@ fn inputs_for(
             CapabilityScope::Tree,
         )),
         _ => None,
+    }
+}
+
+/// The probes one requirement's capability is derived from. A run measures
+/// only these; `doctor` measures every probe.
+fn probes_for(requirement: &str) -> &'static [&'static str] {
+    if requirement.starts_with("protected_coverage:") {
+        return inputs_for(REQ_FILESYSTEM_CONTAINMENT).map_or(&[], |(probes, _, _)| probes);
+    }
+    match requirement {
+        "limit:wall" | REQ_NETWORK_PROXY => &[],
+        "limit:pids" => &["cgroup_pids"],
+        "limit:mem" => &["cgroup_memory"],
+        "limit:cpu" => &["cgroup_cpu"],
+        other if other.starts_with("limit:") => &["cgroup_delegated_leaf"],
+        other => inputs_for(other).map_or(&[], |(probes, _, _)| probes),
     }
 }
 
@@ -224,10 +247,9 @@ fn capability_for(requirement: &str, results: &[ProbeResult], measured_at: &str)
         };
     }
     if requirement.starts_with("limit:") && requirement != "limit:wall" {
-        // pids, mem and cpu all need the execution cgroup.
         return capability_from(
             requirement,
-            &["cgroup_delegated_leaf"],
+            probes_for(requirement),
             "cgroup-v2-delegated",
             CapabilityScope::Tree,
             results,
@@ -282,6 +304,40 @@ fn capability_from(
     }
 }
 
+impl LinuxPlatform {
+    /// Runs the probes `wanted` selects, in report order, and derives the
+    /// plan's capabilities from them.
+    fn measure(&self, plan: &PlanRequest, wanted: impl Fn(&str) -> bool) -> Vec<Capability> {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/proc/self/exe"));
+        let results: Vec<ProbeResult> = probe::PROBE_NAMES
+            .iter()
+            .filter(|name| wanted(name))
+            .map(|name| probe::run_one(name, &exe, &self.bwrap))
+            .collect();
+        let measured_at = rfc3339_utc(SystemTime::now());
+
+        let mut out: Vec<Capability> = plan
+            .requirements
+            .iter()
+            .map(|requirement| capability_for(requirement, &results, &measured_at))
+            .collect();
+        // The probe rows themselves, so `doctor --json` reports what was
+        // measured and not only what the plan happened to ask for (§14.1).
+        for result in &results {
+            out.push(Capability {
+                name: result.name.to_owned(),
+                status: status_of(result),
+                scope: CapabilityScope::Host,
+                mechanism: Some(result.mechanism.to_owned()),
+                reason_code: Some(result.reason_code.to_owned()),
+                measured_at: Some(measured_at.clone()),
+                evidence_ref: Some(result.evidence.clone()),
+            });
+        }
+        out
+    }
+}
+
 impl Platform for LinuxPlatform {
     fn owner_identity(&self) -> Option<crate::platform::OwnerIdentity> {
         let identity = identity::ProcessIdentity::own().ok()?;
@@ -300,29 +356,19 @@ impl Platform for LinuxPlatform {
     }
 
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/proc/self/exe"));
-        let results = probe::run_all(&exe, &self.bwrap);
-        let measured_at = rfc3339_utc(SystemTime::now());
-
-        let mut out: Vec<Capability> = plan
+        // A run measures what its plan asks about: every probe is a real
+        // sandbox, fork or ptrace session, and the leaf and observer probes
+        // are not free. `doctor` runs them all through `probe_all`.
+        let wanted: std::collections::BTreeSet<&str> = plan
             .requirements
             .iter()
-            .map(|requirement| capability_for(requirement, &results, &measured_at))
+            .flat_map(|requirement| probes_for(requirement).iter().copied())
             .collect();
-        // The ten probe rows themselves, so `doctor --json` reports what was
-        // measured and not only what the plan happened to ask for (§14.1).
-        for result in &results {
-            out.push(Capability {
-                name: result.name.to_owned(),
-                status: status_of(result),
-                scope: CapabilityScope::Host,
-                mechanism: Some(result.mechanism.to_owned()),
-                reason_code: Some(result.reason_code.to_owned()),
-                measured_at: Some(measured_at.clone()),
-                evidence_ref: Some(result.evidence.clone()),
-            });
-        }
-        out
+        self.measure(plan, |name| wanted.contains(name))
+    }
+
+    fn probe_all(&self, plan: &PlanRequest) -> Vec<Capability> {
+        self.measure(plan, |_| true)
     }
 
     fn prepare(
@@ -436,8 +482,27 @@ struct Boundary {
     backend_version: String,
     observe_on: bool,
     ns_ids: identity::NsIds,
+    cgroup: Option<ExecutionCgroup>,
+    cgroup_lost: bool,
+    /// Why no execution cgroup exists, when preferred ceilings run unenforced.
+    cgroup_unavailable: Option<String>,
+    watcher: super::watch::Watcher,
 }
 impl Boundary {
+    /// Whether the backend's pidfd reports its exit, independent of whether
+    /// its status has been collected yet.
+    fn backend_exited(&self) -> bool {
+        self.bwrap_fd
+            .as_ref()
+            .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
+    }
+    fn cgroup_empty(&self) -> bool {
+        !self.cgroup_lost
+            && self
+                .cgroup
+                .as_ref()
+                .is_none_or(|leaf| matches!(leaf.populated(), Ok(false)))
+    }
     #[allow(clippy::too_many_lines)]
     fn create(
         bwrap_path: &Path,
@@ -504,30 +569,30 @@ impl Boundary {
         };
         create_private_dir(&scratch)?;
 
-        // §6.4 + I02: an explicit pids/mem/cpu ceiling is a required limit,
-        // and this slice applies only the wall clock (limits are staged at
-        // J2, jail-v1 §16). A requirement this slice cannot enforce refuses
-        // before exec; it is never satisfied with nothing behind it.
-        for (key, ceiling) in [
-            ("pids", &snapshot.limits.pids),
-            ("mem", &snapshot.limits.mem),
-            ("cpu", &snapshot.limits.cpu),
-        ] {
-            if let Some(limit) = ceiling
-                && limit.required
-            {
-                return Err(error(
+        let cgroup_required = [
+            &snapshot.limits.pids,
+            &snapshot.limits.mem,
+            &snapshot.limits.cpu,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|limit| limit.required);
+        let mut cgroup_unavailable = None;
+        let cgroup = match ExecutionCgroup::create(&snapshot.limits) {
+            Ok(leaf) => Some(leaf),
+            Err(err) if cgroup_required => {
+                return Err(preparing(
                     ErrorCode::MissingCapability,
-                    ErrorStage::Preparing,
-                    Remediation::Unsupported,
-                    format!(
-                        "an explicit {key} ceiling is required by the resolved policy, and \
-                         pids/mem/cpu enforcement is not implemented in this slice; it refuses \
-                         rather than run unenforced (jail-v1 §6.4)"
-                    ),
+                    format!("required execution cgroup could not be configured: {err}"),
                 ));
             }
-        }
+            // Preferred ceilings run unenforced, and the record says why
+            // (§6.4): the reason reaches the native details and a wrapper note.
+            Err(err) => {
+                cgroup_unavailable = Some(err.to_string());
+                None
+            }
+        };
 
         // north-star §4.4 / jail-v1 §9.1: Linux cannot enforce
         // all_descendants; a profile that requires it refuses (125) rather
@@ -557,6 +622,19 @@ impl Boundary {
         }
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
+        bplan.workspace_access = None;
+        if snapshot.filesystem.read_write.iter().any(|reference| {
+            host_path_of(reference, &plan.workspace, &scratch)
+                .is_ok_and(|path| path == plan.workspace)
+        }) {
+            bplan.workspace_access = Some(true);
+        }
+        if snapshot.filesystem.read_only.iter().any(|reference| {
+            host_path_of(reference, &plan.workspace, &scratch)
+                .is_ok_and(|path| path == plan.workspace)
+        }) {
+            bplan.workspace_access = Some(false);
+        }
         bplan.bwrap = bwrap_path.to_path_buf();
         bplan.env = environment_for(&snapshot, &plan.workspace)?;
 
@@ -588,7 +666,9 @@ impl Boundary {
         }
         for reference in &snapshot.filesystem.read_write {
             if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
-                if host.starts_with(&plan.workspace) || host.starts_with(&scratch) {
+                if (bplan.workspace_access == Some(true) && host.starts_with(&plan.workspace))
+                    || host.starts_with(&scratch)
+                {
                     // Inside a base writable bind already; layering an extra
                     // bind of the same content would add nothing.
                     continue;
@@ -672,6 +752,8 @@ impl Boundary {
         let (release_r, release_w) = exec::pipe().map_err(io)?;
         let (error_r, error_w) = exec::pipe().map_err(io)?;
         let (status_r, status_w) = exec::pipe().map_err(io)?;
+        let (start_r, start_w) = exec::pipe().map_err(io)?;
+        fds.add(start_r, super::watch::START_FD).map_err(io)?;
         fds.add(release_r, RELEASE_FD).map_err(io)?;
         fds.add(error_w, ERROR_FD).map_err(io)?;
         fds.add(status_w, STATUS_FD).map_err(io)?;
@@ -695,8 +777,8 @@ impl Boundary {
         set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
         set_nonblocking(status_r.as_raw_fd()).map_err(io)?;
 
-        let mut command = Command::new(&rendered.argv[0]);
-        command.args(&rendered.argv[1..]);
+        let mut command = Command::new(&exe);
+        command.arg("__backend").args(&rendered.argv);
         // §9.1 mount-handoff verification: the workspace and every pinned
         // protected segment must still resolve to the objects that were
         // scanned, or the run refuses rather than bind a replacement.
@@ -714,26 +796,51 @@ impl Boundary {
             preparing(
                 ErrorCode::BackendUnavailable,
                 format!(
-                    "{} could not be started: {err}",
-                    rendered.argv[0].to_string_lossy()
+                    "the backend bootstrap ({}) could not be started: {err}",
+                    exe.display()
                 ),
             )
         })?;
+        // In particular close our duplicate of ARGS_FD before streaming: if
+        // the backend exits there must be no reader left to suppress EPIPE.
+        drop(fds);
+        // Root the cgroup namespace in this attempt's leaf. Moving only the
+        // target after bubblewrap unshares exposes a /../../host-leaf path in
+        // /proc/self/cgroup. The blocked bootstrap cannot fork or exec yet.
+        if let Some(leaf) = &cgroup
+            && let Err(err) = leaf.place(child.id() as i32)
+        {
+            let _ = child.kill();
+            reap_until(&mut child, deadline);
+            return Err(io(err));
+        }
+        let watcher = match super::watch::Watcher::start(&exe, child.id() as i32, deadline) {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                let _ = child.kill();
+                reap_until(&mut child, deadline);
+                return Err(io(err));
+            }
+        };
+        if let Err(err) = write_all(start_w.as_raw_fd(), &[1]) {
+            let _ = child.kill();
+            reap_until(&mut child, deadline);
+            return Err(io(err));
+        }
+        drop(start_w);
         // The payload write happens with bwrap already blocked on ARGS_FD, so
         // a payload larger than the pipe's capacity flows through instead of
         // deadlocking. A failure here means bwrap died reading: tear it down
         // rather than leak an orphan (§8.1 pre-exec failure refuses).
         if let (Some(args_w), Some(payload)) =
             (args_writer.as_ref(), rendered.args_payload.as_ref())
-            && let Err(err) = write_all(args_w.as_raw_fd(), payload)
+            && let Err(err) = write_until(args_w.as_raw_fd(), payload, deadline)
         {
             let _ = child.kill();
             reap_until(&mut child, clock::Deadline::after(TREE_BUDGET));
             return Err(io(err));
         }
         drop(args_writer);
-        // The parent's copies close here, so the child's peers see EOF.
-        drop(fds);
         let bwrap_pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
 
         let workspace_path = plan.workspace.clone();
@@ -783,11 +890,41 @@ impl Boundary {
             backend_version: String::new(),
             observe_on,
             ns_ids: identity::NsIds::default(),
+            cgroup,
+            cgroup_lost: false,
+            cgroup_unavailable,
+            watcher,
         };
+        if let Some(reason) = boundary.cgroup_unavailable.clone() {
+            for (key, ceiling) in [
+                ("pids", &boundary.snapshot.limits.pids),
+                ("mem", &boundary.snapshot.limits.mem),
+                ("cpu", &boundary.snapshot.limits.cpu),
+            ] {
+                if ceiling.is_some() {
+                    boundary.audit.record_limit_unapplied(key, &reason);
+                }
+            }
+        }
 
         if let Err(err) = boundary.discover(bwrap_path, deadline, &filter_digest, &scan) {
             boundary.teardown();
             return Err(err);
+        }
+        if let Some(leaf) = boundary.cgroup.as_mut()
+            && let Err(err) = leaf
+                .verify_member(boundary.launcher.pid)
+                .and_then(|()| leaf.verify_member(boundary.bwrap_pid))
+                .and_then(|()| leaf.verify_member(boundary.init_pid))
+                .and_then(|()| leaf.arm())
+        {
+            // Placement can have succeeded before read-back failed. Never
+            // discard that leaf and claim the target has no resource boundary.
+            boundary.teardown();
+            return Err(preparing(
+                ErrorCode::MissingCapability,
+                format!("target cgroup placement failed: {err}"),
+            ));
         }
         if observe_on {
             // §13.1: gap intervals count from supervisor start on the same
@@ -1004,10 +1141,15 @@ impl Boundary {
             ("cpu", self.snapshot.limits.cpu.as_ref()),
         ] {
             let Some(ceiling) = ceiling else { continue };
-            // The wall is enforced by this supervisor's own boot-clock
-            // deadline. Every other ceiling needs the execution cgroup, which
-            // this host does not delegate to a login session, so it is
-            // recorded requested and unapplied (§6.4).
+            if key != "wall"
+                && let Some(limit) = self
+                    .cgroup
+                    .as_ref()
+                    .and_then(|leaf| leaf.limits().into_iter().find(|limit| limit.key == key))
+            {
+                limits.push(limit);
+                continue;
+            }
             let applied = key == "wall";
             limits.push(AppliedLimit {
                 key: key.to_owned(),
@@ -1091,6 +1233,10 @@ impl Boundary {
         if let Some(mut child) = self.child.take() {
             reap_until(&mut child, deadline);
         }
+        while !self.watcher.ended() && !deadline.expired() {
+            sleep_for(WAIT_STEP);
+        }
+        self.watcher.reap();
         self.remove_placeholders();
     }
 
@@ -1103,6 +1249,9 @@ impl Boundary {
     /// init makes the kernel kill the namespace; the backend outside it goes
     /// too.
     fn kill_boundary(&self) {
+        if let Some(leaf) = &self.cgroup {
+            let _ = leaf.kill();
+        }
         for fd in [self.init_fd.as_ref(), self.bwrap_fd.as_ref()]
             .into_iter()
             .flatten()
@@ -1194,7 +1343,7 @@ impl Boundary {
     }
 
     fn remove_placeholders(&mut self) {
-        if init_alive(self.init_pid) || !self.observer_verified_the_tree() {
+        if init_alive(self.init_pid) || !self.observer_verified_the_tree() || !self.cgroup_empty() {
             return;
         }
         if self.placeholder_outcomes.is_empty() {
@@ -1208,6 +1357,19 @@ impl Boundary {
 
     fn boundary_identity(&self) -> BoundaryIdentity {
         let mut details = Map::new();
+        details.insert("watcher_pid".to_owned(), Value::from(self.watcher.pid()));
+        details.insert(
+            "execution_cgroup".to_owned(),
+            match &self.cgroup {
+                Some(leaf) => leaf.registration(self.bwrap_pid, self.init_pid),
+                None => serde_json::json!({
+                    "unavailable": self
+                        .cgroup_unavailable
+                        .as_deref()
+                        .unwrap_or("not attempted"),
+                }),
+            },
+        );
         details.insert(
             "bwrap_pid".to_owned(),
             Value::from(i64::from(self.bwrap_pid)),
@@ -1330,6 +1492,47 @@ fn write_all(fd: RawFd, bytes: &[u8]) -> std::io::Result<()> {
             return Err(err);
         }
         written += usize::try_from(n).unwrap_or(0);
+    }
+    Ok(())
+}
+
+/// Setup channels obey the preparation deadline even if a helper stops
+/// reading while retaining its descriptor.
+fn write_until(fd: RawFd, bytes: &[u8], deadline: clock::Deadline) -> std::io::Result<()> {
+    set_nonblocking(fd)?;
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        if deadline.expired() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "backend argument delivery timed out",
+            ));
+        }
+        // SAFETY: the descriptor is owned by the caller, and this slice is live.
+        let n = unsafe { libc::write(fd, remaining.as_ptr().cast(), remaining.len()) };
+        if n > 0 {
+            remaining = &remaining[n as usize..];
+            continue;
+        }
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock => {
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: one initialized pollfd, bounded by the deadline.
+                unsafe {
+                    libc::poll(&raw mut pfd, 1, deadline.remaining_millis_capped(10));
+                }
+            }
+            _ => return Err(error),
+        }
     }
     Ok(())
 }
@@ -1595,7 +1798,9 @@ fn prepare_mounts(
     };
     let mut pins = BTreeMap::<PathBuf, jfs::PinnedPath>::new();
     let mut roots = plan.extra_rw_binds.clone();
-    roots.push((plan.workspace.clone(), plan.workspace.clone()));
+    if plan.workspace_access == Some(true) {
+        roots.push((plan.workspace.clone(), plan.workspace.clone()));
+    }
     roots.push((
         plan.scratch.clone(),
         PathBuf::from(bwrap::SCRATCH_INSIDE_PATH),
@@ -1615,6 +1820,10 @@ fn prepare_mounts(
         for (root_index, (source, destination)) in roots.iter().enumerate() {
             let pin = jfs::PinnedPath::open(source).map_err(failure)?;
             if !pin.is_dir().map_err(failure)? {
+                pins.insert(source.clone(), pin);
+                continue;
+            }
+            if coverage == ProtectedCoverage::None {
                 pins.insert(source.clone(), pin);
                 continue;
             }
@@ -1744,6 +1953,18 @@ impl PreparedExecution for LinuxPrepared {
 
     fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
         let mut boundary = self.boundary;
+        if boundary.watcher.ended()
+            || boundary
+                .cgroup
+                .as_ref()
+                .is_some_and(|leaf| leaf.verify().is_err())
+        {
+            boundary.teardown();
+            return Err(preparing(
+                ErrorCode::BackendUnavailable,
+                "lifetime resources were lost before release",
+            ));
+        }
         let Some(release) = boundary.release.take() else {
             return Err(preparing(
                 ErrorCode::BackendUnavailable,
@@ -1780,6 +2001,7 @@ impl PreparedExecution for LinuxPrepared {
             bwrap_status: None,
             finished: false,
             evidence_reported: false,
+            sampled_at_ns: 0,
         }))
     }
 
@@ -1788,7 +2010,9 @@ impl PreparedExecution for LinuxPrepared {
         boundary.teardown();
         // The target never ran, but the boundary existed, and whether its
         // teardown was observed to complete is still a measured fact.
-        let verified = boundary.observer_verified_the_tree() && !init_alive(boundary.init_pid);
+        let verified = boundary.observer_verified_the_tree()
+            && !init_alive(boundary.init_pid)
+            && boundary.cgroup_empty();
         Ok(Teardown {
             tree: Some(if verified {
                 TreeObservation {
@@ -1827,9 +2051,37 @@ struct LinuxRunning {
     bwrap_status: Option<i32>,
     finished: bool,
     evidence_reported: bool,
+    /// Boot-clock time of the last counter sample.
+    sampled_at_ns: u64,
 }
 
 impl LinuxRunning {
+    fn sample_limits(&mut self, force: bool) {
+        let now = boottime_ns();
+        let interval = u64::try_from(LIMIT_SAMPLE_INTERVAL.as_nanos()).unwrap_or(u64::MAX);
+        if !force && now.saturating_sub(self.sampled_at_ns) < interval {
+            return;
+        }
+        self.sampled_at_ns = now;
+        let Some(leaf) = self.boundary.cgroup.as_mut() else {
+            return;
+        };
+        match leaf.sample() {
+            Ok(hits) => {
+                for _ in 0..hits {
+                    self.boundary.audit.record_limit_hit();
+                }
+                if leaf.oom_killed() {
+                    self.hard_kill();
+                }
+            }
+            Err(_) => {
+                leaf.invalidate_hits();
+                self.boundary.cgroup_lost = true;
+                self.hard_kill();
+            }
+        }
+    }
     /// Reads whatever the launcher wrote about a failed exec.
     fn pump_error(&mut self) {
         if self.boundary.error_eof {
@@ -2136,9 +2388,19 @@ impl RunningExecution for LinuxRunning {
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
             self.pump_status();
+            self.sample_limits(false);
             self.check_exec_without_tracer();
             self.check_wall();
             self.check_grace();
+            // The watcher follows the backend out, and its exit can be seen
+            // before the backend's status has been pumped; only a watcher
+            // gone while the backend still runs is a lost helper.
+            if self.boundary.watcher.ended()
+                && self.bwrap_status.is_none()
+                && !self.boundary.backend_exited()
+            {
+                self.hard_kill();
+            }
             if !self.pending.is_empty() {
                 return self.pending.remove(0);
             }
@@ -2160,6 +2422,11 @@ impl RunningExecution for LinuxRunning {
                 && (self.boundary.tracer.is_none()
                     || self.finished
                     || self.target_outcome.is_some());
+            if done {
+                // The counters must be in hand before the outcome is
+                // classified: an OOM kill is attributed from them.
+                self.sample_limits(true);
+            }
             if done && let Some(event) = self.terminal_event() {
                 return event;
             }
@@ -2204,7 +2471,11 @@ impl RunningExecution for LinuxRunning {
             self.pump_tracer(Duration::ZERO);
             self.pump_status();
             let tracer_done = self.boundary.tracer.is_none() || self.finished;
-            if tracer_done && self.bwrap_status.is_some() && !init_alive(self.boundary.init_pid) {
+            if tracer_done
+                && self.bwrap_status.is_some()
+                && !init_alive(self.boundary.init_pid)
+                && self.boundary.cgroup_empty()
+            {
                 natural = true;
                 break;
             }
@@ -2227,11 +2498,16 @@ impl RunningExecution for LinuxRunning {
         // to whether every tracee really ended.
         self.pump_tracer(Duration::ZERO);
         self.boundary.stop_observer(deadline.remaining());
+        self.sample_limits(true);
+        while !self.boundary.watcher.ended() && !deadline.expired() {
+            sleep_for(WAIT_STEP);
+        }
+        self.boundary.watcher.reap();
         self.boundary.remove_placeholders();
 
-        verdict(&TreeInputs {
+        let mut tree = verdict(&TreeInputs {
             init_alive: init_alive(self.boundary.init_pid),
-            backend_reaped: self.bwrap_status.is_some(),
+            backend_reaped: self.bwrap_status.is_some() && self.boundary.watcher.ended(),
             tracer_finished: self.boundary.tracer.is_none() || self.finished,
             natural_end: natural,
             abandoned_tracees: self
@@ -2249,7 +2525,33 @@ impl RunningExecution for LinuxRunning {
                 .tracer_summary
                 .as_ref()
                 .is_some_and(|summary| summary.thread_panicked),
-        })
+        });
+        if !self.boundary.cgroup_empty() {
+            tree.tree_empty = None;
+            tree.verified_at = None;
+            tree.integrity = if self.boundary.cgroup_lost {
+                "lost"
+            } else {
+                "pending"
+            }
+            .to_owned();
+        }
+        tree
+    }
+
+    fn final_limits(&self) -> Vec<AppliedLimit> {
+        self.boundary
+            .cgroup
+            .as_ref()
+            .map_or_else(Vec::new, ExecutionCgroup::limits)
+    }
+
+    fn limit_cause(&self) -> Option<String> {
+        self.boundary
+            .cgroup
+            .as_ref()
+            .is_some_and(ExecutionCgroup::oom_killed)
+            .then(|| "memory_oom".to_owned())
     }
 
     fn observer_summary(&mut self) -> Option<CoverageSummary> {
@@ -2361,15 +2663,6 @@ fn image_changed(pid: libc::pid_t) -> bool {
     (launcher.dev(), launcher.ino()) != (target.dev(), target.ino())
 }
 
-fn reap_until(child: &mut Child, deadline: clock::Deadline) {
-    loop {
-        match child.try_wait() {
-            Ok(None) if !deadline.expired() => sleep_for(WAIT_STEP),
-            _ => break,
-        }
-    }
-}
-
 /// How long the loop may block before re-checking every source.
 ///
 /// A deadline that has already passed does not shorten the step: the wall is
@@ -2412,6 +2705,31 @@ impl Drop for Boundary {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stalled_backend_argument_delivery_has_a_deadline() {
+        use std::os::fd::AsRawFd;
+        let (_reader, writer) = super::exec::pipe().unwrap();
+        let deadline = super::clock::Deadline::after(std::time::Duration::from_millis(20));
+        let error =
+            super::write_until(writer.as_raw_fd(), &vec![0; 1024 * 1024], deadline).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+    #[test]
+    fn a_run_probes_only_what_its_requirements_name() {
+        assert!(super::probes_for("limit:wall").is_empty());
+        assert!(super::probes_for(super::REQ_NETWORK_PROXY).is_empty());
+        assert_eq!(super::probes_for("limit:pids"), ["cgroup_pids"]);
+        assert_eq!(super::probes_for("limit:mem"), ["cgroup_memory"]);
+        assert_eq!(super::probes_for("limit:cpu"), ["cgroup_cpu"]);
+        assert_eq!(
+            super::probes_for("protected_coverage:existing_and_root"),
+            super::probes_for(super::REQ_FILESYSTEM_CONTAINMENT)
+        );
+        assert!(
+            super::probes_for(super::REQ_CLOSED_SET_OBSERVATION).contains(&"observer_closed_set")
+        );
+        assert!(super::probes_for("unknown:requirement").is_empty());
+    }
     use super::*;
 
     fn mount_plan(root: &Path) -> BwrapPlan {

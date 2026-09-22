@@ -970,10 +970,13 @@ limit of the bubblewrap integration (measured 2026-09-22): bubblewrap clears an
 inherited parent-death signal during its own startup before arming its own for
 `--die-with-parent`, so a supervisor killed with SIGKILL inside that window
 leaves bubblewrap's outer process orphaned, holding the run's stdio open; the
-namespace and the target still die. Closing the window needs an upstream change
-or a trusted outside launcher that kills bubblewrap on the supervisor's death;
-it is scheduled with L02 (J2), and a stdio consumer must not treat EOF as the
-only sign that a run ended. Linux kills
+namespace and the target still die. J2 closes this window with a trusted blocked
+bootstrap and an outside watcher holding supervisor/backend pidfds. The bootstrap
+cannot exec bubblewrap until the watcher confirms readiness; supervisor death
+makes the watcher kill bubblewrap, and watcher death makes the supervisor stop
+the boundary. A synchronized fixture covers death before bootstrap release and
+after a backend clears its parent-death signal. A stdio consumer must not treat
+EOF as the only sign that a run ended. Linux kills
 remaining namespace processes when its init dies; this is the mechanism behind
 the required parent-death test, not an assumption about process groups.
 See [PID namespace semantics](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).

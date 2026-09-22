@@ -262,11 +262,11 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/specs/jail-v1/conformance-manifest.toml");
         let m = Manifest::load(&path).expect("the repository manifest must load");
-        assert!(m.expected.len() >= 10, "{:?}", m.expected);
+        assert!(m.expected.len() >= 14, "{:?}", m.expected);
         assert_eq!(m.expected.get("bwrap_present").unwrap(), "available");
         assert_eq!(
             m.expected.get("cgroup_delegated_leaf").unwrap(),
-            "unavailable"
+            "available"
         );
         assert_eq!(
             m.expected.get("nested_user_namespace").unwrap(),

@@ -480,9 +480,21 @@ fn s11_wall_expiry_separate_run() {
         .expect("the preferred pids ceiling is listed")
         .clone();
     assert_eq!(field(&pids, "/required"), false);
-    assert_eq!(field(&pids, "/applied"), false);
-    assert_eq!(field(&pids, "/mechanism"), &Value::Null);
-    assert_eq!(field(&pids, "/hit"), &Value::Null);
+    let available = ouro_jail::platform::linux::probe::run_one(
+        "cgroup_pids",
+        &harness::jail_path(),
+        Path::new("bwrap"),
+    )
+    .status
+        == ouro_jail::platform::linux::probe::ProbeStatus::Available;
+    assert_eq!(field(&pids, "/applied"), available);
+    if available {
+        assert_eq!(field(&pids, "/mechanism"), "pids.max");
+        assert_eq!(field(&pids, "/hit"), false);
+    } else {
+        assert_eq!(field(&pids, "/mechanism"), &Value::Null);
+        assert_eq!(field(&pids, "/hit"), &Value::Null);
+    }
 }
 
 #[test]
