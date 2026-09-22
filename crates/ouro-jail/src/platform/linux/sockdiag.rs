@@ -300,7 +300,41 @@ mod live {
             self.send_request(seq, show)?;
             let mut out = Vec::new();
             let mut buf = vec![0u8; 32 * 1024];
+            // Bound the read (review fix 2): a `recv` that never completes must
+            // not wedge a mediation worker, and a dump larger than this many
+            // datagrams is refused rather than read without limit. The attempt's
+            // network namespace holds few sockets, so these bounds are generous.
+            const DUMP_DEADLINE_MS: libc::c_int = 2000;
+            const MAX_DATAGRAMS: usize = 4096;
+            let mut datagrams = 0usize;
             loop {
+                datagrams += 1;
+                if datagrams > MAX_DATAGRAMS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sock_diag: dump exceeded the datagram bound",
+                    ));
+                }
+                let mut pfd = libc::pollfd {
+                    fd: self.fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: single live pollfd.
+                let p = unsafe { libc::poll(&raw mut pfd, 1, DUMP_DEADLINE_MS) };
+                if p == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "sock_diag: dump timed out",
+                    ));
+                }
+                if p < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(err);
+                }
                 // SAFETY: `buf` is a live, writable slice of `buf.len()` bytes.
                 let n = unsafe {
                     libc::recv(

@@ -47,8 +47,18 @@
 /// attempt-netns listener). The integrator owns the spec decision on whether
 /// `agent`'s inner sandbox may rely on Landlock-net; this module implements the
 /// egress-preserving choice (mediator connects) and records it honestly.
-pub const NON_UNIX_NOTE: &str =
-    "non-AF_UNIX connect runs in the mediator's LSM context; inner Landlock-net does not compose";
+pub const NON_UNIX_NOTE: &str = "a mediated connect runs in the supervisor's LSM context, so an \
+     inner sandbox's Landlock network rules and its abstract-socket scope do \
+     not compose through it";
+
+/// A test-only delay, in milliseconds, inserted at the start of servicing each
+/// notification (before the first id revalidation). It defaults to zero and has
+/// no effect in production; a live test raises it to force the task-death /
+/// pid-reuse window that the id revalidation guards, so removing that guard
+/// turns a test red (contract rule 6 / review fix 3). It is an atomic load per
+/// mediation, which is negligible.
+pub static MEDIATION_TEST_DELAY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Step 1: the agent filter
@@ -71,10 +81,16 @@ const SOCK_TYPE_MASK: u32 = 0xf;
 const SOCK_STREAM: u32 = 1;
 const SOCK_SEQPACKET: u32 = 5;
 const LINUX_EPERM: u32 = 1;
+/// The x32 ABI sets bit 30 of the syscall number while sharing the x86_64 audit
+/// arch; its numbering is a different table, so it must be denied, not matched
+/// against these numbers (`__X32_SYSCALL_BIT`, as in the `tool` baseline).
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 // classic-BPF opcodes (linux/bpf_common.h), spelled out like `bpf.rs`.
 const LD_W_ABS: u16 = 0x20;
 const JEQ_K: u16 = 0x15;
+const JSET_K: u16 = 0x45;
+const JA: u16 = 0x05;
 const ALU_AND_K: u16 = 0x54;
 const RET_K: u16 = 0x06;
 const SD_NR: u32 = 0;
@@ -93,6 +109,14 @@ const fn stmt(code: u16, k: u32) -> SockFilter {
 }
 const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
     SockFilter { code, jt, jf, k }
+}
+const fn ja(distance: u32) -> SockFilter {
+    SockFilter {
+        code: JA,
+        jt: 0,
+        jf: 0,
+        k: distance,
+    }
 }
 
 /// One classic-BPF instruction, laid out as `struct sock_filter`.
@@ -125,40 +149,48 @@ pub struct SockFilter {
 /// `SOCK_CLOEXEC`/`SOCK_NONBLOCK` bits do not defeat it), and AF_UNIX
 /// `SOCK_DGRAM`/`SOCK_RAW` are refused with `EPERM` because a datagram send can
 /// name a peer in `sendmsg`'s `msg_name`, which seccomp cannot read (§3.4
-/// step 1). A non-x86_64 architecture is allowed through so the nesting
-/// filter's own architecture check judges it.
+/// step 1).
+///
+/// The fragment is **safe on its own**: it validates the architecture before
+/// any syscall number and denies (`EPERM`) every ABI other than native x86_64,
+/// and denies the x32 numbering (which shares the x86_64 audit arch), exactly
+/// as the `tool` baseline in `seccomp.rs` does. It does not rely on a companion
+/// filter to reject a compat ABI — the reference host does accept an i386 (int
+/// 0x80) ABI, and a non-native `connect` there would otherwise fall through to
+/// `SECCOMP_RET_ALLOW` and escape mediation entirely.
 ///
 /// `USER_NOTIF` (0x7fc00000) outranks `SECCOMP_RET_TRACE` (0x7ff00000), so a
 /// mediated connect is never a ptrace stop and the observer never sees it
 /// (§3.4 step 4, proved in the spike).
+///
+/// Instruction indices are noted so the jump arithmetic can be read; the
+/// interpreter unit test [`tests::the_filter_table`] validates every path.
 #[must_use]
 pub fn filter_rules() -> Vec<SockFilter> {
+    // The single arch/x32 denial verdict lives at the end (index 19); the two
+    // jumps that reach it carry their distance to that index.
+    const DENY: usize = 19;
     vec![
-        // architecture guard
-        stmt(LD_W_ABS, SD_ARCH),
-        jump(JEQ_K, AUDIT_ARCH_X86_64, 1, 0),
-        stmt(RET_K, SECCOMP_RET_ALLOW),
-        // syscall number
-        stmt(LD_W_ABS, SD_NR),
-        // connect -> USER_NOTIF
-        jump(JEQ_K, NR_CONNECT, 0, 1),
-        stmt(RET_K, SECCOMP_RET_USER_NOTIF),
-        // socket / socketpair -> the type allow-list (3 / 2 insns ahead)
-        jump(JEQ_K, NR_SOCKET, 3, 0),
-        jump(JEQ_K, NR_SOCKETPAIR, 2, 0),
-        // everything else
-        stmt(RET_K, SECCOMP_RET_ALLOW),
-        stmt(RET_K, SECCOMP_RET_ALLOW), // padding: socket() jt lands here safely
-        // socket type check: domain first
-        stmt(LD_W_ABS, sd_arg_low(0)),
-        jump(JEQ_K, AF_UNIX, 1, 0),
-        stmt(RET_K, SECCOMP_RET_ALLOW), // non-AF_UNIX socket: allow
-        stmt(LD_W_ABS, sd_arg_low(1)),
-        stmt(ALU_AND_K, SOCK_TYPE_MASK),
-        jump(JEQ_K, SOCK_STREAM, 2, 0),
-        jump(JEQ_K, SOCK_SEQPACKET, 1, 0),
-        stmt(RET_K, SECCOMP_RET_ERRNO | LINUX_EPERM),
-        stmt(RET_K, SECCOMP_RET_ALLOW),
+        stmt(LD_W_ABS, SD_ARCH),                            // 0: load arch
+        jump(JEQ_K, AUDIT_ARCH_X86_64, 1, 0),               // 1: x86_64? skip the arch-deny jump
+        ja((DENY - 3) as u32),                              // 2: not x86_64 -> DENY (16 ahead)
+        stmt(LD_W_ABS, SD_NR),                              // 3: load nr
+        jump(JSET_K, X32_SYSCALL_BIT, (DENY - 5) as u8, 0), // 4: x32 bit set -> DENY
+        jump(JEQ_K, NR_CONNECT, 0, 1),                      // 5: connect? -> 6 else -> 7
+        stmt(RET_K, SECCOMP_RET_USER_NOTIF),                // 6: connect -> USER_NOTIF
+        jump(JEQ_K, NR_SOCKET, 2, 0),                       // 7: socket? -> 10 (SOCK_CHECK)
+        jump(JEQ_K, NR_SOCKETPAIR, 1, 0),                   // 8: socketpair? -> 10
+        stmt(RET_K, SECCOMP_RET_ALLOW),                     // 9: any other native syscall -> ALLOW
+        stmt(LD_W_ABS, sd_arg_low(0)),                      // 10: SOCK_CHECK: load domain
+        jump(JEQ_K, AF_UNIX, 1, 0),                         // 11: AF_UNIX? skip the ALLOW
+        stmt(RET_K, SECCOMP_RET_ALLOW),                     // 12: non-AF_UNIX socket -> ALLOW
+        stmt(LD_W_ABS, sd_arg_low(1)),                      // 13: load type
+        stmt(ALU_AND_K, SOCK_TYPE_MASK),                    // 14: mask off CLOEXEC/NONBLOCK
+        jump(JEQ_K, SOCK_STREAM, 2, 0),                     // 15: stream? -> 18 ALLOW
+        jump(JEQ_K, SOCK_SEQPACKET, 1, 0),                  // 16: seqpacket? -> 18 ALLOW
+        stmt(RET_K, SECCOMP_RET_ERRNO | LINUX_EPERM),       // 17: dgram/raw AF_UNIX -> EPERM
+        stmt(RET_K, SECCOMP_RET_ALLOW),                     // 18: stream/seqpacket AF_UNIX -> ALLOW
+        stmt(RET_K, SECCOMP_RET_ERRNO | LINUX_EPERM),       // 19: DENY (non-native arch / x32)
     ]
 }
 
@@ -369,19 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_connect_rule_is_user_notif_and_dgram_is_denied() {
+    fn the_filter_table() {
         // Interpret the program the way the kernel would, so the test checks the
         // jump arithmetic rather than restating it.
+        let eperm = SECCOMP_RET_ERRNO | LINUX_EPERM;
+        // connect on the native ABI -> USER_NOTIF
         assert_eq!(
             run_filter(AUDIT_ARCH_X86_64, NR_CONNECT, 0, 0),
             SECCOMP_RET_USER_NOTIF
         );
-        // socket(AF_UNIX, SOCK_DGRAM=2) -> EPERM
-        assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, AF_UNIX, 2),
-            SECCOMP_RET_ERRNO | LINUX_EPERM
-        );
-        // socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC) -> ALLOW (type masked)
+        // AF_UNIX SOCK_DGRAM / SOCK_RAW -> EPERM; SOCK_STREAM (with CLOEXEC) and
+        // SOCK_SEQPACKET -> ALLOW (type masked)
+        assert_eq!(run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, AF_UNIX, 2), eperm);
+        assert_eq!(run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, AF_UNIX, 3), eperm);
         assert_eq!(
             run_filter(
                 AUDIT_ARCH_X86_64,
@@ -391,25 +423,51 @@ mod tests {
             ),
             SECCOMP_RET_ALLOW
         );
-        // socket(AF_INET, SOCK_STREAM) -> ALLOW
+        assert_eq!(
+            run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, AF_UNIX, SOCK_SEQPACKET),
+            SECCOMP_RET_ALLOW
+        );
+        // non-AF_UNIX socket, socketpair DGRAM, and an unrelated syscall
         assert_eq!(
             run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, 2, SOCK_STREAM),
             SECCOMP_RET_ALLOW
         );
-        // socketpair(AF_UNIX, SOCK_DGRAM) -> EPERM
         assert_eq!(
             run_filter(AUDIT_ARCH_X86_64, NR_SOCKETPAIR, AF_UNIX, 2),
-            SECCOMP_RET_ERRNO | LINUX_EPERM
+            eperm
         );
-        // an unrelated syscall -> ALLOW
         assert_eq!(
             run_filter(AUDIT_ARCH_X86_64, 1 /* write */, 0, 0),
             SECCOMP_RET_ALLOW
         );
-        // a non-x86_64 architecture -> ALLOW (deferred to the nesting filter)
+
+        // Architecture coverage: the fragment fails closed on its own. Every
+        // non-native ABI is denied EPERM regardless of the syscall, so a compat
+        // connect cannot escape mediation.
+        for arch in [
+            0xc000_00b7u32, // aarch64
+            0x4000_0003,    // i386
+            0x4000_00b7,    // arm (32-bit)
+            0,
+            0xffff_ffff,
+        ] {
+            for nr in [NR_CONNECT, NR_SOCKET, 20 /* i386 getpid */, 39, 42] {
+                assert_eq!(
+                    run_filter(arch, nr, AF_UNIX, 0),
+                    eperm,
+                    "arch {arch:#x} nr {nr}"
+                );
+            }
+        }
+        // x32 shares the x86_64 audit arch but its numbering is distinct, so it
+        // is denied even though the arch matches.
         assert_eq!(
-            run_filter(0xc000_00b7 /* aarch64 */, NR_CONNECT, 0, 0),
-            SECCOMP_RET_ALLOW
+            run_filter(AUDIT_ARCH_X86_64, X32_SYSCALL_BIT | NR_CONNECT, 0, 0),
+            eperm
+        );
+        assert_eq!(
+            run_filter(AUDIT_ARCH_X86_64, X32_SYSCALL_BIT | 59, 0, 0),
+            eperm
         );
     }
 
@@ -445,6 +503,12 @@ mod tests {
                 }
                 JEQ_K => {
                     pc += 1 + usize::from(if acc == insn.k { insn.jt } else { insn.jf });
+                }
+                JSET_K => {
+                    pc += 1 + usize::from(if acc & insn.k != 0 { insn.jt } else { insn.jf });
+                }
+                JA => {
+                    pc += 1 + insn.k as usize;
                 }
                 RET_K => return insn.k,
                 other => panic!("unexpected opcode {other:#x}"),

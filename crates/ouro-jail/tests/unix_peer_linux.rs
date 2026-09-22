@@ -152,6 +152,9 @@ const HELPER_C: &str = r##"
 #include <sys/syscall.h>
 #include <sys/prctl.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <arpa/inet.h>
+#include <signal.h>
 #include <unistd.h>
 #include <linux/seccomp.h>
 #include <linux/filter.h>
@@ -191,6 +194,41 @@ static int bind_listen(int type, const char *name, int abstract) {
     return s;
 }
 
+/* fill a pathname sockaddr_un for `path`; returns the length. */
+static socklen_t fill_un(struct sockaddr_un *a, const char *path) {
+    memset(a,0,sizeof *a); a->sun_family=AF_UNIX;
+    size_t n = strlen(path);
+    memcpy(a->sun_path, path, n);
+    return (socklen_t)(2+n+1);
+}
+
+/* one stream connect to a pathname socket; returns 0 or errno. */
+static int connect_stream(const char *path) {
+    int s = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
+    if (s < 0) return errno;
+    struct sockaddr_un a; socklen_t len = fill_un(&a, path);
+    int r = connect(s,(void*)&a,len);
+    int e = r==0?0:errno;
+    close(s);
+    return e;
+}
+
+/* an x32 connect: shares the x86_64 audit arch but sets the x32 syscall bit,
+   so the mediation filter must deny it (EPERM). __X32_SYSCALL_BIT | connect. */
+static int x32_connect(const char *path) {
+    int s = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
+    if (s < 0) return errno;
+    struct sockaddr_un a; socklen_t len = fill_un(&a, path);
+    long r = syscall((long)(0x40000000L | 42L), (long)s, (long)&a, (long)len);
+    int e = r==0?0:(int)(r<0?-r:r);
+    close(s);
+    return e;
+}
+
+/* does the i386 int-0x80 ABI work here? i386 getpid == 20. */
+static long i386_call0(long nr){ long ret; __asm__ volatile("int $0x80":"=a"(ret):"a"(nr):"memory"); return ret; }
+static long i386_socketcall(long call, unsigned long *args){ long ret; __asm__ volatile("int $0x80":"=a"(ret):"a"(102),"b"(call),"c"(args):"memory"); return ret; }
+
 int main(int argc, char **argv) {
     const char *coord_path = argv[1];
     const char *attempt_dir = argv[2];
@@ -208,6 +246,18 @@ int main(int argc, char **argv) {
     if (bind_listen(SOCK_SEQPACKET,p,0) < 0) { dprintf(coord,"FATAL bind seq"); return 1; }
     if (bind_listen(SOCK_STREAM,"ouro-attempt-abstract",1) < 0) { dprintf(coord,"FATAL bind abs"); return 1; }
 
+    /* a TCP listener in this netns (for the domain-check test). lo may be down
+       under bwrap; the port is reported and the connect result is what matters. */
+    int tcpl = socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, 0);
+    struct sockaddr_in ta; memset(&ta,0,sizeof ta); ta.sin_family=AF_INET; ta.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    bind(tcpl,(void*)&ta,sizeof ta); listen(tcpl,16);
+    socklen_t tl=sizeof ta; getsockname(tcpl,(void*)&ta,&tl);
+    int tcp_port = ntohs(ta.sin_port);
+
+    /* i386 int-0x80 availability probe (getpid). */
+    long ip = i386_call0(20);
+    int ia32_ok = (ip == getpid());
+
     /* read the filter file into a sock_filter array */
     FILE *f = fopen(filter_file,"rb");
     if (!f) { dprintf(coord,"FATAL open filter"); return 1; }
@@ -220,7 +270,7 @@ int main(int argc, char **argv) {
     if (listener < 0) { dprintf(coord,"FATAL seccomp %d", errno); return 1; }
     int diag = socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
 
-    dprintf(coord,"HELLO %ld %d", listener, diag);
+    dprintf(coord,"HELLO %ld %d %d %d", listener, diag, tcp_port, ia32_ok);
 
     char buf[512];
     for (;;) {
@@ -233,7 +283,29 @@ int main(int argc, char **argv) {
            the supervisor closing its copy fully close the listener, which is
            what makes a later connect fail ENOSYS (fail-closed). */
         if (!strncmp(buf,"GO",2)) { close((int)listener); close(diag); continue; }
-        /* "C <t> <path>" : t in p(stream path) s(seqpacket) a(abstract) d(dgram-create) t(tcp) */
+        /* "L <n>": loop n stream connects to attempt.sock (backlog stress). */
+        if (buf[0]=='L') { int n=atoi(buf+2); snprintf(p,sizeof p,"%s/attempt.sock",attempt_dir); for(int i=0;i<n;i++) connect_stream(p); dprintf(coord,"done"); continue; }
+        /* "K <path>": fork a child that connects `path` (blocks in mediation),
+           then kill it mid-mediation. With the id revalidation, the mediator
+           must drop the now-stale notification silently. */
+        if (buf[0]=='K') {
+            char *path = buf+2;
+            pid_t c = fork();
+            if (c==0) { connect_stream(path); _exit(0); }
+            usleep(50*1000);
+            kill(c, SIGKILL);
+            int st; waitpid(c,&st,0);
+            dprintf(coord,"killed"); continue;
+        }
+        /* "F <n>": fork n children that each connect concurrently, then wait. */
+        if (buf[0]=='F') {
+            int n=atoi(buf+2); snprintf(p,sizeof p,"%s/attempt.sock",attempt_dir);
+            for(int i=0;i<n;i++){ pid_t c=fork(); if(c==0){ connect_stream(p); _exit(0);} }
+            int done=0,st; while(wait(&st)>0) done++;
+            dprintf(coord,"done %d", done); continue;
+        }
+        /* "C <t> <arg>" : p stream / s seqpacket / a abstract / d dgram / r raw
+           / t tcp(port) / b bind-nolisten / x x32 / i i386 */
         char t=buf[2];
         char *path = buf+4;
         int e;
@@ -241,6 +313,18 @@ int main(int argc, char **argv) {
         else if (t=='r') { int s=socket(AF_UNIX,SOCK_RAW|SOCK_CLOEXEC,0); e=s<0?errno:0; if(s>=0)close(s); }
         else if (t=='a') e=connect_un_type(SOCK_STREAM,path,1);
         else if (t=='s') e=connect_un_type(SOCK_SEQPACKET,path,0);
+        else if (t=='t') { int port=atoi(path); int s=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0);
+            struct sockaddr_in d; memset(&d,0,sizeof d); d.sin_family=AF_INET; d.sin_addr.s_addr=htonl(INADDR_LOOPBACK); d.sin_port=htons(port);
+            int r=connect(s,(void*)&d,sizeof d); e=r==0?0:errno; close(s); }
+        else if (t=='b') { int s=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); struct sockaddr_un a; socklen_t len=fill_un(&a,path); unlink(path); e=bind(s,(void*)&a,len)?errno:0; /* keep fd open, no listen */ }
+        else if (t=='x') e=x32_connect(path);
+        else if (t=='i') {
+            if (!ia32_ok) { e=-1; }
+            else { int s=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
+                static struct sockaddr_un la; socklen_t len=fill_un(&la,path);
+                unsigned long args[3]; args[0]=(unsigned long)s; args[1]=(unsigned long)&la; args[2]=len;
+                long r=i386_socketcall(3 /*SYS_CONNECT*/, args); e=r==0?0:(int)(r<0?-r:r); close(s); }
+        }
         else e=connect_un_type(SOCK_STREAM,path,0);
         dprintf(coord,"%d", e);
     }
@@ -251,7 +335,20 @@ fn build() -> Result<&'static (PathBuf, PathBuf), String> {
     static BUILD: OnceLock<Result<(PathBuf, PathBuf), String>> = OnceLock::new();
     BUILD
         .get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!("ouro-j3-unixpeer-{}", std::process::id()));
+            // Hygiene (review fix 5): before creating this run's directory,
+            // remove any this test left behind on earlier runs, so /tmp does not
+            // accumulate one per invocation.
+            let mine = format!("ouro-j3-unixpeer-{}", std::process::id());
+            if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+                for e in entries.flatten() {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("ouro-j3-unixpeer-") && name != mine {
+                        let _ = std::fs::remove_dir_all(e.path());
+                    }
+                }
+            }
+            let dir = std::env::temp_dir().join(&mine);
             std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
             let source = dir.join("helper.c");
             std::fs::write(&source, HELPER_C).map_err(|e| format!("write helper.c: {e}"))?;
@@ -288,12 +385,27 @@ struct Rig {
     _mediator: Option<ouro_jail::platform::linux::unixpeer::MediatorHandle>,
     sink: Arc<CollectingSink>,
     tmp: tempfile::TempDir,
+    tcp_port: u16,
+    ia32_ok: bool,
+}
+
+impl Rig {
+    /// Host-side path inside the attempt dir (bind-mounted at `/attempt`).
+    fn attempt_host(&self, name: &str) -> std::path::PathBuf {
+        self.tmp.path().join("attempt").join(name)
+    }
 }
 
 impl Rig {
     /// Connect (mediated) and return the child's observed errno string.
     fn run(&self, t: char, path: &str) -> String {
         send(self.coord, &format!("C {t} {path}"));
+        recv(self.coord)
+    }
+
+    /// Send a raw coordination command (e.g. `L 300`, `F 40`) and read the reply.
+    fn run_raw(&self, cmd: &str) -> String {
+        send(self.coord, cmd);
         recv(self.coord)
     }
 
@@ -459,6 +571,8 @@ fn start_rig() -> Option<Rig> {
     }
     let lfd: RawFd = parts[1].parse().unwrap();
     let dfd: RawFd = parts[2].parse().unwrap();
+    let tcp_port: u16 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let ia32_ok: bool = parts.get(4).map(|s| *s == "1").unwrap_or(false);
     let lpid = find_launcher(init_pid, helper.to_str().unwrap());
     let pidfd = pidfd_open(lpid).expect("pidfd_open launcher");
     let authority = take_from_launcher(
@@ -481,6 +595,8 @@ fn start_rig() -> Option<Rig> {
         _mediator: Some(mediator),
         sink,
         tmp,
+        tcp_port,
+        ia32_ok,
     })
 }
 
@@ -779,6 +895,217 @@ fn a_connect_fails_closed_when_the_mediator_stops() {
         rig.run('p', "/attempt/attempt.sock"),
         libc::ENOSYS.to_string(),
         "fail-closed"
+    );
+}
+
+/// Review fix 1: the filter is safe on its own — a connect issued through a
+/// non-native ABI (x32, and i386 int-0x80 where the kernel offers it) is
+/// refused, never allowed through unmediated. `EPERM` is the filter's denial;
+/// `ENOSYS` means the kernel does not offer that ABI, which is also a refusal.
+/// The old filter allowed non-native architectures, so a connect through them
+/// reached the peer unmediated: this test caught that.
+#[test]
+fn non_native_abi_connects_are_refused() {
+    if !common::live() {
+        return;
+    }
+    let rig = start_rig().expect("rig");
+    let refused = |r: &str| {
+        let e: i32 = r.trim().parse().unwrap_or(0);
+        e == libc::EPERM || e == libc::ENOSYS
+    };
+    // x32 shares the x86_64 audit arch; the filter must deny it via the x32 bit.
+    let x32 = rig.run('x', "/attempt/attempt.sock");
+    assert!(
+        refused(&x32),
+        "x32 connect must be refused (EPERM/ENOSYS), got {x32:?}"
+    );
+    // i386 int-0x80, only where the kernel offers the ABI.
+    if rig.ia32_ok {
+        let i386 = rig.run('i', "/attempt/attempt.sock");
+        assert!(
+            refused(&i386),
+            "i386 connect must be refused (EPERM/ENOSYS), got {i386:?}"
+        );
+    }
+    // Sanity: the native ABI is still mediated and allowed for the attempt sock.
+    assert_eq!(
+        rig.run('p', "/attempt/attempt.sock"),
+        "0",
+        "native still works"
+    );
+}
+
+/// Review fix 3, mutation M9 (domain check): a TCP connect is decided by the
+/// socket's `SO_DOMAIN`, not the address bytes. Removing that check routes a
+/// TCP connect down the AF_UNIX classifier, which reports `EAFNOSUPPORT`; with
+/// the check it is a real connect result. Assert it is never `EAFNOSUPPORT`.
+#[test]
+fn mutation_domain_check_a_tcp_connect_is_not_family_mismatched() {
+    if !common::live() {
+        return;
+    }
+    let rig = start_rig().expect("rig");
+    let r = rig.run('t', &rig.tcp_port.to_string());
+    let e: i32 = r.trim().parse().unwrap_or(-1);
+    assert_ne!(
+        e,
+        libc::EAFNOSUPPORT,
+        "a TCP connect must be handled by the domain check, not the unix classifier: {r:?}"
+    );
+}
+
+/// Review fix 3, mutation M3 (S_ISSOCK) and M7 (listener state) and M2/M10
+/// (RESOLVE_IN_ROOT / RESOLVE_NO_MAGICLINKS): each guard produces a distinct
+/// errno for a crafted node, so removing it changes the observed result.
+#[test]
+fn mutation_pathname_guards_each_produce_their_distinct_denial() {
+    if !common::live() {
+        return;
+    }
+    let rig = start_rig().expect("rig");
+
+    // M3 S_ISSOCK: a regular file is ECONNREFUSED (not_a_socket); without the
+    // check it would fall through to the sock_diag lookup and be EACCES.
+    std::fs::write(rig.attempt_host("regfile"), b"x").unwrap();
+    assert_eq!(
+        rig.run('p', "/attempt/regfile"),
+        libc::ECONNREFUSED.to_string(),
+        "M3: a non-socket node must be ECONNREFUSED"
+    );
+
+    // M7 listener state: a bound-but-not-listening socket has a VFS identity but
+    // is not SS_LISTEN, so it is EACCES (no listener); without the state check
+    // it would match and be connected (ECONNREFUSED).
+    assert_eq!(
+        rig.run('b', "/attempt/bound_nolisten.sock"),
+        "0",
+        "bind (no listen) should succeed"
+    );
+    assert_eq!(
+        rig.run('p', "/attempt/bound_nolisten.sock"),
+        libc::EACCES.to_string(),
+        "M7: a bound-but-not-listening socket must be EACCES"
+    );
+
+    // Magic links must not be traversed during resolution: a symlink to a /proc
+    // magic link resolves to EACCES (path_unresolved). This is enforced jointly
+    // by RESOLVE_IN_ROOT (which per openat2(2) itself blocks magic-link jumps)
+    // and RESOLVE_NO_MAGICLINKS. Dropping the whole resolve safety (both flags)
+    // is caught by the `absroot` case above (M2); dropping NO_MAGICLINKS alone
+    // is a benign no-op here because RESOLVE_IN_ROOT already blocks magic links.
+    let _ = std::fs::remove_file(rig.attempt_host("maglink"));
+    std::os::unix::fs::symlink("/proc/1/cwd", rig.attempt_host("maglink")).unwrap();
+    assert_eq!(
+        rig.run('p', "/attempt/maglink"),
+        libc::EACCES.to_string(),
+        "a magic-link symlink must not be traversed"
+    );
+
+    // M2 RESOLVE_IN_ROOT: an absolute symlink whose target is a host-side path
+    // resolves inside the child's root, where that path does not exist -> EACCES
+    // (path_unresolved). Without RESOLVE_IN_ROOT the absolute target would be
+    // followed in the supervisor's root and reach the attempt socket (allowed),
+    // a different result the mutation would produce.
+    let abs_host = rig.attempt_host("attempt.sock");
+    let _ = std::fs::remove_file(rig.attempt_host("absroot"));
+    std::os::unix::fs::symlink(&abs_host, rig.attempt_host("absroot")).unwrap();
+    assert_eq!(
+        rig.run('p', "/attempt/absroot"),
+        libc::EACCES.to_string(),
+        "M2: an absolute symlink must resolve inside the child's root"
+    );
+}
+
+/// Review fix 2: a full listener backlog cannot wedge the mediator. The
+/// attempt listener has a backlog of 64 and is never accepted; the child issues
+/// far more connects than that. With a blocking mediator the connect on the
+/// duplicate would block once the backlog filled and stall every request; the
+/// non-blocking bounded connect returns promptly for each.
+#[test]
+fn a_full_backlog_does_not_wedge_the_mediator() {
+    if !common::live() {
+        return;
+    }
+    let rig = start_rig().expect("rig");
+    // 300 sequential connects (>> the backlog of 64). The helper replies "done"
+    // only after all of them return; `recv` bounds the wait, so a wedge fails
+    // the test rather than hanging.
+    assert_eq!(
+        rig.run_raw("L 300"),
+        "done",
+        "the mediator serviced a full backlog"
+    );
+    // The mediator is still responsive afterwards: a connect to a *different*
+    // listener with an empty backlog succeeds promptly (the attempt.sock backlog
+    // is now full, so a connect to it would return EAGAIN — also a prompt,
+    // non-wedged reply, not a hang).
+    assert_eq!(
+        rig.run('s', "/attempt/attempt_seq.sock"),
+        "0",
+        "mediator still responsive"
+    );
+}
+
+/// Review fix 2: many concurrent connects are all serviced (the worker pool),
+/// and `stop()` returns within a bound even with requests in flight (the
+/// outstanding ones fail closed).
+#[test]
+fn concurrent_connects_are_serviced_and_stop_is_bounded() {
+    if !common::live() {
+        return;
+    }
+    let mut rig = start_rig().expect("rig");
+    // 40 concurrent connects to the never-accepted attempt listener.
+    assert_eq!(
+        rig.run_raw("F 40"),
+        "done 40",
+        "all concurrent children completed"
+    );
+
+    // Fire another wave and stop the mediator while it is in flight; stop() must
+    // return within a bound. The helper reply for the wave may or may not
+    // arrive; we only require the stop to be prompt.
+    send(rig.coord, "F 40");
+    let m = rig._mediator.take().expect("mediator");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        m.stop();
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_secs(8)).is_ok(),
+        "stop() must return within a bound even with connects in flight"
+    );
+    // Drain whatever the helper replied so Drop's teardown is clean.
+    let _ = recv(rig.coord);
+}
+
+/// Review fix 3, mutation M1 (notification-id revalidation). A forked child
+/// connects a host socket and is killed while a worker is deliberately delayed
+/// mid-mediation (the delay knob widens the task-death window). With the id
+/// revalidation the worker sees the notification is stale and drops it
+/// silently, so the sink stays empty; removing the revalidation makes the
+/// worker act on the dead task and emit a record, turning this test red.
+#[test]
+fn mutation_id_revalidation_drops_a_stale_notification() {
+    use std::sync::atomic::Ordering;
+    if !common::live() {
+        return;
+    }
+    let rig = start_rig().expect("rig");
+    let _ = rig.sink.drain();
+    // Hold each mediation for 300ms so the child can be killed (at ~50ms) before
+    // the worker acts on its notification.
+    ouro_jail::platform::linux::unixpeer::MEDIATION_TEST_DELAY_MS.store(300, Ordering::Relaxed);
+    assert_eq!(rig.run_raw("K /shared/host.sock"), "killed");
+    // Let the delayed worker finish and revalidate.
+    std::thread::sleep(Duration::from_millis(500));
+    ouro_jail::platform::linux::unixpeer::MEDIATION_TEST_DELAY_MS.store(0, Ordering::Relaxed);
+    let records = rig.sink.drain();
+    assert!(
+        records.is_empty(),
+        "a stale notification (killed task) must be dropped without a record: {records:?}"
     );
 }
 
