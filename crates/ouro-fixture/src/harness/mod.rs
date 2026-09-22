@@ -386,6 +386,12 @@ impl Jail {
         self
     }
 
+    /// Bound child execution and every channel drain by one deadline.
+    pub fn timeout(mut self, timeout: Duration) -> Jail {
+        self.timeout = timeout;
+        self
+    }
+
     /// Ask for `--trace-fd`.
     pub fn trace(mut self) -> Jail {
         self.kinds.push(Kind::Trace);
@@ -433,6 +439,7 @@ impl Jail {
             stdin,
             timeout,
         } = self;
+        let deadline = std::time::Instant::now() + timeout;
 
         let mut channels: Vec<pipes::Channel> = kinds
             .iter()
@@ -461,6 +468,7 @@ impl Jail {
         let channel_targets: Vec<RawFd> = channels.iter().map(|c| c.target).collect();
 
         let mut cmd = Command::new(&program);
+        cmd.process_group(0);
         cmd.args(&argv)
             .env("OURO_DATA_DIR", root.path().join("data"))
             .env("OURO_CONFIG_DIR", root.path().join("config"))
@@ -506,7 +514,33 @@ impl Jail {
         let stdin_writer = match (stdin, child.stdin.take()) {
             (Some(bytes), Some(mut pipe)) => Some(std::thread::spawn(move || {
                 use std::io::Write as _;
-                let r = pipe.write_all(&bytes);
+                let r = (|| {
+                    nonblocking(pipe.as_raw_fd())?;
+                    let mut left = bytes.as_slice();
+                    while !left.is_empty() {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "stdin exceeded harness deadline",
+                            ));
+                        }
+                        match pipe.write(left) {
+                            Ok(0) => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::WriteZero,
+                                    "stdin write stalled",
+                                ));
+                            }
+                            Ok(n) => left = &left[n..],
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(5))
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(())
+                })();
                 drop(pipe);
                 r
             })),
@@ -521,21 +555,24 @@ impl Jail {
                 Kind::Control => {
                     let mut r = LineReader::new(fd);
                     r.timeout = timeout;
+                    r.set_deadline(deadline);
                     control = Some(r);
                 }
                 Kind::Gate => gate = Some(GateWriter::new(fd)),
                 Kind::Trace => {
                     let mut r = LineReader::new(fd);
                     r.timeout = timeout;
+                    r.set_deadline(deadline);
                     trace_reader = Some(r);
                 }
             }
         }
 
-        let stdout = child.stdout.take().map(drain_thread);
-        let stderr = child.stderr.take().map(drain_thread);
+        let stdout = child.stdout.take().map(|pipe| drain_thread(pipe, deadline));
+        let stderr = child.stderr.take().map(|pipe| drain_thread(pipe, deadline));
 
         Ok(Spawned {
+            deadline,
             child,
             control,
             gate,
@@ -556,22 +593,52 @@ impl Jail {
     }
 }
 
-fn drain_thread<R: std::io::Read + Send + 'static>(mut r: R) -> std::thread::JoinHandle<Vec<u8>> {
+fn nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: reads/updates flags on an owned descriptor; no pointers.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_thread<R: std::io::Read + AsRawFd + Send + 'static>(
+    mut r: R,
+    deadline: std::time::Instant,
+) -> std::thread::JoinHandle<io::Result<Vec<u8>>> {
     std::thread::spawn(move || {
+        nonblocking(r.as_raw_fd())?;
         let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut r, &mut buf);
-        buf
+        let mut chunk = [0u8; 8192];
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "stdio exceeded harness deadline",
+                ));
+            }
+            match r.read(&mut chunk) {
+                Ok(0) => return Ok(buf),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
     })
 }
 
 /// A running jail with its channels attached.
 pub struct Spawned {
+    deadline: std::time::Instant,
     child: Child,
     control: Option<LineReader>,
     gate: Option<GateWriter>,
     trace_reader: Option<LineReader>,
-    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
-    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stdout: Option<std::thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr: Option<std::thread::JoinHandle<io::Result<Vec<u8>>>>,
     stdin_writer: Option<std::thread::JoinHandle<io::Result<()>>>,
     channel_targets: Vec<RawFd>,
     root: TempDir,
@@ -626,7 +693,28 @@ impl Spawned {
         // then EOF" case; `gate_closed_by_harness` records that it was us.
         let gate_closed_by_harness = self.gate.take().is_some();
 
-        let status = self.child.wait()?;
+        let status = loop {
+            if let Some(status) = self.child.try_wait()? {
+                break status;
+            }
+            if std::time::Instant::now() >= self.deadline {
+                // SAFETY: this is the process group created for our unreaped child.
+                unsafe {
+                    libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
+                }
+                let _ = self.child.kill();
+                let reap = std::time::Instant::now() + Duration::from_secs(1);
+                while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < reap
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "jail exceeded harness deadline",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
 
         let mut channels_timed_out: Vec<String> = Vec::new();
 
@@ -640,9 +728,12 @@ impl Spawned {
                 if line.is_empty() {
                     continue;
                 }
-                if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                    control_messages.push(v);
-                }
+                control_messages.push(serde_json::from_slice::<Value>(&line).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("malformed control message: {e}"),
+                    )
+                })?);
             }
         }
 
@@ -656,9 +747,12 @@ impl Spawned {
                 if line.is_empty() {
                     continue;
                 }
-                if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                    trace_events.push(v);
-                }
+                trace_events.push(serde_json::from_slice::<Value>(&line).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("malformed trace event: {e}"),
+                    )
+                })?);
             }
         }
 
@@ -682,12 +776,20 @@ impl Spawned {
         let stdout = self
             .stdout
             .take()
-            .map(|h| h.join().unwrap_or_default())
+            .map(|h| {
+                h.join()
+                    .map_err(|_| io::Error::other("stdout reader panicked"))?
+            })
+            .transpose()?
             .unwrap_or_default();
         let stderr = self
             .stderr
             .take()
-            .map(|h| h.join().unwrap_or_default())
+            .map(|h| {
+                h.join()
+                    .map_err(|_| io::Error::other("stderr reader panicked"))?
+            })
+            .transpose()?
             .unwrap_or_default();
 
         // Receipts are read once, now, so a read or parse error is a recorded

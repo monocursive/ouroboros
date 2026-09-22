@@ -43,7 +43,14 @@ pub fn ssh_opts(target: &Target) -> Vec<String> {
     ];
     if let Some(kh) = &target.known_hosts {
         v.push("-o".to_string());
-        v.push(format!("UserKnownHostsFile={}", kh.display()));
+        // ssh parses this option again as configuration, including its list
+        // of paths. Preserve one filename through that second parser too.
+        let path = kh
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        v.push(format!("UserKnownHostsFile=\"{path}\""));
     }
     v
 }
@@ -63,7 +70,10 @@ pub fn rsh_string(target: &Target) -> String {
     let mut s = String::from("ssh");
     for opt in ssh_opts(target) {
         s.push(' ');
-        s.push_str(&opt);
+        // rsync parses -e itself: quote an argument and double embedded quotes.
+        s.push('\'');
+        s.push_str(&opt.replace('\'', "''"));
+        s.push('\'');
     }
     s
 }
@@ -777,7 +787,7 @@ mod tests {
         assert!(
             ssh_opts(&t)
                 .iter()
-                .any(|o| o == "UserKnownHostsFile=/home/runner/.ssh/known_hosts")
+                .any(|o| o == "UserKnownHostsFile=\"/home/runner/.ssh/known_hosts\"")
         );
     }
 
@@ -798,7 +808,7 @@ mod tests {
             "ouro-ci@198.51.100.7:ouro-ci/runs/20260922T000000Z-abc123/"
         );
         let rsh = argv.iter().position(|a| a == "-e").unwrap();
-        assert!(argv[rsh + 1].starts_with("ssh -i "));
+        assert!(argv[rsh + 1].starts_with("ssh '-i' "));
         assert!(argv[rsh + 1].contains("BatchMode=yes"));
     }
 
@@ -806,6 +816,16 @@ mod tests {
     fn a_source_path_that_already_ends_in_a_slash_is_not_doubled() {
         let argv = rsync_argv(&target(), Path::new("/w/tree/"), "d");
         assert_eq!(argv[argv.len() - 2], "/w/tree/");
+    }
+
+    #[test]
+    fn rsync_transport_quotes_whitespace_and_both_quote_kinds() {
+        let mut t = target();
+        t.key = PathBuf::from("/keys/a b'c\"d");
+        t.known_hosts = Some(PathBuf::from("/hosts/a b'c\"d"));
+        let command = rsh_string(&t);
+        assert!(command.contains("'-i' '/keys/a b''c\"d'"));
+        assert!(command.contains("'UserKnownHostsFile=\"/hosts/a b''c\\\"d\"'"));
     }
 
     #[test]

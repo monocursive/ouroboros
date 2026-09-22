@@ -571,17 +571,14 @@ impl Session {
         }
         // Whatever these tracees were about to do is unobserved, whether or
         // not the kill and the reap below succeed. That is the loss, and it
-        // is recorded before anything is attempted, naming the closed-set
-        // calls that were in flight: a consumer degrades exactly the classes
-        // the abandoned entries could have changed (§11.4).
-        let mut ops = OpSet::EMPTY;
-        for task in self.tasks.values() {
-            if let Some(pending) = task.pending.as_ref() {
-                ops.insert(pending.entry.op);
-            }
-        }
+        // is recorded before anything is attempted. With live tasks beyond
+        // the observation boundary, loss is not limited to in-flight calls.
         self.summary.loss.abandoned_tracees += alive.len() as u64;
-        self.gap(GapReason::TraceesAbandoned, ops, Some(alive.len() as u64));
+        self.gap(
+            GapReason::TraceesAbandoned,
+            OpSet::ALL,
+            Some(alive.len() as u64),
+        );
         for pid in &alive {
             let _ = sys::kill(*pid, libc::SIGKILL);
             let _ = sys::restart(*pid, sys::PTRACE_CONT, libc::SIGKILL);
@@ -743,7 +740,7 @@ impl Session {
     fn handle_fork(&mut self, parent_tid: pid_t) {
         let Ok(child) = sys::event_msg(parent_tid) else {
             self.summary.loss.syscall_info_unavailable += 1;
-            self.gap(GapReason::SyscallInfoUnavailable, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
             return;
         };
         let child = child as pid_t;
@@ -869,12 +866,12 @@ impl Session {
     fn handle_entry(&mut self, tid: pid_t) {
         let Some(info) = sys::syscall_info(tid) else {
             self.summary.loss.syscall_info_unavailable += 1;
-            self.gap(GapReason::SyscallInfoUnavailable, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
             return;
         };
         if info.op != sys::SYSCALL_INFO_SECCOMP && info.op != sys::SYSCALL_INFO_ENTRY {
             self.summary.loss.syscall_info_unavailable += 1;
-            self.gap(GapReason::SyscallInfoUnavailable, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
             return;
         }
         // jail-v1 §9.2: validate the architecture before the syscall number.
@@ -882,14 +879,14 @@ impl Session {
         // naming it from this one would mislabel the call.
         if info.arch != sys::AUDIT_ARCH_X86_64 {
             self.summary.loss.unexpected_trace_stops += 1;
-            self.gap(GapReason::UnexpectedTraceStop, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
             return;
         }
         let Some(entry) = closed_set::lookup(info.nr) else {
             // The filter stopped a number this table does not name, so the
             // filter the launcher installed is not this module's. Say so.
             self.summary.loss.unexpected_trace_stops += 1;
-            self.gap(GapReason::UnexpectedTraceStop, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
             return;
         };
         if self.inflight >= self.config.inflight_max {
@@ -937,7 +934,7 @@ impl Session {
     fn handle_syscall_stop(&mut self, tid: pid_t) {
         let Some(info) = sys::syscall_info(tid) else {
             self.summary.loss.syscall_info_unavailable += 1;
-            self.gap(GapReason::SyscallInfoUnavailable, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
             return;
         };
         match info.op {
@@ -949,7 +946,7 @@ impl Session {
             sys::SYSCALL_INFO_NONE => {}
             _ => {
                 self.summary.loss.syscall_info_unavailable += 1;
-                self.gap(GapReason::SyscallInfoUnavailable, OpSet::EMPTY, Some(1));
+                self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
             }
         }
     }
@@ -964,7 +961,7 @@ impl Session {
             // A syscall exit with no entry to pair it with: either the entry
             // was never seen or this thread is not one we track.
             self.summary.loss.unmatched_exits += 1;
-            self.gap(GapReason::UnmatchedExit, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
             return;
         };
         self.inflight = self.inflight.saturating_sub(1);

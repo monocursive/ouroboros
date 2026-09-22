@@ -420,15 +420,23 @@ impl<'a> GateOwner<'a> {
     /// error is returned alongside them so a caller cannot mistake a timeout
     /// for silence.
     pub fn drain_control(&mut self) -> (Vec<Value>, Option<io::Error>) {
-        let drained = self.control.drain();
+        let mut drained = self.control.drain();
         let mut out = Vec::new();
         for line in drained.lines {
             if line.is_empty() {
                 continue;
             }
-            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                self.seen.push(v.clone());
-                out.push(v);
+            match serde_json::from_slice::<Value>(&line) {
+                Ok(v) => {
+                    self.seen.push(v.clone());
+                    out.push(v);
+                }
+                Err(e) => {
+                    drained.error = Some(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("malformed control message: {e}"),
+                    ));
+                }
             }
         }
         (out, drained.error)

@@ -100,13 +100,8 @@ impl AuditWriter {
             // anyone claimed to collect.
             return true;
         };
-        let Ok(frame) = serde_json::to_vec(event) else {
-            self.lost_frames += 1;
-            self.degraded.insert(class);
-            return false;
-        };
         let written = match trace.lock() {
-            Ok(mut sink) => sink.write_frame(&frame, Priority::Normal),
+            Ok(mut sink) => sink.write_event(event, Priority::Normal),
             Err(_) => {
                 self.lost_frames += 1;
                 self.degraded.insert(class);
@@ -358,20 +353,40 @@ impl AuditWriter {
             reason: reason.as_str().to_owned(),
             lost_count: count,
         };
-        let seq = self.next_seq();
+        // Keep bounded interval summaries; repeated losses extend an interval.
+        if let Some(existing) = self
+            .gaps
+            .iter_mut()
+            .find(|existing| existing.reason == gap.reason && existing.classes == gap.classes)
+        {
+            extend_gap_interval(existing, from_ns, to_ns);
+            existing.lost_count = existing
+                .lost_count
+                .zip(gap.lost_count)
+                .and_then(|(a, b)| a.checked_add(b));
+            return;
+        }
+        if self.gaps.len() >= 64 {
+            let existing = self.gaps.last_mut().expect("nonempty bounded gaps");
+            existing.reason = "coalesced_losses".to_owned();
+            extend_gap_interval(existing, from_ns, to_ns);
+            existing.lost_count = None;
+            existing.classes.extend(gap.classes);
+            existing.classes.sort();
+            existing.classes.dedup();
+            return;
+        }
         let event = Event::coverage_gap_note(
             &self.attempt_id,
-            seq,
+            0, // assigned by the shared wrapper stream writer
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
             &gap,
         );
         // A gap note may use the reserve: it is the record of what was lost.
-        if let Some(trace) = self.trace.as_ref()
-            && let Ok(frame) = serde_json::to_vec(&event)
-        {
+        if let Some(trace) = self.trace.as_ref() {
             let written = match trace.lock() {
-                Ok(mut sink) => sink.write_frame(&frame, Priority::Reserve),
+                Ok(mut sink) => sink.write_event(&event, Priority::Reserve),
                 Err(_) => Ok(()),
             };
             if written.is_err() {
@@ -510,6 +525,15 @@ impl AuditWriter {
         if bytes.is_empty() {
             return PathClass::Unavailable("empty_path");
         }
+        if bytes
+            .split(|b| *b == b'/')
+            .any(|part| part == b".." || part == b".")
+        {
+            return PathClass::Digest(
+                crate::canonical::sha256_prefixed(bytes),
+                "ambiguous_path_components",
+            );
+        }
         if bytes[0] != b'/' {
             // §11.3: a relative path is never appended to a host cwd.
             return match dirfd {
@@ -608,6 +632,23 @@ fn classes_for(ops: OpSet) -> Vec<CoverageClass> {
     classes.into_iter().collect()
 }
 
+fn extend_gap_interval(gap: &mut Gap, from: u64, to: u64) {
+    gap.start_ns = gap
+        .start_ns
+        .parse::<u64>()
+        .unwrap_or(from)
+        .min(from)
+        .to_string();
+    gap.end_ns = Some(
+        gap.end_ns
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(to)
+            .max(to)
+            .to_string(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,6 +722,81 @@ mod tests {
                 assert_eq!(reason, "outside_known_roots");
             }
             other => panic!("expected a digest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dot_components_never_reveal_a_raw_outside_suffix() {
+        for path in [
+            "/work/space/../private/token",
+            "/tmp/../private/token",
+            "/work/space/link/../../token",
+        ] {
+            assert!(matches!(
+                writer().classify(Some(&snap(path)), None),
+                PathClass::Digest(_, _)
+            ));
+        }
+    }
+
+    #[test]
+    fn repeated_unknown_result_loss_is_bounded_and_degrades_every_audit_class() {
+        let mut writer = writer();
+        for time in 1..10_001 {
+            writer.record_gap(
+                GapReason::UnmatchedExit,
+                OpSet::ALL,
+                time - 1,
+                time,
+                Some(1),
+            );
+        }
+        assert_eq!(writer.gaps().len(), 1);
+        assert_eq!(writer.gaps()[0].lost_count, Some(10_000));
+        assert_eq!(writer.gaps()[0].end_ns.as_deref(), Some("10000"));
+        let summary = writer.summary(&TracerSummary::default(), true);
+        for class in [
+            CoverageClass::Exec,
+            CoverageClass::FsWrite,
+            CoverageClass::FsDeny,
+            CoverageClass::Net,
+        ] {
+            assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
+            assert_eq!(summary.classes[&class].observed_count, None);
+        }
+    }
+
+    #[test]
+    fn gap_notes_share_wrapper_sequences_without_consuming_audit_sequences() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
+        let mut writer = AuditWriter::new("att_test", Some(trace.clone()), b"/work/space", b"/tmp");
+        let note = Event::lifecycle_note("att_test", 99, SystemTime::now(), 0, "prepared");
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&note, Priority::Normal)
+            .unwrap();
+        writer.record_exec(10, Some(&snap("/work/space/tool")), None);
+        writer.record_gap(GapReason::UnmatchedExit, OpSet::ALL, 0, 1, Some(1));
+        writer.record_exit(10, 0);
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&note, Priority::Normal)
+            .unwrap();
+        let events: Vec<Value> = std::fs::read_to_string(file.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for (source, expected) in [("wrapper", vec![1, 2, 3]), ("audit", vec![1, 2])] {
+            let seqs: Vec<_> = events
+                .iter()
+                .filter(|e| e["source"] == source)
+                .map(|e| e["source_seq"].as_u64().unwrap())
+                .collect();
+            assert_eq!(seqs, expected);
         }
     }
 

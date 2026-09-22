@@ -493,15 +493,26 @@ fn s11_observe_off() {
     let validators = validators();
     let case = case();
     let target = case.workspace.join("allowed.txt");
+    // Keep the image alive long enough for the observation-off backend to
+    // independently read back the exec transition. A fast exit may honestly
+    // remain unknown when no tracer witnesses it.
+    let script = case.workspace.join("observe-off.json");
+    std::fs::write(
+        &script,
+        serde_json::to_vec(&serde_json::json!([
+            ["open", target.to_str().unwrap(), "--create", "--write"],
+            ["sleep", "200"]
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
     let run = case
         .jail
         .args(["--observe", "off"])
         .target([
             case.fixture.as_os_str(),
-            OsStr::new("open"),
-            target.as_os_str(),
-            OsStr::new("--create"),
-            OsStr::new("--write"),
+            OsStr::new("script"),
+            script.as_os_str(),
         ])
         .run()
         .expect("the jail runs");
@@ -581,7 +592,10 @@ fn closed_set_traces(name: &str) -> bool {
 fn events_for_path<'a>(run: &'a Run, relative: &str) -> Vec<&'a Value> {
     audit_events(run)
         .into_iter()
-        .filter(|event| event.pointer("/fields/path").and_then(Value::as_str) == Some(relative))
+        .filter(|event| {
+            event.pointer("/fields/path/kind").and_then(Value::as_str) == Some("workspace_relative")
+                && event.pointer("/fields/path/value").and_then(Value::as_str) == Some(relative)
+        })
         .collect()
 }
 
@@ -1145,16 +1159,23 @@ fn x07_case(validators: &BTreeMap<String, Validator>, observe: Option<&str>) {
     let receipts = receipts_of(&run, validators);
     let settled = receipts.phase("settled");
     // The target's own outcome is preserved; the descendant does not become it.
-    assert_eq!(field(settled, "/outcome/kind"), "exited");
-    assert_eq!(field(settled, "/outcome/code"), 0);
+    if observe == Some("off") && field(settled, "/exec_observed") == false {
+        // This short-lived target can exit before image read-back. Boundary
+        // death is still provable; target exec must not be invented from it.
+        assert_eq!(field(settled, "/outcome/kind"), "unknown");
+        assert_eq!(field(settled, "/outcome/code"), &Value::Null);
+        assert_eq!(run.code(), Some(1));
+    } else {
+        assert_eq!(field(settled, "/outcome/kind"), "exited");
+        assert_eq!(field(settled, "/outcome/code"), 0);
+        assert_eq!(run.code(), Some(0));
+    }
     assert_eq!(field(settled, "/lifetime/tree_empty"), true);
     assert_eq!(field(settled, "/lifetime/integrity"), "verified");
     assert_eq!(
         field(settled, "/lifetime/verification_scope"),
         "attempt_tree"
     );
-    assert_eq!(run.code(), Some(0));
-
     // Give the descendant more than its own delay to show itself.
     std::thread::sleep(std::time::Duration::from_millis(3500));
     assert!(
@@ -1309,9 +1330,9 @@ fn launcher_pid_of(jail: u32) -> Option<libc::pid_t> {
             let mut next = Vec::new();
             for pid in frontier {
                 for child in children(pid) {
-                    if std::fs::read(format!("/proc/{child}/cmdline"))
-                        .is_ok_and(|raw| raw.split(|b| *b == 0).any(|part| part == b"__launch"))
-                    {
+                    if std::fs::read(format!("/proc/{child}/cmdline")).is_ok_and(|raw| {
+                        raw.split(|b| *b == 0).nth(1) == Some(b"__launch".as_slice())
+                    }) {
                         return Some(child);
                     }
                     next.push(child);

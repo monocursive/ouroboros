@@ -616,6 +616,8 @@ pub struct PolicyDelta {
     pub network_mode: Option<NetworkMode>,
     /// Raw `network.allow` entries.
     pub network_allow: Vec<String>,
+    /// Whether a file explicitly supplied the allow set, including an empty set.
+    pub network_allow_present: bool,
     /// Ceilings this layer sets.
     pub limits: Ceilings,
     /// `observation.mode`.
@@ -1314,6 +1316,11 @@ fn apply_layer(
         });
     }
 
+    if layer.narrowing
+        && (layer.delta.network_allow_present || !layer.delta.network_allow.is_empty())
+    {
+        authority.network_allow.clear();
+    }
     for raw in &layer.delta.network_allow {
         let key = format!("{prefix}network.allow");
         if base.network_mode != NetworkMode::Proxy {

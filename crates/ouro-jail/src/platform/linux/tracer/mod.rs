@@ -184,6 +184,8 @@ impl OpSet {
     /// A gap that affects no closed-set operation: the loss was bookkeeping,
     /// not a result.
     pub const EMPTY: OpSet = OpSet(0);
+    /// Unknown result loss may affect any class in the closed set.
+    pub const ALL: OpSet = OpSet(u16::MAX);
 
     #[must_use]
     pub fn of(op: ClosedOp) -> OpSet {
@@ -730,7 +732,16 @@ impl Tracer {
     /// [`GapReason::UnreapedChildren`]: their exit statuses had exactly one
     /// route to the supervisor and it is now closed.
     #[must_use]
-    pub fn finish_within(mut self, budget: Duration) -> TracerSummary {
+    pub fn finish_within(self, budget: Duration) -> TracerSummary {
+        self.finish_within_draining(budget, |_| {})
+    }
+
+    /// Stop while delivering the final events, including shutdown loss notes.
+    pub fn finish_within_draining(
+        mut self,
+        budget: Duration,
+        mut consume: impl FnMut(TracerEvent),
+    ) -> TracerSummary {
         self.shutdown_ns.store(
             u64::try_from(budget.as_nanos()).unwrap_or(u64::MAX),
             Ordering::Release,
@@ -742,30 +753,23 @@ impl Tracer {
         // The thread may be inside a blocking `waitpid`. Keep interrupting it
         // until it is gone: a single signal could arrive in the window
         // between its stop-flag check and the wait it is about to enter.
-        let tid = Arc::clone(&self.tid);
-        let joined = Arc::new(AtomicBool::new(false));
-        let waker_flag = Arc::clone(&joined);
-        let waker = std::thread::Builder::new()
-            .name("ouro-jail-tracer-wake".to_string())
-            .spawn(move || {
-                while !waker_flag.load(Ordering::Acquire) {
-                    let target = tid.load(Ordering::Acquire);
-                    if target > 0 {
-                        let _ = sys::tgkill(target, sys::wake_signal());
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            })
-            .ok();
-        let summary = handle.join().unwrap_or(TracerSummary {
+        while !handle.is_finished() {
+            while let Ok(event) = self.events.try_recv() {
+                consume(event);
+            }
+            let target = self.tid.load(Ordering::Acquire);
+            if target > 0 {
+                let _ = sys::tgkill(target, sys::wake_signal());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        while let Ok(event) = self.events.try_recv() {
+            consume(event);
+        }
+        handle.join().unwrap_or(TracerSummary {
             thread_panicked: true,
             ..TracerSummary::default()
-        });
-        joined.store(true, Ordering::Release);
-        if let Some(waker) = waker {
-            let _ = waker.join();
-        }
-        summary
+        })
     }
 }
 
@@ -830,6 +834,7 @@ mod tests {
         // rest of the suite runs in parallel.
         let before = tracer_threads();
         match Tracer::attach(0, TracerConfig::default()) {
+            Err(TracerError::UnsupportedArch) if !cfg!(target_arch = "x86_64") => {}
             Err(TracerError::Seize { pid, errno }) => {
                 assert_eq!(pid, 0);
                 assert!(
@@ -866,6 +871,7 @@ mod tests {
         // pid 1 is not a descendant of this process, so Yama at scope 1 and
         // the ordinary permission check both refuse it.
         match Tracer::attach(1, TracerConfig::default()) {
+            Err(TracerError::UnsupportedArch) if !cfg!(target_arch = "x86_64") => {}
             Err(TracerError::Seize { pid: 1, errno }) => {
                 assert!(
                     errno == libc::EPERM || errno == libc::ESRCH,

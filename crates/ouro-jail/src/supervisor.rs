@@ -39,7 +39,7 @@ use crate::records::{
     Phase, PlatformRecord, PolicyRecord, Receipt, Remediation, SCHEMA_POLICY_FILE, rfc3339_utc,
 };
 use crate::state::{self, AttemptDir, AttemptId};
-use crate::trace::{self, FdSink, FileSink, Priority, SharedTrace};
+use crate::trace::{self, FdSink, FileSink, Priority, SharedTrace, TraceSink};
 
 /// External gate wait after `prepared` (§8.2).
 pub const GATE_WAIT: Duration = Duration::from_secs(60);
@@ -232,7 +232,16 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
     let (profile, policy_name) = match ProfileName::parse(&selection) {
         Some(profile) => (profile, selection.clone()),
         None => {
-            let path = absolutize(&ctx.cwd, Path::new(&selection));
+            let path = if args.profile.is_some() {
+                absolutize(&ctx.cwd, Path::new(&selection))
+            } else if let Some(suffix) = selection.strip_prefix("~/") {
+                ctx.home
+                    .as_ref()
+                    .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?
+                    .join(suffix)
+            } else {
+                absolutize(&config_dir, Path::new(&selection))
+            };
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| usage("--profile", format!("{}: {error}", path.display())))?;
             let file = config::parse_policy_file(&text)?;
@@ -936,7 +945,18 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // §7: the state file names the registered execution boundary once it
     // exists, so crash reconciliation and GC can identify resources without
     // parsing a receipt.
-    let _ = register_boundary_in_state(&attempt_dir, &boundary);
+    if let Err(error) = register_boundary_in_state(&attempt_dir, &boundary) {
+        let teardown = prepared.abort();
+        record_teardown(&mut record, &teardown);
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
     if let Some(applied) = prepared.applied() {
         record.applied = applied;
     }
@@ -1037,9 +1057,14 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             outcome_error.get_or_insert(error);
         }
         if signals.as_ref().is_some_and(signals::SignalPipe::triggered) {
+            record
+                .outcome
+                .cause
+                .get_or_insert("operator_signal".to_owned());
             running.request_stop(StopReason::OperatorSignal);
         }
         match running.wait(crate::platform::Deadline { at: wall_deadline }) {
+            RunEvent::Poll => continue,
             RunEvent::ExecConfirmed => {
                 // §11.2: exec is a confirmed transition, and there is exactly
                 // one per attempt. A repeat would advance the receipt revision
@@ -1211,8 +1236,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         record.errors.push(error.to_object());
         outcome_error.get_or_insert(error);
     }
-    // The tree is already waited for at this point, so a failure here is
-    let receipt = match persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+    if journal.loss.is_some() {
+        degrade_trace_coverage(&mut record);
+    }
+    let receipt = match persist_terminal(&attempt_dir, &mut record, phase, args, &mut journal) {
         Ok(receipt) => receipt,
         Err(error) => {
             return Ok(RunReport {
@@ -1225,6 +1252,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             });
         }
     };
+    if let Some(error) = journal.loss.clone() {
+        outcome_error.get_or_insert(error);
+    }
     send_control(
         control.as_mut(),
         &record,
@@ -1240,12 +1270,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         &receipt,
     );
 
-    // Drain once more so the receipt's own final note — written by persist
-    // after the drain above — is not dropped when the descriptor closes; a
-    // loss here is already beyond the receipt and reaches the report only.
-    if let Ok(mut sink) = journal.trace.lock() {
-        sink.finish();
-    }
     let exit_code = if let Some(error) = &tree_error {
         error.exit_code()
     } else if let Some(error) = &outcome_error {
@@ -1276,6 +1300,48 @@ fn wall_deadline(plan: &Plan) -> Option<Instant> {
         .wall
         .as_ref()
         .map(|ceiling| Instant::now() + Duration::from_millis(ceiling.value))
+}
+
+/// Queued frames from any active source may have been lost in transport.
+fn degrade_trace_coverage(record: &mut AttemptRecord) {
+    use crate::records::{Gap, SourceStatus};
+    record.observer.sources.wrapper = SourceStatus::Degraded;
+    for status in [
+        &mut record.observer.sources.audit,
+        &mut record.observer.sources.proxy,
+    ] {
+        if *status != SourceStatus::Unsupported {
+            *status = SourceStatus::Degraded;
+        }
+    }
+    for (name, entry) in [
+        ("exec", &mut record.coverage.exec),
+        ("fs.write", &mut record.coverage.fs_write),
+        ("fs.deny", &mut record.coverage.fs_deny),
+        ("net", &mut record.coverage.net),
+        ("proxy.net", &mut record.coverage.proxy_net),
+        ("limits", &mut record.coverage.limits),
+    ] {
+        if entry.status == SourceStatus::Unsupported {
+            continue;
+        }
+        entry.status = SourceStatus::Degraded;
+        entry.observed_count = None;
+        let gap = Gap {
+            classes: vec![name.to_owned()],
+            source: entry
+                .sources
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "wrapper".to_owned()),
+            start_ns: "0".to_owned(),
+            end_ns: Some(crate::platform::elapsed_since_start_ns().to_string()),
+            reason: "trace_transport_loss".to_owned(),
+            lost_count: None,
+        };
+        entry.gaps.push(gap.clone());
+        record.observer.gaps.push(gap);
+    }
 }
 
 /// Removes this attempt's managed scratch and placeholder holders (§14.2).
@@ -1618,7 +1684,7 @@ fn refuse(
     record.errors.push(error.to_object());
     record.exec_observed = false;
     journal.lifecycle("refused");
-    let receipt = persist(attempt_dir, record, Phase::Refused, args, journal);
+    let receipt = persist_terminal(attempt_dir, record, Phase::Refused, args, journal);
     match receipt {
         Ok(receipt) => {
             send_control(
@@ -1706,7 +1772,6 @@ pub fn requested_limits(plan: &Plan) -> Vec<AppliedLimit> {
 struct Journal {
     attempt_id: String,
     trace: SharedTrace,
-    seq: u64,
     loss: Option<JailError>,
     /// True while `loss` has not yet been surfaced to the supervision loop.
     loss_pending: bool,
@@ -1717,7 +1782,6 @@ impl Journal {
         Journal {
             attempt_id: attempt_id.to_owned(),
             trace,
-            seq: 0,
             loss: None,
             loss_pending: false,
         }
@@ -1729,6 +1793,33 @@ impl Journal {
     /// stops on trace-sink loss without waiting for the next event; the
     /// first loss is kept in `loss` for the final report.
     fn take_new_loss(&mut self) -> Option<JailError> {
+        let transport_error = match self.trace.lock() {
+            Ok(mut sink) => {
+                let progress = sink.poll().err();
+                progress.or_else(|| {
+                    sink.loss().map(|loss| {
+                        JailError::new(
+                            ErrorCode::EvidenceLost,
+                            ErrorStage::Running,
+                            Remediation::InspectState,
+                            loss.reason.clone(),
+                        )
+                    })
+                })
+            }
+            Err(_) => Some(JailError::new(
+                ErrorCode::EvidenceLost,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                "trace writer poisoned".to_owned(),
+            )),
+        };
+        if self.loss.is_none()
+            && let Some(error) = transport_error
+        {
+            self.loss = Some(error);
+            self.loss_pending = true;
+        }
         if self.loss_pending {
             self.loss_pending = false;
             self.loss.clone()
@@ -1738,11 +1829,8 @@ impl Journal {
     }
 
     fn emit(&mut self, event: &crate::records::Event, priority: Priority) {
-        let Ok(frame) = serde_json::to_vec(event) else {
-            return;
-        };
         let outcome = match self.trace.lock() {
-            Ok(mut sink) => sink.write_frame(&frame, priority),
+            Ok(mut sink) => sink.write_event(event, priority),
             Err(_) => Err(JailError::new(
                 ErrorCode::EvidenceLost,
                 ErrorStage::Running,
@@ -1753,17 +1841,18 @@ impl Journal {
         if let Err(error) = outcome {
             // Keep the first loss: later frames fail for the same reason and a
             // later message would hide the one that started it.
-            self.loss.get_or_insert(error);
-            self.loss_pending = true;
+            if self.loss.is_none() {
+                self.loss = Some(error);
+                self.loss_pending = true;
+            }
         }
     }
 
     /// A lifecycle note (`fields.kind = lifecycle`).
     fn lifecycle(&mut self, transition: &str) {
-        self.seq += 1;
         let event = crate::records::Event::lifecycle_note(
             &self.attempt_id,
-            self.seq,
+            0, // assigned under the shared stream lock
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
             transition,
@@ -1773,13 +1862,12 @@ impl Journal {
 
     /// A `jail.receipt` event referencing a receipt that is already durable.
     fn receipt(&mut self, phase: Phase, receipt: &Receipt, terminal: bool) {
-        self.seq += 1;
         let digest = serde_json::to_vec(receipt)
             .map(|bytes| crate::canonical::sha256_prefixed(&bytes))
             .unwrap_or_else(|_| "sha256:".to_owned());
         let event = crate::records::Event::receipt_note(
             &self.attempt_id,
-            self.seq,
+            0, // assigned under the shared stream lock
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
             phase,
@@ -1853,6 +1941,28 @@ fn persist(
     Ok(receipt)
 }
 
+/// Finish the last note before publishing the control receipt. A loss during
+/// that drain requires one durable correction, without another trace write
+/// that could recursively fail and invalidate the correction.
+fn persist_terminal(
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    args: &RunArgs,
+    journal: &mut Journal,
+) -> Result<Receipt, JailError> {
+    let receipt = persist(attempt_dir, record, phase, args, journal)?;
+    if let Ok(mut sink) = journal.trace.lock() {
+        sink.finish();
+    }
+    if let Some(error) = journal.take_new_loss() {
+        record.errors.push(error.to_object());
+        degrade_trace_coverage(record);
+        return write_receipt(attempt_dir, record, phase, args.receipt.as_deref());
+    }
+    Ok(receipt)
+}
+
 fn claim_attempt(
     attempt_dir: &AttemptDir,
     attempt_id: &AttemptId,
@@ -1860,6 +1970,15 @@ fn claim_attempt(
 ) -> Result<(), JailError> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let identity = ctx.platform.identity();
+    let owner = ctx.platform.owner_identity();
+    if identity.os == crate::records::Os::Linux && owner.is_none() {
+        return Err(JailError::new(
+            ErrorCode::StateWriteFailed,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            "the Linux supervisor birth identity could not be read".to_owned(),
+        ));
+    }
     let state = serde_json::json!({
         "schema": "ouro.jail.state/1",
         "attempt_id": attempt_id.as_str(),
@@ -1871,7 +1990,7 @@ fn claim_attempt(
         // §7: boot identity and the live owner's birth identity, so a
         // reconciler can tell this attempt's supervisor from a recycled pid
         // without parsing a receipt.
-        "owner": ctx.platform.owner_identity().map_or(serde_json::Value::Null, |owner| {
+        "owner": owner.map_or(serde_json::Value::Null, |owner| {
             serde_json::json!({
                 "pid": owner.pid,
                 "boot_id": owner.boot_id,
@@ -2487,6 +2606,51 @@ pub fn env_bytes(name: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::records::Os;
+
+    #[test]
+    fn journal_detects_another_producers_loss_without_a_wrapper_write() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = trace::shared(FileSink::with_bounds(file.reopen().unwrap(), 100, 40));
+        let mut journal = Journal::new("att_test", trace.clone());
+        // An audit producer exhausts the normal budget, without going through
+        // Journal::emit. The supervisor must still see and report it once.
+        assert!(
+            trace
+                .lock()
+                .unwrap()
+                .write_frame(&[b'x'; 100], Priority::Normal)
+                .is_err()
+        );
+        assert!(journal.take_new_loss().is_some());
+        assert!(journal.take_new_loss().is_none());
+    }
+
+    #[test]
+    fn journal_detects_a_loss_that_only_appears_during_terminal_drain() {
+        struct DrainFailure {
+            loss: Option<trace::Loss>,
+        }
+        impl TraceSink for DrainFailure {
+            fn write_frame(&mut self, _: &[u8], _: Priority) -> Result<(), JailError> {
+                Ok(())
+            }
+            fn loss(&self) -> Option<&trace::Loss> {
+                self.loss.as_ref()
+            }
+            fn finish(&mut self) {
+                self.loss = Some(trace::Loss {
+                    reason: "terminal drain stalled".to_owned(),
+                    lost_frames: None,
+                });
+            }
+        }
+        let trace = trace::shared(DrainFailure { loss: None });
+        let mut journal = Journal::new("att_test", trace.clone());
+        assert!(journal.take_new_loss().is_none());
+        trace.lock().unwrap().finish();
+        assert!(journal.take_new_loss().is_some());
+        assert!(journal.loss.is_some());
+    }
 
     #[test]
     fn the_gate_and_preparation_budgets_are_the_ones_the_specification_names() {

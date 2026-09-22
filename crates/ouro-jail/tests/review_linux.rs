@@ -2687,7 +2687,7 @@ fn r9_a_symlinked_root_git_refuses_rather_than_downgrade() {
         .expect("run");
     assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
     assert!(!marker.exists(), "the target ran despite the refusal");
-    let receipt = receipt_in(c.jail.root()).expect("a receipt");
+    let receipt = run.receipt_phase("refused").expect("a receipt");
     let codes: Vec<&str> = receipt
         .pointer("/errors")
         .and_then(Value::as_array)
@@ -2747,7 +2747,9 @@ fn r9_deny_read_grants_are_enforced_as_masks() {
         .map(|mounts| {
             mounts
                 .iter()
-                .filter(|m| m.get("kind").and_then(Value::as_str) == Some("tmpfs-mask"))
+                .filter(|m| {
+                    m.get("path").and_then(Value::as_str) == c.workspace.join("secret").to_str()
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -2758,11 +2760,12 @@ fn r9_deny_read_grants_are_enforced_as_masks() {
     );
     assert!(
         masked[0]
-            .get("destination")
+            .get("path")
             .and_then(Value::as_str)
             .is_some_and(|d| d.ends_with("/secret")),
         "the mask must cover the denied subtree: {masked:?}"
     );
+    assert_eq!(masked[0]["mode"], "rw", "the empty tmpfs is writable");
     // The real file is unchanged outside the jail.
     assert_eq!(
         std::fs::read(c.workspace.join("secret/file")).unwrap(),
@@ -2837,12 +2840,15 @@ fn r9_a_large_option_tail_does_not_deadlock_the_supervisor() {
     }
     let c = case();
     let marker = c.workspace.join("target-ran");
-    // Enough protected segments to push the rendered option tail past the
-    // 128 KiB --args threshold and the payload past the default 64 KiB pipe
-    // capacity, with a command that stays short.
-    for index in 0..600 {
-        let name = format!("segment-{index:04}-abcdefghijklmnopqrstuvwxyz0123456789abcdefgh");
-        std::fs::create_dir_all(c.workspace.join(name).join(".git")).unwrap();
+    // Long destinations push the descriptor-backed option tail past 128 KiB
+    // without exceeding the host's 1024-fd soft limit. This tests args-pipe
+    // pressure independently of mount-source descriptor exhaustion.
+    for index in 0..120 {
+        let mut path = c.workspace.join(format!("segment-{index:04}"));
+        for _ in 0..7 {
+            path.push("x".repeat(200));
+        }
+        std::fs::create_dir_all(path.join(".git")).unwrap();
     }
     let run = c
         .jail

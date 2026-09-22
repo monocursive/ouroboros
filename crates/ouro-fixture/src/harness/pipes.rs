@@ -142,39 +142,100 @@ impl Drained {
 /// A blocking NDJSON reader with a bounded wait, so a test fails instead of
 /// hanging. The bound catches hangs; it is never used to order events.
 pub struct LineReader {
-    fd: OwnedFd,
-    buf: Vec<u8>,
-    eof: bool,
+    lines: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    deadline: Option<Instant>,
     pub timeout: Duration,
 }
 
 impl LineReader {
     #[must_use]
     pub fn new(fd: OwnedFd) -> LineReader {
+        let (sender, lines) = std::sync::mpsc::channel();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        let worker = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            while !stopped.load(std::sync::atomic::Ordering::Acquire) {
+                let mut pfd = libc::pollfd {
+                    fd: fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one live pollfd; the worker exclusively owns its fd.
+                let ready = unsafe { libc::poll(&raw mut pfd, 1, 50) };
+                if ready == 0 {
+                    continue;
+                }
+                if ready < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    let _ = sender.send(Err(err));
+                    break;
+                }
+                let mut chunk = [0u8; 8192];
+                // SAFETY: live buffer and readable descriptor owned by this worker.
+                let n =
+                    unsafe { libc::read(fd.as_raw_fd(), chunk.as_mut_ptr().cast(), chunk.len()) };
+                if n < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    let _ = sender.send(Err(err));
+                    break;
+                }
+                if n == 0 {
+                    if !buf.is_empty() {
+                        let _ = sender.send(Ok(buf));
+                    }
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n as usize]);
+                while let Some(end) = buf.iter().position(|b| *b == b'\n') {
+                    let line = buf.drain(..=end).take(end).collect();
+                    if sender.send(Ok(line)).is_err() {
+                        return;
+                    }
+                }
+                if buf.len() > 1024 * 1024 {
+                    let _ = sender.send(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "channel line exceeds harness bound",
+                    )));
+                    break;
+                }
+            }
+        });
         LineReader {
-            fd,
-            buf: Vec::new(),
-            eof: false,
+            lines,
+            stop,
+            worker: Some(worker),
+            deadline: None,
             timeout: Duration::from_secs(30),
         }
     }
 
+    pub fn set_deadline(&mut self, deadline: Instant) {
+        self.deadline = Some(deadline);
+    }
+
     /// The next complete line without its terminator, or `None` at EOF.
     pub fn next_line(&mut self) -> io::Result<Option<Vec<u8>>> {
-        let deadline = Instant::now() + self.timeout;
-        loop {
-            if let Some(i) = self.buf.iter().position(|b| *b == b'\n') {
-                let line = self.buf.drain(..=i).take(i).collect();
-                return Ok(Some(line));
-            }
-            if self.eof {
-                return Ok(if self.buf.is_empty() {
-                    None
-                } else {
-                    Some(std::mem::take(&mut self.buf))
-                });
-            }
-            self.fill(deadline)?;
+        let wait = self.deadline.map_or(self.timeout, |at| {
+            at.saturating_duration_since(Instant::now())
+                .min(self.timeout)
+        });
+        match self.lines.recv_timeout(wait) {
+            Ok(line) => line.map(Some),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "channel exceeded the harness deadline",
+            )),
         }
     }
 
@@ -200,63 +261,14 @@ impl LineReader {
             }
         }
     }
+}
 
-    fn fill(&mut self, deadline: Instant) -> io::Result<()> {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "no line within the harness timeout",
-            ));
+impl Drop for LineReader {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
-        let mut pfd = libc::pollfd {
-            fd: self.fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one live pollfd; the descriptor is owned by this reader.
-        let r = unsafe {
-            libc::poll(
-                &raw mut pfd,
-                1,
-                i32::try_from(left.as_millis()).unwrap_or(i32::MAX),
-            )
-        };
-        if r < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                return Ok(());
-            }
-            return Err(e);
-        }
-        if r == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "no line within the harness timeout",
-            ));
-        }
-        let mut chunk = [0u8; 8192];
-        // SAFETY: `chunk` is live and `read` writes at most its length.
-        let n = unsafe {
-            libc::read(
-                self.fd.as_raw_fd(),
-                chunk.as_mut_ptr().cast::<libc::c_void>(),
-                chunk.len(),
-            )
-        };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                return Ok(());
-            }
-            return Err(e);
-        }
-        if n == 0 {
-            self.eof = true;
-        } else {
-            self.buf.extend_from_slice(&chunk[..n as usize]);
-        }
-        Ok(())
     }
 }
 

@@ -578,6 +578,9 @@ pub struct BwrapPlan {
     pub workspace: PathBuf,
     /// The scratch directory, mounted at `/tmp` inside.
     pub scratch: PathBuf,
+    /// Source descriptors for each row of `mount_table`, populated by preparation.
+    /// Each mount owns a distinct descriptor: bubblewrap closes it after binding.
+    pub mount_fds: Vec<Option<RawFd>>,
     /// Environment to set after `--clearenv`.
     pub env: Vec<(OsString, OsString)>,
     /// Existing protected segments, each bound read-only over itself. A pin
@@ -672,6 +675,7 @@ impl BwrapPlan {
             etc_paths,
             workspace: workspace.to_owned(),
             scratch: scratch.to_owned(),
+            mount_fds: Vec::new(),
             env: vec![
                 (
                     OsString::from("PATH"),
@@ -731,16 +735,26 @@ impl BwrapPlan {
             source: None,
             destination: OsString::from("/dev"),
         });
-        rows.push(MountRow {
-            kind: "bind",
-            source: Some(self.scratch.as_os_str().to_owned()),
-            destination: OsString::from(SCRATCH_INSIDE_PATH),
-        });
-        rows.push(MountRow {
-            kind: "bind",
-            source: Some(self.workspace.as_os_str().to_owned()),
-            destination: self.workspace.as_os_str().to_owned(),
-        });
+        let mut writable = self.extra_rw_binds.clone();
+        writable.push((self.scratch.clone(), PathBuf::from(SCRATCH_INSIDE_PATH)));
+        writable.push((self.workspace.clone(), self.workspace.clone()));
+        writable.sort_by_key(|(_, destination)| destination.components().count());
+        for (source, destination) in writable {
+            rows.push(MountRow {
+                kind: "bind",
+                source: Some(source.into_os_string()),
+                destination: destination.into_os_string(),
+            });
+        }
+        let mut readonly = self.extra_ro_binds.clone();
+        readonly.sort_by_key(|(_, destination)| destination.components().count());
+        for (source, destination) in readonly {
+            rows.push(MountRow {
+                kind: "ro-bind",
+                source: Some(source.into_os_string()),
+                destination: destination.into_os_string(),
+            });
+        }
         for protected in &self.protected {
             rows.push(MountRow {
                 kind: if protected.fd.is_some() {
@@ -750,27 +764,6 @@ impl BwrapPlan {
                 },
                 source: Some(protected.source.as_os_str().to_owned()),
                 destination: protected.source.as_os_str().to_owned(),
-            });
-        }
-        for (source, destination) in &self.extra_ro_binds {
-            rows.push(MountRow {
-                kind: "ro-bind",
-                source: Some(source.as_os_str().to_owned()),
-                destination: destination.as_os_str().to_owned(),
-            });
-        }
-        for (source, destination) in &self.extra_rw_binds {
-            rows.push(MountRow {
-                kind: "bind",
-                source: Some(source.as_os_str().to_owned()),
-                destination: destination.as_os_str().to_owned(),
-            });
-        }
-        for path in &self.masked {
-            rows.push(MountRow {
-                kind: "tmpfs-mask",
-                source: None,
-                destination: path.as_os_str().to_owned(),
             });
         }
         for placeholder in &self.placeholders {
@@ -785,6 +778,15 @@ impl BwrapPlan {
             source: Some(self.jail_exe.as_os_str().to_owned()),
             destination: OsString::from(JAIL_INSIDE_PATH),
         });
+        let mut masks = self.masked.clone();
+        masks.sort_by_key(|path| path.components().count());
+        for path in masks {
+            rows.push(MountRow {
+                kind: "tmpfs-mask",
+                source: None,
+                destination: path.into_os_string(),
+            });
+        }
         rows
     }
 
@@ -838,88 +840,36 @@ impl BwrapPlan {
             for (key, value) in &self.env {
                 push(&[OsStr::new("--setenv"), key, value]);
             }
-            for root in &self.roots {
-                match root {
-                    RootSpec::RoBind(p) => {
-                        push(&[OsStr::new("--ro-bind"), p.as_os_str(), p.as_os_str()])
-                    }
-                    RootSpec::Symlink { path, target } => {
-                        push(&[
-                            OsStr::new("--symlink"),
-                            target.as_os_str(),
-                            path.as_os_str(),
-                        ]);
-                    }
-                }
-            }
-            for etc in &self.etc_paths {
-                push(&[OsStr::new("--ro-bind"), etc.as_os_str(), etc.as_os_str()]);
-            }
-            push(&[OsStr::new("--proc"), OsStr::new("/proc")]);
-            push(&[OsStr::new("--dev"), OsStr::new("/dev")]);
-            // The scratch is mounted first and the workspace second: bubblewrap
-            // applies mounts in order, so the deeper path has to come last. A
-            // workspace that happens to live under /tmp would otherwise be hidden
-            // by the scratch, and the run would land in a directory bubblewrap
-            // created inside the scratch instead of in the workspace.
-            push(&[
-                OsStr::new("--bind"),
-                self.scratch.as_os_str(),
-                OsStr::new(SCRATCH_INSIDE_PATH),
-            ]);
-            push(&[
-                OsStr::new("--bind"),
-                self.workspace.as_os_str(),
-                self.workspace.as_os_str(),
-            ]);
-            // §9.1: a pinned source is bound by descriptor, which no path
-            // swap can redirect; an unpinned one is bound by path and was
-            // re-verified immediately before spawn.
-            for protected in &self.protected {
-                match protected.fd {
-                    Some(fd) => push(&[
-                        OsStr::new("--ro-bind-fd"),
+            for (index, row) in self.mount_table().iter().enumerate() {
+                let fd = self.mount_fds.get(index).copied().flatten().or_else(|| {
+                    self.protected
+                        .iter()
+                        .find(|p| p.source.as_os_str() == row.destination)
+                        .and_then(|p| p.fd)
+                });
+                let flag = match row.kind {
+                    "bind" if fd.is_some() => "--bind-fd",
+                    "ro-bind" | "ro-bind-fd" | "placeholder" if fd.is_some() => "--ro-bind-fd",
+                    "bind" => "--bind",
+                    "ro-bind" | "ro-bind-fd" | "placeholder" => "--ro-bind",
+                    "symlink" => "--symlink",
+                    "tmpfs-mask" => "--tmpfs",
+                    "proc" => "--proc",
+                    "dev" => "--dev",
+                    _ => unreachable!("mount table kind"),
+                };
+                if let Some(fd) = fd {
+                    push(&[
+                        OsStr::new(flag),
                         OsStr::new(&fd.to_string()),
-                        protected.source.as_os_str(),
-                    ]),
-                    None => push(&[
-                        OsStr::new("--ro-bind"),
-                        protected.source.as_os_str(),
-                        protected.source.as_os_str(),
-                    ]),
+                        &row.destination,
+                    ]);
+                } else if let Some(source) = &row.source {
+                    push(&[OsStr::new(flag), source, &row.destination]);
+                } else {
+                    push(&[OsStr::new(flag), &row.destination]);
                 }
             }
-            for (source, destination) in &self.extra_ro_binds {
-                push(&[
-                    OsStr::new("--ro-bind"),
-                    source.as_os_str(),
-                    destination.as_os_str(),
-                ]);
-            }
-            for (source, destination) in &self.extra_rw_binds {
-                push(&[
-                    OsStr::new("--bind"),
-                    source.as_os_str(),
-                    destination.as_os_str(),
-                ]);
-            }
-            // Denied subtrees are masked last, so the tmpfs lands over
-            // whatever the earlier mounts exposed there.
-            for path in &self.masked {
-                push(&[OsStr::new("--tmpfs"), path.as_os_str()]);
-            }
-            for placeholder in &self.placeholders {
-                push(&[
-                    OsStr::new("--ro-bind"),
-                    placeholder.source.as_os_str(),
-                    placeholder.destination.as_os_str(),
-                ]);
-            }
-            push(&[
-                OsStr::new("--ro-bind"),
-                self.jail_exe.as_os_str(),
-                OsStr::new(JAIL_INSIDE_PATH),
-            ]);
             push(&[OsStr::new("--chdir"), self.workspace.as_os_str()]);
             if let Some(fd) = self.seccomp_fd {
                 push(&[OsStr::new("--seccomp"), OsStr::new(&fd.to_string())]);
@@ -1069,7 +1019,10 @@ mod tests {
             },
         ];
         plan.etc_paths = vec![PathBuf::from("/etc/passwd")];
-        plan.protected = vec![PathBuf::from("/work/space/.git")];
+        plan.protected = vec![ProtectedBind {
+            source: PathBuf::from("/work/space/.git"),
+            fd: None,
+        }];
         plan.seccomp_fd = Some(10);
         plan.json_status_fd = Some(11);
         plan.inner = inner_launch_command(12, 13, true, &[OsString::from("/bin/true")]);
@@ -1128,6 +1081,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(text.contains("--setenv TMPDIR /tmp"));
+    }
+
+    #[test]
+    fn a_writable_parent_never_hides_readonly_children_or_masks() {
+        let mut plan = sample_plan();
+        plan.extra_rw_binds
+            .push(("/external".into(), "/external".into()));
+        plan.extra_rw_binds
+            .push(("/external/deep".into(), "/external/deep".into()));
+        plan.extra_ro_binds
+            .push(("/external/secrets".into(), "/external/secrets".into()));
+        plan.masked.push("/external/secrets/hidden".into());
+        let rows = plan.mount_table();
+        let index = |path: &str| rows.iter().position(|row| row.destination == path).unwrap();
+        assert!(index("/external") < index("/external/deep"));
+        assert!(index("/external") < index("/external/secrets"));
+        assert!(index("/external/secrets") < index("/external/secrets/hidden"));
+        let rendered = plan.render().unwrap();
+        let position = |path: &str| rendered.argv.iter().position(|arg| arg == path).unwrap();
+        assert!(position("/external") < position("/external/secrets"));
+        assert!(position("/external/secrets") < position("/external/secrets/hidden"));
     }
 
     #[test]

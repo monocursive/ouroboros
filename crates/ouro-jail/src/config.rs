@@ -84,7 +84,7 @@ pub struct NetworkSection {
     pub mode: Option<String>,
     /// `network.allow`.
     #[serde(default)]
-    pub allow: Vec<String>,
+    pub allow: Option<Vec<String>>,
 }
 
 /// `[limits]` in a policy file.
@@ -283,7 +283,8 @@ pub fn delta_from_sections(
             }
         });
     }
-    delta.network_allow = network.allow.clone();
+    delta.network_allow_present = network.allow.is_some();
+    delta.network_allow = network.allow.clone().unwrap_or_default();
     delta.limits = ceilings_from_section(prefix, limits, true)?;
     if let Some(mode) = &observation.mode {
         delta.observe = Some(parse_observe(&format!("{prefix}observation.mode"), mode)?);

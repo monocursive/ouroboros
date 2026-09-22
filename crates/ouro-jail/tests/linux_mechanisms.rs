@@ -245,10 +245,10 @@ fn root_level_literals_are_reported_present_or_absent() {
         scan.root_literals,
         vec![
             (
-                ".git",
+                ".git".to_owned(),
                 jfs::RootLiteralState::Present(jfs::SegmentKind::Directory)
             ),
-            (".ouroboros", jfs::RootLiteralState::Absent),
+            (".ouroboros".to_owned(), jfs::RootLiteralState::Absent),
         ]
     );
     assert_eq!(scan.absent_root_literals(), vec![".ouroboros"]);
@@ -782,7 +782,10 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         "the narrowing filter does not trace exactly the closed set"
     );
     checked += expected.len();
-    assert_eq!(checked, 29 + 5 + 22);
+    assert_eq!(
+        checked,
+        seccomp::DENY_EPERM.len() + 5 + CLOSED_SET_NAMES.len()
+    );
 }
 
 // ===========================================================================
@@ -1015,7 +1018,14 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
 
     let mut plan = BwrapPlan::tool(&workspace, &scratch, &jail_exe());
     plan.bwrap = bwrap_path();
-    plan.protected = scan.segments.iter().map(|s| s.path.clone()).collect();
+    plan.protected = scan
+        .segments
+        .iter()
+        .map(|s| bwrap::ProtectedBind {
+            source: s.path.clone(),
+            fd: None,
+        })
+        .collect();
     let mut placeholders = Vec::new();
     for (index, literal) in scan.absent_root_literals().iter().enumerate() {
         let source = holder_dir.path().join(format!("holder{index}"));

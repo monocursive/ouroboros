@@ -61,12 +61,62 @@ fn evidence_lost(reason: &str) -> JailError {
 ///
 /// §13.1 requires exactly one writer per trace stream; the mutex is that single
 /// writer, and both producers take it for one frame at a time.
-pub type SharedTrace = Arc<Mutex<dyn TraceSink + Send>>;
+pub type SharedTrace = Arc<Mutex<TraceWriter>>;
+
+/// One sequence allocator and loss state for all producers of a stream.
+pub struct TraceWriter {
+    sink: Box<dyn TraceSink + Send>,
+    wrapper_seq: u64,
+    local_loss: Option<Loss>,
+}
+
+impl TraceWriter {
+    /// Serialize under the stream lock. All wrapper notes share this sequence.
+    pub fn write_event(
+        &mut self,
+        event: &crate::records::Event,
+        priority: Priority,
+    ) -> Result<(), JailError> {
+        let mut event = event.clone();
+        if event.source == crate::records::EventSource::Wrapper {
+            self.wrapper_seq += 1;
+            event.source_seq = self.wrapper_seq;
+        }
+        let frame = serde_json::to_vec(&event).map_err(|err| {
+            let reason = format!("trace serialization failed: {err}");
+            self.local_loss = Some(Loss {
+                reason: reason.clone(),
+                lost_frames: None,
+            });
+            evidence_lost(&reason)
+        })?;
+        self.write_frame(&frame, priority)
+    }
+}
+
+impl TraceSink for TraceWriter {
+    fn write_frame(&mut self, frame: &[u8], priority: Priority) -> Result<(), JailError> {
+        self.sink.write_frame(frame, priority)
+    }
+    fn poll(&mut self) -> Result<(), JailError> {
+        self.sink.poll()
+    }
+    fn finish(&mut self) {
+        self.sink.finish();
+    }
+    fn loss(&self) -> Option<&Loss> {
+        self.local_loss.as_ref().or_else(|| self.sink.loss())
+    }
+}
 
 /// Wraps a sink in the shared handle.
 #[must_use]
 pub fn shared(sink: impl TraceSink + Send + 'static) -> SharedTrace {
-    Arc::new(Mutex::new(sink))
+    Arc::new(Mutex::new(TraceWriter {
+        sink: Box::new(sink),
+        wrapper_seq: 0,
+        local_loss: None,
+    }))
 }
 
 /// One bounded NDJSON trace sink.
@@ -85,6 +135,11 @@ pub trait TraceSink {
     /// deadline, and records whatever still cannot be delivered as evidence
     /// loss instead of dropping it when the descriptor closes.
     fn finish(&mut self) {}
+
+    /// Progress queued writes even while producers are idle.
+    fn poll(&mut self) -> Result<(), JailError> {
+        Ok(())
+    }
 
     /// The loss this sink has recorded, if any.
     fn loss(&self) -> Option<&Loss>;
@@ -305,6 +360,9 @@ impl TraceSink for FdSink {
         if self.queue.len() + frame.len() + 1 > self.queue_max {
             return Err(self.record_loss("trace fd queue overflowed its 4 MiB bound"));
         }
+        if self.queue.is_empty() {
+            self.last_progress = Instant::now();
+        }
         self.queue.extend(frame.iter().copied());
         self.queue.push_back(b'\n');
         self.flush_now()
@@ -312,6 +370,10 @@ impl TraceSink for FdSink {
 
     fn finish(&mut self) {
         self.drain_final();
+    }
+
+    fn poll(&mut self) -> Result<(), JailError> {
+        self.flush_now()
     }
 
     fn loss(&self) -> Option<&Loss> {

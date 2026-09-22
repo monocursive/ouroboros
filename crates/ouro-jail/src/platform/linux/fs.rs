@@ -220,7 +220,36 @@ pub fn scan_protected_names(
         path: root.to_owned(),
         errno,
     })?;
+    scan_directory(root, root_dir, names, limits)
+}
 
+/// Scan the pinned root, without resolving its pathname again.
+pub fn scan_pinned(
+    root: &PinnedPath,
+    names: &[&str],
+    limits: ScanLimits,
+) -> Result<ProtectedScan, ScanError> {
+    // SAFETY: the pin owns a live directory descriptor and "." is a C string.
+    let fd = unsafe { libc::openat(root.fd.as_raw_fd(), c".".as_ptr(), DIR_FLAGS) };
+    if fd < 0 {
+        return Err(ScanError::BadRoot {
+            path: root.path.clone(),
+            errno: last_errno(),
+        });
+    }
+    // SAFETY: openat returned a fresh owned fd.
+    let dir = DirHandle {
+        fd: unsafe { OwnedFd::from_raw_fd(fd) },
+    };
+    scan_directory(&root.path, dir, names, limits)
+}
+
+fn scan_directory(
+    root: &Path,
+    root_dir: DirHandle,
+    names: &[&str],
+    limits: ScanLimits,
+) -> Result<ProtectedScan, ScanError> {
     let mut state = WalkState {
         limits,
         entries_seen: 0,
@@ -270,10 +299,20 @@ fn walk(
     state: &mut WalkState,
 ) -> Result<(), ScanError> {
     state.max_depth_seen = state.max_depth_seen.max(depth);
-    let entries = dir.entries().map_err(|errno| ScanError::Unreadable {
-        path: dir_path.to_owned(),
-        errno,
-    })?;
+    let entries = dir
+        .entries(state.limits.max_entries.saturating_sub(state.entries_seen))
+        .map_err(|errno| {
+            if errno == libc::E2BIG {
+                ScanError::EntryLimit {
+                    limit: state.limits.max_entries,
+                }
+            } else {
+                ScanError::Unreadable {
+                    path: dir_path.to_owned(),
+                    errno,
+                }
+            }
+        })?;
 
     let mut subdirs: Vec<CString> = Vec::new();
     for name in entries {
@@ -431,7 +470,7 @@ impl DirHandle {
     }
 
     /// Every entry name in this directory except `.` and `..`.
-    fn entries(&self) -> Result<Vec<CString>, i32> {
+    fn entries(&self, remaining: usize) -> Result<Vec<CString>, i32> {
         // `fdopendir` takes ownership of the fd it is given, so hand it a
         // duplicate and keep ours for `openat`.
         // SAFETY: `self.fd` is a live directory fd; F_DUPFD_CLOEXEC returns a
@@ -470,6 +509,10 @@ impl DirHandle {
             let bytes = name.to_bytes();
             if bytes == b"." || bytes == b".." {
                 continue;
+            }
+            if out.len() >= remaining {
+                result = Err(libc::E2BIG);
+                break;
             }
             out.push(name.to_owned());
         }
@@ -557,13 +600,28 @@ impl PinnedPath {
     pub fn open(path: &Path) -> Result<Self, io::Error> {
         let c = cstring_from_path(path).map_err(|e| io::Error::other(e.to_string()))?;
         // SAFETY: `c` is NUL-terminated and outlives the call. O_PATH means no
-        // I/O authority is acquired; O_NOFOLLOW means a symlink at the final
-        // component is pinned as itself rather than followed.
+        // I/O authority is acquired; openat2 rejects symlinks at every
+        // component rather than following a mutable ancestor.
+        #[repr(C)]
+        struct OpenHow {
+            flags: u64,
+            mode: u64,
+            resolve: u64,
+        }
+        let how = OpenHow {
+            flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
+            mode: 0,
+            resolve: 0x04, // RESOLVE_NO_SYMLINKS, on every component.
+        };
+        // SAFETY: both buffers are live; the kernel validates every path component.
         let fd = unsafe {
-            libc::open(
+            libc::syscall(
+                libc::SYS_openat2,
+                libc::AT_FDCWD,
                 c.as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
+                &raw const how,
+                size_of::<OpenHow>(),
+            ) as i32
         };
         if fd < 0 {
             return Err(io::Error::last_os_error());
@@ -595,6 +653,16 @@ impl PinnedPath {
     #[must_use]
     pub const fn identity(&self) -> (u64, u64) {
         (self.dev, self.ino)
+    }
+
+    /// Whether the pinned object, rather than its current pathname, is a directory.
+    pub fn is_dir(&self) -> io::Result<bool> {
+        let mut st = empty_stat();
+        // SAFETY: live owned fd and writable stat buffer.
+        if unsafe { libc::fstat(self.fd.as_raw_fd(), &raw mut st) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(st.st_mode & libc::S_IFMT == libc::S_IFDIR)
     }
 
     /// The `O_PATH` handle, for callers that want to hand the kernel the

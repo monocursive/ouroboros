@@ -114,6 +114,37 @@ fn ceiling(value: u64, requested: &str) -> Option<Ceiling> {
     })
 }
 
+#[test]
+fn project_host_narrowing_replaces_the_base_set_including_empty() {
+    let workspace = Workspace::new();
+    for allow in [vec!["api.example.com:443".to_owned()], Vec::new()] {
+        let resolved = workspace
+            .resolve_project(
+                ProfileName::Agent,
+                |base| {
+                    base.network_allow = HostRule::parse("*.example.com:443").unwrap();
+                },
+                PolicyDelta {
+                    network_allow: allow.clone(),
+                    network_allow_present: true,
+                    ..PolicyDelta::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(resolved.snapshot.network.allow, allow);
+    }
+    let resolved = workspace
+        .resolve_project(
+            ProfileName::Agent,
+            |base| {
+                base.network_allow = HostRule::parse("*.example.com:443").unwrap();
+            },
+            PolicyDelta::default(),
+        )
+        .unwrap();
+    assert_eq!(resolved.snapshot.network.allow, vec!["*.example.com:443"]);
+}
+
 fn read_only(paths: &[&str]) -> PolicyDelta {
     PolicyDelta {
         read_only: paths.iter().map(|path| path.as_bytes().to_vec()).collect(),

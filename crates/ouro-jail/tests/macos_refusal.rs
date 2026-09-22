@@ -873,6 +873,30 @@ fn config_toml_paths_anchor_to_the_config_directory() {
     );
 }
 
+#[test]
+fn a_profile_selected_in_config_is_resolved_beside_config() {
+    let harness = Harness::new();
+    std::fs::write(
+        harness.config.join("config.toml"),
+        "[jail]\nprofile = \"selected.toml\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        harness.config.join("selected.toml"),
+        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n",
+    )
+    .unwrap();
+    let output = harness.run(&["explain", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["policy"]["snapshot"]["profile"], "tool");
+}
+
 /// §6.2/§6.3: `[jail_host.network] translation_prefixes` is merged into proxy
 /// policy before digest creation, so equivalent spellings must render as one
 /// canonical RFC 5952 form — and text that is not an IPv6 CIDR refuses with

@@ -35,6 +35,10 @@ pivot_root             155    EPERM
 chroot                 161    EPERM
 unshare                272    EPERM
 setns                  308    EPERM
+userfaultfd            323    EPERM
+open_by_handle_at      304    EPERM
+name_to_handle_at      303    EPERM
+syslog                 103    EPERM
 clone3                 435    ENOSYS  (argument struct not inspectable)
 clone                  56     EPERM when args[0] & 0x7e020080 != 0
 socket                 41     EPERM when args[0] == 1 (AF_UNIX)
@@ -43,58 +47,62 @@ ioctl                  16     EPERM when args[1] == 0x5412 (TIOCSTI)
 
 everything else        ALLOW
 
-instructions: 51
-digest: sha256:9165d7394ebfd311d5db53ec5dec8a9fe147ee3a1484a53ca7a37dd8e22e7a01
+instructions: 55
+digest: sha256:080c1ad7c8a8d2503c87b5c77649ba1500c820d0267fbec381bc75fd57c98049
 
 disassembly
 0000 ld    [4]
-0001 jeq   #0xc000003e  jt 2 jf 49
+0001 jeq   #0xc000003e  jt 2 jf 53
 0002 ld    [0]
-0003 jset  #0x40000000  jt 49 jf 4
-0004 jeq   #0x00000065  jt 49 jf 5
-0005 jeq   #0x00000136  jt 49 jf 6
-0006 jeq   #0x00000137  jt 49 jf 7
-0007 jeq   #0x00000141  jt 49 jf 8
-0008 jeq   #0x0000012a  jt 49 jf 9
-0009 jeq   #0x000000f6  jt 49 jf 10
-0010 jeq   #0x00000140  jt 49 jf 11
-0011 jeq   #0x000000af  jt 49 jf 12
-0012 jeq   #0x00000139  jt 49 jf 13
-0013 jeq   #0x000000b0  jt 49 jf 14
-0014 jeq   #0x000000fa  jt 49 jf 15
-0015 jeq   #0x000000f8  jt 49 jf 16
-0016 jeq   #0x000000f9  jt 49 jf 17
-0017 jeq   #0x000001a9  jt 49 jf 18
-0018 jeq   #0x000001aa  jt 49 jf 19
-0019 jeq   #0x000001ab  jt 49 jf 20
-0020 jeq   #0x000000a5  jt 49 jf 21
-0021 jeq   #0x000000a6  jt 49 jf 22
-0022 jeq   #0x000001ad  jt 49 jf 23
-0023 jeq   #0x000001ac  jt 49 jf 24
-0024 jeq   #0x000001ae  jt 49 jf 25
-0025 jeq   #0x000001b0  jt 49 jf 26
-0026 jeq   #0x000001b1  jt 49 jf 27
-0027 jeq   #0x000001af  jt 49 jf 28
-0028 jeq   #0x000001ba  jt 49 jf 29
-0029 jeq   #0x0000009b  jt 49 jf 30
-0030 jeq   #0x000000a1  jt 49 jf 31
-0031 jeq   #0x00000110  jt 49 jf 32
-0032 jeq   #0x00000134  jt 49 jf 33
-0033 jeq   #0x000001b3  jt 50 jf 34
-0034 jeq   #0x00000038  jt 39 jf 35
-0035 jeq   #0x00000029  jt 42 jf 36
-0036 jeq   #0x00000035  jt 42 jf 37
-0037 jeq   #0x00000010  jt 45 jf 38
-0038 ja    48
-0039 ld    [16]
-0040 jset  #0x7e020080  jt 49 jf 41
-0041 ja    48
-0042 ld    [16]
-0043 jeq   #0x00000001  jt 49 jf 44
-0044 ja    48
-0045 ld    [24]
-0046 jeq   #0x00005412  jt 49 jf 47
-0047 ja    48
-0048 ret   #0x7fff0000
-0049 ret   #0x00050001
-0050 ret   #0x00050026
+0003 jset  #0x40000000  jt 53 jf 4
+0004 jeq   #0x00000065  jt 53 jf 5
+0005 jeq   #0x00000136  jt 53 jf 6
+0006 jeq   #0x00000137  jt 53 jf 7
+0007 jeq   #0x00000141  jt 53 jf 8
+0008 jeq   #0x0000012a  jt 53 jf 9
+0009 jeq   #0x000000f6  jt 53 jf 10
+0010 jeq   #0x00000140  jt 53 jf 11
+0011 jeq   #0x000000af  jt 53 jf 12
+0012 jeq   #0x00000139  jt 53 jf 13
+0013 jeq   #0x000000b0  jt 53 jf 14
+0014 jeq   #0x000000fa  jt 53 jf 15
+0015 jeq   #0x000000f8  jt 53 jf 16
+0016 jeq   #0x000000f9  jt 53 jf 17
+0017 jeq   #0x000001a9  jt 53 jf 18
+0018 jeq   #0x000001aa  jt 53 jf 19
+0019 jeq   #0x000001ab  jt 53 jf 20
+0020 jeq   #0x000000a5  jt 53 jf 21
+0021 jeq   #0x000000a6  jt 53 jf 22
+0022 jeq   #0x000001ad  jt 53 jf 23
+0023 jeq   #0x000001ac  jt 53 jf 24
+0024 jeq   #0x000001ae  jt 53 jf 25
+0025 jeq   #0x000001b0  jt 53 jf 26
+0026 jeq   #0x000001b1  jt 53 jf 27
+0027 jeq   #0x000001af  jt 53 jf 28
+0028 jeq   #0x000001ba  jt 53 jf 29
+0029 jeq   #0x0000009b  jt 53 jf 30
+0030 jeq   #0x000000a1  jt 53 jf 31
+0031 jeq   #0x00000110  jt 53 jf 32
+0032 jeq   #0x00000134  jt 53 jf 33
+0033 jeq   #0x00000143  jt 53 jf 34
+0034 jeq   #0x00000130  jt 53 jf 35
+0035 jeq   #0x0000012f  jt 53 jf 36
+0036 jeq   #0x00000067  jt 53 jf 37
+0037 jeq   #0x000001b3  jt 54 jf 38
+0038 jeq   #0x00000038  jt 43 jf 39
+0039 jeq   #0x00000029  jt 46 jf 40
+0040 jeq   #0x00000035  jt 46 jf 41
+0041 jeq   #0x00000010  jt 49 jf 42
+0042 ja    52
+0043 ld    [16]
+0044 jset  #0x7e020080  jt 53 jf 45
+0045 ja    52
+0046 ld    [16]
+0047 jeq   #0x00000001  jt 53 jf 48
+0048 ja    52
+0049 ld    [24]
+0050 jeq   #0x00005412  jt 53 jf 51
+0051 ja    52
+0052 ret   #0x7fff0000
+0053 ret   #0x00050001
+0054 ret   #0x00050026

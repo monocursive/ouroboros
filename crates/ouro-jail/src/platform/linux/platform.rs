@@ -64,10 +64,6 @@ const ARGS_FD: RawFd = 14;
 /// First fixed descriptor number used for pinned protected binds
 /// (`--ro-bind-fd`); the fixed channel descriptors live below it.
 const PINNED_FD_BASE: RawFd = 20;
-/// Exclusive upper bound for pinned-bind descriptors. Beyond this the
-/// remaining segments are bound by path and re-verified at handoff, which
-/// §9.1 permits where the backend cannot take another descriptor.
-const PINNED_FD_LIMIT: RawFd = 200;
 
 /// Preparation budget (§8.2).
 const PREPARE_BUDGET: Duration = Duration::from_secs(30);
@@ -287,6 +283,14 @@ fn capability_from(
 }
 
 impl Platform for LinuxPlatform {
+    fn owner_identity(&self) -> Option<crate::platform::OwnerIdentity> {
+        let identity = identity::ProcessIdentity::own().ok()?;
+        Some(crate::platform::OwnerIdentity {
+            pid: identity.pid as u32,
+            boot_id: identity.boot_id,
+            start_time_ticks: identity.start_time_ticks,
+        })
+    }
     fn identity(&self) -> PlatformIdentity {
         PlatformIdentity {
             os: Os::Linux,
@@ -552,36 +556,6 @@ impl Boundary {
             }
         }
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let scan = jfs::scan_protected_names(&plan.workspace, &name_refs, jfs::ScanLimits::DEFAULT)
-            .map_err(|err| {
-                error(
-                    ErrorCode::MissingCapability,
-                    ErrorStage::Preparing,
-                    Remediation::Configuration,
-                    err.to_string(),
-                )
-            })?;
-
-        // jail-v1 §2 I02: the tool profile requires existing_and_root, and a
-        // scan that cannot certify it — a protected symlink met on the walk,
-        // a root literal that is a symlink — refuses before exec instead of
-        // running with a silently downgraded receipt.
-        if snapshot.filesystem.protected_coverage == ProtectedCoverage::ExistingAndRoot
-            && scan_coverage(&scan) != "existing_and_root"
-        {
-            let skipped = skipped_protected_names(&scan);
-            return Err(error(
-                ErrorCode::MissingCapability,
-                ErrorStage::Preparing,
-                Remediation::Configuration,
-                format!(
-                    "the required existing_and_root protected coverage cannot be certified: \
-                     protected names that are symlinks are neither followed nor covered: {}",
-                    skipped.join(", ")
-                ),
-            ));
-        }
-
         let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
         bplan.bwrap = bwrap_path.to_path_buf();
         bplan.env = environment_for(&snapshot, &plan.workspace)?;
@@ -594,6 +568,18 @@ impl Boundary {
         // by mount order.
         for reference in &snapshot.filesystem.read_only {
             if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
+                // The runtime plan already renders merged-/usr aliases as
+                // symlinks and pins their real roots. Do not reopen /bin or
+                // /lib as an operator bind (or mount over those aliases).
+                if bplan.etc_paths.contains(&host)
+                    || bplan.roots.iter().any(|root| match root {
+                        jfs::RootSpec::RoBind(path) | jfs::RootSpec::Symlink { path, .. } => {
+                            path == &host
+                        }
+                    })
+                {
+                    continue;
+                }
                 let destination = resolve_path_ref(reference, &plan.workspace)?;
                 bplan
                     .extra_ro_binds
@@ -618,93 +604,12 @@ impl Boundary {
             bplan.masked.push(PathBuf::from(destination));
         }
 
-        // §9.1 source pinning: every protected segment and the workspace
-        // itself are pinned by O_PATH|O_NOFOLLOW handles at plan time and
-        // re-verified at mount handoff (immediately before spawn), so a
-        // replacement between validation and bind refuses rather than
-        // mounts. Pins whose descriptor fits the spawn map's reserved range
-        // are bound by descriptor (`--ro-bind-fd`), which removes the
-        // name-resolution race entirely; the rest are bound by path and
-        // verified.
-        let mut pins: Vec<jfs::PinnedPath> = Vec::with_capacity(scan.segments.len() + 1);
-        let mut pinned_fds: Vec<(std::os::fd::OwnedFd, RawFd)> = Vec::new();
-        let mut next_fd: RawFd = PINNED_FD_BASE;
-        let mut protected_binds = Vec::with_capacity(scan.segments.len());
-        for segment in &scan.segments {
-            let pin = jfs::PinnedPath::open(&segment.path).map_err(|err| {
-                preparing(
-                    ErrorCode::BackendUnavailable,
-                    format!(
-                        "the protected path {} could not be pinned: {err}",
-                        segment.path.display()
-                    ),
-                )
-            })?;
-            let fd = if next_fd < PINNED_FD_LIMIT {
-                let target = next_fd;
-                next_fd += 1;
-                let copy = pin.try_clone_fd().map_err(|err| {
-                    preparing(
-                        ErrorCode::BackendUnavailable,
-                        format!(
-                            "the protected path {} could not be pinned: {err}",
-                            segment.path.display()
-                        ),
-                    )
-                })?;
-                pinned_fds.push((copy, target));
-                Some(target)
-            } else {
-                None
-            };
-            protected_binds.push(bwrap::ProtectedBind {
-                source: segment.path.clone(),
-                fd,
-            });
-            pins.push(pin);
-        }
-        let workspace_pin = jfs::PinnedPath::open(&plan.workspace).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!(
-                    "the workspace {} could not be pinned: {err}",
-                    plan.workspace.display()
-                ),
-            )
-        })?;
-        bplan.protected = protected_binds;
-
-        // A root-level literal that does not exist is protected by a
-        // placeholder whose identity is registered before use (§9.1).
-        let holders = plan.attempt_dir.join("placeholders");
-        let mut placeholders = Vec::new();
-        for literal in scan.absent_root_literals() {
-            create_private_dir(&holders)?;
-            let source = holders.join(format!("holder{}", literal.replace('/', "_")));
-            match Placeholder::create(&source, &plan.workspace.join(&literal)) {
-                Ok(placeholder) => placeholders.push(placeholder),
-                Err(bwrap::PlaceholderError::DestinationExists(path)) => {
-                    // It appeared between the scan and now: treat it as the
-                    // pre-existing object it is, and never remove it.
-                    bplan.protected.push(bwrap::ProtectedBind {
-                        source: path,
-                        fd: None,
-                    });
-                }
-                Err(err) => {
-                    return Err(preparing(
-                        ErrorCode::BackendUnavailable,
-                        format!("a protected placeholder could not be created: {err}"),
-                    ));
-                }
-            }
-        }
-        // The plan renders from the paths; the handles that pin the
-        // identities stay here, in the supervisor.
-        bplan.placeholders = placeholders
-            .iter()
-            .map(|placeholder| placeholder.mount().clone())
-            .collect();
+        let (scan, pins, pinned_fds, placeholders) = prepare_mounts(
+            &mut bplan,
+            &plan.attempt_dir,
+            &name_refs,
+            snapshot.filesystem.protected_coverage,
+        )?;
 
         let filter = seccomp::tool_baseline().map_err(|err| {
             preparing(
@@ -755,7 +660,7 @@ impl Boundary {
             )
         })?;
 
-        let mut fds = FdMap::new();
+        let mut fds = FdMap::with_target_limit(PINNED_FD_BASE + pinned_fds.len() as RawFd);
         let io = |err: std::io::Error| {
             preparing(
                 ErrorCode::BackendUnavailable,
@@ -769,6 +674,7 @@ impl Boundary {
         let (status_r, status_w) = exec::pipe().map_err(io)?;
         fds.add(release_r, RELEASE_FD).map_err(io)?;
         fds.add(error_w, ERROR_FD).map_err(io)?;
+        fds.add(status_w, STATUS_FD).map_err(io)?;
         for (copy, target) in pinned_fds {
             fds.add(copy, target).map_err(io)?;
         }
@@ -794,12 +700,6 @@ impl Boundary {
         // §9.1 mount-handoff verification: the workspace and every pinned
         // protected segment must still resolve to the objects that were
         // scanned, or the run refuses rather than bind a replacement.
-        workspace_pin.verify().map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the workspace changed during preparation: {err}"),
-            )
-        })?;
         for pin in &pins {
             pin.verify().map_err(|err| {
                 preparing(
@@ -810,7 +710,7 @@ impl Boundary {
         }
         // §8.3: stdio is inherited without capture; every other descriptor the
         fds.apply(&mut command);
-        let child = command.spawn().map_err(|err| {
+        let mut child = command.spawn().map_err(|err| {
             preparing(
                 ErrorCode::BackendUnavailable,
                 format!(
@@ -825,12 +725,11 @@ impl Boundary {
         // rather than leak an orphan (§8.1 pre-exec failure refuses).
         if let (Some(args_w), Some(payload)) =
             (args_writer.as_ref(), rendered.args_payload.as_ref())
+            && let Err(err) = write_all(args_w.as_raw_fd(), payload)
         {
-            if let Err(err) = write_all(args_w.as_raw_fd(), payload) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(io(std::io::Error::from(err)));
-            }
+            let _ = child.kill();
+            reap_until(&mut child, clock::Deadline::after(TREE_BUDGET));
+            return Err(io(err));
         }
         drop(args_writer);
         // The parent's copies close here, so the child's peers see EOF.
@@ -1186,10 +1085,11 @@ impl Boundary {
 
     /// Kills and reaps everything this boundary owns.
     fn teardown(&mut self) {
+        let deadline = clock::Deadline::after(TREE_BUDGET);
         self.kill_boundary();
-        self.stop_observer(TREE_BUDGET);
+        self.stop_observer(deadline.remaining());
         if let Some(mut child) = self.child.take() {
-            let _ = child.wait();
+            reap_until(&mut child, deadline);
         }
         self.remove_placeholders();
     }
@@ -1221,23 +1121,68 @@ impl Boundary {
         let Some(tracer) = self.tracer.take() else {
             return;
         };
-        let summary = tracer.finish_within(budget);
-        if summary.loss.abandoned_tracees > 0 {
+        let summary = tracer.finish_within_draining(budget, |event| match event {
+            TracerEvent::Exec {
+                pid, path, dirfd, ..
+            } => self.audit.record_exec(pid, path.as_ref(), dirfd),
+            TracerEvent::Syscall {
+                pid,
+                tid,
+                op,
+                syscall,
+                args,
+                ret,
+                ..
+            } => self.audit.record_syscall(pid, tid, op, syscall, &args, ret),
+            TracerEvent::Exit { pid, status, .. } => self.audit.record_exit(pid, status),
+            TracerEvent::Gap {
+                reason,
+                ops,
+                from_ns,
+                to_ns,
+                count,
+            } => self.audit.record_gap(reason, ops, from_ns, to_ns, count),
+            _ => {}
+        });
+        if summary.loss.abandoned_tracees > 0
+            && !self
+                .audit
+                .gaps()
+                .iter()
+                .any(|gap| gap.reason == super::tracer::GapReason::TraceesAbandoned.as_str())
+        {
             self.audit.record_gap(
                 super::tracer::GapReason::TraceesAbandoned,
-                super::tracer::OpSet::EMPTY,
+                super::tracer::OpSet::ALL,
                 0,
                 0,
                 Some(summary.loss.abandoned_tracees),
             );
         }
-        if !summary.unreaped_children.is_empty() {
+        if !summary.unreaped_children.is_empty()
+            && !self
+                .audit
+                .gaps()
+                .iter()
+                .any(|gap| gap.reason == super::tracer::GapReason::UnreapedChildren.as_str())
+        {
             self.audit.record_gap(
                 super::tracer::GapReason::UnreapedChildren,
                 super::tracer::OpSet::EMPTY,
                 0,
                 0,
                 u64::try_from(summary.unreaped_children.len()).ok(),
+            );
+        }
+        if summary.loss.lifecycle_dropped > 0
+            || (summary.loss.total() > 0 && !self.audit.has_gaps())
+        {
+            self.audit.record_gap(
+                super::tracer::GapReason::QueueFull,
+                super::tracer::OpSet::ALL,
+                0,
+                crate::platform::elapsed_since_start_ns() as u64,
+                None,
             );
         }
         self.tracer_summary = Some(summary);
@@ -1249,6 +1194,9 @@ impl Boundary {
     }
 
     fn remove_placeholders(&mut self) {
+        if init_alive(self.init_pid) || !self.observer_verified_the_tree() {
+            return;
+        }
         if self.placeholder_outcomes.is_empty() {
             self.placeholder_outcomes = self
                 .placeholders
@@ -1623,6 +1571,151 @@ fn host_path_of(
     }
 }
 
+type MountPreparation = (
+    jfs::ProtectedScan,
+    Vec<jfs::PinnedPath>,
+    Vec<(OwnedFd, RawFd)>,
+    Vec<Placeholder>,
+);
+
+/// Pin every source once, scan the pinned writable roots, then give each bind
+/// its own descriptor. Bubblewrap validates the mounted inode against that fd.
+fn prepare_mounts(
+    plan: &mut BwrapPlan,
+    attempt_dir: &Path,
+    names: &[&str],
+    coverage: ProtectedCoverage,
+) -> Result<MountPreparation, JailError> {
+    use std::collections::BTreeMap;
+    let failure = |err: std::io::Error| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("mount source pinning failed: {err}"),
+        )
+    };
+    let mut pins = BTreeMap::<PathBuf, jfs::PinnedPath>::new();
+    let mut roots = plan.extra_rw_binds.clone();
+    roots.push((plan.workspace.clone(), plan.workspace.clone()));
+    roots.push((
+        plan.scratch.clone(),
+        PathBuf::from(bwrap::SCRATCH_INSIDE_PATH),
+    ));
+    roots.sort();
+    roots.dedup();
+    let mut aggregate = jfs::ProtectedScan {
+        root: PathBuf::from("/"),
+        segments: Vec::new(),
+        skipped_symlinks: Vec::new(),
+        root_literals: Vec::new(),
+        entries_seen: 0,
+        max_depth_seen: 0,
+    };
+    let mut placeholders = Vec::new();
+    let result = (|| {
+        for (root_index, (source, destination)) in roots.iter().enumerate() {
+            let pin = jfs::PinnedPath::open(source).map_err(failure)?;
+            if !pin.is_dir().map_err(failure)? {
+                pins.insert(source.clone(), pin);
+                continue;
+            }
+            let scan = jfs::scan_pinned(
+                &pin,
+                names,
+                jfs::ScanLimits {
+                    max_entries: jfs::ScanLimits::DEFAULT
+                        .max_entries
+                        .saturating_sub(aggregate.entries_seen),
+                    ..jfs::ScanLimits::DEFAULT
+                },
+            )
+            .map_err(|err| preparing(ErrorCode::MissingCapability, err.to_string()))?;
+            pins.insert(source.clone(), pin);
+            if coverage == ProtectedCoverage::ExistingAndRoot && !scan.skipped_symlinks.is_empty() {
+                return Err(preparing(
+                    ErrorCode::MissingCapability,
+                    "existing_and_root coverage cannot cover protected symlinks",
+                ));
+            }
+            for segment in &scan.segments {
+                let pinned = jfs::PinnedPath::open(&segment.path).map_err(failure)?;
+                if pinned.identity() != (segment.dev, segment.ino) {
+                    return Err(preparing(
+                        ErrorCode::BackendUnavailable,
+                        "a protected object changed between scan and pin",
+                    ));
+                }
+                pins.insert(segment.path.clone(), pinned);
+                plan.extra_ro_binds.push((
+                    segment.path.clone(),
+                    destination.join(
+                        segment
+                            .path
+                            .strip_prefix(source)
+                            .expect("scan beneath root"),
+                    ),
+                ));
+            }
+            for literal in scan.absent_root_literals() {
+                let holders = attempt_dir.join("placeholders");
+                create_private_dir(&holders)?;
+                let holder = holders.join(format!("holder-{root_index}-{}", placeholders.len()));
+                let placeholder = Placeholder::create(&holder, &source.join(&literal))
+                    .map_err(|err| preparing(ErrorCode::BackendUnavailable, err.to_string()))?;
+                let mut mount = placeholder.mount().clone();
+                mount.destination = destination.join(&literal);
+                plan.placeholders.push(mount);
+                placeholders.push(placeholder);
+            }
+            aggregate.entries_seen += scan.entries_seen;
+            aggregate.max_depth_seen = aggregate.max_depth_seen.max(scan.max_depth_seen);
+            aggregate.segments.extend(scan.segments);
+            aggregate.skipped_symlinks.extend(scan.skipped_symlinks);
+        }
+        // Bind ancestors before descendants, and never expose a second writable
+        // alias of a protected source after applying its protection.
+        let mut fds = Vec::new();
+        for row in plan.mount_table() {
+            if !matches!(row.kind, "bind" | "ro-bind" | "ro-bind-fd" | "placeholder") {
+                plan.mount_fds.push(None);
+                continue;
+            }
+            let source = PathBuf::from(row.source.expect("bind source"));
+            if !pins.contains_key(&source) {
+                // Distribution-owned runtime aliases may be resolved here;
+                // workspace/operator sources must never follow symlinks.
+                let runtime = plan.etc_paths.contains(&source)
+                    || plan
+                        .roots
+                        .iter()
+                        .any(|r| matches!(r, jfs::RootSpec::RoBind(p) if p == &source))
+                    || source == plan.jail_exe;
+                let path = if runtime {
+                    std::fs::canonicalize(&source).map_err(failure)?
+                } else {
+                    source.clone()
+                };
+                pins.insert(
+                    source.clone(),
+                    jfs::PinnedPath::open(&path).map_err(failure)?,
+                );
+            }
+            let target = PINNED_FD_BASE + fds.len() as RawFd;
+            fds.push((pins[&source].try_clone_fd().map_err(failure)?, target));
+            plan.mount_fds.push(Some(target));
+        }
+        Ok(fds)
+    })();
+    match result {
+        Ok(fds) => Ok((aggregate, pins.into_values().collect(), fds, placeholders)),
+        Err(err) => {
+            for placeholder in &placeholders {
+                let _ = placeholder.remove_if_unchanged();
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Join a root with a reference's native-byte suffix.
 fn join_suffix(base: &Path, reference: &PathRef) -> PathBuf {
     let suffix = reference.path.as_bytes();
@@ -1683,6 +1776,7 @@ impl PreparedExecution for LinuxPrepared {
             stop_requested: None,
             stop_at: None,
             hard_killed: false,
+            hard_deadline: None,
             bwrap_status: None,
             finished: false,
             evidence_reported: false,
@@ -1729,6 +1823,7 @@ struct LinuxRunning {
     stop_requested: Option<StopReason>,
     stop_at: Option<u64>,
     hard_killed: bool,
+    hard_deadline: Option<clock::Deadline>,
     bwrap_status: Option<i32>,
     finished: bool,
     evidence_reported: bool,
@@ -1798,8 +1893,11 @@ impl LinuxRunning {
         {
             events.push(event);
         }
-        while let Ok(event) = tracer.events().try_recv() {
-            events.push(event);
+        for _ in 0..256 {
+            match tracer.events().try_recv() {
+                Ok(event) => events.push(event),
+                Err(_) => break,
+            }
         }
         for event in events {
             self.handle_tracer_event(&event, launcher);
@@ -1808,7 +1906,9 @@ impl LinuxRunning {
 
     fn handle_tracer_event(&mut self, event: &TracerEvent, launcher: libc::pid_t) {
         match event {
-            TracerEvent::Exec { pid, path, dirfd } => {
+            TracerEvent::Exec {
+                pid, path, dirfd, ..
+            } => {
                 self.boundary.audit.record_exec(*pid, path.as_ref(), *dirfd);
                 // A transition with no pathname is one whose entry the
                 // observer did not witness, which is what seizing a process
@@ -1904,10 +2004,10 @@ impl LinuxRunning {
     /// measured on this host the only holder of that descriptor inside the
     /// sandbox is the launcher itself: neither bubblewrap nor its reaper keeps
     /// a copy. So EOF means the launcher closed it, which it does either by
-    /// execing or by dying. The launcher still being alive at EOF settles
-    /// which of the two happened, and nothing is claimed until it does; if the
-    /// launcher is already gone, [`terminal_event`](Self::terminal_event)
-    /// decides from the backend's report and the absence of an errno instead.
+    /// execing or by dying. Require a changed executable inode too: a zombie
+    /// retains its birth identity, and even pidfd readiness can lag fd closure
+    /// during exit. If the kernel image is unreadable or unchanged, exec stays
+    /// unknown unless the observer independently witnessed it.
     fn check_exec_without_tracer(&mut self) {
         if self.exec_confirmed || self.boundary.tracer.is_some() {
             return;
@@ -1915,7 +2015,7 @@ impl LinuxRunning {
         if !self.boundary.error_bytes.is_empty() || !self.boundary.error_eof {
             return;
         }
-        if self.boundary.launcher.is_live() {
+        if self.boundary.launcher.is_live() && image_changed(self.boundary.launcher.pid) {
             self.exec_confirmed = true;
             self.pending.push(RunEvent::ExecConfirmed);
         }
@@ -1951,6 +2051,7 @@ impl LinuxRunning {
             return;
         }
         self.hard_killed = true;
+        self.hard_deadline = Some(clock::Deadline::after(TREE_BUDGET));
         self.boundary.kill_boundary();
     }
 
@@ -1975,9 +2076,9 @@ impl LinuxRunning {
             return Some(RunEvent::ExecError { errno });
         }
         if !self.exec_confirmed {
-            self.exec_confirmed = true;
-            self.pending.push(self.status_outcome(status));
-            return Some(RunEvent::ExecConfirmed);
+            return Some(RunEvent::Unknown {
+                reason: "the backend ended without independent evidence of target exec".to_owned(),
+            });
         }
         Some(self.status_outcome(status))
     }
@@ -2028,7 +2129,7 @@ fn outcome_from_status(status: i32) -> RunEvent {
 
 impl RunningExecution for LinuxRunning {
     fn wait(&mut self, deadline: PortableDeadline) -> RunEvent {
-        loop {
+        {
             if !self.pending.is_empty() {
                 return self.pending.remove(0);
             }
@@ -2062,12 +2163,18 @@ impl RunningExecution for LinuxRunning {
             if done && let Some(event) = self.terminal_event() {
                 return event;
             }
+            if self.hard_deadline.is_some_and(clock::Deadline::expired) {
+                return RunEvent::Unknown {
+                    reason: "termination could not be observed within the tree budget".to_owned(),
+                };
+            }
             let step = step_for(deadline);
             if self.boundary.tracer.is_some() {
                 self.pump_tracer(step);
             } else {
                 sleep_for(step);
             }
+            RunEvent::Poll
         }
     }
 
@@ -2087,7 +2194,9 @@ impl RunningExecution for LinuxRunning {
     }
 
     fn wait_tree(&mut self, budget: Duration) -> TreeObservation {
-        let deadline = clock::Deadline::after(budget);
+        let deadline = self
+            .hard_deadline
+            .unwrap_or_else(|| clock::Deadline::after(budget));
         let settle = clock::Deadline::after(SETTLE_GRACE.min(budget));
         let mut natural = false;
         loop {
@@ -2150,7 +2259,7 @@ impl RunningExecution for LinuxRunning {
         if self.boundary.tracer.is_none()
             && let Some(mut child) = self.boundary.child.take()
         {
-            let _ = child.wait();
+            let _ = child.try_wait();
         }
         if self.boundary.observe_on {
             let summary = self.boundary.tracer_summary.clone().unwrap_or_default();
@@ -2241,6 +2350,26 @@ fn init_alive(init: libc::pid_t) -> bool {
     init > 0 && Path::new(&format!("/proc/{init}")).exists()
 }
 
+fn image_changed(pid: libc::pid_t) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(launcher) = std::fs::metadata("/proc/self/exe") else {
+        return false;
+    };
+    let Ok(target) = std::fs::metadata(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    (launcher.dev(), launcher.ino()) != (target.dev(), target.ino())
+}
+
+fn reap_until(child: &mut Child, deadline: clock::Deadline) {
+    loop {
+        match child.try_wait() {
+            Ok(None) if !deadline.expired() => sleep_for(WAIT_STEP),
+            _ => break,
+        }
+    }
+}
+
 /// How long the loop may block before re-checking every source.
 ///
 /// A deadline that has already passed does not shorten the step: the wall is
@@ -2284,6 +2413,106 @@ impl Drop for Boundary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mount_plan(root: &Path) -> BwrapPlan {
+        for name in ["workspace", "scratch", "external", "attempt"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let mut plan = BwrapPlan::tool(
+            &root.join("workspace"),
+            &root.join("scratch"),
+            &std::env::current_exe().unwrap(),
+        );
+        plan.roots.clear();
+        plan.etc_paths.clear();
+        plan.extra_rw_binds
+            .push((root.join("external"), root.join("external")));
+        plan
+    }
+
+    #[test]
+    fn all_writable_roots_are_scanned_and_every_bind_is_pinned() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut plan = mount_plan(root);
+        for name in ["workspace", "scratch", "external"] {
+            std::fs::create_dir(root.join(name).join(".git")).unwrap();
+        }
+        let (scan, _pins, fds, placeholders) = prepare_mounts(
+            &mut plan,
+            &root.join("attempt"),
+            &jfs::PROTECTED_LITERALS,
+            ProtectedCoverage::ExistingAndRoot,
+        )
+        .unwrap();
+        assert_eq!(scan.segments.len(), 3);
+        assert_eq!(placeholders.len(), 3);
+        let rows = plan.mount_table();
+        for dest in [
+            root.join("workspace/.git"),
+            root.join("external/.git"),
+            PathBuf::from("/tmp/.git"),
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.destination == dest && row.kind == "ro-bind")
+            );
+        }
+        assert_eq!(
+            fds.len(),
+            rows.iter().filter(|row| row.source.is_some()).count()
+        );
+        for (row, fd) in rows.iter().zip(&plan.mount_fds) {
+            if matches!(row.kind, "bind" | "ro-bind" | "placeholder") {
+                assert!(fd.is_some());
+            }
+        }
+        for placeholder in placeholders {
+            let _ = placeholder.remove_if_unchanged();
+        }
+    }
+
+    #[test]
+    fn protected_symlinks_in_extra_roots_refuse_before_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut plan = mount_plan(root);
+        std::os::unix::fs::symlink("elsewhere", root.join("external/.git")).unwrap();
+        assert!(
+            prepare_mounts(
+                &mut plan,
+                &root.join("attempt"),
+                &jfs::PROTECTED_LITERALS,
+                ProtectedCoverage::ExistingAndRoot
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn large_protected_sets_keep_descriptor_backed_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut plan = mount_plan(root);
+        for index in 0..240 {
+            std::fs::create_dir_all(root.join(format!("workspace/repo-{index}/.git"))).unwrap();
+        }
+        let (_, _pins, fds, placeholders) = prepare_mounts(
+            &mut plan,
+            &root.join("attempt"),
+            &jfs::PROTECTED_LITERALS,
+            ProtectedCoverage::ExistingAndRoot,
+        )
+        .unwrap();
+        assert!(fds.len() > 240);
+        let mut map = FdMap::with_target_limit(PINNED_FD_BASE + fds.len() as RawFd);
+        for (fd, target) in fds {
+            map.add(fd, target).unwrap();
+        }
+        for placeholder in placeholders {
+            let _ = placeholder.remove_if_unchanged();
+        }
+    }
 
     #[test]
     fn mountinfo_paths_decode_their_octal_escapes() {

@@ -428,3 +428,54 @@ fn a_run_that_fails_to_start_is_an_error_not_a_pass() {
     };
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
 }
+
+#[test]
+fn wait_drains_a_trace_larger_than_pipe_capacity_before_exit() {
+    let run = Jail::with_program(stand_in())
+        .unwrap()
+        .trace()
+        .arg("--trace-lines")
+        .arg("2048")
+        .target_fixture(["exit", "0"])
+        .timeout(std::time::Duration::from_secs(5))
+        .run()
+        .unwrap();
+    run.assert_channels_complete();
+    assert_eq!(run.code(), Some(0));
+    assert_eq!(
+        run.trace_events
+            .iter()
+            .filter(|event| event.get("padding").is_some())
+            .count(),
+        2048
+    );
+}
+
+#[test]
+fn wait_enforces_a_deadline_even_when_the_child_never_exits() {
+    let started = std::time::Instant::now();
+    let result = Jail::with_program(stand_in())
+        .unwrap()
+        .target(["/bin/sleep", "60"])
+        .timeout(std::time::Duration::from_millis(200))
+        .run();
+    assert!(matches!(result, Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut));
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+#[test]
+fn malformed_json_invalidates_control_and_trace_transcripts() {
+    for flag in ["--malformed-control", "--malformed-trace"] {
+        let result = Jail::with_program(stand_in())
+            .unwrap()
+            .control()
+            .trace()
+            .arg(flag)
+            .target_fixture(["exit", "0"])
+            .run();
+        assert!(
+            matches!(result, Err(ref e) if e.kind() == std::io::ErrorKind::InvalidData),
+            "{flag} was silently discarded"
+        );
+    }
+}

@@ -159,6 +159,8 @@ pub enum StopReason {
 /// One thing that happened while the target was running.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RunEvent {
+    /// A bounded polling step completed; recheck signals and transport health.
+    Poll,
     /// The target `exec` transition was confirmed; the enforced receipt and
     /// the `exec_confirmed` control message follow from it.
     ExecConfirmed,

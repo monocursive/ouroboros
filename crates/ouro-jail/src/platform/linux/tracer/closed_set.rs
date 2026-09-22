@@ -247,6 +247,7 @@ mod tests {
     /// excluded exactly as `write` is, and the table must say so by not
     /// containing it.
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn descriptor_based_mutations_stay_outside_the_set() {
         for nr in [
             libc::SYS_ftruncate,
@@ -264,6 +265,7 @@ mod tests {
     /// The table must agree with the `SYS_*` numbers of this target, which is
     /// the only cross-check that catches a transposed digit.
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn numbers_match_the_targets_syscall_table() {
         let expected: &[(&str, u64)] = &[
             ("execve", libc::SYS_execve as u64),

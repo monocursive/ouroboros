@@ -13,10 +13,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use super::clock::Deadline;
 use super::identity::{pidfd_open, pidfd_send_signal};
 
-/// Descriptors the parent holds are first duplicated above this number, so
-/// that the `dup2` calls in the child can never overwrite a source. The
-/// reserved range also hosts the pinned protected-bind descriptors
-/// (`--ro-bind-fd`), which is why it is well above the fixed channel numbers.
+/// Default start of the source-descriptor range. Large mount plans raise it
+/// above their last target, so the child's `dup2` calls cannot overwrite a
+/// source, including when there are more than 256 pinned mounts.
 const RESERVE_BASE: RawFd = 256;
 
 /// A pipe with both ends close-on-exec.
@@ -41,9 +40,16 @@ pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 /// The map owns its sources, so they stay open until it is dropped; the caller
 /// keeps it alive across `spawn` and drops it afterwards to give the child's
 /// peer its EOF.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FdMap {
     moves: Vec<(OwnedFd, RawFd)>,
+    reserve_base: RawFd,
+}
+
+impl Default for FdMap {
+    fn default() -> Self {
+        Self::with_target_limit(RESERVE_BASE)
+    }
 }
 
 impl FdMap {
@@ -53,9 +59,19 @@ impl FdMap {
         Self::default()
     }
 
+    /// Reserve enough target slots for this mount plan. Source duplicates live
+    /// above every target, so large plans remain collision-free without a fixed
+    /// protected-bind cap. Descriptor exhaustion is an error before spawn.
+    pub fn with_target_limit(limit: RawFd) -> Self {
+        Self {
+            moves: Vec::new(),
+            reserve_base: limit.max(RESERVE_BASE),
+        }
+    }
+
     /// Install `fd` as descriptor `target` in the child.
     ///
-    /// Takes ownership: the source is duplicated above [`RESERVE_BASE`] if
+    /// Takes ownership: the source is duplicated above the target range if
     /// needed and the original is closed, so the only copies left in the
     /// parent are the ones this map holds.
     ///
@@ -65,24 +81,25 @@ impl FdMap {
     ///
     /// # Panics
     ///
-    /// If `target` is negative or not below [`RESERVE_BASE`]; the reserved
+    /// If `target` is negative or outside the configured target range; the reserved
     /// range is what makes the child's `dup2` sequence collision-free.
     pub fn add(&mut self, fd: OwnedFd, target: RawFd) -> io::Result<()> {
         assert!(
-            (0..RESERVE_BASE).contains(&target),
-            "target fd {target} must be in 0..{RESERVE_BASE}"
+            (0..self.reserve_base).contains(&target),
+            "target fd {target} must be in 0..{}",
+            self.reserve_base
         );
         assert!(
             !self.moves.iter().any(|(_, t)| *t == target),
             "fd {target} assigned twice"
         );
         let raw = fd.as_raw_fd();
-        let high = if raw >= RESERVE_BASE {
+        let high = if raw >= self.reserve_base {
             fd
         } else {
             // SAFETY: `raw` is a live descriptor owned by `fd`; F_DUPFD_CLOEXEC
-            // returns a new owned descriptor at or above RESERVE_BASE.
-            let dup = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, RESERVE_BASE) };
+            // returns a new owned descriptor above every target in this map.
+            let dup = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, self.reserve_base) };
             if dup < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -128,7 +145,7 @@ impl FdMap {
     /// the supervisor happens to hold — the gate, control and trace channels
     /// among them — survives into the child (§8.3). The `dup2` calls clear
     /// that flag on exactly the descriptors this map names. Every source is at
-    /// or above [`RESERVE_BASE`] and every target below it, so no `dup2` can
+    /// or above the configured reserve base and every target below it, so no `dup2` can
     /// clobber a later source.
     pub fn apply(&self, command: &mut Command) {
         let moves: Vec<(RawFd, RawFd)> = self

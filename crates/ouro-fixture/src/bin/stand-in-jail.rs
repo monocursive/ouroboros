@@ -41,6 +41,13 @@ struct Cli {
     gate_fd: Option<i32>,
     #[arg(long, value_name = "FD")]
     trace_fd: Option<i32>,
+    /// Exercise harness backpressure with more data than a pipe can hold.
+    #[arg(long, default_value_t = 0)]
+    trace_lines: usize,
+    #[arg(long)]
+    malformed_trace: bool,
+    #[arg(long)]
+    malformed_control: bool,
     #[arg(long, value_name = "PATH")]
     receipt: Option<PathBuf>,
     #[arg(long, default_value = "att_00000000-0000-4000-8000-000000000001")]
@@ -112,6 +119,11 @@ fn main() -> std::process::ExitCode {
     }
 
     let mut control = control;
+    if cli.malformed_control
+        && let Some(file) = &mut control
+    {
+        writeln!(file, "not-json").expect("malformed control write");
+    }
     let mut seq = 0u64;
     if let Some(w) = control.as_mut() {
         let msg = json!({
@@ -131,6 +143,12 @@ fn main() -> std::process::ExitCode {
         let _ = w.flush();
     }
     if let Some(mut w) = trace {
+        for _ in 0..cli.trace_lines {
+            writeln!(w, "{{\"padding\":\"{}\"}}", "x".repeat(1024)).expect("trace pressure write");
+        }
+        if cli.malformed_trace {
+            writeln!(w, "not-json").expect("malformed trace write");
+        }
         let event = json!({
             "schema": "ouro.event/1",
             "source": "wrapper",
