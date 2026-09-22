@@ -172,8 +172,9 @@ capabilities inside the user namespace
 [nesting probe](jail-v1/evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)).
 For `agent` the operator either installs a scoped profile granting `userns`,
 and capabilities within it, to the required executables, or changes that
-sysctl. All of these are host policy: the tools report the state and change
-none of them. Conformance runs on the host as a dedicated operator account,
+sysctl. The reference host uses the sysctl (decision 2026-09-22, recorded by
+the manifest); a multi-tenant host would need the scoped profile. All of
+these are host policy: the tools report the state and change none of them. Conformance runs on the host as a dedicated operator account,
 `ouro-ci`: no sudo, lingering enabled so its `user@` service delegates the
 cgroup controllers, the provisioned tracing capabilities, and nothing else
 (§16). A VM is acceptable; a container that cannot delegate the required
@@ -385,10 +386,12 @@ Prove the child cannot reacquire privileges; user-namespace capabilities are
 separately confined and do not grant host capabilities.
 
 Capability provisioning is the operator's act on the reference host, and J0
-records which mechanism was used: ambient capabilities granted by the systemd
-service or user unit that starts the supervisor (`AmbientCapabilities=`), or
-file capabilities the operator sets on the supervisor binary. Neither is
-installed by the tools. Measure the smallest set that attaches: `CAP_BPF` and
+records which mechanism was used: ambient capabilities granted by a systemd
+system service unit that starts the supervisor (`AmbientCapabilities=`; a user
+unit cannot grant capabilities the account lacks), or file capabilities the
+operator sets on the supervisor binary. Neither is installed by the tools. The
+reference host uses the first, running the observer at a fixed path owned by
+`ouro-ci` (decision 2026-09-22), so a rebuilt binary needs no privileged step. Measure the smallest set that attaches: `CAP_BPF` and
 `CAP_PERFMON` are the candidates on the pinned kernel; needing `CAP_SYS_ADMIN`
 is a failed measurement, not a fallback. Record whether the AppArmor
 user-namespace restriction, `perf_event_paranoid` or a hardened

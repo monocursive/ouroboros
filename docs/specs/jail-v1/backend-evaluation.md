@@ -25,7 +25,7 @@ Produced by `doctor --json` on the operator-provisioned x86_64 VPS
 | `kernel.yama.ptrace_scope` | 1 (manual 2026-09-22); `kernel.io_uring_disabled` 0 |
 | Kernel options | `SECURITY_LANDLOCK`, `SECCOMP_FILTER`, `USER_NS`, `SECURITY_APPARMOR`, `CGROUPS`, `BPF_LSM` all `y` (manual 2026-09-22, [evidence](evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)) |
 | Operator-installed AppArmor profile: name, executables granted `userns` | none installed; AppArmor enabled with Ubuntu's `bwrap-userns-restrict`, `unprivileged_userns`, `lxc-usernsexec` files and `bwrap`, `unpriv_bwrap` loaded; the legacy `ouroboros-sandbox-fleet` profile was removed 2026-09-22 (manual) |
-| Tracing capability provisioning: mechanism (ambient via unit / file caps) and set | not_started; login shell `CapEff` is 0 (manual 2026-09-22) |
+| Tracing capability provisioning: mechanism (ambient via unit / file caps) and set | Decided 2026-09-22, not yet applied or measured: ambient capabilities from a system-level service unit that runs the observer at a fixed path owned by `ouro-ci`, so a freshly built binary needs no privileged step per build. The set to measure is CAP_BPF plus CAP_PERFMON. Login shell `CapEff` is 0 (manual 2026-09-22) |
 | Raw `doctor --json` output location | not_started; manual collection by [host-manifest.sh](host-manifest.sh): [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ouro-ci`, the account conformance runs under |
 
 ### 1.1 Unprivileged bubblewrap on the reference host
@@ -55,6 +55,13 @@ sysctl change that sandbox-runtime's README recommends; both are host policy
 the specification leaves to the operator. Which one, and its exact text, is
 the next enforcement measurement. Until it passes S03, `agent` refuses on
 this host, as §4.6 requires.
+
+Decision 2026-09-22: on this dedicated single-tenant host the sysctl is the
+chosen mechanism, applied and made persistent by the operator, because it is
+one recorded setting rather than a path-pinned profile that must follow every
+launcher rebuild. The manifest already records its value, so the change is
+visible in every later evidence file. Not yet applied; the nesting probe is
+re-run once it is, and a multi-tenant host would need the scoped profile.
 
 On the legacy tree's Ubuntu 24.04 hosted runners the apt bubblewrap could not
 apply its mounts without a sysctl change; on this 26.04.1 host it can, under
