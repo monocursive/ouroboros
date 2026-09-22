@@ -55,3 +55,26 @@ changes a containment or record contract; each names where the resolution lives.
 | Repository layout for the whole north star | One workspace: `crates/` per process with fixed split rules, `fleet/` outside Cargo, contracts and evidence under `docs/specs/`; bootstrap files added, no crate | North star D7; jail §4 |
 | Conformance runner model | Hosted runner drives the host over SSH as non-sudo `ouro-ci`; push/dispatch only; job fails once `Cargo.toml` exists until the driver runs | Jail §3.2, §16; `.github/workflows/conformance.yml` |
 
+
+## J1 review findings (2026-09-22)
+
+Two adversarial reviews of the first implementation slices (portable core,
+Linux ptrace observer) found defects and spec ambiguities. Defects are fixed
+in the implementation with regression tests; the ambiguities are resolved
+here and in revision 8 of the specification.
+
+| Finding | Resolution |
+|---|---|
+| Untrusted `ouro.toml` re-granted a denied subtree through a symlink or a case variant; a deeper grant overrode a denial | §6.3: identity comparison for untrusted layers, denial wins at any depth |
+| An unreadable or non-regular `ouro.toml` silently discarded the narrowing layer | §6.3: only a missing file means no narrowing |
+| The §6.3 example profile refused when stored in the config directory | §6.3: relative paths resolve against the file; the example narrows the workspace beside it |
+| §6.4 "Required by observer" read as "always" | §6.4: required by a cgroup-filtering observer or an explicit tree limit |
+| An unverified tree after exec was reported as `refused` on the control channel | §8.2: `refused` only before release; new terminal kind `unsettled` |
+| `applied.network.mode` for a `none` refusal was `host` in code and `pending` in the fixture | §13.2: `pending` |
+| `policy.grants` was always empty | §13.2: the explicit operator grants beyond the baseline |
+| `explain --json` printed environment values | §6.1: names only |
+| Budgets used the plain monotonic clock while the receipt could name a boot-time deadline | §13.2: the receipt names the clock it uses; suspend semantics are L04 (J2) |
+| `mknod`, `mknodat` and `truncate` were inside the native ABI, outside the closed set and not denied | §11.2: the closed set has 22 rows; `ftruncate` named as excluded |
+| The event queue bound was a count the child could turn into 125 MiB | §11.4: bytes |
+| Queue gaps named no class | §11.4: gaps name the dropped operations' classes |
+| A child could stop its own strict attempt with unreadable arguments | §11.4: kernel-rejected arguments are unavailable metadata, not loss |
