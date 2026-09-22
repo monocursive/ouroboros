@@ -163,10 +163,13 @@ mechanism by which tracing capabilities were provisioned (§5.2). Until
 same facts read-only; its first run is
 [evidence/reference-host-2026-09-22.txt](jail-v1/evidence/reference-host-2026-09-22.txt),
 and `doctor --json` output supersedes it. Ubuntu 24.04 and later restrict
-unprivileged user namespaces through AppArmor by default; the operator either
-installs a scoped profile granting `userns` to the required executables or
-changes that sysctl. Both are host policy: the tools report the state and
-change neither. Conformance runs on the host as a dedicated operator account,
+unprivileged user namespaces through AppArmor by default. Where the
+distribution's own `bwrap-userns-restrict` profile is measured sufficient, as
+it is for basic mounts and namespaces on the reference host
+([evidence](jail-v1/evidence/bwrap-probe-2026-09-22-ouro-ci.txt)), no operator
+change is needed; otherwise the operator either installs a scoped profile
+granting `userns` to the required executables or changes that sysctl. All of
+these are host policy: the tools report the state and change none of them. Conformance runs on the host as a dedicated operator account,
 `ouro-ci`: no sudo, lingering enabled so its `user@` service delegates the
 cgroup controllers, the provisioned tracing capabilities, and nothing else
 (§16). A VM is acceptable; a container that cannot delegate the required

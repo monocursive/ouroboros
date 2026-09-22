@@ -1,0 +1,28 @@
+collected_at: 2026-09-22T03:47:37Z as ouro-ci on vps-450b3fe8, kernel 7.0.0-31-generic
+bwrap: bubblewrap 0.11.1
+confinement label of a plain login process: unconfined
+--- 1 bwrap starts with --unshare-all
+exit=0
+--- 2 confinement label inside the sandbox
+bwrap//&unpriv_bwrap (enforce)
+exit=0
+--- 3 ro-bind holds: a write under /usr must fail and leave nothing
+exit=0
+--- 4 tmpfs write works
+x
+exit=0
+--- 5 egress blocked by --unshare-net (connect must fail)
+exit=1
+--- 6 pid namespace applied (shell sees a small pid)
+pid=2
+exit=0
+--- 7 process status inside: seccomp, no_new_privs, effective caps
+CapEff:	0000000000000000
+NoNewPrivs:	1
+Seccomp:	0
+exit=0
+--- 8 a nested user namespace inside the sandbox (agent-profile nesting precondition)
+exit=0
+--- 9 mount table inside
+13
+exit=0

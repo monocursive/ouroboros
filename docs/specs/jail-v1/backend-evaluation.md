@@ -27,6 +27,27 @@ Produced by `doctor --json` on the operator-provisioned x86_64 VPS
 | Tracing capability provisioning: mechanism (ambient via unit / file caps) and set | not_started; login shell `CapEff` is 0 (manual 2026-09-22) |
 | Raw `doctor --json` output location | not_started; manual collection by [host-manifest.sh](host-manifest.sh): [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ouro-ci`, the account conformance runs under |
 
+### 1.1 Unprivileged bubblewrap on the reference host
+
+Measured 2026-09-22 as `ouro-ci`, no operator change to AppArmor or sysctls
+([evidence](evidence/bwrap-probe-2026-09-22-ouro-ci.txt)). This is a
+functionality probe of the mechanism the D9 lane builds on, not a §15 gate.
+
+| Check | Result |
+|---|---|
+| bubblewrap 0.11.1 starts with `--unshare-all` | pass; the sandboxed process runs under Ubuntu's stacked profile `bwrap//&unpriv_bwrap (enforce)` |
+| `--ro-bind` holds: a write under `/usr` fails with EROFS and leaves nothing | pass |
+| tmpfs write, PID namespace, `NoNewPrivs=1`, `CapEff=0` inside | pass |
+| `--unshare-net` blocks a connect | pass (ENETUNREACH) |
+| A nested user namespace inside the sandbox | pass (`unshare -U true` exits 0) |
+| seccomp | none installed unless a filter is passed (`Seccomp: 0`); filter loading under `unpriv_bwrap` not measured |
+| Not measured | mount and umount inside the namespace (agent nesting, §9.2), seccomp filter loading, pathname-socket isolation (§10), and what the `unpriv_bwrap` profile itself denies; read that profile before assuming any of them |
+
+On the legacy tree's Ubuntu 24.04 hosted runners the apt bubblewrap could not
+apply its mounts without a sysctl change; on this 26.04.1 host it can, under
+the distribution's own profile. J0 reruns this probe whenever that profile,
+bubblewrap or the kernel changes.
+
 ## 2. Observer privilege model (measured first)
 
 | Measurement | Result | Evidence |
@@ -50,8 +71,8 @@ Produced by `doctor --json` on the operator-provisioned x86_64 VPS
 
 | Candidate | Pinned revision | License | Binary/package hashes | Transitive executables and runtime dependencies |
 |---|---|---|---|---|
-| sandbox-runtime (`srt`) | not_started | not_started | not_started | not_started |
-| Greywall | not_started | not_started | not_started | not_started |
+| sandbox-runtime (`srt`) | tag `v0.0.77` = `6fa731368807419ee157f9a3fac955fefe1019c6` (released 2026-09-18); `main` head `ddbeb74711c4097014ef3056791efa83f553116c` on 2026-09-21 ([evidence](evidence/candidates-2026-09-22.txt)) | Apache-2.0 | not_started; npm package `@anthropic-ai/sandbox-runtime` 0.0.77, hashes recorded at install | TypeScript on Node `>=20.11.0`; four direct npm dependencies (`@pondwader/socks5-server`, `commander`, `node-forge`, `zod`) plus a `vendor/` directory; transitive set not_started |
+| Greywall | tag `v0.3.7` = `5581056d0523bfa244d8061008744ed9f72a0361` (released 2026-06-01); `main` head `60ab1b5bfd41c1683220435a85fc116dc29fd04f` on 2026-08-13 ([evidence](evidence/candidates-2026-09-22.txt)) | Apache-2.0 | not_started; goreleaser binaries, hashes recorded at install | Go module, Linux and macOS per its description; transitive set not_started |
 | Legacy sandbox | `f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82` (fixtures and code to inspect, not an oracle) | n/a | n/a | n/a |
 
 Per-candidate results for §5.1 criteria 1–8: pass, fail or unsupported, each

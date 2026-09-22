@@ -1,0 +1,33 @@
+collected_at: 2026-09-22T03:47:44Z via the GitHub API; pinned revisions for jail-v1 §5.1
+=== anthropics/sandbox-runtime
+default_branch=main license=Apache-2.0 language=TypeScript pushed_at=2026-09-22T00:37:02Z archived=false
+description=A lightweight sandboxing tool for enforcing filesystem and network restrictions on arbitrary processes at the OS level, without requiring a container.
+head=ddbeb74711c4097014ef3056791efa83f553116c committed=2026-09-21T11:09:36Z
+latest_release=v0.0.77 published=2026-09-18T22:09:16Z
+tag=v0.0.77 sha=6fa731368807419ee157f9a3fac955fefe1019c6
+tag=v0.0.76 sha=c392e6cf9f8df957c66d9ab1461e2cfa99b1ab5d
+tag=v0.0.75 sha=40804af269e1616092e9971de12a1f358f58eba9
+top-level: .dockerignore .gitattributes .github .gitignore .husky .npmrc .prettierrc.json .vscode LICENSE README.md eslint.config.js package-lock.json package.json src test tsconfig.json tsconfig.test.json vendor
+=== GreyhavenHQ/greywall
+default_branch=main license=Apache-2.0 language=Go pushed_at=2026-08-13T19:57:51Z archived=false
+description=Container-free, deny-by-default sandbox for AI coding agents. Kernel-enforced filesystem, network, and syscall isolation for Linux and macOS
+head=60ab1b5bfd41c1683220435a85fc116dc29fd04f committed=2026-08-13T19:57:51Z
+latest_release=v0.3.7 published=2026-06-01T15:05:14Z
+tag=v0.3.7 sha=5581056d0523bfa244d8061008744ed9f72a0361
+tag=v0.3.6 sha=1ab2de35d61c7bb9ef49aa3230b32efdde05215e
+tag=v0.3.5 sha=32daa9f30a77e89c2a2d51c801e4e5859adf5e16
+top-level: .github .gitignore .golangci.yml .goreleaser.yaml ARCHITECTURE.md CLAUDE.md CONTRIBUTING.md LICENSE Makefile README.md SECURITY.md cmd docs go.mod go.sum install.sh internal pkg scripts
+=== sandbox-runtime package.json (name, version, engines, bin, deps count)
+{
+ "name": "@anthropic-ai/sandbox-runtime",
+ "version": "0.0.77",
+ "engines": {
+  "node": ">=20.11.0"
+ },
+ "bin": {
+  "srt": "dist/cli.js"
+ }
+}
+dependencies: 4 -> @pondwader/socks5-server, commander, node-forge, zod
+=== greywall manifest (Cargo.toml if Rust, else package.json)
+base64: stdin: (null): error decoding base64 input stream
