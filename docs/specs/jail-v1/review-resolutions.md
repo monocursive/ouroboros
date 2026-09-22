@@ -83,3 +83,4 @@ here and in revision 8 of the specification.
 | A workspace beneath the scratch mount point left a path skeleton inside managed scratch | §9.1: recorded as the backend's side effect |
 | A proved exec failure used `outcome.kind = refused` | §13.2: `exec_error` with the errno |
 | Scratch removal at settlement was a precondition, not an obligation | §14.2: removed at settlement after verified tree death, retained otherwise |
+| A supervisor killed during bubblewrap's startup leaves an orphaned outer bubblewrap holding stdio (bubblewrap clears the inherited parent-death signal) | §9.3: recorded limit; closing it is scheduled with L02 (J2) |

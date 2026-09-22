@@ -965,7 +965,15 @@ Use a live pidfd and recorded boot/birth identity when addressing a process;
 never signal a PID recovered from a file without revalidating its identity.
 
 For a contained run, record the namespace-init identity and verify the selected
-backend's entire death chain, including any intermediate launcher. Linux kills
+backend's entire death chain, including any intermediate launcher. Recorded
+limit of the bubblewrap integration (measured 2026-09-22): bubblewrap clears an
+inherited parent-death signal during its own startup before arming its own for
+`--die-with-parent`, so a supervisor killed with SIGKILL inside that window
+leaves bubblewrap's outer process orphaned, holding the run's stdio open; the
+namespace and the target still die. Closing the window needs an upstream change
+or a trusted outside launcher that kills bubblewrap on the supervisor's death;
+it is scheduled with L02 (J2), and a stdio consumer must not treat EOF as the
+only sign that a run ended. Linux kills
 remaining namespace processes when its init dies; this is the mechanism behind
 the required parent-death test, not an assumption about process groups.
 See [PID namespace semantics](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
