@@ -16,6 +16,9 @@ pub mod observer;
 pub mod platform;
 pub mod policy;
 pub mod profiles;
+// J3-P begin: the outside HTTP proxy library (jail-v1 §10)
+pub mod proxy;
+// J3-P end
 pub mod records;
 pub mod state;
 pub mod supervisor;
