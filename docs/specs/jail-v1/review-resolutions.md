@@ -70,7 +70,7 @@ here and in revision 8 of the specification.
 | The §6.3 example profile refused when stored in the config directory | §6.3: relative paths resolve against the file; the example narrows the workspace beside it |
 | §6.4 "Required by observer" read as "always" | §6.4: required by a cgroup-filtering observer or an explicit tree limit |
 | An unverified tree after exec was reported as `refused` on the control channel | §8.2: `refused` only before release; new terminal kind `unsettled` |
-| `applied.network.mode` for a `none` refusal was `host` in code and `pending` in the fixture | §13.2: `pending` |
+| `applied.network.mode` for a pre-boundary refusal: `pending` for contained profiles; the `none` fixture and schema say `host` | §13.2: `pending`, except `none`, whose mode is `host` by definition |
 | `policy.grants` was always empty | §13.2: the explicit operator grants beyond the baseline |
 | `explain --json` printed environment values | §6.1: names only |
 | Budgets used the plain monotonic clock while the receipt could name a boot-time deadline | §13.2: the receipt names the clock it uses; suspend semantics are L04 (J2) |

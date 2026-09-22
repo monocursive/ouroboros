@@ -1469,9 +1469,10 @@ Initial and terminal tuples are normative:
 | Refusal after setup or proved exec error | refused | actual application state | false | actual boundary / actual scope | true / timestamp only after teardown verification; otherwise null / null |
 | Verified settlement | settled | actual application state | true, or false if exec is unknown | actual boundary / actual scope | true / timestamp |
 
-In a refusal before boundary creation every `applied` field is unapplied:
-`applied.network.mode` is `pending`, including for `none`, whose host network
-was never entered. Wall deadlines report the clock they use as their
+In a refusal before boundary creation every `applied` field is unapplied and
+`applied.network.mode` is `pending`; a `none` receipt is the one exception,
+where the mode is `host` by definition (the schema binds `containment: none`
+to it) and describes the profile, not an application. Wall deadlines report the clock they use as their
 mechanism (`monotonic-deadline` or `boottime-deadline`); the §6.4 suspend
 semantics are a J2 requirement (L04) and a receipt never claims them by name
 when the implementation uses the plain monotonic clock.
