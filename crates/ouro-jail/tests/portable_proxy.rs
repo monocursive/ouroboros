@@ -1281,12 +1281,16 @@ impl HeldLookup {
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(name.to_owned());
             this.changed.notify_all();
+            // Held until released, or until WAIT passes, so a resolver that
+            // ignores its deadline fails the test instead of hanging it.
+            let deadline = Instant::now() + WAIT;
             let mut released = this.released.lock().unwrap_or_else(PoisonError::into_inner);
-            while !*released {
+            while !*released && Instant::now() < deadline {
                 released = this
                     .changed
-                    .wait(released)
-                    .unwrap_or_else(PoisonError::into_inner);
+                    .wait_timeout(released, deadline.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             }
             Ok(vec!["127.0.0.1".parse().expect("ip")])
         })
@@ -1779,12 +1783,141 @@ fn n04_stop_closes_a_tunnel_to_a_silent_destination() {
     server.join().expect("the server ran");
 }
 
+/// Z20: stop also closes the destination socket. A client that fills every
+/// buffer toward a destination that never reads leaves the relay blocked in
+/// a write to the destination; closing only the client cannot end that.
+#[test]
+fn n04_stop_ends_a_relay_blocked_writing_to_the_destination() {
+    let (listener, port) = loopback();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accepts");
+        // Never reads, never closes until the test is done.
+        let _ = release_rx.recv_timeout(WAIT);
+        drop(stream);
+    });
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&[&format!("127.0.0.1:{port}")]), &resolver);
+    let mut client = harness.connect();
+    client
+        .write_all(connect_request(&format!("127.0.0.1:{port}")).as_bytes())
+        .expect("writes");
+    assert_eq!(read_head(&mut client).0, 200);
+    // Backpressure reaches the client once the destination's receive
+    // buffer, the proxy's send buffer and the relay share are all full: a
+    // write that cannot complete within a second is that event.
+    client
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .expect("sets a timeout");
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut written = 0usize;
+    loop {
+        match client.write(&chunk) {
+            Ok(n) => written += n,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                break;
+            }
+            Err(error) => panic!("writing: {error}"),
+        }
+        assert!(written < 1 << 30, "no backpressure after {written} bytes");
+    }
+    let (summary, results) = harness.stop(Duration::from_secs(5));
+    assert!(summary.complete(), "{summary:?}");
+    assert_eq!(results[0].end, Some(EndReason::Stopped));
+    let _ = release_tx.send(());
+    server.join().expect("the server ran");
+}
+
+/// A sink that records how many connections were still admitted when each
+/// result arrived.
+struct ProbeSink {
+    handle: Mutex<Option<ProxyHandle>>,
+    active_at_emit: Mutex<Vec<usize>>,
+    changed: Condvar,
+}
+
+impl ProxySink for ProbeSink {
+    fn emit(&self, _result: ProxyResult) {
+        let active = self
+            .handle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(usize::MAX, ProxyHandle::active_connections);
+        self.active_at_emit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(active);
+        self.changed.notify_all();
+    }
+}
+
+/// A connection's slot is free before its result is delivered, so a client
+/// that saw the result can connect again without meeting `overload`.
+#[test]
+fn n04_the_slot_is_free_before_the_result_is_delivered() {
+    let dir = tempfile::tempdir().expect("a private temporary directory");
+    let path = dir.path().join("proxy.sock");
+    let listener = UnixListener::bind(&path).expect("binds");
+    let sink = Arc::new(ProbeSink {
+        handle: Mutex::new(None),
+        active_at_emit: Mutex::new(Vec::new()),
+        changed: Condvar::new(),
+    });
+    let handle = proxy::start(
+        ProxyConfig {
+            listener,
+            rules: Rules::from_strings(&[], &[]).expect("empty rules"),
+            budgets: Budgets {
+                max_connections: 1,
+                ..Budgets::default()
+            },
+            resolver: Arc::new(FixtureResolver::new()),
+        },
+        Arc::clone(&sink) as Arc<dyn ProxySink>,
+    )
+    .expect("starts");
+    *sink.handle.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle);
+    for round in 1..=3 {
+        let mut client = UnixStream::connect(&path).expect("connects");
+        client.set_read_timeout(Some(WAIT)).expect("sets a timeout");
+        client
+            .write_all(connect_request("denied.test:443").as_bytes())
+            .expect("writes");
+        let (status, head) = read_head(&mut client);
+        assert_eq!(
+            (status, reason_of(&head)),
+            (403, Some("host_not_allowed")),
+            "round {round}"
+        );
+    }
+    let recorded = sink
+        .active_at_emit
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(recorded, vec![0, 0, 0]);
+    let handle = sink
+        .handle
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .expect("the handle");
+    assert!(handle.stop(WAIT).complete());
+}
+
 /// R05: an unrepresentable stop budget waits for settlement, never panics.
 #[test]
 fn n04_stop_with_the_largest_budget_does_not_panic() {
     let resolver = fixtures("", &[]);
     let harness = start(&allow(&["a.test:443"]), &resolver);
-    let (summary, _) = harness.stop(Duration::MAX);
+    // Stopped on its own thread, so a stop that never returns fails the
+    // test instead of hanging it.
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done_tx.send(harness.stop(Duration::MAX));
+    });
+    let (summary, _) = done_rx.recv_timeout(WAIT).expect("stop returns");
     assert!(summary.complete());
     assert!(summary.listener_closed);
 }
@@ -1996,7 +2129,13 @@ fn n04_descriptor_exhaustion_is_reported_truthfully() {
         }
         served
     });
-    let stdout = run_helper("exhaust", "ulimit -S -n 256", Some(port));
+    // Soft and hard limit both 256, so `start` cannot raise it and the
+    // helper can exhaust it cheaply.
+    let stdout = run_helper(
+        "exhaust",
+        "ulimit -S -n 256 && ulimit -H -n 256",
+        Some(port),
+    );
     // Two descriptors free: the client's and the accepted one. The upstream
     // socket cannot be created: a proxy-side failure, answered with 503,
     // never a connection that did not happen.

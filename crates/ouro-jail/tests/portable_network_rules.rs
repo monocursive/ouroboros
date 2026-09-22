@@ -557,25 +557,26 @@ fn timed(host: &str, rounds: u32) -> (HostRuleError, Duration) {
 
 /// A long label used to be punycode-encoded (quadratic) before
 /// VerifyDnsLength refused it: 67 ms per host on macOS, 131 ms on the
-/// reference host. It now refuses at the mapping bound. Twenty rounds of the
-/// old cost are over a second; the bound below is a fifth of that.
+/// reference host, in release builds (seconds in debug). It now refuses at
+/// the mapping bound: the error names the early step, and twenty rounds stay
+/// under a second in any build, where the old code needed at least 1.3 s.
 #[test]
 fn n03_a_long_label_refuses_before_any_quadratic_work() {
     let host = format!("{}.example", costly_label(10_000));
     let (error, elapsed) = timed(&host, 20);
     assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
-    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
     // Squared katakana (U+3300..U+3357) map to two to five code points.
     let squares: String = (0..10_000u32)
         .map(|i| char::from_u32(0x3300 + (i % 0x58)).expect("a square"))
         .collect();
     let (error, elapsed) = timed(&format!("{}{squares}", costly_label(3_000)), 20);
     assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
-    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
     // Just inside the mapping bound, the label bound refuses before encoding.
     let (error, elapsed) = timed(&format!("{}.example", costly_label(1_000)), 20);
     assert_eq!(error, HostRuleError::Idna(IdnaError::LabelLength));
-    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }
 
 /// U+FDFA maps to eighteen code points: 10,800 of them used to expand to
@@ -586,7 +587,7 @@ fn n03_mapping_expansion_is_bounded() {
     let host: String = std::iter::repeat_n('\u{fdfa}', 10_800).collect();
     let (error, elapsed) = timed(&host, 20);
     assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
-    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }
 
 /// A long A-label used to be decoded with a quadratic insert; decoding now
@@ -596,7 +597,7 @@ fn n03_mapping_expansion_is_bounded() {
 fn n03_a_long_a_label_refuses_before_quadratic_decoding() {
     let (error, elapsed) = timed(&format!("xn--{}", "a".repeat(30_000)), 20);
     assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
-    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
     let (error, _) = timed(&format!("xn--{}", "a".repeat(1_000)), 1);
     assert_eq!(error, HostRuleError::Idna(IdnaError::LabelLength));
 }
