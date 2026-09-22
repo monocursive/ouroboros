@@ -1,0 +1,16 @@
+{
+  "policy_domain": "ouro.jail.policy/1",
+  "policy_digest": "sha256:29dc7d480459294504956daa60cfed3fc81745ee5aefb3c78dac1972d88cb4f3",
+  "argv_domain": "ouro.jail.argv/1",
+  "argv": [
+    "/usr/bin/printf",
+    "%s\n",
+    "",
+    {
+      "encoding": "base64",
+      "data": "/w=="
+    }
+  ],
+  "argv_preimage_hex": "6f75726f2e6a61696c2e617267762f31000000000000000004000000000000000f2f7573722f62696e2f7072696e7466000000000000000325730a00000000000000000000000000000001ff",
+  "argv_digest": "sha256:9b751d74ac5746fa24e247eb36031d681af8afac7df671887d531d4e5e8b4f36"
+}

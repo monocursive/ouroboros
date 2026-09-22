@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ouroboros.dev/schemas/managed-policy-v1.json",
+  "title": "Managed teams v1 immutable policy revision",
+  "$comment": "Draft document contract. Values are authority only after trusted installation and current authorization checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policy_id",
+    "revision",
+    "scope",
+    "organization_id",
+    "project_id",
+    "issuer",
+    "valid_from",
+    "valid_until",
+    "profiles",
+    "launch_profiles",
+    "data_classes",
+    "worker_pools",
+    "execution_regions",
+    "model_processing_regions",
+    "storage_regions",
+    "service_capabilities",
+    "limits",
+    "evidence",
+    "capture",
+    "artifacts",
+    "retention",
+    "quotas"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ouro.managed.policy/1"
+    },
+    "policy_id": {
+      "$ref": "#/$defs/id"
+    },
+    "revision": {
+      "$ref": "#/$defs/positive"
+    },
+    "scope": {
+      "enum": [
+        "organization",
+        "project"
+      ]
+    },
+    "organization_id": {
+      "$ref": "#/$defs/id"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "issuer": {
+      "$ref": "#/$defs/id"
+    },
+    "valid_from": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "profiles": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "enum": [
+          "agent",
+          "tool",
+          "build"
+        ]
+      }
+    },
+    "launch_profiles": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "data_classes": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "enum": [
+          "public",
+          "internal",
+          "confidential",
+          "restricted"
+        ]
+      }
+    },
+    "worker_pools": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "execution_regions": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "model_processing_regions": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "storage_regions": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "service_capabilities": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/id"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "uniqueItems": true,
+        "minItems": 1,
+        "maxItems": 128,
+        "items": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_ms",
+        "pids",
+        "mem_bytes",
+        "cpu_percent",
+        "writable_bytes",
+        "writable_inodes"
+      ],
+      "properties": {
+        "wall_ms": {
+          "$ref": "#/$defs/positive"
+        },
+        "pids": {
+          "$ref": "#/$defs/positive"
+        },
+        "mem_bytes": {
+          "$ref": "#/$defs/positive"
+        },
+        "cpu_percent": {
+          "$ref": "#/$defs/positive"
+        },
+        "writable_bytes": {
+          "$ref": "#/$defs/positive"
+        },
+        "writable_inodes": {
+          "$ref": "#/$defs/positive"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observe",
+        "mode",
+        "require_ledger",
+        "require_live_authorization"
+      ],
+      "properties": {
+        "observe": {
+          "const": "on"
+        },
+        "mode": {
+          "const": "strict"
+        },
+        "require_ledger": {
+          "const": true
+        },
+        "require_live_authorization": {
+          "const": true
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stdout",
+        "stderr",
+        "argv",
+        "max_bytes_per_stream"
+      ],
+      "properties": {
+        "stdout": {
+          "type": "boolean"
+        },
+        "stderr": {
+          "type": "boolean"
+        },
+        "argv": {
+          "const": false
+        },
+        "max_bytes_per_stream": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "types",
+        "max_files",
+        "max_bytes"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "types": {
+          "type": "array",
+          "uniqueItems": true,
+          "minItems": 0,
+          "maxItems": 128,
+          "items": {
+            "enum": [
+              "patch",
+              "test_report",
+              "regular_files"
+            ]
+          }
+        },
+        "max_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "events_max_seconds",
+        "captures_max_seconds",
+        "artifacts_max_seconds"
+      ],
+      "properties": {
+        "events_max_seconds": {
+          "$ref": "#/$defs/positive"
+        },
+        "captures_max_seconds": {
+          "$ref": "#/$defs/positive"
+        },
+        "artifacts_max_seconds": {
+          "$ref": "#/$defs/positive"
+        }
+      }
+    },
+    "quotas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_active_attempts",
+        "max_queued_attempts"
+      ],
+      "properties": {
+        "max_active_attempts": {
+          "$ref": "#/$defs/positive"
+        },
+        "max_queued_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "organization"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "project_id": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "project_id": {
+            "$ref": "#/$defs/id"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "artifacts": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "artifacts": {
+            "properties": {
+              "types": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "positive": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    }
+  }
+}

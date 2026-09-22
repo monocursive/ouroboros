@@ -1,0 +1,153 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "revision": 3,
+  "phase": "settled",
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "fixture-kernel"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.0.0-fixture",
+    "backend": "none",
+    "backend_version": null
+  },
+  "policy": {
+    "name": "none",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation"
+    ],
+    "grants": []
+  },
+  "containment": "none",
+  "child_protection": "unprotected",
+  "exec_observed": true,
+  "argv_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "applied": {
+    "filesystem": null,
+    "network": {
+      "mode": "host",
+      "mechanism": null,
+      "allowed_hosts": []
+    },
+    "syscalls": null,
+    "limits": [
+      {
+        "key": "wall",
+        "requested": "30m",
+        "required": true,
+        "applied": true,
+        "mechanism": "monotonic-deadline",
+        "scope": "tree",
+        "hit": false
+      }
+    ],
+    "environment_names": [
+      "PATH",
+      "LANG",
+      "TMPDIR"
+    ],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": "fixture-observer",
+    "set": "linux-closed-v1",
+    "attached": true,
+    "sources": {
+      "wrapper": "active",
+      "audit": "active",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "active",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": 1,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "active",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": 1,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "active",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": 0,
+      "gaps": []
+    },
+    "net": {
+      "status": "active",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": 0,
+      "gaps": []
+    },
+    "limits": {
+      "status": "active",
+      "sources": [
+        "wrapper"
+      ],
+      "observed_count": 0,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": {
+    "pid": 1234,
+    "identity": {
+      "kind": "linux_boot_start",
+      "value": {
+        "boot_id": "fixture-boot",
+        "start_time_ticks": "123456"
+      }
+    }
+  },
+  "lifetime": {
+    "boundary": "supervisor_cgroup",
+    "native": {
+      "os": "linux",
+      "details": {
+        "cgroup_identity": "fixture-cgroup"
+      }
+    },
+    "tree_empty": true,
+    "verified_at": "2026-09-21T12:00:01Z",
+    "verification_scope": "registered_boundary",
+    "integrity": "verified"
+  },
+  "outcome": {
+    "kind": "exited",
+    "code": 0,
+    "signal": null,
+    "cause": null,
+    "error": null
+  },
+  "state_cleanup": "not_needed",
+  "cleanup_error": null,
+  "created_at": "2026-09-21T12:00:00Z",
+  "updated_at": "2026-09-21T12:00:01Z",
+  "errors": [],
+  "credentials": []
+}

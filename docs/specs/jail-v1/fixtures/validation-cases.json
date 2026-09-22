@@ -1,0 +1,619 @@
+[
+  {
+    "name": "audit decision allow",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "decision"
+        ],
+        "value": "allow"
+      }
+    ]
+  },
+  {
+    "name": "audit decision deny",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "decision"
+        ],
+        "value": "deny"
+      }
+    ]
+  },
+  {
+    "name": "owner intent in event",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "source"
+        ],
+        "value": "wrapper"
+      },
+      {
+        "path": [
+          "operation"
+        ],
+        "value": "intent.admitted"
+      }
+    ]
+  },
+  {
+    "name": "owner intent in jail-event",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "source"
+        ],
+        "value": "wrapper"
+      },
+      {
+        "path": [
+          "operation"
+        ],
+        "value": "intent.admitted"
+      }
+    ]
+  },
+  {
+    "name": "reserved net.dns",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "source"
+        ],
+        "value": "wrapper"
+      },
+      {
+        "path": [
+          "operation"
+        ],
+        "value": "net.dns"
+      }
+    ]
+  },
+  {
+    "name": "reserved limit.hit",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "source"
+        ],
+        "value": "wrapper"
+      },
+      {
+        "path": [
+          "operation"
+        ],
+        "value": "limit.hit"
+      }
+    ]
+  },
+  {
+    "name": "jail lifecycle note",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "source"
+        ],
+        "value": "wrapper"
+      },
+      {
+        "path": [
+          "operation"
+        ],
+        "value": "note"
+      },
+      {
+        "path": [
+          "fields"
+        ],
+        "value": {
+          "kind": "lifecycle",
+          "transition": "exec_confirmed"
+        }
+      },
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "completion": "wrapper"
+        }
+      }
+    ]
+  },
+  {
+    "name": "pending prepared boundary",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-prepared.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "containment"
+        ],
+        "value": "pending"
+      },
+      {
+        "path": [
+          "child_protection"
+        ],
+        "value": "pending"
+      },
+      {
+        "path": [
+          "lifetime",
+          "boundary"
+        ],
+        "value": "pending"
+      }
+    ]
+  },
+  {
+    "name": "refused nonexistent tree verified",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "tree_empty"
+        ],
+        "value": true
+      },
+      {
+        "path": [
+          "lifetime",
+          "verified_at"
+        ],
+        "value": "2026-09-21T12:00:00Z"
+      }
+    ]
+  },
+  {
+    "name": "settled unknown exec",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-settled-unknown.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "exec error cannot be settled",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "kind"
+        ],
+        "value": "exec_error"
+      },
+      {
+        "path": [
+          "outcome",
+          "code"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "settled without tree proof",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "tree_empty"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "lifetime",
+          "verified_at"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "none cannot claim attempt tree",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-none.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "verification_scope"
+        ],
+        "value": "attempt_tree"
+      }
+    ]
+  },
+  {
+    "name": "none cannot claim protection",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-none.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "child_protection"
+        ],
+        "value": "enforced"
+      }
+    ]
+  },
+  {
+    "name": "lost boundary cannot settle",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "integrity"
+        ],
+        "value": "lost"
+      }
+    ]
+  },
+  {
+    "name": "lost boundary retained",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-prepared.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "integrity"
+        ],
+        "value": "lost"
+      },
+      {
+        "path": [
+          "outcome",
+          "kind"
+        ],
+        "value": "unknown"
+      },
+      {
+        "path": [
+          "state_cleanup"
+        ],
+        "value": "pending"
+      }
+    ]
+  },
+  {
+    "name": "prepared without applied filesystem",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-prepared.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "filesystem"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "unapplied required wall",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-prepared.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "limits",
+          0,
+          "applied"
+        ],
+        "value": false
+      }
+    ]
+  },
+  {
+    "name": "preferred pids absent is valid",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "nonproxy tool cannot retain proxy coverage",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy",
+          "name"
+        ],
+        "value": "tool"
+      },
+      {
+        "path": [
+          "applied",
+          "network",
+          "mode"
+        ],
+        "value": "none"
+      }
+    ]
+  },
+  {
+    "name": "proxy cannot impersonate audit coverage",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "net"
+        ],
+        "value": {
+          "status": "active",
+          "sources": [
+            "proxy"
+          ],
+          "observed_count": 1,
+          "gaps": []
+        }
+      }
+    ]
+  },
+  {
+    "name": "proxy only evidence valid",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "byte paths valid",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-native-path.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "byte encoding unknown",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-native-path.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy",
+          "grants",
+          0,
+          "value",
+          "encoding"
+        ],
+        "value": "hex"
+      }
+    ]
+  },
+  {
+    "name": "credential digest needs reason when absent",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "credentials",
+          1,
+          "digest_unavailable_reason"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "credential source path forbidden",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "credentials",
+          0,
+          "source"
+        ],
+        "value": "/secret/auth"
+      }
+    ]
+  },
+  {
+    "name": "hypothetical native macOS shape",
+    "schema": "jail-receipt",
+    "base": "fixtures/receipt-macos-hypothetical.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "Linux boundary invalid for macOS",
+    "schema": "jail-receipt",
+    "base": "fixtures/receipt-macos-hypothetical.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "boundary"
+        ],
+        "value": "pid_namespace"
+      }
+    ]
+  },
+  {
+    "name": "UUID must be version 4",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "attempt_id"
+        ],
+        "value": "att_00000000-0000-1000-8000-000000000001"
+      }
+    ]
+  },
+  {
+    "name": "error must have remediation category",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "errors",
+          0,
+          "remediation_category"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "denied connect keeps operation",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "operation"
+        ],
+        "value": "fs.deny"
+      },
+      {
+        "path": [
+          "fields"
+        ],
+        "value": {
+          "attempted_operation": "net.connect"
+        }
+      },
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": false,
+          "return_value": -13,
+          "errno": "EACCES",
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "observe off cannot claim audit net active",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy",
+          "observe"
+        ],
+        "value": "off"
+      },
+      {
+        "path": [
+          "observer",
+          "attached"
+        ],
+        "value": false
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "unsupported"
+      },
+      {
+        "path": [
+          "coverage",
+          "exec"
+        ],
+        "value": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write"
+        ],
+        "value": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.deny"
+        ],
+        "value": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      }
+    ]
+  }
+]

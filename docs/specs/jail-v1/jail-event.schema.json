@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:jail-event:1",
+  "title": "Jail v1 producer event (draft)",
+  "allOf": [
+    {
+      "$ref": "urn:ouro:schema:event:1"
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "note",
+              "jail.receipt"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "net.connect"
+          },
+          "stage": {
+            "const": "result"
+          },
+          "decision": {
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "not": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "net.dns",
+              "limit.hit",
+              "intent.admitted",
+              "intent.denied",
+              "intent.settled"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

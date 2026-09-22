@@ -1,6 +1,6 @@
-# Runtime: three tools, September 2026
+# North star: three tools, September 2026
 
-Status: **specification, revision 8.** Written 2026-09-21. Revision 6 cut the
+Status: **specification, revision 13.** Written 2026-09-21, revised 2026-09-22. Revision 6 cut the
 product to a jail, a ledger, and a fleet around existing agents. Revision 7
 answered five review findings by specifying the mechanism that would close
 each hole. Revision 8 keeps the findings as named limits and stops there.
@@ -9,6 +9,45 @@ and OpenCode. The jail is the audit sensor. The ledger only stores what that
 sensor emits. Decisions settled with these revisions are dated in §2. The rest
 stay recommendations until a date is recorded. Every value marked *initial* is
 a default to implement first and measure. Nothing described as new exists yet.
+
+Revision 9 names this document the north star and records Linux and macOS as
+the long-term host platforms. Linux remains the first execution release.
+The [jail implementation specification](docs/specs/jail-v1.md) defines milestone
+1, its first implementation slice, and the platform boundaries needed for macOS.
+The current tooling tree starts fresh; source and migration references below
+describe the previous implementation preserved on `legacy`, not files that
+must be restored into this tree. The historical cut in §9 is not a new deletion
+instruction for this checkout.
+
+Revision 10 aligns the jail contract with reviewed containment, lifetime,
+coverage, canonicalization and receipt requirements. The executable schemas,
+golden fixtures and platform-specific gates live beside the jail spec; none
+establishes that a backend has passed live conformance.
+
+Revision 11 adds [managed teams](docs/specs/managed-teams-v1.md): company-owned
+policy, authenticated developer submission, isolated inputs, scoped service
+credentials, bounded artifacts and project-scoped evidence. These compose the
+three tools. A single Linux worker can serve Linux and macOS clients after jail
+and ledger; multiple workers add fleet. Native macOS execution remains separate.
+
+Revision 12 (2026-09-22) records state and closes five review findings without
+adding a subsystem. Nothing in §§3–7 is implemented; the next change to this
+tree is J0 of the jail specification, and specification revisions before J0's
+report are corrections and recorded measurements (§8). The Linux reference host
+is an operator-provisioned x86_64 virtual private server (D9). The preserved
+implementation must stay reachable on the remote before `dev` is replaced
+there, and D2's archive is restated against `legacy` (§9). Observer provisioning
+on the reference host is named as the critical-path risk: J0 measures it first,
+the fallback candidates are named, and a blocked observer never turns
+`--observe off` into J1's acceptance run (§11, jail-v1 §5.2).
+
+Revision 13 (2026-09-22) pins the reference host to the release it runs,
+Ubuntu 26.04 LTS on a 7.0-series kernel, with its first measured manifest
+checked in as evidence (D9, jail-v1 §3.2); fixes the repository layout and the
+crate split rules under D7 (jail-v1 §4); and sets the conformance runner model
+(jail-v1 §16). The bootstrap files that layout needs, the license, ignore
+rules, toolchain pin, workflows and link validator, exist from this revision.
+No crate does.
 
 ## 0. Why
 
@@ -101,10 +140,10 @@ replacement for it.
 implied by a milestone shipping:
 
 - a vendor session adapter, and remote human approval with it
-- exporting, checking, or pushing a workspace
+- general workspace synchronization, automatic checking/merging/pushing, and deployment
 - an external witness key and independent custody
 - a web view of the ledger, and a gateway in front of it
-- a macOS backend
+- the production macOS backend (a required long-term platform; not milestone 1)
 
 "Record and see" means the closed audit set in §4.8, plus the coverage on every
 answer. The jail supervisor emits those events. The ledger stores them and does
@@ -112,34 +151,71 @@ not attach a probe of its own. An empty result in an unsupported or gapped class
 is unobserved. `--observe off` is the run that leaves filesystem and descendant
 exec unsupported.
 
+### 1.1 Company-managed developer agents
+
+A company must be able to let developers use an existing agent on internal code,
+untrusted contributions or confidential IP while controlling which assets and
+services the agent can reach. The first useful deployment returns a reviewable
+patch and test report from one managed Linux worker. Developers on macOS use the
+same Rust submission client; their laptop does not become a trusted fleet peer.
+
+The company controls workers, identity mapping, immutable policy revisions,
+registered inputs, approved model/tool services and result access. Developers
+submit within organization/project ceilings and may only narrow them. Managed
+attempts require containment, strict observation, ledger evidence and explicit
+resource limits. They cannot select `none`, turn evidence off or supply arbitrary
+host mounts/credential sources. Broader access needs an authorized new policy
+revision and a new attempt. Standalone operators retain the existing controls.
+
+The jail trusts its operator. It cannot enforce company policy against someone
+who administers that same laptop. Company enforcement therefore depends on
+managed infrastructure and external services that protect company assets and
+credentials. Model processing permissions, data location and API actions are
+separate from a network allowlist; the company provisions those integrations.
+Ouroboros does not infer GDPR compliance from a sandbox or an EU worker.
+
+[Managed teams v1](docs/specs/managed-teams-v1.md) specifies the roles, policy
+intersection, admission, private input materialization, bounded artifact export,
+privacy and acceptance gates. This explicitly schedules those bounded additions
+in milestone 4. Live workspace synchronization, vendor protocols and publishing
+remain outside the product. The single-worker pilot does not wait for fleet.
+
 ## 2. Decisions
 
 | # | Decision | Recommendation | Accepted |
 |---|---|---|---|
 | D0 | What is the product | A jail, a ledger, and a fleet around existing agents. The first launch profiles are Codex, Claude Code, and OpenCode. Milestone 1 is the jail alone. Milestone 2 wraps it in the ledger. Milestone 3 places the agent through the fleet, with a jail policy or an explicit `none`. There is no Ouroboros agent beside them. | 2026-09-21 |
 | D1 | The in-tree agent | Delete `provider/native/` (including its sandbox modules once the D8 implementation covers their contracts) and `interactive/` in the cut after milestone 3, once nothing in the three tools calls them. The cut also needs the one real-agent run in §7.4. Conformance tests use a scripted child. No reference agent remains. | 2026-09-21 |
-| D2 | Self-improvement | Before any of that code is deleted, archive `wasm/`, `upgrade/`, `self/`, capability tools, their Rust clients, bench and self-development assets, docs, skills and workflows at an immutable tag `thesis-4-preserved` and a branch `thesis-4`. Delete them in the cut after milestone 3. | 2026-09-21 |
+| D2 | Self-improvement | The archive is branch `legacy` at `f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82`, which holds `wasm/`, `upgrade/`, `self/`, capability tools, their Rust clients, bench and self-development assets, docs, skills and workflows in full, plus the tag `thesis-4-preserved` at that same commit. Both refs must exist on the remote before `dev` is replaced there (§9). No separate `thesis-4` branch is needed. Deletion of that code happens on the legacy line, in the cut after milestone 3, never from this tree. | 2026-09-21; restated 2026-09-22 |
 | D3 | Vendor boundary | Launch profiles are data: environment, credential files, allowed hosts, and a default jail. No adapter package and no vendor RPC. A dependency test asserts `jail/` and `ledger/` contain no vendor identifier outside the profile table and test fixtures. | 2026-09-21 |
-| D4 | Trust and credentials | One fleet is one trust domain; a connected node owns every other. Credentials are provisioned on each node by the operator and no fleet verb moves them. The jail contains the child, not a peer. FLEET.md's first paragraph says both. | 2026-09-21 |
+| D4 | Trust and credentials | One fleet is one trust domain; a connected node owns every other. Credentials are provisioned on each node by the operator or its approved issuer and no fleet verb moves them. The jail contains the child, not a peer. Managed developer clients are submitters, never fleet peers; only company-administered workers join that fleet. FLEET.md's first paragraph says both. | 2026-09-21 |
 | D5 | Ledger ownership | One canonical Rust ledger, one writer per stream (`ouro-ledger serve`). No dual-write and no merge-on-query. `audit/` and `agent/effect_ledger.ex` go in the cut, after the history export in §5.4. Independent witness custody is unscheduled. | 2026-09-21 |
 | D6 | Packaging | After milestone 3: three executables (`ouro`, `ouro-jail`, `ouro-ledger`), the pinned D8 dependencies, and a separately fetched BEAM runtime for nodes that run the fleet. `doctor` refuses a missing required component. Packaging is not a gate for milestone 1. The BEAM runtime is not embedded in the jail or the ledger. | 2026-09-21 |
-| D7 | Repository | One workspace. A tool moves to its own repository only after a later decision, once its CLI, contracts and tests stand alone. | 2026-09-21 |
-| D8 | Jail implementation | Before milestone 1 is declared green, evaluate pinned `srt`, Greywall and the existing in-tree sandbox against §4. Prefer reuse behind `ouro-jail`, with the smallest policy, admission and receipt integration that passes. The enforcement backend is not the audit sensor (§4.8). A backend that leaves no supervisor outside the child, or that hides descendant syscalls from a host probe, fails the evaluation. Record boundary and nesting failures, coverage, lifecycle and limit support, startup cost, dependency footprint, licensing and maintenance cost. A runtime dependency such as Node is a measured packaging tradeoff. Implement or port a missing mechanism only when a named failing gate justifies it. Freeze one backend, version and integration, with provenance and a gap-to-gate plan, in `docs/proposals/runtime/backend-evaluation.md`. Independent §4 fixtures are authoritative. Differential runs against other candidates are supporting evidence, not an oracle and not a permanent shipping dependency. | |
-| D9 | First lane | Linux (bubblewrap, seccomp, cgroup v2 where the host delegates one). Initial launch profiles for Codex, Claude Code, and OpenCode. A profile is experimental until its own §7.4 run. `--jail none` is a real run, still observed unless `--observe off`, and its evidence is unprotected. macOS, including Claude's Keychain credential, is unscheduled. On Ubuntu 24.04+, an operator-installed scoped AppArmor profile may grant `userns` to the required executables. `doctor` measures the sandbox, the cgroup, and the audit sensor, and never changes host policy. | 2026-09-21 |
+| D7 | Repository | One workspace, laid out as jail-v1 §4 specifies: Rust crates under `crates/` (one per process the north star names; `ouro-records` carved out of the jail only when the ledger becomes its second consumer; a test-only fixture crate; a BPF object crate outside the default members if J0 selects eBPF; `xtask` for repository tasks), the Elixir fleet as a sibling Mix project outside Cargo, contracts and measured evidence under `docs/specs/`, proposals under `docs/proposals/`, packaging under `packaging/` after milestone 3. Directories are created when their milestone starts; their names and split rules are fixed now. A tool moves to its own repository only after a later decision, once its CLI, contracts and tests stand alone. | 2026-09-21; layout 2026-09-22 |
+| D8 | Jail implementation | Before milestone 1 is declared green, evaluate pinned `srt`, Greywall and the existing in-tree sandbox against §4. Prefer reuse behind `ouro-jail`, with the smallest policy, admission and receipt integration that passes. The enforcement backend is not the audit sensor (§4.8). A backend that leaves no supervisor outside the child, or that hides descendant syscalls from a host probe, fails the evaluation. Record boundary and nesting failures, coverage, lifecycle and limit support, startup cost, dependency footprint, licensing and maintenance cost. A runtime dependency such as Node is a measured packaging tradeoff. Implement or port a missing mechanism only when a named failing gate justifies it. Freeze one backend, version and integration, with provenance and a gap-to-gate plan, in `docs/specs/jail-v1/backend-evaluation.md`. Independent §4 fixtures are authoritative. Differential runs against other candidates are supporting evidence, not an oracle and not a permanent shipping dependency. The decision is scheduled, not made: it is taken in J0's report, whose checked-in skeleton at [`backend-evaluation.md`](docs/specs/jail-v1/backend-evaluation.md) records `not_started` for every measurement until the reference host produces them. J0 measures the observer privilege model before the enforcement candidates, because a blocked observer changes which backend is worth integrating. | pending; scheduled as J0 on 2026-09-22 |
+| D9 | First lane | Linux (bubblewrap, seccomp, cgroup v2 where the host delegates one). Initial launch profiles for Codex, Claude Code, and OpenCode. A profile is experimental until its own §7.4 run. `--jail none` is a real run, still observed unless `--observe off`, and its evidence is unprotected. macOS execution, including Claude's Keychain credential, follows a separate platform implementation; shared contracts must accommodate it now. On Ubuntu 24.04+, an operator-installed scoped AppArmor profile may grant `userns` to the required executables. `doctor` measures the sandbox, the cgroup, and the audit sensor, and never changes host policy. The initial conformance host is an operator-provisioned x86_64 virtual private server that runs its own Linux kernel under hardware virtualization, pinned to the release it runs: Ubuntu 26.04 LTS on the 7.0-series kernel, with the measured manifest recorded in jail-v1 §3.2. A container-based host that cannot create user namespaces, delegate a cgroup v2 subtree or attach the observer is ineligible, whatever the provider calls it. aarch64 is a later, separately conformed lane, not the reference host (jail-v1 §3.2). | 2026-09-21; host added 2026-09-22 |
 | D10 | Audit sensor | The jail supervisor is the only syscall sensor. It attaches before exec, outside the child, including when containment is `none`. The ledger is the store. The closed set and the `--observe` default are §4.8. Seccomp notification is not that sensor. | 2026-09-21 |
 | D11 | The five limits | `none` is labelled unprotected. Its tree kill is the supervisor's cgroup, and supervisor death is an unknown. Fleet I/O is batch with opt-in bounded capture. Vendor state is deleted after tree death. One real-agent run marks that profile supported. The accepted holes are the Enough table in §1. | 2026-09-21 |
+| D12 | Language and platform boundary | Rust owns the local CLI, jail and ledger; Elixir/OTP owns fleet coordination. Linux and macOS share policy semantics, lifecycle states, events and receipts. Containment, observation, process identity and tree termination have OS-specific implementations and measured capabilities. Linux mechanisms are not required fields in portable records. A missing required guarantee refuses; compilation on macOS is not execution support. | 2026-09-21 |
+| D13 | Managed teams | Company-controlled workers resolve organization/project/attempt policy, authenticate developers and enforce project access. Managed v1 requires contained execution, strict evidence, explicit limits and approved services. Rust owns the submission/composition path, private inputs and bounded artifacts; Elixir adds multi-worker placement. Existing company identity, model gateway and publishing systems remain external. The full contract and MT01–MT16 gates are in managed-teams-v1.md. | 2026-09-21 |
 
 ## 3. `ouro`, the front door
 
 | # | Functionality | Contract |
 |---|---|---|
-| O1 | Dispatch | `ouro jail …`, `ouro ledger …`, `ouro fleet …`, `ouro doctor`, `ouro version`. `jail` and `ledger` execute in-process without a BEAM. `fleet` execs the release launcher. Every inspection and control verb takes `--json`. |
+| O1 | Dispatch | `ouro jail …`, `ouro ledger …`, `ouro fleet …`, `ouro doctor`, `ouro version`; milestone 4 adds `ouro managed …`. `jail`, `ledger`, and the managed client/single-worker composition execute in Rust without BEAM. `fleet` execs the release launcher. Every inspection and control verb takes `--json`. |
 | O2 | Doctor | Sections for the tools that are installed: jail capabilities (§4.9), ledger daemon and store health, fleet membership and readiness (§6.2 F5). Each section is the same output as the tool's own `doctor`. Presence of a binary, a directory, or a peer is not readiness. |
 | O3 | Configuration | `~/.config/ouro/config.toml` with `[jail]`, `[ledger]`, `[fleet]`, overridable by `OURO_*`. A project `ouro.toml` at the workspace root may only narrow the operator's jail policy. Any widening key, any credential path, any extra allow-host, and `none` are refused with the key's path. The resolved policy is snapshotted and digested outside the workspace before launch. An edit by the child does not change an active attempt. |
 | O4 | Streams and exit codes | Foreground execution passes child stdout and stderr unchanged. Diagnostics and ids go to stderr or `--control-fd N`. Exit codes: the child's code, or `128+signal`; 1 tool error; 2 usage; 125 pre-exec refusal. A receipt distinguishes a tool refusal from a child that exits 125. `fleet run [--json]` returns after durable admission with the job id. `fleet wait JOB --json` reports the process outcome and renders an unknown outcome as unknown. |
 
 Packaging, install, and update are D6. They follow milestone 3 and are not part of
 the milestone 1 contract.
+
+O3 describes trusted operator configuration. For managed submission, local config
+selects the endpoint and client behavior only. The server owns immutable company
+policies and supplies the effective jail configuration; submitter `OURO_*`, paths
+and CLI arguments never become operator overrides. Managed policy provenance and
+business authorization are bound to, but separate from, the canonical jail policy.
 
 Source seams: `tui/src/{cli,main,config,runtime}.rs`.
 
@@ -150,6 +226,11 @@ account of what it applied, what it observed, and what it could not. The
 supervisor is also the audit sensor (§4.8). The first lane is Linux. This
 section claims neither macOS parity nor a trace of every syscall number.
 
+The jail's operator is trusted. In a managed deployment that operator is the
+company-owned launch owner, not the developer submitting the task. The jail
+reports local boundaries; identity, business authorization and service scope
+are enforced by the composition described in managed teams v1.
+
 ### 4.1 Verbs
 
 ```text
@@ -157,8 +238,9 @@ ouro-jail run     [--profile agent|tool|build|none|FILE] [--launch NAME]
                   [--workspace P] [--scratch P] [--rw P]… [--ro P]… [--deny-read P]…
                   [--allow-host H[:PORT]]… [--limit K=V]…
                   [--observe on|off] [--evidence strict|best-effort] [--trace-fd N]
-                  [--receipt PATH] [--gate-fd N] [--control-fd N] [--label-only] -- <argv>
-ouro-jail doctor  [--json]
+                  [--receipt PATH] [--gate-fd N] [--control-fd N] [--attempt-id ID]
+                  [--label-only] -- <argv>
+ouro-jail doctor  [--profile NAME|FILE] [--launch NAME] [--json]
 ouro-jail explain [--profile …] [same flags]     # rendered policy, no probe, no exec
 ouro-jail gc      [--dry-run] [--json]          # recover pending vendor-state cleanup
 ```
@@ -203,7 +285,7 @@ grants, recorded in the receipt.
 | Read-only | system roots (`/usr`, `/bin`, `/lib*`, `/etc/{ssl,resolv.conf,passwd,group,hosts,localtime}`), declared credential inputs | system roots | system roots, declared inputs | n/a |
 | Denied read | everything under `$HOME` not listed; `<data>/ledger` | same, plus every credential | same | n/a |
 | Network | proxy only; hosts from the launch profile plus `--allow-host` | none | none | the host network |
-| Limits (initial) | `wall=2h`, `pids=512`; `mem` and `cpu` optional | `wall=30m`, `pids=256` | `wall=1h`, `pids=512`, `mem` required | `wall=2h`; a cgroup the supervisor can kill; no `pids` or `mem` promise |
+| Limits (initial) | `wall=2h`, preferred `pids=512`; `mem` and `cpu` optional | `wall=30m`, preferred `pids=256` | `wall=1h`, preferred `pids=512`, `mem` required | `wall=2h`; a cgroup the supervisor can kill; no default `pids` or `mem` ceiling; explicit limits remain unprotected |
 | Environment | allow-list: `PATH`, `HOME` (set to `<vendor-state>` when a launch profile says so), `LANG`, `TERM`, `TZ`, proxy variables, and the launch profile's variables | `PATH`, `LANG`, `TERM`, `TZ` | same as `tool` | inherited, except names that point at the data directory, the ledger socket, or a token; the receipt says `inherited` and lists the removed names, not the values |
 | Process | `--new-session`, `--die-with-parent`, own pid, net, ipc, and uts namespaces | same | same | new session, no namespaces; supervisor-owned cgroup (§4.9) |
 
@@ -225,7 +307,8 @@ Applied for every profile other than `none`.
   and read-only, writable, or absent. Roots, symlinks, and protected literals are
   resolved before launch. The rendered mount table is in the receipt.
 - A common seccomp baseline denies `ptrace`, `process_vm_*`, `kexec*`, `bpf`,
-  `perf_event_open`, `keyctl`, and `add_key`. `tool` and `build` additionally deny
+  `perf_event_open`, `keyctl`, `add_key`, and all three `io_uring_*` entry points
+  (`setup`, `enter`, `register`); no ring fd is inherited. `tool` and `build` additionally deny
   mount and unmount operations and creation or joining of further namespaces after
   outer setup. Architecture-specific syscall variants and indirect interfaces are
   covered by the filter. A rule that cannot inspect an argument safely does not
@@ -329,9 +412,12 @@ or when the run refuses before exec, it deletes that directory and does not
 follow links out of it. The operator's source files stay where they are.
 `state_cleanup` on the receipt is `pending` until that delete finishes, then
 `complete`. A failed delete stays `pending` and `ouro-jail gc` retries it.
-`gc` deletes a directory only when the attempt never exec'd or its cgroup is
-empty. A live or unproved tree keeps its directory. An unknown outcome does
-not keep vendor state once the tree is dead.
+`gc` deletes a directory only after pre-exec refusal and helper teardown, or
+verified termination within the receipt's declared lifetime scope. Detected
+boundary-integrity loss retains it; a live or unproved tree keeps its directory.
+An unknown execution outcome alone does not prevent cleanup after verified
+termination. None's registered-boundary scope never proves migrated descendants
+dead or supplies tamper protection.
 
 This is an unlink of the managed directory. Copies the agent made elsewhere
 are the accepted hole in §1.
@@ -356,16 +442,22 @@ kernel, helper, and filter versions.
 Applied when the profile's network is `proxy`. `none` does not install a proxy
 and does not claim to filter.
 
-- The child has no membership in the host network namespace. The proxy listens on
-  a Unix socket in `<scratch>/.ouro/proxy.sock`, bind-mounted into the jail. A
-  bridge the jail starts inside the namespace, forwarding `127.0.0.1:3128` to
-  that socket, lets ordinary `HTTP(S)_PROXY` clients work. `HTTP_PROXY`,
-  `HTTPS_PROXY`, `ALL_PROXY=http://127.0.0.1:3128`, and an empty `NO_PROXY` are
-  set. The namespace is the enforcement.
+- The child has no membership in the host network namespace. The proxy socket
+  lives in the protected `<data>/attempts/<id>/proxy/proxy.sock`, exposed at
+  `/run/ouro/proxy/proxy.sock` through a dedicated read-only directory. The
+  bridge listens on `127.0.0.1:3128`; its namespace and pinned endpoint cannot
+  be redirected by child path/mount replacement. Upper/lowercase HTTP_PROXY,
+  HTTPS_PROXY and ALL_PROXY use `http://127.0.0.1:3128`; NO_PROXY is empty.
+  Pathname Unix sockets require separate host-peer isolation: network namespaces
+  alone do not protect shared mounts. Agent nesting retains same-attempt IPC,
+  but refuses if a tested mechanism cannot block unauthorized host peers,
+  including sockets created after launch. See jail §10 and S03/N05.
 - The proxy speaks `CONNECT` and plain HTTP. Policy is normalised `host[:port]`,
   with wildcard labels (`*.openai.com`), evaluated on the request host and on
-  every resolved address. Private, loopback, link-local, and cloud-metadata
-  ranges are denied unless an explicit `--allow-host` names them. DNS is resolved
+  every resolved address. The jail's versioned [network rules](docs/specs/jail-v1/network-rules.md)
+  pin IDNA and numeric normalization and default-deny special/metadata ranges.
+  Only an explicit numeric address/port grant overrides a numeric denial;
+  hostname permission does not. DNS is resolved
   by the proxy. A denial returns `403` with a reason header and emits one
   `net.connect` event with `decision: deny`.
 - No TLS interception in this specification.
@@ -385,16 +477,16 @@ before exec. If it cannot load, the run exits 125. `--observe off` is explicit:
 the supervisor records the direct child only, and the receipt marks the audit
 classes `unsupported`.
 
-The sensor emits a closed set. It correlates syscall entry with the return code
-at exit. A `result` event exists only for that pair. `stage: attempt` is not
-success. The set is:
+The sensor emits a closed set. Ordinary syscall results pair entry with the
+return code; exec success pairs entry with a confirmed kernel exec transition.
+`stage: attempt` is not success. The set is:
 
 | Operation | Attached calls (initial) | Result means |
 |---|---|---|
-| `proc.exec` | `execve`, `execveat` | the exec returned success; fields carry executable identity and an `argv` digest |
-| `proc.exit` | exit of a task the sensor saw `exec` | the task is gone; the code or signal is the one the kernel reported |
-| `fs.create`, `fs.write` | `openat` / `openat2` / `creat` that request write, create, or truncate | the open returned success; the path was opened for mutation |
-| `fs.rename`, `fs.unlink` | `rename`, `renameat`, `unlink`, `unlinkat`, `mkdir`, `link`, `symlink` | the directory change returned success |
+| `proc.exec` | `execve`, `execveat` | a confirmed exec transition or failed exec return; executable identity and a complete argv digest when available, otherwise an explicit unavailable digest |
+| `proc.exit` | final thread-group termination of a process with witnessed exec | the process is gone; a worker or leader thread exiting alone is insufficient |
+| `fs.create`, `fs.write` | native open-family variants that request write, create, or truncate (§11.2 of the jail spec) | the open returned success; the path was opened for mutation |
+| `fs.create`, `fs.rename`, `fs.unlink` | native directory-entry creation, rename and removal variants (§11.2 of the jail spec) | the directory change returned success |
 | `fs.deny` | a failed call from the rows above, or a failed `connect`, whose errno is a denial (`EACCES`, `EPERM`) | that call was denied; not every denial on the system, and not a failed read |
 | `net.connect` | `connect` | the connect returned; fields carry the address the kernel was given |
 
@@ -425,11 +517,16 @@ error is not, by itself, an `fs.deny` event. `fs.deny` counts are the denial
 results the sensor emitted. Unsupported counts are `null`.
 
 Every attempt declares, per class (`exec`, `fs.write`, `fs.deny`, `net`,
-`limits`), one of `supported`, `active`, `degraded`, `unsupported`, with
+`proxy.net`, `limits`), one of `supported`, `active`, `degraded`, `unsupported`, with
 intervals and reasons for gaps. Queries carry coverage. A requested trace that
 cannot start refuses before exec (125). Loss or backpressure during a run
 records a gap. Under `--evidence strict` the supervisor stops and terminates the
 tree. Under `best-effort` the run continues with `degraded`.
+Audit `net` and proxy `proxy.net` are separate counts/scopes; a working proxy
+cannot claim syscall coverage. All directory-entry operations belong to
+`fs.write`. Denied connect belongs to `fs.deny` with attempted_operation
+`net.connect`; every audit decision is null. Explicitly excluded interfaces
+are not coverage loss. The jail spec §11.4 defines the full mapping.
 
 Observation coverage is separate from protection against the child. Receipts,
 run records, query results, bundles, and status carry `child_protection`:
@@ -440,46 +537,23 @@ recorded provenance and a valid local hash chain cannot disprove that. `strict`
 controls the response to detected evidence loss; it does not provide tamper
 resistance. Every successful result still displays this protection label.
 
-`jail.json`, written at *prepared* and replaced atomically at *enforced* and
-*settled*:
-
-```json
-{
-  "schema": "ouro.jail.receipt/1",
-  "attempt_id": "att_01J…",
-  "phase": "settled",
-  "containment": "enforced",
-  "child_protection": "enforced",
-  "jail": { "component": "ouro-jail", "version": "0.2.0", "backend": "bwrap+seccomp", "kernel": "6.8.0" },
-  "profile": { "name": "agent", "extends": null, "policy_digest": "sha256:…" },
-  "launch": { "name": "codex", "digest": "sha256:…" },
-  "applied": {
-    "mounts": [ { "path": "/work", "mode": "rw" } ],
-    "protected_coverage": "existing_and_root",
-    "network": { "mode": "proxy", "allowed_hosts": ["api.openai.com:443", "*.openai.com:443"] },
-    "limits": { "wall": { "value": "2h", "scope": "tree" }, "pids": { "value": 512, "scope": "cgroup" }, "mem": null },
-    "env": ["PATH", "HOME", "CODEX_HOME", "HTTPS_PROXY"],
-    "nesting": "allowed"
-  },
-  "grants": [ { "kind": "allow_host", "value": "github.com:443", "by": "operator", "at": "…" } ],
-  "credentials": [ { "id": "codex.auth", "mode": "copy_rw", "digest": "sha256:…" } ],
-  "observer": { "attached": true, "backend": "ebpf", "set": "closed-v1" },
-  "coverage": { "exec": "active", "fs.write": "active", "fs.deny": "active", "net": "active", "limits": "active" },
-  "argv_digest": "sha256:…",
-  "process": { "pid": 41234, "pidfd_birth": "boot:…:start:…" },
-  "lifetime": { "boundary": "pid_namespace", "tree_empty": true },
-  "state_cleanup": "complete",
-  "outcome": { "kind": "exited", "code": 0, "signal": null, "limit_hit": null },
-  "denials": { "fs": null, "net": 1 },
-  "started_at": "…", "settled_at": "…"
-}
-```
+`jail.json` is written at *prepared* and replaced atomically at *enforced* and
+*settled*, with a separate pre-exec *refused* variant. The executable draft shape
+and synthetic examples are in the [jail receipt contract](docs/specs/jail-v1.md#132-receipt-lifecycle-and-shape).
+The [contained](docs/specs/jail-v1/examples/receipt-tool.json),
+[none](docs/specs/jail-v1/examples/receipt-none.json),
+[prepared](docs/specs/jail-v1/examples/receipt-prepared.json), and
+[macOS refusal](docs/specs/jail-v1/examples/receipt-macos-refused.json) examples
+are executable contract fixtures with synthetic identities, not real runs.
+Credential provenance and byte-valued paths use that same receipt schema.
 
 A `none` receipt sets `containment` to `none`, `child_protection` to
 `unprotected`, the enforcement `backend` to `none`, and `lifetime.boundary` to
 `supervisor_cgroup`. `tree_empty` stays null until the supervisor has seen the
-cgroup empty. `--observe on` leaves the audit classes `active`. `--observe off`
-marks them `unsupported`. The same schema covers both.
+registered cgroup empty, with verification_scope=registered_boundary and no
+detected integrity loss. Healthy `--observe on` records active audit coverage;
+loss records degraded coverage. `--observe off` marks audit classes unsupported.
+Proxy coverage is separate. The same schema covers these cases.
 
 The full resolved policy is operational state under `<data>/attempts/<id>/policy.json`,
 not part of the receipt. A *prepared* receipt is not proof of exec. A missing
@@ -494,10 +568,14 @@ not part of the receipt. A *prepared* receipt is not proof of exec. A missing
   cgroup. `none` does not require the enforcement backend. It still requires
   the sensor unless `--observe off`.
 - The supervisor enforces `wall` with a monotonic deadline starting at gate
-  release, or at standalone launch. Reattachment does not reset it. `pids` and
+  release, or at standalone launch. Linux uses CLOCK_BOOTTIME, including suspend.
+  Reattachment does not reset it. `pids` and
   `mem` apply on a cgroup v2 leaf when the host delegates one. Otherwise they are
   recorded absent, and refused when the profile marks them required. A limit hit
-  records `outcome.limit_hit` and the signal. It does not force every case into 137.
+  records `applied.limits[].hit`, `outcome.cause` and the actual signal. It does
+  not force every case into 137. Built-in pids ceilings are preferred; every
+  explicit ceiling is required. Observer-required cgroup support does not imply
+  the pids controller is required. Jail §6.4 is the authoritative defaults table.
 - Contained profiles die with their pid namespace (`--die-with-parent` plus the
   jail's `PR_SET_PDEATHSIG`). When a cgroup is in use it is emptied and checked.
   The direct child's exit is not, by itself, proof the tree is dead.
@@ -508,6 +586,10 @@ not part of the receipt. A *prepared* receipt is not proof of exec. A missing
   a recorded cgroup that is still populated after that unknown, and it records
   that it did. `none` still has no filesystem or network containment and no
   protected ledger.
+  Its receipt uses verification_scope=registered_boundary: an empty leaf does
+  not certify that migrated descendants died. Target exit is independently
+  observed. Detected migration/identity loss prevents settlement and cleanup;
+  unobserved same-UID interference remains an accepted limit, not tree proof.
 - `doctor` runs the probes: create a namespace, bind a mount, load the filter,
   take a cgroup leaf and kill it, start the bridge, run the scripted nested
   setup, load the audit sensor, and inspect the applicable AppArmor policy.
@@ -524,9 +606,10 @@ On the D9 kernel, with the ledger and the fleet absent:
 - Direct egress fails. An allowed proxy request and a denied one each produce
   exactly one proxy `net.connect` with the matching decision. A scripted child
   that execs, opens a file for write, renames, unlinks, and connects produces
-  one audit `result` per succeeded call, with the return code. A denied write
-  in that set produces one `fs.deny`. A fixture that noticed a denial by some
-  other means does not count. `write` and `mmap` produce no events.
+  one audit `result` per succeeded call, with native completion evidence. A
+  covered failure returning EACCES or EPERM produces one `fs.deny`; EROFS stays
+  a failed result of its original operation. A fixture that noticed a denial
+  by some other means does not count. `write` and `mmap` produce no events.
 - Under `tool`, a write into an exact `a/b/c/.git` that existed at launch fails,
   and replacing that protected mount fails. If that `.git` was absent at launch,
   creating it later may succeed. The harness shows this limit. The receipt says
@@ -539,7 +622,7 @@ On the D9 kernel, with the ledger and the fleet absent:
 - `--profile none` writes `containment: none` and `child_protection: unprotected`,
   mounts nothing, and kills its cgroup on `wall`. A child that ignores `SIGTERM`
   still dies with that cgroup. If the cgroup cannot be created, the run refuses.
-  `--observe off` emits none of the closed set. An observer that cannot attach
+  `--observe off` emits no audit-source events from the closed set. An observer that cannot attach
   refuses before exec. The same child inside the scripted inner sandbox is still
   visible to the host sensor. Receipts validate against the schema.
 - Vendor state: a normal exit and a pre-exec refusal both leave the managed
@@ -561,6 +644,13 @@ completeness, local consistency, and protection from the child. Under `none`,
 the record is explicitly unprotected (§5.4). It stores the jail's audit events.
 It does not load a probe, attach to a process, or reinterpret a syscall. An
 outside witness is unscheduled. Local `verify` is the check this spec provides.
+
+Milestone 4 adds managed admission/provenance records, project-scoped readers,
+access decisions and event/capture/artifact retention under company policy.
+These are owner/store responsibilities, not new audit probes. An authenticated
+principal comes from trusted ingress, never a submitter-provided actor field.
+The ordinary operator/reader roles below do not themselves provide a managed
+multi-project authorization system; MT01 and MT13 must pass before that claim.
 
 ### 5.1 Processes
 
@@ -656,6 +746,7 @@ response. Foreground JSON control uses `--control-fd` if child output is present
     "fs.write": "active",
     "fs.deny": "active",
     "net": "degraded",
+    "proxy.net": "active",
     "limits": "active",
     "gaps": [ { "class": "net", "from_seq": 812, "to_seq": 830, "reason": "producer backpressure" } ]
   },
@@ -674,8 +765,8 @@ recorded.
 
 This is the gate for trusting the ledger, and later for removing `audit/` and
 `agent/effect_ledger.ex`. Each property has a test. References:
-[`audit/store.ex`](../../lib/ouroboros/audit/store.ex),
-[`agent/effect_ledger.ex`](../../lib/ouroboros/agent/effect_ledger.ex).
+[`audit/store.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/audit/store.ex),
+[`agent/effect_ledger.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/agent/effect_ledger.ex).
 
 1. **One owner, and an honest label for `none`.** Under an enforced profile the
    child cannot reach `serve.sock`, the store, or a producer token: they are
@@ -730,7 +821,12 @@ that staleness does not move ownership.
 
 ### 6.1 Verbs
 
-Membership verbs stay as in [FLEET.md](../FLEET.md) §2: `setup`, `add`, `leave`,
+These are trusted infrastructure-operator verbs. A developer submission endpoint
+must not expose them directly. Milestone 4's `ouro managed` interface authorizes
+each operation, forbids uncontained/unobserved jobs and limits placement to
+company-administered eligible workers.
+
+Membership verbs stay as in [FLEET.md](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md) §2: `setup`, `add`, `leave`,
 `forget`, `status`, `doctor`, `devices`, `service`, `tag`.
 
 ```text
@@ -767,8 +863,10 @@ export.
 
 `--dir PATH` is a directory that already exists on the worker. It is the
 workspace. The fleet does not copy, clone, or mirror it. Omitted, the workspace
-is the attempt's empty scratch. Getting a tree onto the worker is the operator's
-job until a later proposal.
+is the attempt's empty scratch. In milestone 3, getting a tree onto the worker
+is the operator's job. Managed milestone 4's Rust materializer supplies a fresh
+private tree from an authorized pinned input; the developer selects a logical
+input id and cannot supply `--dir` or another worker path.
 
 There is no adapter flag, no approval verb, and no collect verb.
 
@@ -809,25 +907,34 @@ child already made had no effect. Silence is not success. `wall` is the deadline
 ### 6.4 What the fleet does not do
 
 The fleet starts `argv` under a launch owner. It does not speak a vendor
-protocol, relay an approval, resume a vendor session, collect a diff, push a
-branch, or render a page. Those are the unscheduled list in §1. A launch profile
-that grew a protocol parser would violate D3.
+protocol, relay an approval, resume a vendor session, push a branch or render a
+page. Milestone 4's Rust owner collects bounded artifacts after verified tree
+death; fleet only places and reconciles that owner. General workspace sync and
+publishing remain unscheduled. A launch profile that grew a protocol parser
+would violate D3.
 
-Source: `fleet/`, [FLEET.md](../FLEET.md). Reuse membership. Do not keep
+Source: `fleet/`, [FLEET.md](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md). Reuse membership. Do not keep
 `cluster/`, `mesh/`, `session/`, or `gateway/` on the grounds that the fleet
 once used them (§9).
 
 ## 7. The composition contract
 
-Schema files live under `docs/proposals/runtime/` and are frozen at the milestone
-that first ships them: `jail-receipt.schema.json` and `event.schema.json` at
-milestone 1, because the jail's trace is already the audit record;
-`run.schema.json` at milestone 2. Job and attempt records are frozen with
-milestone 3. Components announce the schema ranges they accept in
+The jail's draft schemas live under `docs/specs/jail-v1/`: `jail-receipt.schema.json`,
+`event.schema.json`, its `jail-event.schema.json` producer restriction and the
+canonical policy snapshot freeze at milestone 1, because the jail's trace is already
+the audit record. The future ledger implementation will define `run.schema.json`
+at milestone 2. Job and attempt records are frozen with milestone 3. Components announce the schema ranges they accept in
 `ouro version --json`. A mismatch refuses before dispatch. The ledger implements
 the writer against the event schema the jail already froze.
 
 ### 7.1 Process tree and admission
+
+For managed submissions, the owner also applies the authenticated policy/input/
+service checks in [managed teams §7](docs/specs/managed-teams-v1.md#7-admission-revocation-and-reconciliation).
+It compares the prepared policy, argv and applied capabilities with the authorized
+plan, then durably binds authorization before step 5 can release the gate. Gate
+possession alone is not company authorization. The managed-record schema freezes
+with milestone 4, without changing the jail's canonical policy or gate schema.
 
 ```text
 fleet worker                         control client; not the parent's cgroup
@@ -868,7 +975,9 @@ fault-injection test.
 
 ### 7.2 Records
 
-A source event is one JSON object per line, length-prefixed on sockets:
+A source event is one JSON object per line, length-prefixed on sockets.
+The complete draft envelope is specified in [Jail v1 §13](docs/specs/jail-v1.md#13-wire-records-receipts-and-bounded-trace);
+this sketch omits some required envelope fields:
 
 ```json
 {
@@ -889,8 +998,14 @@ The canonical event is the source event plus `run_id`, `seq`, `received_at`,
 `provenance: {role, peer_pid, token_id}`, and `prev`. Operations: `proc.exec`,
 `proc.exit`, `fs.create`, `fs.write`, `fs.rename`, `fs.unlink`, `fs.deny`,
 `net.connect`, `net.dns`, `limit.hit`, `jail.receipt`, `intent.admitted`,
-`intent.denied`, `intent.settled`, `note`. `fs.create` and `fs.write` share the
-`fs.write` coverage class. `source` is `wrapper`, `audit`, or `proxy`.
+`intent.denied`, `intent.settled`, `note`. `fs.create`, `fs.write`, `fs.rename`
+and `fs.unlink` share the `fs.write` coverage class. `source` is `wrapper`,
+`audit`, or `proxy`; proxy network evidence uses `proxy.net` coverage.
+Jail v1 writers are restricted by the [producer schema](docs/specs/jail-v1/jail-event.schema.json)
+to audit operations, proxy net.connect, and wrapper note/jail.receipt.
+net.dns, limit.hit and intent.* remain reserved in that producer contract;
+future ledger-owner intent events retain the shared envelope and their own
+authenticated producer-role checks.
 
 Ledger sequence is ingestion order. It is not causal order and it is not
 wall-clock order across machines. A timestamp does not repair a missing record.
@@ -914,8 +1029,9 @@ gap is recorded. Kill it under `best-effort`: the run may finish, evidence is
 degraded, and settlement is not fabricated. `status` shows `none` as
 uncontained and unprotected. A batch child sees EOF on stdin. A captured stream
 past the cap is `truncated`. An unselected stream is `not_captured`. Disconnecting
-the client does not hang up the child. Vendor state is gone once the cgroup is
-empty.
+the client does not hang up the child. Vendor state is removed only after the
+jail verifies its declared lifetime scope without detected integrity loss;
+none retains its unprotected limits.
 
 A launch-profile smoke that needs a vendor binary or a credential is reported
 skipped when either is absent. A skip does not mark the profile supported. A
@@ -925,7 +1041,7 @@ skip is not a pass.
 
 Scripted fixtures are the milestone gates. Calling a profile supported, and
 deleting the in-tree agent, each wait on one further run: the real binary, with
-real credentials, recorded in `docs/proposals/runtime/agent-compatibility.md`.
+real credentials, recorded in `docs/specs/jail-v1/agent-compatibility.md`.
 The note names the Ouroboros revision, the profile, the vendor version, the OS,
 and the jail mode. It stores no tokens and no vendor-state archive.
 
@@ -940,14 +1056,22 @@ the smoke and leaves the profile experimental. The tools still ship.
 ## 8. Milestones
 
 Dependencies, not a calendar. Milestone 2 needs milestone 1's receipt contract.
-Milestone 3 needs milestone 2. The D8 evaluation is recorded before milestone 1
-is declared green. No schema is frozen before the milestone that ships it.
+Milestone 3 needs milestone 2. Milestone 4's single-worker pilot needs milestones
+1 and 2 and can proceed alongside 3; its multi-worker stage needs 3 as well.
+The D8 evaluation is recorded before milestone 1 is declared green. No schema
+is frozen before the milestone that ships it.
+
+Status 2026-09-22: no milestone has started and no code exists in this tree.
+The next change is J0 (jail-v1 §16) on the reference host. Until J0's report
+is recorded, revisions of these specifications are corrections and measured
+results, not new requirements or subsystems.
 
 | Milestone | Deliverable | Exit |
 |---|---|---|
 | 1. Jail | `ouro-jail` on the D9 kernel: profiles including `none`, the audit sensor, the three launch profiles, enforcement, the supervisor cgroup, receipts, vendor-state cleanup, doctor, and the scripted nesting fixture. The event schema freezes here. | §4.10 passes. Profiles stay experimental. No other backend is a permanent test oracle. |
 | 2. Ledger | `ouro-ledger serve` and `run`, the verbs in §5.2, the §5.4 suite, bounded capture. | A contained child cannot write the store. `none` stays labelled unprotected. A killed writer leaves a gap or an explicit unknown. |
 | 3. Fleet | Batch jobs: admission, supervision, placement, reconciliation, `--capture`, `--jail` and `--jail none`. | §7.3 passes on two nodes. A lost reply does not start a second child. An unproved outcome stays unknown. |
+| 4. Managed teams | Authenticated Linux/macOS client, company/project policies, approved services, isolated inputs, bounded artifacts and project-scoped evidence. T1 uses one Linux worker; T2 adds fleet. | T1 passes MT01–MT14 plus actual internal-code, untrusted-contribution and confidential-model workflows. T2 adds MT15–MT16. A green jail suite alone does not establish managed readiness. |
 
 After milestone 3 is green, one cut does §9 and the D6 packaging. That change
 adds no features.
@@ -958,12 +1082,17 @@ Deletion sets come from live dependencies after milestone 3, not from this table
 The cut cannot proceed on scripted fixtures alone. §7.4's one real-agent note
 must be recorded for at least one of Codex, Claude Code, or OpenCode.
 
-**Park, then delete.** Before anything in this list is deleted, tag
-`thesis-4-preserved` and branch `thesis-4`: `wasm/`, `wasm.ex`, `upgrade/`,
-`self/`, `runtime/capabilities.ex`, `tools/forge.ex`, the wasm Rust clients,
-`bench/`, `priv/self`, `priv/wasm`, the self-development and wasm scripts, the
-related make targets and workflows, `SELF.md`, `WASM.md`, `WASM_GUIDE.md`,
-`BENCHMARKS.md`, `docs/self/`, `.agents/skills/forge/`.
+**Preserved.** The whole previous tree is branch `legacy` at
+`f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82`, and the tag `thesis-4-preserved`
+marks the same commit. Both refs must exist on the remote before the tooling
+tree replaces `dev` there: every link in these specifications to a preserved
+file uses that hash, and a hash link stays valid only while some ref reaches
+the commit. The self-improvement set D2 names lives there in full: `wasm/`,
+`wasm.ex`, `upgrade/`, `self/`, `runtime/capabilities.ex`, `tools/forge.ex`,
+the wasm Rust clients, `bench/`, `priv/self`, `priv/wasm`, the self-development
+and wasm scripts, the related make targets and workflows, `SELF.md`, `WASM.md`,
+`WASM_GUIDE.md`, `BENCHMARKS.md`, `docs/self/`, `.agents/skills/forge/`.
+Nothing is deleted from this tree; the cut below acts on the legacy line.
 
 **Delete in the cut, once unreferenced.** `provider/native/` and `provider/*.ex`;
 `interactive/` and `interactive_session.ex`; the chat paths of `web/`, `gateway/`,
@@ -971,7 +1100,8 @@ and `tui/src/`; `prompt/`, `attachments/`, `poll/`, `action/`; `agent/effect_led
 and `audit/` after the §5.4 history export; `jido*`, `req_llm`, `earmark`, and
 the Phoenix surface. `cluster/`, `mesh/`, and `session/` go in the same cut
 unless milestone 3's membership still calls them. `workspace/` mirrors,
-provisioning, and return go. They belong to the unscheduled export work.
+provisioning, and return go. Milestone 4's bounded input/artifact contract does
+not retain the former workspace synchronization subsystem by implication.
 
 **Reuse.** Fleet membership as FLEET.md describes it, for as long as milestone 3
 places jobs through it: the trust model, the secret bundle, and `setup` / `add`
@@ -989,11 +1119,16 @@ For code that remains: `mix compile --warnings-as-errors`, `mix format --check-f
 application remains.
 
 Added by milestone: jail conformance (1); ledger durability, the unprotected
-label, and capture (2); fleet fault tests (3). §7.4 is one real-agent note
+label, and capture (2); fleet fault tests (3); managed identity/policy/input/
+artifact/privacy gates MT01–MT16 (4). §7.4 is one real-agent note
 before a profile is called supported and before the cut. A credential-dependent
 skip leaves the profile experimental. It does not fail the scripted suite, and
 it is not a support claim. At milestone 3 each tool's suite still runs with the
 other two stopped.
+
+Managed team readiness additionally needs the real company identity, model/
+service and storage integrations tested by MT01–MT14. A simulator or a standalone
+agent smoke cannot establish those deployment guarantees.
 
 Rules carried from `core.md` §5: the cut adds no features; tests travel with
 the code; a durable-format change sweeps retired atoms and states the blast
@@ -1034,6 +1169,15 @@ radius per store; `docs/experiments/` is never added.
   unknown. Status shows both.
 - **Ubuntu 24.04+.** Restricted user namespaces can block the outer or the
   nested sandbox. `doctor` measures both. The operator owns any host-policy change.
+- **Observer provisioning is the critical path.** J1 requires observation on,
+  from a non-root supervisor, with no setuid helper and no host-policy change by
+  the tools. Ubuntu 24.04 restricts unprivileged user namespaces through
+  AppArmor and gates BPF tracing behind capabilities the operator must
+  provision. J0 measures this on the reference host before anything else
+  (jail-v1 §5.2). If the eBPF candidate cannot attach under a provisioning the
+  operator accepts, the fallback candidates named there are measured against
+  the same closed set. If none passes, the blocker is recorded and J1 does not
+  ship with `--observe off` as its acceptance run.
 - **The workspace is not a git boundary.** Shared inodes and alternates are the
   operator's problem until a later proposal says otherwise.
 
@@ -1062,8 +1206,8 @@ Checked 2026-09-21. Revalidate a pinned backend when milestone 1 starts.
 - [systemd termination](https://github.com/systemd/systemd/blob/main/man/systemd.kill.xml):
   a child of a service dies with that service. The launch owner is not a child
   of the fleet worker.
-- In-tree: [`audit/store.ex`](../../lib/ouroboros/audit/store.ex),
-  [`agent/effect_ledger.ex`](../../lib/ouroboros/agent/effect_ledger.ex),
-  [`sandbox/bwrap.ex`](../../lib/ouroboros/provider/native/sandbox/bwrap.ex),
-  [`sandbox/sandbox_exec.ex`](../../lib/ouroboros/provider/native/sandbox/sandbox_exec.ex),
-  [FLEET.md](../FLEET.md), [`core.md`](core.md) §7.
+- Preserved implementation (branch `legacy`, tag `thesis-4-preserved`, commit f3b2dbfd): [`audit/store.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/audit/store.ex),
+  [`agent/effect_ledger.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/agent/effect_ledger.ex),
+  [`sandbox/bwrap.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/provider/native/sandbox/bwrap.ex),
+  [`sandbox/sandbox_exec.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/provider/native/sandbox/sandbox_exec.ex),
+  [FLEET.md](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md), [`core.md`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/proposals/core.md) §7.

@@ -1,0 +1,96 @@
+{
+  "schema": "ouro.jail.policy-snapshot/1",
+  "profile": "tool",
+  "profile_version": 1,
+  "platform": "linux",
+  "roots": {
+    "workspace": "/srv/demo",
+    "scratch": {
+      "kind": "managed"
+    },
+    "vendor_state": null
+  },
+  "filesystem": {
+    "read_write": [
+      {
+        "root": "scratch",
+        "path": ""
+      },
+      {
+        "root": "workspace",
+        "path": ""
+      }
+    ],
+    "read_only": [
+      {
+        "root": "host",
+        "path": "/usr"
+      },
+      {
+        "root": "workspace",
+        "path": "fixtures"
+      }
+    ],
+    "deny_read": [
+      {
+        "root": "workspace",
+        "path": "secrets"
+      },
+      {
+        "root": "workspace",
+        "path": {
+          "encoding": "base64",
+          "data": "/w=="
+        }
+      }
+    ],
+    "protected_segments": [
+      ".git",
+      ".ouroboros"
+    ],
+    "protected_coverage": "existing_and_root"
+  },
+  "network": {
+    "mode": "none",
+    "allow": [],
+    "ruleset": null,
+    "translation_prefixes": []
+  },
+  "limits": {
+    "wall": {
+      "value": "300000",
+      "required": true
+    },
+    "pids": {
+      "value": "64",
+      "required": true
+    },
+    "mem": null,
+    "cpu": null
+  },
+  "observation": {
+    "mode": "on",
+    "evidence": "strict"
+  },
+  "environment": {
+    "inherit_host": false,
+    "bindings": [
+      {
+        "name": "LANG",
+        "value": "C.UTF-8"
+      },
+      {
+        "name": "PATH",
+        "value": "/usr/bin"
+      },
+      {
+        "name": "TMPDIR",
+        "value": {
+          "root": "scratch",
+          "path": ""
+        }
+      }
+    ]
+  },
+  "launch": null
+}

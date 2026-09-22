@@ -1,0 +1,62 @@
+{
+  "description": "Synthetic resolver input; no real backend or filesystem conformance claimed.",
+  "platform": "linux",
+  "profile_directory": "/srv/demo",
+  "workspace": "/srv/demo",
+  "scratch": {
+    "kind": "managed"
+  },
+  "baseline": {
+    "read_write": [
+      {
+        "root": "workspace",
+        "path": ""
+      },
+      {
+        "root": "scratch",
+        "path": ""
+      }
+    ],
+    "read_only": [
+      {
+        "root": "host",
+        "path": "/usr"
+      }
+    ],
+    "deny_read": [],
+    "protected_segments": [
+      ".git",
+      ".ouroboros"
+    ],
+    "environment": {
+      "inherit_host": false,
+      "bindings": [
+        {
+          "name": "LANG",
+          "value": "C.UTF-8"
+        },
+        {
+          "name": "PATH",
+          "value": "/usr/bin"
+        },
+        {
+          "name": "TMPDIR",
+          "value": {
+            "root": "scratch",
+            "path": ""
+          }
+        }
+      ]
+    }
+  },
+  "cli_deny_read": [
+    {
+      "encoding": "base64",
+      "data": "L3Nydi9kZW1vL/8="
+    }
+  ],
+  "provenance_variants": [
+    "operator-file-A",
+    "operator-file-B"
+  ]
+}

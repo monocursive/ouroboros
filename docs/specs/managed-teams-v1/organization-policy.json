@@ -1,0 +1,82 @@
+{
+  "schema": "ouro.managed.policy/1",
+  "policy_id": "acme-engineering",
+  "revision": 1,
+  "scope": "organization",
+  "organization_id": "acme-eu",
+  "project_id": null,
+  "issuer": "acme-policy-admin",
+  "valid_from": "2026-09-21T00:00:00Z",
+  "valid_until": "2027-09-21T00:00:00Z",
+  "profiles": [
+    "agent",
+    "tool",
+    "build"
+  ],
+  "launch_profiles": [
+    "approved-batch-agent"
+  ],
+  "data_classes": [
+    "internal",
+    "confidential"
+  ],
+  "worker_pools": [
+    "eu-managed"
+  ],
+  "execution_regions": [
+    "eu"
+  ],
+  "model_processing_regions": [
+    "eu"
+  ],
+  "storage_regions": [
+    "eu"
+  ],
+  "service_capabilities": {
+    "model-eu": [
+      "inference"
+    ],
+    "packages-internal": [
+      "read"
+    ]
+  },
+  "limits": {
+    "wall_ms": 7200000,
+    "pids": 512,
+    "mem_bytes": 8589934592,
+    "cpu_percent": 400,
+    "writable_bytes": 17179869184,
+    "writable_inodes": 500000
+  },
+  "evidence": {
+    "observe": "on",
+    "mode": "strict",
+    "require_ledger": true,
+    "require_live_authorization": true
+  },
+  "capture": {
+    "stdout": true,
+    "stderr": true,
+    "argv": false,
+    "max_bytes_per_stream": 4194304
+  },
+  "artifacts": {
+    "enabled": true,
+    "types": [
+      "patch",
+      "test_report",
+      "regular_files"
+    ],
+    "max_files": 10000,
+    "max_bytes": 67108864
+  },
+  "retention": {
+    "events_max_seconds": 1209600,
+    "captures_max_seconds": 86400,
+    "artifacts_max_seconds": 604800
+  },
+  "quotas": {
+    "max_active_attempts": 8,
+    "max_queued_attempts": 32
+  }
+}

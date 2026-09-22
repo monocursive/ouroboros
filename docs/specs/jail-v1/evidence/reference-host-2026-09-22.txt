@@ -1,0 +1,37 @@
+manifest_schema: ouro.jail.host-manifest/0 (manual, superseded by doctor --json)
+collected_at: 2026-09-22T03:32:36Z
+hostname: vps-450b3fe8
+virtualization: kvm
+kernel: 7.0.0-31-generic
+kernel_build: #31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026
+arch: x86_64
+distribution: Ubuntu 26.04.1 LTS
+systemd: systemd 259 (259.5-0ubuntu3.4)
+cpus: 4
+mem_total_kib: 3905584
+swap_total_kib: 8388604
+root_fs: 77G total, 61G free
+operator: uid=1000 ubuntu
+operator_linger: yes
+operator_sudo: passwordless
+shell_cap_eff: 0000000000000000
+sysctl.kernel.apparmor_restrict_unprivileged_userns: 1
+sysctl.kernel.unprivileged_bpf_disabled: 2
+sysctl.kernel.perf_event_paranoid: 4
+sysctl.kernel.yama.ptrace_scope: 1
+sysctl.user.max_user_namespaces: 11829
+sysctl.kernel.io_uring_disabled: 0
+cgroup_fs: cgroup2fs
+cgroup_root_controllers: cpuset cpu io memory hugetlb pids rdma misc dmem
+cgroup_user_service: present
+cgroup_user_controllers: cpu memory pids
+cgroup_user_subtree_control: cpu memory pids
+bwrap: bubblewrap 0.11.1
+userns_unshare_test: ok
+apparmor_enabled: Yes
+apparmor_profile_files: bwrap-userns-restrict glycin.bwrap lxc-usernsexec unprivileged_userns 
+apparmor_loaded_bwrap_ouro: :glycin:bwrap bwrap unpriv_bwrap 
+kconfig_bpf: CONFIG_BPF_SYSCALL=y CONFIG_BPF_JIT=y CONFIG_DEBUG_INFO_BTF=y 
+btf_vmlinux: present
+beam_present: no
+ouro_binaries_on_path: 

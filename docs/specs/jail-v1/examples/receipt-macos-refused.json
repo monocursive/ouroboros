@@ -1,0 +1,127 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "revision": 1,
+  "phase": "refused",
+  "platform": {
+    "os": "macos",
+    "arch": "aarch64",
+    "kernel": "fixture-darwin"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.0.0-fixture",
+    "backend": null,
+    "backend_version": null
+  },
+  "policy": {
+    "name": "tool",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation"
+    ],
+    "grants": []
+  },
+  "containment": "pending",
+  "child_protection": "pending",
+  "exec_observed": false,
+  "argv_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "applied": {
+    "filesystem": null,
+    "network": {
+      "mode": "pending",
+      "mechanism": null,
+      "allowed_hosts": []
+    },
+    "syscalls": null,
+    "limits": [],
+    "environment_names": [],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": null,
+  "lifetime": {
+    "boundary": "pending",
+    "native": null,
+    "tree_empty": null,
+    "verified_at": null,
+    "verification_scope": null,
+    "integrity": "pending"
+  },
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "unsupported_platform",
+      "stage": "probing",
+      "message": "Execution is not implemented for this platform.",
+      "remediation_category": "unsupported"
+    }
+  },
+  "state_cleanup": "not_needed",
+  "cleanup_error": null,
+  "created_at": "2026-09-21T12:00:00Z",
+  "updated_at": "2026-09-21T12:00:00Z",
+  "errors": [
+    {
+      "code": "unsupported_platform",
+      "stage": "probing",
+      "message": "Execution is not implemented for this platform.",
+      "remediation_category": "unsupported"
+    }
+  ],
+  "credentials": []
+}

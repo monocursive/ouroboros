@@ -1,0 +1,12 @@
+schema = "ouro.jail.policy/1"
+extends = "tool"
+[filesystem]
+read_only = ["./fixtures"]
+deny_read = ["./secrets"]
+protected_coverage = "existing_and_root"
+[limits]
+wall = "5m"
+pids = 64
+[observation]
+mode = "on"
+evidence = "strict"

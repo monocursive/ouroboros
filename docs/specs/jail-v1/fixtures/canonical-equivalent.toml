@@ -1,0 +1,12 @@
+extends = "tool"
+schema = "ouro.jail.policy/1"
+[observation]
+evidence = "strict"
+mode = "on"
+[limits]
+pids = 64
+wall = "300s"
+[filesystem]
+protected_coverage = "existing_and_root"
+deny_read = ["/srv/demo/secrets"]
+read_only = ["/srv/demo/fixtures"]

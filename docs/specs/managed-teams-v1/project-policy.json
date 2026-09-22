@@ -1,0 +1,80 @@
+{
+  "schema": "ouro.managed.policy/1",
+  "policy_id": "payments-development",
+  "revision": 1,
+  "scope": "project",
+  "organization_id": "acme-eu",
+  "project_id": "payments",
+  "issuer": "payments-maintainer",
+  "valid_from": "2026-09-21T00:00:00Z",
+  "valid_until": "2027-03-21T00:00:00Z",
+  "profiles": [
+    "agent",
+    "tool",
+    "build"
+  ],
+  "launch_profiles": [
+    "approved-batch-agent"
+  ],
+  "data_classes": [
+    "internal"
+  ],
+  "worker_pools": [
+    "eu-managed"
+  ],
+  "execution_regions": [
+    "eu"
+  ],
+  "model_processing_regions": [
+    "eu"
+  ],
+  "storage_regions": [
+    "eu"
+  ],
+  "service_capabilities": {
+    "model-eu": [
+      "inference"
+    ],
+    "packages-internal": [
+      "read"
+    ]
+  },
+  "limits": {
+    "wall_ms": 1800000,
+    "pids": 256,
+    "mem_bytes": 4294967296,
+    "cpu_percent": 200,
+    "writable_bytes": 8589934592,
+    "writable_inodes": 250000
+  },
+  "evidence": {
+    "observe": "on",
+    "mode": "strict",
+    "require_ledger": true,
+    "require_live_authorization": true
+  },
+  "capture": {
+    "stdout": true,
+    "stderr": true,
+    "argv": false,
+    "max_bytes_per_stream": 1048576
+  },
+  "artifacts": {
+    "enabled": true,
+    "types": [
+      "patch",
+      "test_report"
+    ],
+    "max_files": 1000,
+    "max_bytes": 16777216
+  },
+  "retention": {
+    "events_max_seconds": 1209600,
+    "captures_max_seconds": 86400,
+    "artifacts_max_seconds": 604800
+  },
+  "quotas": {
+    "max_active_attempts": 2,
+    "max_queued_attempts": 8
+  }
+}

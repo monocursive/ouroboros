@@ -1,0 +1,427 @@
+[
+  {
+    "id": "explicit-narrowing",
+    "changes": [
+      {
+        "path": "limits.wall_ms",
+        "value": 60000
+      }
+    ],
+    "expect": "valid"
+  },
+  {
+    "id": "no-services",
+    "changes": [
+      {
+        "path": "service_capabilities",
+        "value": {}
+      }
+    ],
+    "expect": "valid"
+  },
+  {
+    "id": "capture-disabled",
+    "changes": [
+      {
+        "path": "capture.stdout",
+        "value": false
+      }
+    ],
+    "expect": "valid"
+  },
+  {
+    "id": "same-organization-ceiling",
+    "changes": [
+      {
+        "path": "limits.pids",
+        "value": 512
+      }
+    ],
+    "expect": "valid"
+  },
+  {
+    "id": "uncontained-profile",
+    "changes": [
+      {
+        "path": "profiles",
+        "value": [
+          "none"
+        ]
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "observation-disabled",
+    "changes": [
+      {
+        "path": "evidence.observe",
+        "value": "off"
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "best-effort-evidence",
+    "changes": [
+      {
+        "path": "evidence.mode",
+        "value": "best_effort"
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "ledger-disabled",
+    "changes": [
+      {
+        "path": "evidence.require_ledger",
+        "value": false
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "offline-admission",
+    "changes": [
+      {
+        "path": "evidence.require_live_authorization",
+        "value": false
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "argv-capture",
+    "changes": [
+      {
+        "path": "capture.argv",
+        "value": true
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "unknown-key",
+    "changes": [
+      {
+        "path": "credential_source",
+        "value": "/home/operator/auth.json"
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "zero-limit",
+    "changes": [
+      {
+        "path": "limits.wall_ms",
+        "value": 0
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "unsafe-integer",
+    "changes": [
+      {
+        "path": "limits.mem_bytes",
+        "value": 9007199254740992
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "artifact-hard-cap",
+    "changes": [
+      {
+        "path": "artifacts.max_bytes",
+        "value": 67108865
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "duplicate-profile",
+    "changes": [
+      {
+        "path": "profiles",
+        "value": [
+          "agent",
+          "agent"
+        ]
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "missing-project-identity",
+    "changes": [
+      {
+        "path": "project_id",
+        "value": null
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "inverted-validity",
+    "changes": [
+      {
+        "path": "valid_until",
+        "value": "2026-09-20T00:00:00Z"
+      }
+    ],
+    "expect": "invalid"
+  },
+  {
+    "id": "other-organization",
+    "changes": [
+      {
+        "path": "organization_id",
+        "value": "other-company"
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "organization_id"
+    ]
+  },
+  {
+    "id": "wider-classification",
+    "changes": [
+      {
+        "path": "data_classes",
+        "value": [
+          "restricted"
+        ]
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "data_classes"
+    ]
+  },
+  {
+    "id": "wider-execution-region",
+    "changes": [
+      {
+        "path": "execution_regions",
+        "value": [
+          "global"
+        ]
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "execution_regions"
+    ]
+  },
+  {
+    "id": "wider-model-region",
+    "changes": [
+      {
+        "path": "model_processing_regions",
+        "value": [
+          "global"
+        ]
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "model_processing_regions"
+    ]
+  },
+  {
+    "id": "wider-storage-region",
+    "changes": [
+      {
+        "path": "storage_regions",
+        "value": [
+          "global"
+        ]
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "storage_regions"
+    ]
+  },
+  {
+    "id": "unregistered-pool",
+    "changes": [
+      {
+        "path": "worker_pools",
+        "value": [
+          "developer-laptop"
+        ]
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "worker_pools"
+    ]
+  },
+  {
+    "id": "unapproved-launch",
+    "changes": [
+      {
+        "path": "launch_profiles",
+        "value": [
+          "personal-agent"
+        ]
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "launch_profiles"
+    ]
+  },
+  {
+    "id": "wider-service-action",
+    "changes": [
+      {
+        "path": "service_capabilities.packages-internal",
+        "value": [
+          "write"
+        ]
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "service_capabilities.packages-internal"
+    ]
+  },
+  {
+    "id": "wider-resource-limit",
+    "changes": [
+      {
+        "path": "limits.wall_ms",
+        "value": 7200001
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "limits.wall_ms"
+    ]
+  },
+  {
+    "id": "wider-retention",
+    "changes": [
+      {
+        "path": "retention.captures_max_seconds",
+        "value": 86401
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "retention.captures_max_seconds"
+    ]
+  },
+  {
+    "id": "wider-quota",
+    "changes": [
+      {
+        "path": "quotas.max_active_attempts",
+        "value": 9
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "quotas.max_active_attempts"
+    ]
+  },
+  {
+    "id": "earlier-validity",
+    "changes": [
+      {
+        "path": "valid_from",
+        "value": "2026-09-20T00:00:00Z"
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "valid_from"
+    ]
+  },
+  {
+    "id": "later-validity",
+    "changes": [
+      {
+        "path": "valid_until",
+        "value": "2028-09-21T00:00:00Z"
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "valid_until"
+    ]
+  },
+  {
+    "id": "wider-storage-bytes",
+    "changes": [
+      {
+        "path": "limits.writable_bytes",
+        "value": 17179869185
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "limits.writable_bytes"
+    ]
+  },
+  {
+    "id": "wider-storage-inodes",
+    "changes": [
+      {
+        "path": "limits.writable_inodes",
+        "value": 500001
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "limits.writable_inodes"
+    ]
+  },
+  {
+    "id": "wider-capture-cap",
+    "changes": [
+      {
+        "path": "capture.max_bytes_per_stream",
+        "value": 4194305
+      }
+    ],
+    "expect": "widening",
+    "paths": [
+      "capture.max_bytes_per_stream"
+    ]
+  },
+  {
+    "id": "capture-forbidden-by-company",
+    "organization_changes": [
+      {
+        "path": "capture.stdout",
+        "value": false
+      }
+    ],
+    "changes": [],
+    "expect": "widening",
+    "paths": [
+      "capture.stdout"
+    ]
+  },
+  {
+    "id": "artifacts-forbidden-by-company",
+    "organization_changes": [
+      {
+        "path": "artifacts.enabled",
+        "value": false
+      }
+    ],
+    "changes": [],
+    "expect": "widening",
+    "paths": [
+      "artifacts.enabled"
+    ]
+  }
+]
