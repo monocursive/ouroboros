@@ -17,3 +17,6 @@ __pycache__/
 
 # Release artifacts are published, not committed.
 /dist/
+
+# The conformance driver's default local evidence directory (cargo xtask conformance).
+/evidence/
