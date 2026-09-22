@@ -1,0 +1,35 @@
+collected_at: 2026-09-22T04:06:49Z as ouro-ci on vps-450b3fe8, kernel 7.0.0-31-generic, ptrace_scope=1
+strace: strace -- version 6.19   bpftrace: bpftrace v0.25.0
+=== 1 eBPF attach without provisioning (expected: refused)
+ERROR: Failed to open kernel function info: Error reading events from /sys/kernel/tracing/available_events (Permission denied)
+exit=1
+=== 2 ptrace follows bubblewrap into its namespaces: closed-set trace of a fixture (host pids)
+bwrap exit=0
+lines total: 152
+-- execve lines (setup helpers first, then the target and its descendants):
+3227  execve("/usr/bin/bwrap", [...]) = 0
+3229  execve("/usr/local/sbin/sh", [...]) = -1 ENOENT (No such file or directory)
+3229  execve("/usr/local/bin/sh", [...]) = -1 ENOENT (No such file or directory)
+3229  execve("/usr/sbin/sh", [...]) = -1 ENOENT (No such file or directory)
+3229  execve("/usr/bin/sh", [...]) = 0
+3230  execve("/usr/bin/mv", [...]) = 0
+3231  execve("/usr/bin/rm", [...]) = 0
+3232  execve("/bin/true", [...]) = 0
+-- target file operations with results:
+3227  execve("/usr/bin/bwrap", ["bwrap", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--sym
+3229  execve("/usr/local/sbin/sh", ["sh", "-c", "echo hi > /tmp/a && mv /tmp/a /t"...], 0x7ffe0274fe10 /* 16 vars */) = -1 ENOENT (No such f
+3229  execve("/usr/local/bin/sh", ["sh", "-c", "echo hi > /tmp/a && mv /tmp/a /t"...], 0x7ffe0274fe10 /* 16 vars */) = -1 ENOENT (No such fi
+3229  execve("/usr/sbin/sh", ["sh", "-c", "echo hi > /tmp/a && mv /tmp/a /t"...], 0x7ffe0274fe10 /* 16 vars */) = -1 ENOENT (No such file or
+3229  execve("/usr/bin/sh", ["sh", "-c", "echo hi > /tmp/a && mv /tmp/a /t"...], 0x7ffe0274fe10 /* 16 vars */) = 0
+3229  openat(AT_FDCWD, "/tmp/a", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3
+3230  execve("/usr/bin/mv", ["mv", "/tmp/a", "/tmp/b"], 0x58e596b38518 /* 16 vars */) = 0
+3230  renameat2(AT_FDCWD, "/tmp/a", AT_FDCWD, "/tmp/b", RENAME_NOREPLACE) = 0
+3231  execve("/usr/bin/rm", ["rm", "/tmp/b"], 0x58e596b384f8 /* 16 vars */) = 0
+3231  unlinkat(AT_FDCWD, "/tmp/b", 0)   = 0
+-- distinct pids seen: 6
+=== 3 overhead on fixed workloads (seconds, 5 runs each, median in the middle)
+noop: untraced=0.00  ptrace+seccomp-narrowed=0.01  ptrace-all-syscalls=0.03
+descendants: untraced=0.14  ptrace+seccomp-narrowed=0.21  ptrace-all-syscalls=0.44
+fileops: untraced=0.15  ptrace+seccomp-narrowed=0.78  ptrace-all-syscalls=1.25
+=== 4 events the narrowed trace produced for the fileops workload
+closed-set lines: 15104; openat with O_CREAT: 5000; rename: 5000; unlink: 5000

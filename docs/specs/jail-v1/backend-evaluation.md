@@ -87,14 +87,14 @@ closed set (O01–O06) or the §4 overhead budget. jail-v1 §5.2 records the sam
 | Descendant tracking across fork, exec, PID namespace; PID reuse | not_started | |
 | Event loss accounting under the §11.4 bounds | not_started | |
 | Child cannot reacquire tracing privileges (X06) | not_started | |
-| Interference: AppArmor userns restriction, `perf_event_paranoid`, `unprivileged_bpf_disabled`; operator resolution | not_started | |
+| Interference: AppArmor userns restriction, `perf_event_paranoid`, `unprivileged_bpf_disabled`; operator resolution | Unprovisioned attach is refused: as `ouro-ci`, bpftrace 0.25 fails reading `/sys/kernel/tracing/available_events` (permission denied), so tracefs access is part of the provisioning question, not only CAP_BPF/CAP_PERFMON. Operator resolution not_started | [ptrace probe §1](evidence/ptrace-probe-2026-09-22-ouro-ci.txt) |
 | Result: `attaches` or `blocked` | not_started | |
 
 ### 2.1 ptrace tracer (measured first) and the fanotify supplement
 
 | Candidate | Closed-set coverage (§11.2) | Overhead | Known limits observed | Result |
 |---|---|---|---|---|
-| ptrace tracer with `SECCOMP_RET_TRACE` narrowing | not_started | not_started | not_started | not_started |
+| ptrace tracer with `SECCOMP_RET_TRACE` narrowing (stand-in: strace 6.19 `-f --seccomp-bpf`) | Attaches as `ouro-ci` with zero provisioning under `ptrace_scope=1`, including through bubblewrap's user and PID namespaces and its `unpriv_bwrap` confinement; sees the target's `execve` (with the PATH-search ENOENTs), `openat` with `O_CREAT`, `renameat2`, `unlinkat`, and the exec of each descendant, each with its return value and host pid; 15,000 of 15,000 closed-set events on the file workload, no loss by construction | Medians of 5 runs, strace as an upper bound (it decodes and formats every event): no-op 0.00→0.01 s; 200 fork+exec 0.14→0.21 s (+50%); 5,000 create/rename/unlink 0.15→0.78 s (+420%). Without narrowing: 0.03, 0.44, 1.25 s | Two stops per traced call even when narrowed; setup helpers (bubblewrap's own calls) appear before the target and need tagging as helpers; PID reuse and thread-group exit semantics not exercised | attaches; correctness looks right; overhead on syscall-dense work is over the §4 budget with the stand-in, so a purpose-built tracer using `PTRACE_GET_SYSCALL_INFO` must be measured before ptrace is judged on cost |
 | `fanotify` (filesystem classes only; cannot alone satisfy the set) | not_started | not_started | not_started | not_started |
 
 ## 3. Enforcement candidates
@@ -160,6 +160,25 @@ Exceeding one requires a recorded adjustment before backend freeze.
 | Descendant-heavy fixture | off | not_started | not_started | not_started | not_started | not_started |
 | Fixed file-operation workload | on | not_started | not_started | not_started | not_started | not_started |
 | Fixed file-operation workload | off | not_started | not_started | not_started | not_started | not_started |
+
+### 4.1 Preliminary numbers from the ptrace stand-in
+
+Five runs each as `ouro-ci`, medians, strace 6.19 as the tracer, `/usr/bin/time`
+resolution 0.01 s ([evidence](evidence/ptrace-probe-2026-09-22-ouro-ci.txt)).
+Not the §4 measurement: fewer launches, a stand-in tracer, no RSS.
+
+| Workload | Untraced | ptrace, seccomp-narrowed to the closed set | ptrace, every syscall |
+|---|---|---|---|
+| No-op command | 0.00 s | 0.01 s | 0.03 s |
+| 200 fork+exec descendants | 0.14 s | 0.21 s | 0.44 s |
+| 5,000 create/rename/unlink (15,000 closed-set calls) | 0.15 s | 0.78 s | 1.25 s |
+
+Reading: narrowing halves the cost but cannot remove the two context switches
+per traced call, and the file workload is a syscall-dense worst case at about
+100,000 closed-set calls per second. A purpose-built tracer that reads only the
+needed arguments will sit between the untraced and strace numbers; whether it
+reaches the 20% median budget on this workload is the open measurement. eBPF
+has no per-event context switch, which is its case, and it costs provisioning.
 
 ## 5. Gap-to-gate table
 
