@@ -1347,70 +1347,12 @@ impl Boundary {
         let Some(tracer) = self.tracer.take() else {
             return;
         };
-        let summary = tracer.finish_within_draining(budget, |event| match event {
-            TracerEvent::Exec {
-                pid, path, dirfd, ..
-            } => self.audit.record_exec(pid, path.as_ref(), dirfd),
-            TracerEvent::Syscall {
-                pid,
-                tid,
-                op,
-                syscall,
-                args,
-                ret,
-                ..
-            } => self.audit.record_syscall(pid, tid, op, syscall, &args, ret),
-            TracerEvent::Exit { pid, status, .. } => self.audit.record_exit(pid, status),
-            TracerEvent::Gap {
-                reason,
-                ops,
-                from_ns,
-                to_ns,
-                count,
-            } => self.audit.record_gap(reason, ops, from_ns, to_ns, count),
-            _ => {}
-        });
-        if summary.loss.abandoned_tracees > 0
-            && !self
-                .audit
-                .gaps()
-                .iter()
-                .any(|gap| gap.reason == super::tracer::GapReason::TraceesAbandoned.as_str())
-        {
-            self.audit.record_gap(
-                super::tracer::GapReason::TraceesAbandoned,
-                super::tracer::OpSet::ALL,
-                0,
-                0,
-                Some(summary.loss.abandoned_tracees),
-            );
-        }
-        if !summary.unreaped_children.is_empty()
-            && !self
-                .audit
-                .gaps()
-                .iter()
-                .any(|gap| gap.reason == super::tracer::GapReason::UnreapedChildren.as_str())
-        {
-            self.audit.record_gap(
-                super::tracer::GapReason::UnreapedChildren,
-                super::tracer::OpSet::EMPTY,
-                0,
-                0,
-                u64::try_from(summary.unreaped_children.len()).ok(),
-            );
-        }
-        if summary.loss.lifecycle_dropped > 0
-            || (summary.loss.total() > 0 && !self.audit.has_gaps())
-        {
-            self.audit.record_gap(
-                super::tracer::GapReason::QueueFull,
-                super::tracer::OpSet::ALL,
-                0,
-                crate::platform::elapsed_since_start_ns() as u64,
-                None,
-            );
-        }
+        let target = super::observed::Target {
+            launcher: self.launcher.pid,
+            images: &self.target_images,
+        };
+        // Late facts change nothing here: the run loop has already ended.
+        let summary = super::observed::stop(tracer, budget, &mut self.audit, &target, |_| {});
         self.tracer_summary = Some(summary);
     }
 
@@ -2420,25 +2362,6 @@ impl LinuxRunning {
         }
     }
 
-    /// Whether an observed exec transition is the launcher executing the
-    /// program the operator named.
-    ///
-    /// A transition with no pathname is one whose entry the observer did not
-    /// witness. A transition whose pathname is not one the launcher would have
-    /// tried is some other image: the launcher resolves `PATH` itself and
-    /// finishes with `execve`, so the set is small, known and derived from the
-    /// same inputs on both sides. Neither confirms the target ran.
-    fn image_is_the_target(&self, path: Option<&super::tracer::PathSnapshot>) -> bool {
-        let Some(path) = path else { return false };
-        if !path.complete {
-            return false;
-        }
-        self.boundary
-            .target_images
-            .iter()
-            .any(|candidate| candidate.as_slice() == path.bytes.as_slice())
-    }
-
     /// Drains the tracer channel into audit events and run events.
     ///
     /// `block` is how long to wait for the first event. Every event taken from
@@ -2448,101 +2371,36 @@ impl LinuxRunning {
         let Some(tracer) = self.boundary.tracer.as_ref() else {
             return;
         };
-        let launcher = self.boundary.launcher.pid;
-        let mut events = Vec::new();
-        if !block.is_zero()
-            && let Ok(event) = tracer.events().recv_timeout(block)
-        {
-            events.push(event);
-        }
-        for _ in 0..256 {
-            match tracer.events().try_recv() {
-                Ok(event) => events.push(event),
-                Err(_) => break,
-            }
-        }
-        for event in events {
-            self.handle_tracer_event(&event, launcher);
+        for event in super::observed::drain(tracer, block) {
+            self.handle_tracer_event(&event);
         }
     }
 
-    fn handle_tracer_event(&mut self, event: &TracerEvent, launcher: libc::pid_t) {
-        match event {
-            TracerEvent::Exec {
-                pid, path, dirfd, ..
-            } => {
-                self.boundary.audit.record_exec(*pid, path.as_ref(), *dirfd);
-                // A transition with no pathname is one whose entry the
-                // observer did not witness, which is what seizing a process
-                // that is already inside its own `execve` produces. The
-                // launcher is seized while blocked in `read(2)`, so its
-                // target exec is witnessed and carries a path; requiring one
-                // here means a transition we cannot attribute never becomes
-                // exec confirmation.
-                if *pid == launcher
-                    && !self.exec_confirmed
-                    && self.image_is_the_target(path.as_ref())
-                {
-                    self.exec_confirmed = true;
-                    self.pending.push(RunEvent::ExecConfirmed);
-                }
+    fn handle_tracer_event(&mut self, event: &TracerEvent) {
+        use super::observed::Fact;
+        let target = super::observed::Target {
+            launcher: self.boundary.launcher.pid,
+            images: &self.boundary.target_images,
+        };
+        match super::observed::record(&mut self.boundary.audit, &target, event) {
+            Fact::TargetExec if !self.exec_confirmed => {
+                self.exec_confirmed = true;
+                self.pending.push(RunEvent::ExecConfirmed);
             }
-            TracerEvent::Syscall {
-                pid,
-                tid,
-                op,
-                syscall,
-                args,
-                ret,
-                ..
-            } => {
-                self.boundary
-                    .audit
-                    .record_syscall(*pid, *tid, *op, syscall, args, *ret);
+            Fact::TargetExit(status) if self.target_outcome.is_none() => {
+                self.target_outcome = Some(outcome_from_status(status));
             }
-            TracerEvent::Exit { pid, status, .. } => {
-                self.boundary.audit.record_exit(*pid, *status);
-                if *pid == launcher && self.target_outcome.is_none() {
-                    self.target_outcome = Some(outcome_from_status(*status));
-                }
+            Fact::UntracedExit { pid, status } if pid == self.boundary.bwrap_pid => {
+                self.bwrap_status = Some(status);
             }
-            TracerEvent::UntracedChildExit { pid, status } => {
-                if *pid == self.boundary.bwrap_pid {
-                    self.bwrap_status = Some(*status);
-                }
+            Fact::CoverageLost(reason) if !self.evidence_reported => {
+                self.evidence_reported = true;
+                self.pending.push(RunEvent::EvidenceLost {
+                    reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
+                });
             }
-            TracerEvent::Gap {
-                reason,
-                ops,
-                from_ns,
-                to_ns,
-                count,
-            } => {
-                self.boundary
-                    .audit
-                    .record_gap(*reason, *ops, *from_ns, *to_ns, *count);
-                // §11.4 counts a hole only where a result went missing. A gap
-                // whose operation set is empty is bookkeeping — an argument
-                // the observer could not read and the kernel rejected for the
-                // same reason, say — and stopping a strict run for it would
-                // let a tracee deny service to its own supervisor by passing
-                // pointers that cannot work.
-                if !ops.is_empty() && !self.evidence_reported {
-                    self.evidence_reported = true;
-                    self.pending.push(RunEvent::EvidenceLost {
-                        reason: format!(
-                            "the closed-set observer lost coverage: {}",
-                            reason.as_str()
-                        ),
-                    });
-                }
-            }
-            TracerEvent::Finished => self.finished = true,
-            // §11.2 keeps fork out of the public audit set, and a thread is
-            // not a process: every count this consumer keeps is per thread
-            // group, which is what the observer's `pid` already is. Neither
-            // event adds a fact the receipt states.
-            TracerEvent::Attached { .. } | TracerEvent::Fork { .. } => {}
+            Fact::Finished => self.finished = true,
+            _ => {}
         }
     }
 

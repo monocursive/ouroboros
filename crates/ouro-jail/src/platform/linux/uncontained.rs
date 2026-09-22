@@ -86,9 +86,10 @@ use super::clock::{self, boottime_ns};
 use super::exec::{self, FdMap, reap_until};
 use super::identity;
 use super::launch;
+use super::observed::{self, Fact};
 use super::platform::shared;
 use super::probe::ProbeResult;
-use super::tracer::{self, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary};
+use super::tracer::{self, Tracer, TracerConfig, TracerEvent, TracerSummary};
 use super::watch;
 
 /// The descriptor the launcher blocks reading.
@@ -1086,172 +1087,69 @@ impl Uncontained {
         }
     }
 
-    fn image_is_the_target(&self, path: Option<&tracer::PathSnapshot>) -> bool {
-        path.is_some_and(|path| {
-            path.complete
-                && self
-                    .target_images
-                    .iter()
-                    .any(|candidate| candidate.as_slice() == path.bytes.as_slice())
-        })
-    }
-
     fn pump_tracer(&mut self, block: Duration) {
         let Some(tracer) = self.tracer.as_ref() else {
             return;
         };
-        let mut events = Vec::new();
-        if !block.is_zero()
-            && let Ok(event) = tracer.events().recv_timeout(block)
-        {
-            events.push(event);
-        }
-        for _ in 0..256 {
-            match tracer.events().try_recv() {
-                Ok(event) => events.push(event),
-                Err(_) => break,
-            }
-        }
-        for event in events {
-            self.handle_tracer_event(event);
+        for event in observed::drain(tracer, block) {
+            self.handle_tracer_event(&event);
         }
     }
 
-    fn handle_tracer_event(&mut self, event: TracerEvent) {
-        match event {
-            TracerEvent::Exec {
-                pid, path, dirfd, ..
-            } => {
-                self.audit.record_exec(pid, path.as_ref(), dirfd);
-                if pid == self.pid
-                    && !self.exec_confirmed
-                    && self.image_is_the_target(path.as_ref())
-                {
-                    self.exec_confirmed = true;
-                    self.pending.push(RunEvent::ExecConfirmed);
+    fn handle_tracer_event(&mut self, event: &TracerEvent) {
+        let target = observed::Target {
+            launcher: self.pid,
+            images: &self.target_images,
+        };
+        match observed::record(&mut self.audit, &target, event) {
+            Fact::TargetExec if !self.exec_confirmed => {
+                self.exec_confirmed = true;
+                self.pending.push(RunEvent::ExecConfirmed);
+            }
+            Fact::TargetExit(status) => {
+                self.target_exit_seen = true;
+                if self.target_outcome.is_none() {
+                    self.target_outcome = Some(shared::outcome_from_status(status));
                 }
             }
-            TracerEvent::Syscall {
-                pid,
-                tid,
-                op,
-                syscall,
-                args,
-                ret,
-                ..
-            } => self.audit.record_syscall(pid, tid, op, syscall, &args, ret),
-            TracerEvent::Exit { pid, status, .. } => {
-                self.audit.record_exit(pid, status);
-                if pid == self.pid {
-                    self.target_exit_seen = true;
-                    if self.target_outcome.is_none() {
-                        self.target_outcome = Some(shared::outcome_from_status(status));
-                    }
-                }
+            // §11.4: only a hole where a result went missing stops a strict
+            // run, exactly as for the contained profiles.
+            Fact::CoverageLost(reason) if !self.evidence_reported => {
+                self.evidence_reported = true;
+                self.pending.push(RunEvent::EvidenceLost {
+                    reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
+                });
             }
-            TracerEvent::Gap {
-                reason,
-                ops,
-                from_ns,
-                to_ns,
-                count,
-            } => {
-                self.audit.record_gap(reason, ops, from_ns, to_ns, count);
-                // §11.4: only a hole where a result went missing stops a
-                // strict run, exactly as for the contained profiles.
-                if !ops.is_empty() && !self.evidence_reported {
-                    self.evidence_reported = true;
-                    self.pending.push(RunEvent::EvidenceLost {
-                        reason: format!(
-                            "the closed-set observer lost coverage: {}",
-                            reason.as_str()
-                        ),
-                    });
-                }
-            }
-            TracerEvent::Finished => self.finished = true,
-            // Every child of this subreaper is a tracee, and fork is internal
-            // bookkeeping (§11.2).
-            TracerEvent::UntracedChildExit { .. }
-            | TracerEvent::Attached { .. }
-            | TracerEvent::Fork { .. } => {}
+            Fact::Finished => self.finished = true,
+            // Every child of this subreaper is a tracee; nothing else is a
+            // fact about this attempt's lifecycle.
+            _ => {}
         }
     }
 
-    /// Stops the observer within `budget` and keeps its account, with the
-    /// gap bookkeeping of the contained profiles' `stop_observer`.
+    /// Stops the observer within `budget` and keeps its account; a late
+    /// target exit or the end still delivered counts as seen.
     fn stop_observer(&mut self, budget: Duration) {
         let Some(tracer) = self.tracer.take() else {
             return;
         };
-        let launcher = self.pid;
-        let audit = &mut self.audit;
+        let target = observed::Target {
+            launcher: self.pid,
+            images: &self.target_images,
+        };
         let exit_seen = &mut self.target_exit_seen;
         let finished = &mut self.finished;
-        let summary = tracer.finish_within_draining(budget, |event| match event {
-            TracerEvent::Exec {
-                pid, path, dirfd, ..
-            } => audit.record_exec(pid, path.as_ref(), dirfd),
-            TracerEvent::Syscall {
-                pid,
-                tid,
-                op,
-                syscall,
-                args,
-                ret,
-                ..
-            } => audit.record_syscall(pid, tid, op, syscall, &args, ret),
-            TracerEvent::Exit { pid, status, .. } => {
-                audit.record_exit(pid, status);
-                if pid == launcher {
-                    *exit_seen = true;
-                }
-            }
-            TracerEvent::Gap {
-                reason,
-                ops,
-                from_ns,
-                to_ns,
-                count,
-            } => audit.record_gap(reason, ops, from_ns, to_ns, count),
-            TracerEvent::Finished => *finished = true,
-            _ => {}
-        });
-        let recorded = |audit: &AuditWriter, reason: GapReason| {
-            audit.gaps().iter().any(|gap| gap.reason == reason.as_str())
-        };
-        if summary.loss.abandoned_tracees > 0 && !recorded(&self.audit, GapReason::TraceesAbandoned)
-        {
-            self.audit.record_gap(
-                GapReason::TraceesAbandoned,
-                OpSet::ALL,
-                0,
-                0,
-                Some(summary.loss.abandoned_tracees),
-            );
-        }
-        if !summary.unreaped_children.is_empty()
-            && !recorded(&self.audit, GapReason::UnreapedChildren)
-        {
-            self.audit.record_gap(
-                GapReason::UnreapedChildren,
-                OpSet::EMPTY,
-                0,
-                0,
-                u64::try_from(summary.unreaped_children.len()).ok(),
-            );
-        }
-        if summary.loss.lifecycle_dropped > 0
-            || (summary.loss.total() > 0 && !self.audit.has_gaps())
-        {
-            self.audit.record_gap(
-                GapReason::QueueFull,
-                OpSet::ALL,
-                0,
-                u64::try_from(crate::platform::elapsed_since_start_ns()).unwrap_or(u64::MAX),
-                None,
-            );
-        }
+        let summary = observed::stop(
+            tracer,
+            budget,
+            &mut self.audit,
+            &target,
+            |fact| match fact {
+                Fact::TargetExit(_) => *exit_seen = true,
+                Fact::Finished => *finished = true,
+                _ => {}
+            },
+        );
         self.tracer_summary = Some(summary);
     }
 

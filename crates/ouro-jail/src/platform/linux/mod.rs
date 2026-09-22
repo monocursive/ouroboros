@@ -25,6 +25,10 @@ pub mod fs;
 pub mod identity;
 #[cfg(target_os = "linux")]
 pub mod launch;
+// J3-none begin: observer event consumption shared by both boundaries
+#[cfg(target_os = "linux")]
+pub mod observed;
+// J3-none end
 #[cfg(target_os = "linux")]
 pub mod platform;
 #[cfg(target_os = "linux")]
