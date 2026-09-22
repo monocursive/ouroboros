@@ -78,3 +78,8 @@ here and in revision 8 of the specification.
 | The event queue bound was a count the child could turn into 125 MiB | §11.4: bytes |
 | Queue gaps named no class | §11.4: gaps name the dropped operations' classes |
 | A child could stop its own strict attempt with unreadable arguments | §11.4: kernel-rejected arguments are unavailable metadata, not loss |
+| A read-only open that failed produced no event and the text read as "uncounted" | §11.2: read denials are excluded, not uncounted |
+| "Protected supervisor state" for stdio was read as this attempt's directory | §8.3: the whole runtime state root; an uninspectable descriptor refuses |
+| A workspace beneath the scratch mount point left a path skeleton inside managed scratch | §9.1: recorded as the backend's side effect |
+| A proved exec failure used `outcome.kind = refused` | §13.2: `exec_error` with the errno |
+| Scratch removal at settlement was a precondition, not an obligation | §14.2: removed at settlement after verified tree death, retained otherwise |

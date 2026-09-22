@@ -847,7 +847,9 @@ by the supervisor request termination. Existing terminal fds are explicit I/O
 authority; the backend must prevent TIOCSTI-style terminal injection.
 
 Reject socket or directory stdio descriptors for contained runs, and reject
-regular-file stdio that resolves into protected supervisor state. Pipes, tty
+regular-file stdio that resolves into protected supervisor state, which is
+the whole runtime state root of §6.2, not only this attempt's directory; a
+stdio descriptor that cannot be inspected refuses rather than being skipped. Pipes, tty
 devices, `/dev/null` and operator-selected ordinary file redirects are allowed;
 receipts record descriptor kinds without exposing paths. All other fds close
 before exec, including namespace, directory, BPF, proxy-authority, state,
@@ -899,7 +901,10 @@ must also be protected when absent. If the adapter needs temporary mountpoint
 placeholders, register their exact inode identities and ownership before use;
 remove only unchanged, empty placeholders it created after tree death. Never
 remove a pre-existing Git file/directory. The evaluation must record any visible
-workspace side effect of this mechanism.
+workspace side effect of this mechanism. Recorded for the bubblewrap
+integration: a workspace whose host path lies beneath the scratch mount point
+makes the backend create that path's skeleton inside managed scratch, which
+is removed with the scratch; the workspace itself is untouched.
 
 A protected symlink cannot authorize its target. Test file-form `.git`, nested
 repositories, symlink replacement and mount replacement separately. A newly
@@ -1146,6 +1151,9 @@ success-shaped filesystem event. EROFS and other failures remain failed results
 for the original operation and do not inflate the specified denial count.
 For denied `connect`, `attempted_operation` is `net.connect`; count the single
 result under `fs.deny`, not `net`. This classification does not lose the event.
+A failed open that requested no mutation is outside the set and produces no
+event: read denials are excluded, not merely uncounted, and a consumer must
+not read the absence of an `fs.deny` as the absence of a read denial.
 Audit `decision` is always null: errno alone cannot identify DAC, LSM, seccomp
 or a particular jail policy decision.
 
@@ -1443,7 +1451,10 @@ pending until a contained boundary is established, enforced when established,
 and unprotected for every `none` receipt, even preparation/refusal. Prepared
 does not mean the target ran; `exec_observed` is false until confirmed.
 
-`enforced` is the lifecycle phase after target exec, including for a `none`
+A proved target exec failure has `outcome.kind = exec_error` with the errno
+name in its own field; `refused` is the outcome kind of every other pre-exec
+refusal. Both keep the `refused` phase. `enforced` is the lifecycle phase
+after target exec, including for a `none`
 run; its `containment` still says none. `settled` requires verified tree death,
 but can preserve unknown execution outcome if evidence was lost. If tree
 death itself is unknown, retain the last nonsettled phase and update its
@@ -1578,8 +1589,10 @@ path must not be treated as the original resource. Never signal from a stale
 PID or delete a directory solely because its name looks like an attempt id.
 
 GC may finish interrupted vendor-state/placeholder cleanup and remove an empty
-owned cgroup. Default managed scratch is removed only after verified tree death;
-operator-supplied `--scratch` and workspace directories are never deleted. The
+owned cgroup. The supervisor removes default managed scratch at settlement,
+after verified tree death, and records the result in `state_cleanup`; when
+tree death is unverified the scratch is retained and GC may remove it later.
+Operator-supplied `--scratch` and workspace directories are never deleted. The
 initial implementation preserves any result the operator needs in the explicit
 workspace, not managed scratch. It retains receipts, policy and trace; general evidence retention
 is a future ledger concern. If execution evidence was lost, cleanup completion
