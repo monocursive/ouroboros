@@ -128,10 +128,25 @@ impl NativeString {
 }
 
 impl Serialize for NativeString {
+    /// Writes the one canonical encoding for these bytes.
+    ///
+    /// The codec is symmetric: the writer normalizes rather than trusting the
+    /// variant it was handed, so bytes that happen to be valid UTF-8 always
+    /// take the string form even when they were built as
+    /// [`NativeString::Bytes`]. Without that, the same path would have two
+    /// spellings and therefore two digests, and one of them would be a form
+    /// this type's own deserializer refuses.
+    ///
+    /// A NUL is refused rather than written: canonicalization.md says a native
+    /// value cannot contain one, and a receipt is not the place to discover it.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            NativeString::Text(text) => serializer.serialize_str(text),
-            NativeString::Bytes(bytes) => {
+        let bytes = self.as_bytes();
+        if bytes.contains(&0) {
+            return Err(serde::ser::Error::custom(NativeStringError::ContainsNul));
+        }
+        match std::str::from_utf8(bytes) {
+            Ok(text) => serializer.serialize_str(text),
+            Err(_) => {
                 use serde::ser::SerializeMap as _;
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("encoding", "base64")?;
@@ -1427,10 +1442,15 @@ pub enum ControlKind {
     Prepared,
     /// Target exec was confirmed.
     ExecConfirmed,
-    /// The attempt refused before target exec.
+    /// The attempt refused before target exec. Never sent after release: once
+    /// the target has run, nothing about the attempt is a refusal (§8.1).
     Refused,
     /// Tree death was verified.
     Settled,
+    /// The terminal message after release when tree death could not be
+    /// verified. The receipt keeps its last nonsettled phase with a null
+    /// `tree_empty` and the `tree_unknown` error (§9.3, §13.2).
+    Unsettled,
 }
 
 /// One control-channel message (`ouro.jail.control/1`).

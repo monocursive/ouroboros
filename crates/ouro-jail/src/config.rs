@@ -413,7 +413,10 @@ fn parse_scaled(
     units: &[(&str, u64)],
     unit_required: bool,
 ) -> Result<u64, JailError> {
-    let trimmed = text.trim();
+    // §6.4's grammar is `<digits><unit>` with nothing around it. Trimming
+    // would quietly accept `"  1m  "`, and a narrowing file that is allowed to
+    // spell a ceiling two ways is a comparison waiting to disagree.
+    let trimmed = text;
     let mut sorted: Vec<&(&str, u64)> = units.iter().collect();
     sorted.sort_by_key(|(unit, _)| std::cmp::Reverse(unit.len()));
     let (digits, multiplier) = match sorted
@@ -451,6 +454,26 @@ fn parse_scaled(
     }
     base.checked_mul(multiplier)
         .ok_or_else(|| invalid(key_path, format!("`{text}` overflows 64 bits")))
+}
+
+/// Validates a `schema` key wherever one may appear (§6.2).
+///
+/// An absent key is accepted: `config.toml` and `ouro.toml` may omit it. Any
+/// other value refuses, because a file declaring a schema this build does not
+/// implement is not a file whose keys this build may interpret.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a value other than
+/// `ouro.jail.policy/1`.
+pub fn check_schema(key_path: &str, schema: Option<&str>) -> Result<(), JailError> {
+    match schema {
+        None => Ok(()),
+        Some(value) if value == SCHEMA_POLICY => Ok(()),
+        Some(value) => Err(invalid(
+            key_path,
+            format!("expected schema `{SCHEMA_POLICY}`, found `{value}`"),
+        )),
+    }
 }
 
 /// Parses `observation.mode`.

@@ -14,6 +14,7 @@ use std::ffi::OsString;
 use std::io::Write as _;
 use std::os::fd::{FromRawFd as _, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -25,7 +26,7 @@ use crate::config::{self, EnvSettings};
 use crate::network::NetworkMode;
 use crate::observer::CoverageSummary;
 use crate::platform::{
-    BoundaryIdentity, PlanRequest, Platform, PreparedPlan, RunEvent, Sinks, StopReason,
+    BoundaryIdentity, PlanRequest, Platform, PreparedPlan, RunEvent, Sinks, StopReason, Teardown,
 };
 use crate::policy::{
     self, Layer, LayerOrigin, LimitKey, PolicyDelta, ProfileName, ResolveInputs, Resolved,
@@ -46,6 +47,11 @@ pub const GATE_WAIT: Duration = Duration::from_secs(60);
 pub const PREPARE_BUDGET: Duration = Duration::from_secs(30);
 /// Forced-stop verification budget (§9.3).
 pub const TREE_BUDGET: Duration = Duration::from_secs(5);
+/// Maximum size of the workspace-root `ouro.toml` (§7, H3).
+///
+/// The file is written by the contained party, so it has a bound. A policy
+/// file that needs more than this is not a policy file.
+pub const PROJECT_FILE_MAX: u64 = 256 * 1024;
 
 /// Everything the supervisor needs from its process environment.
 pub struct Context {
@@ -79,6 +85,8 @@ pub struct RunReport {
     /// Evidence loss on the trace stream, reported separately from the
     /// attempt's own outcome (I05: these are separate facts).
     pub trace_error: Option<JailError>,
+    /// Control messages the consumer never took. Reported, never waited on.
+    pub control_dropped: u64,
 }
 
 /// What `explain` established, without probing anything.
@@ -175,26 +183,22 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
 
     let config_dir = state::config_dir(&ctx.env_settings, ctx.home.as_deref())?;
     let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
-    let workspace = match &args.workspace {
-        Some(path) => absolutize(&ctx.cwd, path),
-        None => ctx.cwd.clone(),
-    };
+    let workspace = canonical_root(&ctx.cwd, args.workspace.as_deref(), "--workspace")?;
+    if !workspace.is_dir() {
+        return Err(usage(
+            "--workspace",
+            format!("{} is not a directory", workspace.display()),
+        ));
+    }
 
     // 1. Operator config, then the selected profile.
     let config_path = config_dir.join("config.toml");
-    let operator = match std::fs::read_to_string(&config_path) {
-        Ok(text) => config::parse_operator_config(&text)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            config::OperatorConfig::default()
-        }
-        Err(error) => {
-            return Err(usage(
-                "config",
-                format!("{}: {error}", config_path.display()),
-            ));
-        }
+    let operator = match read_operator_file(&config_path, "config")? {
+        Some(text) => config::parse_operator_config(&text)?,
+        None => config::OperatorConfig::default(),
     };
     let operator_jail = operator.jail.clone().unwrap_or_default();
+    config::check_schema("jail.schema", operator_jail.schema.as_deref())?;
     if operator_jail.extends.is_some() {
         return Err(usage(
             "jail.extends",
@@ -324,9 +328,10 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
 
     // 5. The workspace-root `ouro.toml`, which may only narrow.
     let project_path = workspace.join("ouro.toml");
-    if let Ok(text) = std::fs::read_to_string(&project_path) {
+    if let Some(text) = read_project_file(&project_path)? {
         let project = config::parse_project_config(&text)?;
         if let Some(section) = project.jail {
+            config::check_schema("jail.schema", section.schema.as_deref())?;
             let mut delta = config::delta_from_sections(
                 "jail.",
                 &section.filesystem,
@@ -352,8 +357,12 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
 
     let scratch = match &args.scratch {
         Some(path) => ScratchRoot::Host {
-            path: crate::records::NativeString::from_bytes(os_bytes(&absolutize(&ctx.cwd, path)))
-                .map_err(|error| usage("--scratch", error.to_string()))?,
+            path: crate::records::NativeString::from_bytes(os_bytes(&canonical_root(
+                &ctx.cwd,
+                Some(path),
+                "--scratch",
+            )?))
+            .map_err(|error| usage("--scratch", error.to_string()))?,
         },
         None => ScratchRoot::Managed,
     };
@@ -405,6 +414,87 @@ fn absolutize(cwd: &Path, path: &Path) -> PathBuf {
     }
 }
 
+/// The one spelling of a trusted operator root (§6.3, M2).
+///
+/// "Equivalent semantic inputs have the same digest despite different
+/// provenance", so the root that enters the snapshot is canonical: dot
+/// segments, trailing and repeated slashes and symlinked ancestors are all
+/// resolved. Without this, `/tmp/w`, `/tmp/w/`, `/tmp/w/.` and `/private/tmp/w`
+/// are four digests for one directory, and an owner comparing a prepared
+/// receipt with its plan sees four plans.
+///
+/// The roots are trusted operator input, which is why following symlinks here
+/// is right; the untrusted-layer rule of `policy::untrusted_identities` is a
+/// different question and stays separate.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] when the path cannot be resolved and
+/// its parent does not exist either.
+fn canonical_root(cwd: &Path, path: Option<&Path>, key: &str) -> Result<PathBuf, JailError> {
+    let absolute = match path {
+        Some(path) => absolutize(cwd, path),
+        None => cwd.to_path_buf(),
+    };
+    match std::fs::canonicalize(&absolute) {
+        Ok(resolved) => Ok(resolved),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A `--scratch` that this attempt will create: canonicalize the
+            // parent so the stable part of the path is still canonical.
+            let parent = absolute
+                .parent()
+                .ok_or_else(|| usage(key, format!("{} cannot be resolved", absolute.display())))?;
+            let name = absolute
+                .file_name()
+                .ok_or_else(|| usage(key, format!("{} names no directory", absolute.display())))?;
+            let parent = std::fs::canonicalize(parent)
+                .map_err(|error| usage(key, format!("{}: {error}", parent.display())))?;
+            Ok(parent.join(name))
+        }
+        Err(error) => Err(usage(key, format!("{}: {error}", absolute.display()))),
+    }
+}
+
+/// Reads an operator-owned configuration file (§6.2).
+///
+/// `Ok(None)` means the file is absent. Every other failure is reported:
+/// silently continuing without a file the operator wrote is how a tightening
+/// disappears.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for any failure other than absence.
+fn read_operator_file(path: &Path, key: &str) -> Result<Option<String>, JailError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(usage(key, format!("{}: {error}", path.display()))),
+    }
+}
+
+/// Reads the workspace-root `ouro.toml`, which the contained party writes.
+///
+/// Three properties matter and none of them came free (§2, §7, H2/H3):
+///
+/// - only absence is "no project file". An unreadable file, a directory, a
+///   dangling symlink or an I/O error used to discard the whole narrowing
+///   layer and run with the wider policy; now each one refuses.
+/// - the read is bounded. A fifo here used to hang the supervisor forever and
+///   a symlink to `/dev/zero` used to grow it without limit.
+/// - the file must be a regular file opened without following a symlink.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] at key `jail` for every failure other
+/// than absence.
+fn read_project_file(path: &Path) -> Result<Option<String>, JailError> {
+    match state::read_capped(path, PROJECT_FILE_MAX) {
+        Ok(None) => Ok(None),
+        Ok(Some(bytes)) => match String::from_utf8(bytes) {
+            Ok(text) => Ok(Some(text)),
+            Err(_) => Err(usage("jail", format!("{} is not UTF-8", path.display()))),
+        },
+        Err(error) => Err(usage("jail", format!("{}: {error}", path.display()))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // explain and doctor
 // ---------------------------------------------------------------------------
@@ -453,13 +543,45 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
 /// Returns [`ErrorCode::UnsafeStatePath`] when the state root fails its checks.
 pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
     let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
+    // §14.2 enumerates "the registered state root". A root that fails the
+    // §6.2 checks is not this operator's registered state, so `gc` says so
+    // instead of printing a clean scan of a directory anyone can write.
+    match std::fs::symlink_metadata(&data_dir) {
+        Ok(_) => state::check_state_dir(&data_dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GcReport {
+                entries: Vec::new(),
+                dry_run: args.dry_run,
+            });
+        }
+        Err(error) => {
+            return Err(JailError::new(
+                ErrorCode::UnsafeStatePath,
+                ErrorStage::Resolving,
+                Remediation::InspectState,
+                format!("{}: {error}", data_dir.display()),
+            ));
+        }
+    }
     let attempts = data_dir.join("attempts");
     let mut entries = Vec::new();
-    let Ok(listing) = std::fs::read_dir(&attempts) else {
-        return Ok(GcReport {
-            entries,
-            dry_run: args.dry_run,
-        });
+    let listing = match std::fs::read_dir(&attempts) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GcReport {
+                entries,
+                dry_run: args.dry_run,
+            });
+        }
+        Err(error) => {
+            // §6.4: `gc` uses 1 "for failed cleanup or state access".
+            return Err(JailError::new(
+                ErrorCode::StateWriteFailed,
+                ErrorStage::Resolving,
+                Remediation::InspectState,
+                format!("{}: {error}", attempts.display()),
+            ));
+        }
     };
     for entry in listing.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -605,6 +727,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         None => None,
     };
 
+    // §8.3, H9: the handlers go on before anything exists. They used to be
+    // installed just before `release`, so INT/TERM/HUP during resolution,
+    // preparation or the 60-second gate wait killed the supervisor with the
+    // default disposition and left a prepared receipt and a blocked launcher
+    // behind.
+    let signals = signals::install();
+
     let plan = resolve_plan(ctx, &args.policy)?;
     let request = plan_request(&plan);
     let argv: Vec<Vec<u8>> = args
@@ -615,6 +744,8 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     let argv_digest = (!argv.is_empty()).then(|| crate::canonical::argv_digest(&argv));
 
     validate_channels(args)?;
+    check_state_isolation(&plan)?;
+    validate_receipt_path(args, &plan)?;
 
     if args.label_only {
         // §6.1: resolve and probe, print the label, execute nothing and copy no
@@ -638,6 +769,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             ..RunReport::default()
         });
     }
+
+    // §8.2: "Initial preparation budget: 30 seconds". It covers steps 1 to 5
+    // and is checked at each boundary, so a step that hangs on a child-created
+    // object cannot hold the attempt open indefinitely.
+    let budget = Budget::new(PREPARE_BUDGET);
 
     // Step 1: allocate and lock private state before anything else exists.
     let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
@@ -677,7 +813,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             observe: plan.resolved.snapshot.observation.mode,
             evidence: plan.resolved.snapshot.observation.evidence,
             requirements: plan.resolved.requirements.clone(),
-            grants: Vec::new(),
+            // §13.2: the receipt's grants are the explicit operator grants,
+            // not the profile baseline every `tool` run gets.
+            grants: plan.resolved.grants.clone(),
         },
         containment,
         exec_observed: false,
@@ -701,6 +839,19 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
 
     // Step 2: probe the selected mechanisms.
+    if let Err(error) = budget
+        .check(ErrorStage::Probing)
+        .and(interrupted(signals.as_ref(), ErrorStage::Probing))
+    {
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
     let capabilities = ctx.platform.probe(&request);
     if let Some(error) = first_unsatisfied(&plan.resolved.requirements, &capabilities) {
         return Ok(refuse(
@@ -741,31 +892,26 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
+    if let Some(applied) = prepared.applied() {
+        record.applied = applied;
+    }
+    merge_wall_limit(&mut record, &plan);
     journal.lifecycle("prepared");
-    let prepared_receipt = persist(
+
+    // A failure from here on has a boundary to tear down: §8.1 step 5 is the
+    // last point at which nothing has been created, and every exit after it
+    // goes through `abort`.
+    let prepared_receipt = match persist(
         &attempt_dir,
         &mut record,
         Phase::Prepared,
         args,
         &mut journal,
-    )?;
-    send_control(
-        control.as_mut(),
-        &record,
-        ControlKind::Prepared,
-        Phase::Prepared,
-        &prepared_receipt,
-        1,
-    );
-
-    // Step 6: wait for a valid external release, or release locally.
-    if let Some(fd) = args.gate_fd {
-        let expectation = GateExpectation {
-            attempt_id: attempt_id.as_str().to_owned(),
-            policy_digest: plan.resolved.digest.clone(),
-        };
-        if let Err(error) = await_release(fd, &expectation, GATE_WAIT) {
-            let _ = prepared.abort();
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let teardown = prepared.abort();
+            record_teardown(&mut record, &teardown);
             return Ok(refuse(
                 &attempt_dir,
                 &mut record,
@@ -775,10 +921,43 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 &mut journal,
             ));
         }
+    };
+    send_control(
+        control.as_mut(),
+        &record,
+        ControlKind::Prepared,
+        Phase::Prepared,
+        &prepared_receipt,
+    );
+
+    // Step 6: wait for a valid external release, or release locally.
+    let gate = match budget.check(ErrorStage::Prepared) {
+        Err(error) => Err(error),
+        Ok(()) => match args.gate_fd {
+            None => interrupted(signals.as_ref(), ErrorStage::Prepared),
+            Some(fd) => {
+                let expectation = GateExpectation {
+                    attempt_id: attempt_id.as_str().to_owned(),
+                    policy_digest: plan.resolved.digest.clone(),
+                };
+                await_release(fd, &expectation, GATE_WAIT, signals.as_ref())
+            }
+        },
+    };
+    if let Err(error) = gate {
+        let teardown = prepared.abort();
+        record_teardown(&mut record, &teardown);
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
     }
 
     // Step 7: execute the exact target argv through the blocked launcher.
-    let signals = signals::install();
     let mut running = match prepared.release() {
         Ok(running) => running,
         Err(error) => {
@@ -794,7 +973,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     };
 
     let wall_deadline = wall_deadline(&plan);
-    let mut control_seq = 2u64;
     let mut outcome_error: Option<JailError> = None;
     loop {
         if signals.as_ref().is_some_and(signals::SignalPipe::triggered) {
@@ -802,43 +980,57 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
         match running.wait(crate::platform::Deadline { at: wall_deadline }) {
             RunEvent::ExecConfirmed => {
+                // §11.2: exec is a confirmed transition, and there is exactly
+                // one per attempt. A repeat would advance the receipt revision
+                // and publish a second `exec_confirmed` for the same fact.
+                if record.exec_observed {
+                    continue;
+                }
                 record.exec_observed = true;
                 journal.lifecycle("exec_confirmed");
-                let receipt = persist(
+                match persist(
                     &attempt_dir,
                     &mut record,
                     Phase::Enforced,
                     args,
                     &mut journal,
-                )?;
-                send_control(
-                    control.as_mut(),
-                    &record,
-                    ControlKind::ExecConfirmed,
-                    Phase::Enforced,
-                    &receipt,
-                    control_seq,
-                );
-                control_seq += 1;
+                ) {
+                    Ok(receipt) => send_control(
+                        control.as_mut(),
+                        &record,
+                        ControlKind::ExecConfirmed,
+                        Phase::Enforced,
+                        &receipt,
+                    ),
+                    Err(error) => {
+                        // §7: "Failed/ambiguous persistence ... after exec it
+                        // stops the tree and leaves an incomplete receipt if
+                        // necessary." Returning here would have left the tree
+                        // running with no one waiting for it.
+                        record.errors.push(error.to_object());
+                        record
+                            .outcome
+                            .cause
+                            .get_or_insert("state_write_failed".to_owned());
+                        outcome_error = Some(error);
+                        running.request_stop(StopReason::EvidenceLoss);
+                    }
+                }
             }
+            // §6.4: "Deadline or requested termination preserves the observed
+            // code/signal and records its cause." Only the fields this event
+            // establishes are written; `cause` and `error` were set by whatever
+            // asked for the termination and must survive it.
             RunEvent::TargetExited { code } => {
-                record.outcome = Outcome {
-                    kind: OutcomeKind::Exited,
-                    code: Some(code),
-                    signal: None,
-                    cause: None,
-                    error: None,
-                };
+                record.outcome.kind = OutcomeKind::Exited;
+                record.outcome.code = Some(code);
+                record.outcome.signal = None;
                 break;
             }
             RunEvent::TargetSignaled { signal } => {
-                record.outcome = Outcome {
-                    kind: OutcomeKind::Signaled,
-                    code: None,
-                    signal: Some(signal),
-                    cause: None,
-                    error: None,
-                };
+                record.outcome.kind = OutcomeKind::Signaled;
+                record.outcome.code = None;
+                record.outcome.signal = Some(signal);
                 break;
             }
             RunEvent::ExecError { errno } => {
@@ -860,6 +1052,17 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             }
             RunEvent::WallExpired => {
                 record.outcome.cause = Some("wall_expiry".to_owned());
+                // §13.2: "Limits report hits in `applied.limits[].hit` with
+                // `outcome.cause`". The supervisor owns the wall deadline, so
+                // it is the source of this hit.
+                if let Some(wall) = record
+                    .applied
+                    .limits
+                    .iter_mut()
+                    .find(|limit| limit.key == "wall" && limit.applied)
+                {
+                    wall.hit = Some(true);
+                }
                 running.request_stop(StopReason::WallExpiry);
             }
             RunEvent::EvidenceLost { reason } => {
@@ -879,13 +1082,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 outcome_error = Some(error);
             }
             RunEvent::Unknown { reason } => {
-                record.outcome = Outcome {
-                    kind: OutcomeKind::Unknown,
-                    code: None,
-                    signal: None,
-                    cause: Some(reason),
-                    error: None,
-                };
+                record.outcome.kind = OutcomeKind::Unknown;
+                record.outcome.code = None;
+                record.outcome.signal = None;
+                record.outcome.cause.get_or_insert(reason);
                 break;
             }
         }
@@ -903,27 +1103,55 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     record.lifetime.integrity = tree.integrity;
 
     let settled = tree.tree_empty == Some(true) && record.lifetime.integrity == "verified";
+    // §13.2: "If tree death itself is unknown, retain the last nonsettled phase
+    // and update its outcome/coverage/error as unknown."
     let phase = if settled {
         Phase::Settled
     } else {
         Phase::Enforced
     };
-    let receipt = persist(&attempt_dir, &mut record, phase, args, &mut journal)?;
+    let tree_error = (!settled).then(|| {
+        let error = JailError::new(
+            ErrorCode::TreeUnknown,
+            ErrorStage::Reconciling,
+            Remediation::InspectState,
+            "tree death could not be verified within its budget".to_owned(),
+        );
+        record.errors.push(error.to_object());
+        error
+    });
+    // The tree is already waited for at this point, so a failure here is
+    // reported rather than hiding the settlement that did happen.
+    let receipt = match persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return Ok(RunReport {
+                exit_code: error.exit_code(),
+                error: Some(error),
+                receipt_path: Some(attempt_dir.receipt_path()),
+                trace_error: journal.loss.clone(),
+                control_dropped: control.as_ref().map_or(0, ControlSink::dropped),
+                ..RunReport::default()
+            });
+        }
+    };
     send_control(
         control.as_mut(),
         &record,
         if settled {
             ControlKind::Settled
         } else {
-            ControlKind::Refused
+            // §8.1: nothing after release is a refusal. An unverified tree is
+            // `unsettled`: the target did run, and saying otherwise would tell
+            // an owner that no command executed.
+            ControlKind::Unsettled
         },
         phase,
         &receipt,
-        control_seq,
     );
 
-    let exit_code = if !settled {
-        exit_code_for_unverified_tree(&mut record)
+    let exit_code = if let Some(error) = &tree_error {
+        error.exit_code()
     } else if let Some(error) = &outcome_error {
         error.exit_code()
     } else {
@@ -938,22 +1166,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     Ok(RunReport {
         exit_code,
         receipt: Some(receipt),
-        error: outcome_error,
+        error: tree_error.or(outcome_error),
         receipt_path: Some(attempt_dir.receipt_path()),
         trace_error: journal.loss.clone(),
+        control_dropped: control.as_ref().map_or(0, ControlSink::dropped),
         ..RunReport::default()
     })
-}
-
-fn exit_code_for_unverified_tree(record: &mut AttemptRecord) -> i32 {
-    let error = JailError::new(
-        ErrorCode::TreeUnknown,
-        ErrorStage::Reconciling,
-        Remediation::InspectState,
-        "tree death could not be verified within its budget".to_owned(),
-    );
-    record.errors.push(error.to_object());
-    error.exit_code()
 }
 
 fn wall_deadline(plan: &Plan) -> Option<Instant> {
@@ -981,13 +1199,277 @@ fn apply_boundary(record: &mut AttemptRecord, boundary: &BoundaryIdentity, profi
     record.process = boundary.process.clone();
 }
 
+/// Whether either path is the other or one of its ancestors.
+///
+/// Component-wise, so `/work/a` does not contain `/work/ab`.
+fn overlaps(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+/// Every root the child can see under the resolved policy (§7, §9.1).
+fn child_visible_roots(plan: &Plan) -> Vec<PathBuf> {
+    let mut roots = vec![plan.workspace.clone()];
+    let snapshot = &plan.resolved.snapshot;
+    if let ScratchRoot::Host { path } = &snapshot.roots.scratch {
+        roots.push(PathBuf::from(std::ffi::OsString::from_vec(
+            path.as_bytes().to_vec(),
+        )));
+    }
+    for reference in snapshot
+        .filesystem
+        .read_write
+        .iter()
+        .chain(&snapshot.filesystem.read_only)
+    {
+        if reference.root == crate::policy::RootToken::Host {
+            roots.push(PathBuf::from(std::ffi::OsString::from_vec(
+                reference.path.as_bytes().to_vec(),
+            )));
+        }
+    }
+    roots
+}
+
+/// Refuses a state root that the child can reach (§7, H7).
+///
+/// §6.2: runtime state is "outside every child-visible grant", and §7 asks for
+/// the same of the receipt path, "including a broad grant of the state
+/// directory's ancestor". `OURO_DATA_DIR=$WS/state` with `--rw $WS` used to
+/// run: the contained party could read every receipt and policy snapshot, and
+/// on `none` rewrite them.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeStatePath`] when the state root overlaps the
+/// workspace, the scratch root or any host grant.
+fn check_state_isolation(plan: &Plan) -> Result<(), JailError> {
+    let state_root = canonical_existing_prefix(&plan.data_dir);
+    for root in child_visible_roots(plan) {
+        let root = canonical_existing_prefix(&root);
+        if overlaps(&state_root, &root) {
+            return Err(JailError::new(
+                ErrorCode::UnsafeStatePath,
+                ErrorStage::Resolving,
+                Remediation::Configuration,
+                format!(
+                    "the state root {} overlaps the child-visible root {}",
+                    state_root.display(),
+                    root.display()
+                ),
+            )
+            .with_key_path("OURO_DATA_DIR"));
+        }
+    }
+    Ok(())
+}
+
+/// The canonical form of the deepest existing ancestor, plus the rest.
+///
+/// A path that does not exist yet still has a canonical prefix, which is what
+/// overlap comparisons need: `/var/folders/x/data` and `/private/var/...` are
+/// the same directory on macOS.
+fn canonical_existing_prefix(path: &Path) -> PathBuf {
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(&probe) {
+            let mut out = resolved;
+            for component in suffix.iter().rev() {
+                out.push(component);
+            }
+            return out;
+        }
+        let Some(name) = probe.file_name().map(std::ffi::OsStr::to_os_string) else {
+            return path.to_path_buf();
+        };
+        suffix.push(name);
+        if !probe.pop() {
+            return path.to_path_buf();
+        }
+    }
+}
+
+/// Validates `--receipt PATH` before anything is written (§7, H8).
+///
+/// The flag had no checks at all: it wrote inside the workspace, replaced a
+/// symlink, clobbered an unrelated file and could overwrite another attempt's
+/// `policy.json`. §7 requires the copy to live "outside every child-visible
+/// root", to not be "a symlink, device or existing unrelated file", and the
+/// state directory is not a place for a second copy either.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a path that fails any of those.
+fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
+    let Some(path) = &args.receipt else {
+        return Ok(());
+    };
+    let key = "--receipt";
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(usage(
+                key,
+                format!(
+                    "{} already exists; the receipt copy never replaces an existing file,                      symlink or device",
+                    path.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(usage(key, format!("{}: {error}", path.display()))),
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let parent = std::fs::canonicalize(&parent)
+        .map_err(|error| usage(key, format!("{}: {error}", parent.display())))?;
+    if !parent.is_dir() {
+        return Err(usage(
+            key,
+            format!("{} is not a directory", parent.display()),
+        ));
+    }
+    // Directional: a directory that merely *contains* the state root is an
+    // ordinary place for a copy. What §7 forbids is a copy *inside* the state
+    // root, or inside anything the child can see.
+    let state_root = canonical_existing_prefix(&plan.data_dir);
+    if parent.starts_with(&state_root) {
+        return Err(usage(
+            key,
+            format!(
+                "{} is inside the state root {}; the canonical receipt already lives there",
+                parent.display(),
+                state_root.display()
+            ),
+        ));
+    }
+    for root in child_visible_roots(plan) {
+        let root = canonical_existing_prefix(&root);
+        if parent.starts_with(&root) {
+            return Err(usage(
+                key,
+                format!(
+                    "{} is inside the child-visible root {}",
+                    parent.display(),
+                    root.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A monotonic budget with a stage-appropriate refusal (§8.2).
+struct Budget {
+    deadline: Instant,
+    total: Duration,
+}
+
+impl Budget {
+    fn new(total: Duration) -> Self {
+        Budget {
+            deadline: Instant::now() + total,
+            total,
+        }
+    }
+
+    /// Refuses when the budget is spent.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::PrepareTimeout`].
+    fn check(&self, stage: ErrorStage) -> Result<(), JailError> {
+        if Instant::now() < self.deadline {
+            return Ok(());
+        }
+        Err(JailError::new(
+            ErrorCode::PrepareTimeout,
+            stage,
+            Remediation::Retry,
+            format!(
+                "preparation did not complete within its {} second budget",
+                self.total.as_secs()
+            ),
+        ))
+    }
+}
+
+/// Refuses when a signal asked this supervisor to stop (§8.3).
+///
+/// # Errors
+/// Returns the stop refusal when the self-pipe has a byte waiting.
+fn interrupted(signals: Option<&signals::SignalPipe>, stage: ErrorStage) -> Result<(), JailError> {
+    match signals {
+        Some(pipe) if pipe.triggered() => Err(stopped_by_signal(stage)),
+        _ => Ok(()),
+    }
+}
+
+/// Records the wall ceiling the supervisor itself enforces (§13.2).
+///
+/// The supervisor owns the wall deadline on every platform, so it is the one
+/// that can say the ceiling was applied and, later, that it was hit. The
+/// mechanism name states the clock this code actually uses: `Instant` is
+/// `CLOCK_MONOTONIC`, and calling it a boot-time deadline would be a claim
+/// about suspend that portable code cannot make (§6.4, M10).
+fn merge_wall_limit(record: &mut AttemptRecord, plan: &Plan) {
+    let Some(wall) = plan.resolved.ceilings.wall.as_ref() else {
+        return;
+    };
+    if record
+        .applied
+        .limits
+        .iter()
+        .any(|limit| limit.key == "wall")
+    {
+        return;
+    }
+    record.applied.limits.push(AppliedLimit {
+        key: "wall".to_owned(),
+        requested: wall.requested.clone(),
+        required: wall.required,
+        applied: true,
+        mechanism: Some("monotonic-deadline".to_owned()),
+        scope: Some("tree".to_owned()),
+        hit: Some(false),
+    });
+}
+
+/// Records what an aborted preparation left behind (§13.2 row 4, M14).
+///
+/// "true / timestamp only after teardown verification; otherwise null / null",
+/// and an unverified boundary must not keep claiming `verified` integrity. The
+/// teardown result used to be dropped on the floor, so a refusal after setup
+/// reported the boundary as verified with a null tree and no explanation.
+fn record_teardown(record: &mut AttemptRecord, teardown: &Result<Teardown, JailError>) {
+    match teardown {
+        Ok(Teardown { tree: Some(tree) }) => {
+            record.lifetime.tree_empty = tree.tree_empty;
+            record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
+            record.lifetime.verification_scope = Some(tree.verification_scope.clone());
+            record.lifetime.integrity = tree.integrity.clone();
+        }
+        Ok(Teardown { tree: None }) => {
+            // Teardown ran but verified nothing about the tree.
+            record.lifetime.tree_empty = None;
+            record.lifetime.verified_at = None;
+        }
+        Err(error) => {
+            record.errors.push(error.to_object());
+            record.lifetime.tree_empty = None;
+            record.lifetime.verified_at = None;
+            if record.lifetime.boundary != "pending" {
+                record.lifetime.integrity = "lost".to_owned();
+            }
+        }
+    }
+}
+
 /// Writes the `refused` receipt of §13.2 and returns the report for it.
 fn refuse(
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
     error: &JailError,
     args: &RunArgs,
-    control: Option<&mut std::fs::File>,
+    control: Option<&mut ControlSink>,
     journal: &mut Journal,
 ) -> RunReport {
     record.outcome = Outcome::refused(error);
@@ -1003,7 +1485,6 @@ fn refuse(
                 ControlKind::Refused,
                 Phase::Refused,
                 &receipt,
-                1,
             );
             RunReport {
                 exit_code: error.exit_code(),
@@ -1018,6 +1499,7 @@ fn refuse(
             exit_code: write_error.exit_code(),
             error: Some(write_error),
             receipt_path: Some(attempt_dir.receipt_path()),
+            trace_error: journal.loss.clone(),
             ..RunReport::default()
         },
     }
@@ -1163,12 +1645,21 @@ impl Journal {
 /// replacement, so it is incremented after the write, never before it. The
 /// `jail.receipt` event follows the durable write, so it never references a
 /// receipt that does not exist.
-fn persist(
+/// Renders the receipt for `phase`, writes it durably and advances the
+/// revision (§13.2).
+///
+/// Public so that the revision rule is testable where it lives: §13.2 says the
+/// revision "advances on each successful replacement", and the only way to see
+/// that is to replace twice and read what landed. The advance happens after
+/// the durable write, so a failed replacement does not consume a revision.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
+pub fn write_receipt(
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
     phase: Phase,
-    args: &RunArgs,
-    journal: &mut Journal,
+    extra_copy: Option<&Path>,
 ) -> Result<Receipt, JailError> {
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
@@ -1181,10 +1672,21 @@ fn persist(
         )
     })?;
     state::replace_atomically(&attempt_dir.receipt_path(), &bytes)?;
-    if let Some(path) = &args.receipt {
+    if let Some(path) = extra_copy {
         state::replace_atomically(path, &bytes)?;
     }
     record.revision += 1;
+    Ok(receipt)
+}
+
+fn persist(
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    args: &RunArgs,
+    journal: &mut Journal,
+) -> Result<Receipt, JailError> {
+    let receipt = write_receipt(attempt_dir, record, phase, args.receipt.as_deref())?;
     journal.receipt(
         phase,
         &receipt,
@@ -1335,14 +1837,96 @@ fn fd_access(fd: RawFd) -> Option<libc::c_int> {
     Some(flags & libc::O_ACCMODE)
 }
 
-fn open_control(args: &RunArgs) -> Result<Option<std::fs::File>, JailError> {
+/// The control channel's own bounded, nonblocking writer (§8.2, §13.3).
+///
+/// The control channel had a blocking `write_all` on the raw descriptor. An
+/// owner that stopped reading parked the supervisor inside `send_control`
+/// while the child kept running, which is exactly what I07 forbids: "All
+/// buffers, probes and waits have bounds; evidence pressure cannot prevent
+/// deadline handling."
+///
+/// So control gets what the trace already had, with one addition §13.3 names:
+/// capacity reserved for the terminal message, so a queue filled by `prepared`
+/// and `exec_confirmed` still has room for `settled`, `unsettled` or
+/// `refused`. Nothing here ever blocks; an undeliverable message is counted
+/// and reported, never waited on.
+pub struct ControlSink {
+    file: std::fs::File,
+    queue: std::collections::VecDeque<u8>,
+    dropped: u64,
+    seq: u64,
+}
+
+/// Total control queue: four terminal frames' worth.
+pub const CONTROL_QUEUE_MAX: usize = 4 * crate::records::CONTROL_FRAME_MAX;
+/// Capacity inside that queue that only a terminal message may use.
+pub const CONTROL_QUEUE_RESERVE: usize = crate::records::CONTROL_FRAME_MAX;
+
+impl ControlSink {
+    /// The next message number (§8.2: monotonically increasing per attempt).
+    fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+
+    /// Queues one frame and drains what the descriptor will take right now.
+    ///
+    /// `terminal` messages may use the reserve. Returns whether the frame was
+    /// accepted into the queue at all.
+    fn send(&mut self, frame: &[u8], terminal: bool) -> bool {
+        let budget = if terminal {
+            CONTROL_QUEUE_MAX
+        } else {
+            CONTROL_QUEUE_MAX - CONTROL_QUEUE_RESERVE
+        };
+        if self.queue.len() + frame.len() > budget {
+            self.dropped += 1;
+            return false;
+        }
+        self.queue.extend(frame.iter().copied());
+        self.flush_now();
+        true
+    }
+
+    /// Writes what fits without blocking. A full pipe leaves the rest queued.
+    fn flush_now(&mut self) {
+        while !self.queue.is_empty() {
+            let chunk = self.queue.as_slices().0.to_vec();
+            match self.file.write(&chunk) {
+                Ok(0) => break,
+                Ok(written) => {
+                    self.queue.drain(..written);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                // WouldBlock or a broken pipe: the supervisor keeps going. The
+                // control channel is reporting, not an approval protocol.
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Messages that never reached the descriptor.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+}
+
+fn open_control(args: &RunArgs) -> Result<Option<ControlSink>, JailError> {
     let Some(fd) = args.control_fd else {
         return Ok(None);
     };
     // SAFETY: §6.1 requires the operator to hand this descriptor over
     // exclusively for the invocation, and `validate_channels` has established
     // that it is open for writing and distinct from every other channel.
-    Ok(Some(unsafe { std::fs::File::from_raw_fd(fd) }))
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    crate::trace::set_nonblocking(fd)?;
+    Ok(Some(ControlSink {
+        file,
+        queue: std::collections::VecDeque::new(),
+        dropped: 0,
+        seq: 0,
+    }))
 }
 
 fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, JailError> {
@@ -1353,10 +1937,14 @@ fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, J
         return Ok(trace::shared(sink));
     }
     let path = attempt_dir.trace_path();
+    // §6.2: every file this tool writes under the state root is mode 0600, and
+    // a pre-existing one is checked before it is reopened.
+    state::check_state_file(&path)?;
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
+        .mode(state::FILE_MODE)
         .open(&path)
         .map_err(|error| {
             JailError::new(
@@ -1369,13 +1957,17 @@ fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, J
     Ok(trace::shared(FileSink::new(file)))
 }
 
+/// Publishes one control message (§8.2).
+///
+/// The message number comes from the sink, so it counts every message of the
+/// attempt in order: it used to restart at 1 for a refusal, which made
+/// `prepared` and `refused` indistinguishable from two separate attempts.
 fn send_control(
-    control: Option<&mut std::fs::File>,
+    control: Option<&mut ControlSink>,
     record: &AttemptRecord,
     kind: ControlKind,
     phase: Phase,
     receipt: &Receipt,
-    seq: u64,
 ) {
     let Some(control) = control else { return };
     let digest = serde_json::to_vec(receipt)
@@ -1384,56 +1976,178 @@ fn send_control(
     let message = ControlMessage {
         schema: crate::records::SCHEMA_CONTROL.to_owned(),
         attempt_id: record.attempt_id.clone(),
-        seq,
+        seq: control.next_seq(),
         kind,
         receipt_phase: phase,
         receipt_digest: digest,
         outcome: record.outcome.clone(),
         error: record.outcome.error.clone(),
     };
+    let terminal = matches!(
+        kind,
+        ControlKind::Refused | ControlKind::Settled | ControlKind::Unsettled
+    );
     if let Ok(frame) = message.to_frame() {
-        let _ = control.write_all(&frame);
-        let _ = control.flush();
+        control.send(&frame, terminal);
     }
 }
 
 /// Waits for the owner's single release frame (§8.2).
 ///
-/// The read runs on its own thread so the 60-second budget is enforced by the
-/// supervisor rather than by the owner's willingness to write.
+/// `poll` on the gate descriptor and the signal self-pipe, with the remaining
+/// budget as the timeout. Three defects are gone with the thread that used to
+/// do this:
+///
+/// - the read is bounded. `read_to_end` had no limit, so an owner (or
+///   `/dev/zero`) could push gigabytes through a channel whose maximum frame
+///   is 1024 bytes; the cap was only consulted once the whole payload was in
+///   memory.
+/// - nothing is detached. The old reader thread outlived the refusal, holding
+///   the descriptor until the process exited.
+/// - a signal during the 60-second wait is handled. It used to kill the
+///   supervisor with the default disposition, leaving a prepared receipt and a
+///   blocked launcher behind.
 ///
 /// # Errors
-/// Returns [`ErrorCode::GateInvalid`], [`ErrorCode::GateClosed`] or
-/// [`ErrorCode::PrepareTimeout`].
-fn await_release(fd: RawFd, expected: &GateExpectation, budget: Duration) -> Result<(), JailError> {
+/// Returns [`ErrorCode::GateInvalid`], [`ErrorCode::GateClosed`],
+/// [`ErrorCode::PrepareTimeout`], or [`ErrorCode::ExecFailed`]'s sibling for a
+/// stop requested by a signal.
+pub fn await_release(
+    fd: RawFd,
+    expected: &GateExpectation,
+    budget: Duration,
+    signals: Option<&signals::SignalPipe>,
+) -> Result<(), JailError> {
     // SAFETY: §6.1 requires exclusive ownership of the gate descriptor for this
     // invocation, and `validate_channels` established that it is open for
     // reading and distinct from every other channel.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut payload = Vec::new();
-        let result = std::io::Read::read_to_end(&mut file, &mut payload);
-        let _ = sender.send(result.map(|_| payload));
-    });
-    match receiver.recv_timeout(budget) {
-        Ok(Ok(payload)) => crate::records::parse_release(&payload, expected).map(|_| ()),
-        Ok(Err(error)) => Err(JailError::new(
+    let deadline = Instant::now() + budget;
+    // One byte past the maximum, so an oversized frame is detected rather than
+    // silently truncated into something that parses.
+    let cap = crate::records::GATE_FRAME_MAX + 1;
+    let mut payload: Vec<u8> = Vec::with_capacity(cap);
+
+    loop {
+        if let Some(pipe) = signals
+            && pipe.triggered()
+        {
+            return Err(stopped_by_signal(ErrorStage::Prepared));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(JailError::new(
+                ErrorCode::PrepareTimeout,
+                ErrorStage::Prepared,
+                Remediation::Retry,
+                format!(
+                    "no release arrived within {} seconds of the prepared receipt",
+                    budget.as_secs()
+                ),
+            ));
+        }
+        let signal_fd = signals.map(signals::SignalPipe::as_raw_fd);
+        if !poll_readable(fd, signal_fd, remaining)? {
+            continue;
+        }
+        let mut chunk = [0u8; 256];
+        match std::io::Read::read(&mut file, &mut chunk) {
+            Ok(0) => return crate::records::parse_release(&payload, expected).map(|_| ()),
+            Ok(read) => {
+                payload.extend_from_slice(&chunk[..read]);
+                if payload.len() > cap {
+                    payload.truncate(cap);
+                    // The payload is already past the maximum; reading the rest
+                    // of an unbounded writer would be the defect itself.
+                    return crate::records::parse_release(&payload, expected).map(|_| ());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(JailError::new(
+                    ErrorCode::GateInvalid,
+                    ErrorStage::Prepared,
+                    Remediation::InspectState,
+                    format!("the gate could not be read: {error}"),
+                ));
+            }
+        }
+    }
+}
+
+/// The refusal for an operator signal received before the target ran.
+fn stopped_by_signal(stage: ErrorStage) -> JailError {
+    JailError::new(
+        ErrorCode::PrepareTimeout,
+        stage,
+        Remediation::Retry,
+        "the supervisor was asked to stop before the target ran".to_owned(),
+    )
+}
+
+/// Waits until `fd` (or the signal pipe) is readable, or `timeout` elapses.
+///
+/// Returns whether `fd` itself is readable; a signal wakeup returns `false` so
+/// the caller re-checks its own conditions.
+///
+/// # Errors
+/// Returns [`ErrorCode::GateInvalid`] when `poll` itself fails.
+fn poll_readable(
+    fd: RawFd,
+    signal_fd: Option<RawFd>,
+    timeout: Duration,
+) -> Result<bool, JailError> {
+    let mut fds = vec![libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    if let Some(signal_fd) = signal_fd {
+        fds.push(libc::pollfd {
+            fd: signal_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    let millis = i32::try_from(timeout.as_millis().min(1000)).unwrap_or(1000);
+    // SAFETY: `poll` reads and writes the `pollfd` array it is given, which is
+    // owned here and correctly sized by `fds.len()`. The descriptors are ones
+    // this invocation owns.
+    let ready = unsafe {
+        libc::poll(
+            fds.as_mut_ptr(),
+            u32::try_from(fds.len()).unwrap_or(1) as libc::nfds_t,
+            millis,
+        )
+    };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(JailError::new(
             ErrorCode::GateInvalid,
             ErrorStage::Prepared,
             Remediation::InspectState,
-            format!("the gate could not be read: {error}"),
-        )),
-        Err(_) => Err(JailError::new(
-            ErrorCode::PrepareTimeout,
-            ErrorStage::Prepared,
-            Remediation::Retry,
-            format!(
-                "no release arrived within {} seconds of the prepared receipt",
-                budget.as_secs()
-            ),
-        )),
+            format!("the gate could not be polled: {error}"),
+        ));
     }
+    if fds[0].revents & libc::POLLNVAL != 0 {
+        // macOS reports `POLLNVAL` for a descriptor it cannot poll, such as a
+        // character device. Spinning on that until the 60-second budget ran
+        // out burned a core for a minute; saying so refuses in milliseconds.
+        return Err(JailError::new(
+            ErrorCode::InvalidFd,
+            ErrorStage::Prepared,
+            Remediation::Configuration,
+            "the gate descriptor cannot be waited on; it must be a pipe".to_owned(),
+        ));
+    }
+    // Any event on the gate itself means a read will not block. Only the
+    // signal pipe firing returns false, so the caller re-checks its own
+    // conditions and comes back.
+    Ok(fds[0].revents != 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,6 +2237,12 @@ pub mod signals {
     }
 
     impl SignalPipe {
+        /// The read end, for `poll` alongside another descriptor.
+        #[must_use]
+        pub fn as_raw_fd(&self) -> RawFd {
+            self.read.as_raw_fd()
+        }
+
         /// Whether a signal arrived since the last call. Drains the pipe.
         #[must_use]
         pub fn triggered(&self) -> bool {

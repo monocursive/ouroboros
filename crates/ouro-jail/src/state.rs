@@ -10,6 +10,7 @@
 //! leaves the previous file untouched.
 
 use std::fs::{File, OpenOptions};
+use std::io::Read as _;
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -241,14 +242,75 @@ pub fn create_private_dir(path: &Path) -> Result<(), JailError> {
     check_state_dir(path)
 }
 
+/// This process's effective uid.
+#[must_use]
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` reads this process's effective uid. It takes no
+    // argument, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 /// Checks that `path` is a private directory this operator owns (§6.2).
 ///
 /// Rejects a symlinked state root, foreign ownership and a mode that lets
-/// anyone else read or write it.
+/// anyone else read or write it. Every ancestor is checked too: §6.2 rejects
+/// "unsafe parent replacement", and a private directory under a symlinked or
+/// world-writable parent is not private.
 ///
 /// # Errors
 /// Returns [`ErrorCode::UnsafeStatePath`] on any of those conditions.
 pub fn check_state_dir(path: &Path) -> Result<(), JailError> {
+    // The ancestor walk runs on the resolved path. `/var`, `/tmp` and `/etc`
+    // are symlinks on macOS, so refusing a symlinked ancestor outright would
+    // refuse every ordinary state root there; what "unsafe parent replacement"
+    // really means is an ancestor that someone else can write.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    check_state_ancestors(&resolved)?;
+    check_one_dir(path)
+}
+
+/// Checks every ancestor of an already-resolved `path` (§6.2).
+///
+/// An ancestor may legitimately be shared (`/`, `/home`, `/tmp`), so the rule
+/// is about who can replace an entry in it, not about who owns it: a directory
+/// writable by others without the sticky bit lets anyone swap the next
+/// component for their own, which is the "unsafe parent replacement" §6.2
+/// names. `/tmp` passes because it is sticky.
+///
+/// The caller resolves the path first, so this walks real directories.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeStatePath`] when an ancestor is not a directory
+/// or is writable by anyone other than its owner without the sticky bit.
+pub fn check_state_ancestors(path: &Path) -> Result<(), JailError> {
+    let mut ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(ancestor)
+            .map_err(|error| unsafe_path(ancestor, format!("cannot be inspected: {error}")))?;
+        if !metadata.is_dir() {
+            return Err(unsafe_path(ancestor, "is not a directory"));
+        }
+        let mode = mode_of(&metadata);
+        // `/tmp` is group- and world-writable but sticky, which is what makes
+        // it safe against replacement of entries this operator owns.
+        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+            return Err(unsafe_path(
+                ancestor,
+                format!(
+                    "has mode {mode:04o}: an ancestor writable by others without the sticky bit \
+                     permits parent replacement"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_one_dir(path: &Path) -> Result<(), JailError> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| unsafe_path(path, format!("cannot be inspected: {error}")))?;
     if metadata.file_type().is_symlink() {
@@ -257,55 +319,199 @@ pub fn check_state_dir(path: &Path) -> Result<(), JailError> {
     if !metadata.is_dir() {
         return Err(unsafe_path(path, "is not a directory"));
     }
-    check_owner_and_mode(path, &metadata, DIRECTORY_MODE)
+    check_ownership(
+        path,
+        owner_of(&metadata),
+        mode_of(&metadata),
+        DIRECTORY_MODE,
+    )
 }
 
-fn check_owner_and_mode(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-    expected: u32,
-) -> Result<(), JailError> {
+/// Checks that a state file is a private regular file this operator owns.
+///
+/// Used on descriptors this tool reopens rather than creates: `jail.lock` and a
+/// pre-existing `trace.ndjson` are as much state as the receipt is.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeStatePath`] when the file is a symlink, is not a
+/// regular file, is foreign-owned or is readable by anyone else.
+pub fn check_state_file(path: &Path) -> Result<(), JailError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(unsafe_path(path, format!("cannot be inspected: {error}"))),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(unsafe_path(path, "a state file may not be a symlink"));
+    }
+    if !metadata.is_file() {
+        return Err(unsafe_path(path, "is not a regular file"));
+    }
+    check_ownership(path, owner_of(&metadata), mode_of(&metadata), FILE_MODE)
+}
+
+fn owner_of(metadata: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::MetadataExt as _;
-    // SAFETY: `geteuid` reads this process's effective uid. It takes no
-    // argument, touches no memory and cannot fail.
-    let effective = unsafe { libc::geteuid() };
-    if metadata.uid() != effective {
+    metadata.uid()
+}
+
+fn mode_of(metadata: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.mode() & 0o7777
+}
+
+/// The ownership and mode predicate of §6.2, over plain values.
+///
+/// Taking `uid` and `mode` rather than a `std::fs::Metadata` is what makes the
+/// rule testable: a test cannot `chown` a file to another user, but it can ask
+/// this function about one.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeStatePath`] when `uid` is not this operator or
+/// `mode` grants anything outside `expected`.
+pub fn check_ownership(path: &Path, uid: u32, mode: u32, expected: u32) -> Result<(), JailError> {
+    let effective = effective_uid();
+    if uid != effective {
         return Err(unsafe_path(
             path,
-            format!(
-                "is owned by uid {} rather than this operator ({effective})",
-                metadata.uid()
-            ),
+            format!("is owned by uid {uid} rather than this operator ({effective})"),
         ));
     }
-    let mode = metadata.mode() & 0o777;
-    if mode & !expected != 0 {
+    let permissions = mode & 0o777;
+    if permissions & !expected != 0 {
         return Err(unsafe_path(
             path,
-            format!("has mode {mode:04o}; {expected:04o} or stricter is required"),
+            format!("has mode {permissions:04o}; {expected:04o} or stricter is required"),
         ));
     }
     Ok(())
+}
+
+/// Reads a file that must be a private regular file, with a size cap (§7, H3).
+///
+/// The project `ouro.toml` is child-controlled: it can be a fifo that never
+/// ends, a symlink to `/dev/zero`, or larger than memory. This opens with
+/// `O_NOFOLLOW | O_NONBLOCK`, checks with `fstat` that the descriptor really is
+/// a regular file, and reads at most `cap` bytes.
+///
+/// `Ok(None)` means the file does not exist, which is the only condition that
+/// is not an error: every other failure is the caller's to report.
+///
+/// # Errors
+/// Returns `Err(io::Error)` for a symlink, a non-regular file, an oversized
+/// file or any read failure.
+pub fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, std::io::Error> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    if metadata.len() > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("is {} bytes; the maximum is {cap}", metadata.len()),
+        ));
+    }
+    // `O_NONBLOCK` keeps the open from hanging on a fifo; the size check above
+    // bounds a regular file, and `take` bounds anything that grows under us.
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file.take(cap + 1), &mut bytes)?;
+    if bytes.len() as u64 > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("grew past the {cap} byte maximum while being read"),
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+/// The two durability primitives §7 names, as a seam.
+///
+/// "A successful rename alone is not a durable acknowledgment", so both calls
+/// have to happen and a test has to be able to see that they did. A trait is
+/// the only way to observe an `fsync` from outside the kernel.
+pub trait Durable {
+    /// Flushes the file's own data and metadata.
+    ///
+    /// # Errors
+    /// Returns the underlying `fsync` failure.
+    fn sync_file(&self, file: &File) -> std::io::Result<()>;
+
+    /// Flushes the directory entry created by the rename.
+    ///
+    /// # Errors
+    /// Returns the underlying open or `fsync` failure.
+    fn sync_dir(&self, path: &Path) -> std::io::Result<()>;
+}
+
+/// The real durability implementation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fsync;
+
+impl Durable for Fsync {
+    fn sync_file(&self, file: &File) -> std::io::Result<()> {
+        file.sync_all()
+    }
+
+    fn sync_dir(&self, path: &Path) -> std::io::Result<()> {
+        File::open(path).and_then(|handle| handle.sync_all())
+    }
 }
 
 /// A pending durable replacement: written and synced, not yet renamed.
 ///
 /// Dropping it without [`TempWrite::commit`] leaves the target file exactly as
 /// it was, which is the "either the old or the new file" property of R02.
-#[derive(Debug)]
-pub struct TempWrite {
+pub struct TempWrite<'a> {
     temp: PathBuf,
     target: PathBuf,
     committed: bool,
+    durable: &'a dyn Durable,
 }
 
-impl TempWrite {
+impl std::fmt::Debug for TempWrite<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TempWrite")
+            .field("temp", &self.temp)
+            .field("target", &self.target)
+            .field("committed", &self.committed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TempWrite<'static> {
     /// Creates the temporary file beside `target`, writes `bytes` and syncs it.
     ///
     /// # Errors
     /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be created,
     /// written or synced.
     pub fn create(target: &Path, bytes: &[u8]) -> Result<Self, JailError> {
+        Self::create_with(target, bytes, &Fsync)
+    }
+}
+
+impl<'a> TempWrite<'a> {
+    /// [`TempWrite::create`] against an explicit durability implementation.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be created,
+    /// written or synced.
+    pub fn create_with(
+        target: &Path,
+        bytes: &[u8],
+        durable: &'a dyn Durable,
+    ) -> Result<Self, JailError> {
         let directory = target.parent().ok_or_else(|| {
             write_failed(
                 target,
@@ -327,12 +533,14 @@ impl TempWrite {
             .map_err(|error| write_failed(&temp, &error))?;
         file.write_all(bytes)
             .map_err(|error| write_failed(&temp, &error))?;
-        file.sync_all()
+        durable
+            .sync_file(&file)
             .map_err(|error| write_failed(&temp, &error))?;
         Ok(TempWrite {
             temp,
             target: target.to_path_buf(),
             committed: false,
+            durable,
         })
     }
 
@@ -356,14 +564,14 @@ impl TempWrite {
             .target
             .parent()
             .expect("create() already established a parent");
-        File::open(directory)
-            .and_then(|handle| handle.sync_all())
+        self.durable
+            .sync_dir(directory)
             .map_err(|error| write_failed(directory, &error))?;
         Ok(())
     }
 }
 
-impl Drop for TempWrite {
+impl Drop for TempWrite<'_> {
     fn drop(&mut self) {
         if !self.committed {
             // Best effort: the target is intact either way, and a leftover
@@ -378,7 +586,19 @@ impl Drop for TempWrite {
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when any step fails.
 pub fn replace_atomically(target: &Path, bytes: &[u8]) -> Result<(), JailError> {
-    TempWrite::create(target, bytes)?.commit()
+    replace_atomically_with(target, bytes, &Fsync)
+}
+
+/// [`replace_atomically`] against an explicit durability implementation.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when any step fails.
+pub fn replace_atomically_with(
+    target: &Path,
+    bytes: &[u8],
+    durable: &dyn Durable,
+) -> Result<(), JailError> {
+    TempWrite::create_with(target, bytes, durable)?.commit()
 }
 
 /// An exclusive advisory lease on `jail.lock` (§7).
@@ -402,6 +622,9 @@ impl Lease {
     /// Returns [`ErrorCode::StateWriteFailed`] when the lock file cannot be
     /// created or the lock call fails for a reason other than contention.
     pub fn acquire(path: &Path) -> Result<Option<Lease>, JailError> {
+        // A lock file left with a wider mode, or replaced by a symlink, is not
+        // this operator's private state any more (§6.2).
+        check_state_file(path)?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)

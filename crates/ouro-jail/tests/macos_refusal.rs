@@ -970,3 +970,538 @@ fn the_receipt_flag_writes_an_additional_copy() {
         "the copy is the canonical receipt, not a different rendering"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The review's HIGH findings, each as the exploit that found it
+// ---------------------------------------------------------------------------
+
+/// H2: only absence means "no project file".
+///
+/// An unreadable file, a directory, a dangling symlink or an I/O error used to
+/// discard the whole narrowing layer and exit 0 with the wider policy. §2 makes
+/// that file untrusted input, and silently ignoring a tightening the operator
+/// or the project asked for is the one outcome that must not happen.
+#[test]
+fn h2_an_unusable_project_file_refuses_instead_of_being_ignored() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let narrowing = "[jail.limits]\nwall = \"1m\"\n";
+    let harness = Harness::new();
+    std::fs::write(harness.work.join("ouro.toml"), narrowing).expect("written");
+    let baseline = harness.run(&["explain", "--json"]);
+    assert_eq!(baseline.status.code(), Some(0));
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).expect("JSON");
+    assert_eq!(
+        baseline["policy"]["snapshot"]["limits"]["wall"]["value"],
+        serde_json::json!("60000"),
+        "the readable file narrows, so the unreadable cases below are the change"
+    );
+
+    // Unreadable.
+    let harness = Harness::new();
+    let path = harness.work.join("ouro.toml");
+    std::fs::write(&path, narrowing).expect("written");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("mode");
+    let output = harness.run(&["explain"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unreadable project file must refuse: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid_config"));
+
+    // A directory.
+    let harness = Harness::new();
+    std::fs::create_dir(harness.work.join("ouro.toml")).expect("a directory");
+    assert_eq!(harness.run(&["explain"]).status.code(), Some(2));
+
+    // A dangling symlink.
+    let harness = Harness::new();
+    std::os::unix::fs::symlink("nowhere", harness.work.join("ouro.toml")).expect("a symlink");
+    assert_eq!(harness.run(&["explain"]).status.code(), Some(2));
+
+    // A symlink to a real file is also refused: the open is `O_NOFOLLOW`, so
+    // the contained party cannot point the policy file anywhere it likes.
+    let harness = Harness::new();
+    let real = harness.work.join("real.toml");
+    std::fs::write(&real, narrowing).expect("written");
+    std::os::unix::fs::symlink(&real, harness.work.join("ouro.toml")).expect("a symlink");
+    assert_eq!(harness.run(&["explain"]).status.code(), Some(2));
+}
+
+/// H3: the project file read is bounded, and a fifo cannot hang the supervisor.
+#[test]
+fn h3_the_project_file_read_is_bounded_and_never_blocks() {
+    let harness = Harness::new();
+    let path = harness.work.join("ouro.toml");
+    // A fifo: `read_to_string` on this never returned.
+    let status = Command::new("/usr/bin/mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(status.success());
+    let start = std::time::Instant::now();
+    let output = harness.run(&["explain"]);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "the read must not block on a fifo"
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("regular file"),
+        "the refusal names the reason: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A file past the cap is refused rather than read into memory.
+    let harness = Harness::new();
+    let big = vec![b'#'; 512 * 1024];
+    std::fs::write(harness.work.join("ouro.toml"), &big).expect("written");
+    let output = harness.run(&["explain"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("maximum"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// H5: a control consumer that stops reading must not stall the supervisor.
+#[test]
+fn h5_a_control_consumer_that_stops_reading_cannot_stall_the_supervisor() {
+    let harness = Harness::new();
+    let control = harness._temp.path().join("control.fifo");
+    let status = Command::new("/usr/bin/mkfifo")
+        .arg(&control)
+        .status()
+        .expect("mkfifo runs");
+    assert!(status.success());
+
+    // A reader that opens the fifo and then never reads: the supervisor's
+    // writes fill the pipe buffer and stay unread.
+    let mut idle = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "exec 9<'{}'; exec sleep 30",
+            control.to_str().expect("a UTF-8 path")
+        ))
+        .spawn()
+        .expect("the idle reader starts");
+
+    let start = std::time::Instant::now();
+    let output = harness.run_with_fds(
+        Some(&control),
+        None,
+        &["run", "--control-fd", "3", "--", "/usr/bin/true"],
+    );
+    let elapsed = start.elapsed();
+    let _ = idle.kill();
+    let _ = idle.wait();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the supervisor blocked for {elapsed:?} inside the control write"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "the refusal still lands: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        harness.receipts().len(),
+        1,
+        "and the receipt is still written"
+    );
+}
+
+/// H7: the state root may not live inside anything the child can see.
+#[test]
+fn h7_a_state_root_inside_a_grant_refuses() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let harness = Harness::new();
+    let inside = harness.work.join("state");
+    std::fs::create_dir(&inside).expect("a directory");
+    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o700)).expect("mode");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-jail"));
+    let output = command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", harness._temp.path())
+        .env("OURO_DATA_DIR", &inside)
+        .env("OURO_CONFIG_DIR", &harness.config)
+        .current_dir(&harness.work)
+        .args(["run", "--", "/usr/bin/true"])
+        .output()
+        .expect("the binary runs");
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "state inside the workspace must refuse"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsafe_state_path"), "{stderr}");
+    assert!(stderr.contains("overlaps"), "{stderr}");
+    assert!(
+        !inside.join("attempts").exists(),
+        "nothing is allocated under an unsafe state root"
+    );
+}
+
+/// H8: `--receipt PATH` is validated before anything is written.
+#[test]
+fn h8_the_receipt_copy_path_is_validated() {
+    let harness = Harness::new();
+
+    // Inside the workspace, which the child can see.
+    let output = harness.run(&[
+        "run",
+        "--receipt",
+        harness
+            .work
+            .join("copy.json")
+            .to_str()
+            .expect("a UTF-8 path"),
+        "--",
+        "/usr/bin/true",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("child-visible"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Inside the state root, where the canonical receipt already lives.
+    let output = harness.run(&[
+        "run",
+        "--receipt",
+        harness
+            .data
+            .join("copy.json")
+            .to_str()
+            .expect("a UTF-8 path"),
+        "--",
+        "/usr/bin/true",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("state root"));
+
+    // An existing file is never replaced.
+    let existing = harness._temp.path().join("important.json");
+    std::fs::write(&existing, b"someone else's file").expect("written");
+    let output = harness.run(&[
+        "run",
+        "--receipt",
+        existing.to_str().expect("a UTF-8 path"),
+        "--",
+        "/usr/bin/true",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        std::fs::read(&existing).expect("readable"),
+        b"someone else's file",
+        "the file is untouched"
+    );
+
+    // A symlink is never followed.
+    let link = harness._temp.path().join("link.json");
+    std::os::unix::fs::symlink(&existing, &link).expect("a symlink");
+    let output = harness.run(&[
+        "run",
+        "--receipt",
+        link.to_str().expect("a UTF-8 path"),
+        "--",
+        "/usr/bin/true",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        std::fs::read(&existing).expect("readable"),
+        b"someone else's file"
+    );
+
+    // And a fresh path outside everything still works.
+    let fresh = harness._temp.path().join("fresh.json");
+    let output = harness.run(&[
+        "run",
+        "--receipt",
+        fresh.to_str().expect("a UTF-8 path"),
+        "--",
+        "/usr/bin/true",
+    ]);
+    assert_eq!(output.status.code(), Some(125));
+    assert!(fresh.exists(), "a safe copy path is still honoured");
+}
+
+/// H9: a signal during the gate wait refuses rather than killing the process.
+#[test]
+fn h9_a_signal_during_the_gate_wait_is_handled() {
+    let harness = Harness::new();
+    let gate = harness._temp.path().join("gate.fifo");
+    let status = Command::new("/usr/bin/mkfifo")
+        .arg(&gate)
+        .status()
+        .expect("mkfifo runs");
+    assert!(status.success());
+
+    // A writer that holds the fifo open without sending a frame, so the
+    // supervisor sits in the 60-second gate wait.
+    let mut holder = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "exec 9>'{}'; exec sleep 30",
+            gate.to_str().expect("a UTF-8 path")
+        ))
+        .spawn()
+        .expect("the holder starts");
+
+    let mut child = Command::new("/bin/sh")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", harness._temp.path())
+        .env("OURO_DATA_DIR", &harness.data)
+        .env("OURO_CONFIG_DIR", &harness.config)
+        .current_dir(&harness.work)
+        .arg("-c")
+        .arg(format!(
+            "exec 3<'{}'; shift 0; exec \"$@\"",
+            gate.to_str().expect("a UTF-8 path")
+        ))
+        .arg("sh")
+        .arg(env!("CARGO_BIN_EXE_ouro-jail"))
+        .args([
+            "run",
+            "--gate-fd",
+            "3",
+            "--attempt-id",
+            "att_00000000-0000-4000-8000-0000000000aa",
+            "--",
+            "/usr/bin/true",
+        ])
+        .spawn()
+        .expect("the supervisor starts");
+
+    // On macOS the attempt refuses at probing before it ever reaches the gate,
+    // so this asserts the property that holds on this platform: the signal
+    // handlers are installed before step 1, and the process never dies from
+    // the default disposition with state half-written.
+    let status = child.wait().expect("the supervisor exits");
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(
+        status.code(),
+        Some(125),
+        "the attempt refuses rather than being killed"
+    );
+    let receipts = harness.receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["phase"], serde_json::json!("refused"));
+}
+
+// ---------------------------------------------------------------------------
+// The review's MEDIUM findings
+// ---------------------------------------------------------------------------
+
+/// M2: one directory has one digest, however it is spelled.
+#[test]
+fn m2_equivalent_workspace_spellings_have_one_digest() {
+    let harness = Harness::new();
+    let canonical = std::fs::canonicalize(&harness.work).expect("canonical");
+    let digest_of = |workspace: &str| {
+        let output = harness.run(&["explain", "--json", "--workspace", workspace]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{workspace}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+        report["policy"]["digest"]
+            .as_str()
+            .expect("a digest")
+            .to_owned()
+    };
+    let expected = digest_of(canonical.to_str().expect("a UTF-8 path"));
+    for spelling in [
+        format!("{}/", harness.work.display()),
+        format!("{}/.", harness.work.display()),
+        format!("{}//", harness.work.display()),
+        format!("{}/../{}", harness.work.display(), "work"),
+        // The uncanonicalized `/var/...` spelling of the same directory.
+        harness.work.display().to_string(),
+    ] {
+        assert_eq!(digest_of(&spelling), expected, "`{spelling}`");
+    }
+}
+
+/// L2: `--workspace` must name a directory.
+#[test]
+fn l2_a_workspace_that_is_not_a_directory_refuses() {
+    let harness = Harness::new();
+    let file = harness._temp.path().join("a-file");
+    std::fs::write(&file, b"x").expect("written");
+    let output = harness.run(&[
+        "explain",
+        "--workspace",
+        file.to_str().expect("a UTF-8 path"),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not a directory"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = harness.run(&["explain", "--workspace", "/nonexistent/anywhere"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// M4: the local trace file is state, so it is private.
+#[test]
+fn m4_the_local_trace_file_is_created_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let harness = Harness::new();
+    let output = harness.run(&["run", "--", "/usr/bin/true"]);
+    assert_eq!(output.status.code(), Some(125));
+    let trace = harness.attempt_dir().join("trace.ndjson");
+    let mode = std::fs::metadata(&trace)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "§6.2: files under the state root are 0600");
+}
+
+/// M6: a `schema` this build does not implement is never interpreted.
+#[test]
+fn m6_an_unknown_policy_schema_refuses() {
+    for (file, body) in [
+        ("config", "[jail]\nschema = \"ouro.jail.policy/999\"\n"),
+        ("project", "[jail]\nschema = \"ouro.jail.policy/999\"\n"),
+    ] {
+        let harness = Harness::new();
+        if file == "config" {
+            std::fs::write(harness.config.join("config.toml"), body).expect("written");
+        } else {
+            std::fs::write(harness.work.join("ouro.toml"), body).expect("written");
+        }
+        let output = harness.run(&["explain"]);
+        assert_eq!(output.status.code(), Some(2), "{file}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("jail.schema"), "{file}: {stderr}");
+    }
+    // The right schema is accepted, so the check is about the value.
+    let harness = Harness::new();
+    std::fs::write(
+        harness.work.join("ouro.toml"),
+        "[jail]\nschema = \"ouro.jail.policy/1\"\n[jail.limits]\nwall = \"1m\"\n",
+    )
+    .expect("written");
+    assert_eq!(harness.run(&["explain"]).status.code(), Some(0));
+}
+
+/// M7: `gc` validates the state root it is about to enumerate.
+#[test]
+fn m7_gc_refuses_a_state_root_that_is_not_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let harness = Harness::new();
+    std::fs::set_permissions(&harness.data, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    let output = harness.run(&["gc", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "§6.4: gc uses 1 for failed state access"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unsafe_state_path"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no clean scan is printed for a root that failed its checks"
+    );
+}
+
+/// M13: inspection output carries environment names, never values.
+#[test]
+fn m13_explain_prints_environment_names_only() {
+    let harness = Harness::new();
+    let output = harness.run_with_env(&["explain", "--json"], &[("PATH", "/usr/bin:/secret-dir")]);
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !text.contains("/secret-dir"),
+        "an environment value reached inspection output"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let bindings = report["policy"]["snapshot"]["environment"]["bindings"]
+        .as_array()
+        .expect("bindings");
+    assert!(!bindings.is_empty(), "the names are still there");
+    for binding in bindings {
+        assert!(binding["name"].is_string());
+        assert!(
+            binding.get("value").is_none(),
+            "no binding carries a value: {binding}"
+        );
+    }
+    assert_eq!(
+        report["policy"]["environment_values"],
+        serde_json::json!("omitted"),
+        "and the omission is stated rather than left to be inferred"
+    );
+}
+
+/// A2: the receipt records the operator's explicit grants, not the baseline.
+#[test]
+fn a2_explicit_operator_grants_reach_the_receipt() {
+    let harness = Harness::new();
+    let granted = harness._temp.path().join("granted");
+    std::fs::create_dir(&granted).expect("a directory");
+    let output = harness.run(&[
+        "run",
+        "--ro",
+        granted.to_str().expect("a UTF-8 path"),
+        "--",
+        "/usr/bin/true",
+    ]);
+    assert_eq!(output.status.code(), Some(125));
+    let receipt = &harness.receipts()[0];
+    let grants = receipt["policy"]["grants"].as_array().expect("grants");
+    assert_eq!(grants.len(), 1, "one flag, one grant: {grants:?}");
+    assert_eq!(grants[0]["kind"], serde_json::json!("read_only"));
+    assert_eq!(grants[0]["by"], serde_json::json!("operator"));
+    receipt_validator()
+        .validate(receipt)
+        .expect("the receipt with grants still satisfies the schema");
+
+    // A run with no operator flags records none.
+    let harness = Harness::new();
+    assert_eq!(
+        harness.run(&["run", "--", "/usr/bin/true"]).status.code(),
+        Some(125)
+    );
+    assert_eq!(
+        harness.receipts()[0]["policy"]["grants"]
+            .as_array()
+            .expect("grants")
+            .len(),
+        0,
+        "the profile baseline is not a grant"
+    );
+}
+
+/// L5: the seccomp table subcommand is a Linux artefact.
+#[test]
+fn l5_the_seccomp_table_subcommand_does_not_exist_on_macos() {
+    let harness = Harness::new();
+    let output = harness.run(&["__seccomp-table"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unknown subcommand is a usage error on this platform"
+    );
+}

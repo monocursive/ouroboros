@@ -195,6 +195,18 @@ pub trait PreparedExecution {
     /// The boundary's identity, available before release.
     fn boundary(&self) -> BoundaryIdentity;
 
+    /// What this boundary actually applied, for the receipt's `applied` group.
+    ///
+    /// ADDITIVE, with a default of `None`: a platform that reports nothing
+    /// leaves the supervisor's own view in place, which today is the wall
+    /// ceiling the supervisor itself enforces. The Linux slice overrides it
+    /// when it wires the mechanisms into this trait, because §13.2 wants
+    /// "actually applied filesystem/network/syscall mechanisms and limit
+    /// scopes" and only the platform knows them.
+    fn applied(&self) -> Option<crate::records::Applied> {
+        None
+    }
+
     /// Releases the blocked launcher so it execs the target.
     ///
     /// # Errors

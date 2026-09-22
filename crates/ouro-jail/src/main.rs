@@ -167,8 +167,30 @@ fn explain(context: &Context, args: &ExplainArgs) -> ExitCode {
 /// appear here. When launch profiles land (J3) their environment values must be
 /// reduced to names before this is printed, exactly as §13.2 already requires
 /// of receipts and traces.
+/// Replaces every environment binding's value with its name.
+///
+/// §13.2 and §12: receipts and traces carry environment names, never values,
+/// and inspection output is held to the same rule. The digest is printed
+/// beside the snapshot, so an operator can still check identity without the
+/// values being pasted into a bug report.
+fn redact_environment(snapshot: &mut serde_json::Value) {
+    let Some(bindings) = snapshot
+        .get_mut("environment")
+        .and_then(|environment| environment.get_mut("bindings"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for binding in bindings.iter_mut() {
+        if let Some(object) = binding.as_object_mut() {
+            object.remove("value");
+        }
+    }
+}
+
 fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> {
-    let snapshot = report.resolved.snapshot.to_canonical_value()?;
+    let mut snapshot = report.resolved.snapshot.to_canonical_value()?;
+    redact_environment(&mut snapshot);
     let requirements: Vec<serde_json::Value> = report
         .resolved
         .requirements
@@ -190,7 +212,10 @@ fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> 
         "policy": {
             "name": report.resolved.policy_name,
             "digest": report.resolved.digest,
+            // The snapshot with environment values removed; `environment_values`
+            // says so rather than leaving a reader to infer it.
             "snapshot": snapshot,
+            "environment_values": "omitted",
         },
         "requirements": requirements,
         "capabilities": {
@@ -319,7 +344,12 @@ fn print_doctor_text(report: &DoctorReport) {
 fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     let report = match supervisor::gc(context, args) {
         Ok(report) => report,
-        Err(error) => return fail(&error),
+        // §6.4: `gc` uses 1 for failed cleanup or state access, whatever the
+        // underlying code's usual mapping would be.
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
     };
     if args.json {
         print_json(&gc_json(&report));
@@ -416,6 +446,9 @@ fn internal_subcommand() -> Option<ExitCode> {
         "__launch" => ouro_jail::platform::linux::launch::launch_main(&args[2..]),
         #[cfg(target_os = "linux")]
         "__probe-inside" => ouro_jail::platform::linux::probe::probe_inside_main(&args[2..]),
+        // The table describes a Linux ABI, so the subcommand that prints it
+        // exists only where that ABI does.
+        #[cfg(target_os = "linux")]
         "__seccomp-table" => {
             print!(
                 "{}",

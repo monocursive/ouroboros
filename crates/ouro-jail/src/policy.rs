@@ -11,6 +11,7 @@
 //! instead of widening.
 
 use std::collections::BTreeMap;
+use std::os::unix::ffi::OsStrExt as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -562,6 +563,31 @@ pub enum LayerOrigin {
 }
 
 impl LayerOrigin {
+    /// Whether this layer's entries are explicit operator grants (§13.2, A2).
+    ///
+    /// The command line and the operator's own `config.toml` add authority on
+    /// purpose. A profile file and a project file may only narrow, so nothing
+    /// they contain is a grant.
+    #[must_use]
+    pub fn is_operator_grant(&self) -> bool {
+        matches!(
+            self,
+            LayerOrigin::CommandLine | LayerOrigin::OperatorConfig(_)
+        )
+    }
+
+    /// Whether the paths in this layer are written by an untrusted party.
+    ///
+    /// §2: "The child, its descendants, its workspace and project
+    /// configuration are untrusted." §6.2 steps 1 to 4 are trusted operator
+    /// inputs; step 5, the workspace-root `ouro.toml`, is not. An untrusted
+    /// path is compared by filesystem identity, because its spelling is chosen
+    /// by whoever is being contained.
+    #[must_use]
+    pub fn is_untrusted(&self) -> bool {
+        matches!(self, LayerOrigin::ProjectConfig(_))
+    }
+
     /// A safe label for provenance records.
     #[must_use]
     pub fn label(&self) -> String {
@@ -666,6 +692,13 @@ pub struct Resolved {
     pub ceilings: Ceilings,
     /// The display name of the selected policy.
     pub policy_name: String,
+    /// The explicit operator grants, for the receipt's `policy.grants`.
+    ///
+    /// §13.2 records "grants and requirements", and north star §4.2 calls
+    /// `--rw` and `--allow-host` "separate explicit grants, recorded in the
+    /// receipt". The profile baseline is not a grant: it is what the named
+    /// profile means, and listing it would drown the operator's own additions.
+    pub grants: Vec<crate::records::Grant>,
 }
 
 // ---------------------------------------------------------------------------
@@ -699,12 +732,21 @@ struct Authority {
 }
 
 impl Authority {
-    /// The access `target` has, by longest matching ancestor.
+    /// The access `target` has.
     ///
-    /// At equal specificity denial wins over read-only, which wins over
-    /// writable (§6.3: "Denial wins over an overlapping allow. Read-only
-    /// carve-outs override writable parents.").
+    /// §6.3 has two rules and they are not the same rule. "Denial wins over an
+    /// overlapping allow" is absolute: a `deny_read` ancestor denies every
+    /// descendant, however deep and however specific the allow beneath it is.
+    /// "Read-only carve-outs override writable parents" is the longest-match
+    /// rule, and it decides only between read-only and writable.
+    ///
+    /// Making denial merely the most specific match was the defect: a project
+    /// file could re-grant a denied subtree just by naming a path one component
+    /// deeper than the denial.
     fn mode_at(&self, target: &PathRef) -> AccessMode {
+        if self.deny_read.iter().any(|entry| entry.contains(target)) {
+            return AccessMode::Denied;
+        }
         let mut best_len = 0usize;
         let mut mode = AccessMode::Absent;
         let rank = |entry: &PathRef,
@@ -715,18 +757,16 @@ impl Authority {
                 return;
             }
             let len = entry.components().len();
-            let candidate_rank = match candidate {
-                AccessMode::Denied => 3,
-                AccessMode::ReadOnly => 2,
+            // Absent < read-write < read-only, so a root-level entry still
+            // beats "nothing matched", and a carve-out still beats a writable
+            // entry at the same depth.
+            let rank_of = |mode: AccessMode| match mode {
+                AccessMode::ReadOnly => 2u8,
                 AccessMode::ReadWrite => 1,
-                AccessMode::Absent => 0,
+                AccessMode::Denied | AccessMode::Absent => 0,
             };
-            let current_rank = match mode {
-                AccessMode::Denied => 3,
-                AccessMode::ReadOnly => 2,
-                AccessMode::ReadWrite => 1,
-                AccessMode::Absent => 0,
-            };
+            let candidate_rank = rank_of(candidate);
+            let current_rank = rank_of(*mode);
             if len > *best_len || (len == *best_len && candidate_rank > current_rank) {
                 *best_len = len;
                 *mode = candidate;
@@ -738,9 +778,6 @@ impl Authority {
         for entry in &self.read_only {
             rank(entry, AccessMode::ReadOnly, &mut best_len, &mut mode);
         }
-        for entry in &self.deny_read {
-            rank(entry, AccessMode::Denied, &mut best_len, &mut mode);
-        }
         mode
     }
 }
@@ -748,6 +785,133 @@ impl Authority {
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Filesystem identity for untrusted paths (§6.3)
+// ---------------------------------------------------------------------------
+
+/// A filesystem object's identity: the pair the kernel uses, not its spelling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+fn identity_of(path: &std::path::Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some(FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+fn as_path(bytes: &[u8]) -> &std::path::Path {
+    std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// Resolves an untrusted absolute path to the identity chain of its components.
+///
+/// §6.3 requires authority to be compared "after expansion and path
+/// resolution", and §2 makes the workspace untrusted. Comparing spellings lets
+/// the contained party re-grant a denied subtree three ways: a symlink beside
+/// it, a case variation on a case-folding filesystem, and a symlink that leaves
+/// the workspace entirely. So each component is `lstat`ed without following
+/// anything:
+///
+/// - a symlink component refuses: what it names is not what it spells, and
+///   following it would be trusting the child's choice of target;
+/// - a component that does not exist, or that cannot be inspected, refuses:
+///   the subset relationship is unknown, and §6.3 says unknown refuses;
+/// - a non-directory in the middle refuses for the same reason.
+///
+/// The returned chain is every component's identity from the filesystem root
+/// down to the object itself, which is what makes "lies beneath a denied
+/// object" decidable without following a link.
+fn untrusted_identities(
+    absolute: &[u8],
+    key: &str,
+    origin: &str,
+) -> Result<Vec<FileIdentity>, JailError> {
+    let unknown = |reason: &str| {
+        refuse(
+            ErrorCode::PolicyWidening,
+            key,
+            format!(
+                "unknown subset: {origin} names a path this resolver cannot compare by \
+                 filesystem identity ({reason})"
+            ),
+        )
+    };
+
+    let components: Vec<&[u8]> = absolute
+        .split(|byte| *byte == b'/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let mut chain = Vec::with_capacity(components.len() + 1);
+    let mut walked: Vec<u8> = Vec::with_capacity(absolute.len());
+
+    let root = std::path::Path::new("/");
+    chain.push(identity_of(root).ok_or_else(|| unknown("the filesystem root is unreadable"))?);
+
+    for (index, component) in components.iter().enumerate() {
+        walked.push(b'/');
+        walked.extend_from_slice(component);
+        let path = as_path(&walked);
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(unknown("the object does not exist"));
+            }
+            Err(error) => return Err(unknown(&format!("it cannot be inspected: {error}"))),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(refuse(
+                ErrorCode::PolicyWidening,
+                key,
+                format!(
+                    "unknown subset: {origin} names a path through a symlink, whose target is \
+                     chosen by the contained party"
+                ),
+            ));
+        }
+        let last = index + 1 == components.len();
+        if !last && !metadata.is_dir() {
+            return Err(unknown("a component in the middle is not a directory"));
+        }
+        use std::os::unix::fs::MetadataExt as _;
+        chain.push(FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        });
+    }
+    Ok(chain)
+}
+
+/// The denied entry whose identity appears in `chain`, if any.
+///
+/// `chain` is the candidate's component identities, so a match anywhere in it
+/// means the candidate *is* a denied object or lies beneath one. Denied
+/// entries without a host location (a managed scratch or vendor-state root)
+/// have no identity yet and are left to the lexical rules.
+fn denied_identity<'a>(
+    tokenizer: &Tokenizer,
+    base: &'a Authority,
+    chain: &[FileIdentity],
+) -> Option<(&'a PathRef, FileIdentity)> {
+    for entry in &base.deny_read {
+        let Some(host) = tokenizer.host_path(entry) else {
+            continue;
+        };
+        let Some(identity) = identity_of(as_path(&host)) else {
+            continue;
+        };
+        if chain.contains(&identity) {
+            return Some((entry, identity));
+        }
+    }
+    None
+}
 
 fn refuse(code: ErrorCode, key: &str, message: String) -> JailError {
     JailError::new(
@@ -865,6 +1029,28 @@ impl Tokenizer {
             path: native(absolute.to_vec(), key)?,
         })
     }
+
+    /// Where a reference lives on this host, when that is known.
+    ///
+    /// A managed scratch or vendor-state reference has no host location until
+    /// the attempt directory exists, so it has no identity to compare and the
+    /// caller falls back to the lexical rules for it.
+    fn host_path(&self, reference: &PathRef) -> Option<Vec<u8>> {
+        let root = match reference.root {
+            RootToken::Host => return Some(reference.path.as_bytes().to_vec()),
+            RootToken::Workspace => self.workspace.clone(),
+            RootToken::Scratch => self.scratch.clone()?,
+            RootToken::VendorState => return None,
+        };
+        let suffix = reference.path.as_bytes();
+        if suffix.is_empty() {
+            return Some(root);
+        }
+        let mut out = root;
+        out.push(b'/');
+        out.extend_from_slice(suffix);
+        Some(out)
+    }
 }
 
 fn native(bytes: Vec<u8>, key: &str) -> Result<NativeString, JailError> {
@@ -904,12 +1090,24 @@ fn relative_suffix(root: &[u8], absolute: &[u8]) -> Option<Vec<u8>> {
 /// narrowing layer adds authority, and [`ErrorCode::InvalidConfig`] for a value
 /// this implementation cannot compare or a key a layer may not carry.
 pub fn resolve(inputs: &ResolveInputs) -> Result<Resolved, JailError> {
-    let scratch_host = match &inputs.scratch {
+    // §6.3: "Equivalent semantic inputs have the same digest despite different
+    // provenance." The roots enter the snapshot normalized, so `/srv/work`,
+    // `/srv/work/`, `/srv//work` and `/srv/other/../work` are one digest rather
+    // than four. Resolving symlinks needs a filesystem and belongs to the
+    // caller that has one; this is the part the library can always do.
+    let workspace = normalize_path(None, &inputs.workspace, "workspace")?;
+    let scratch = match &inputs.scratch {
+        ScratchRoot::Managed => ScratchRoot::Managed,
+        ScratchRoot::Host { path } => ScratchRoot::Host {
+            path: native(normalize_path(None, path.as_bytes(), "scratch")?, "scratch")?,
+        },
+    };
+    let scratch_host = match &scratch {
         ScratchRoot::Managed => None,
         ScratchRoot::Host { path } => Some(path.as_bytes().to_vec()),
     };
     let tokenizer = Tokenizer {
-        workspace: inputs.workspace.clone(),
+        workspace: workspace.clone(),
         scratch: scratch_host,
     };
 
@@ -929,12 +1127,20 @@ pub fn resolve(inputs: &ResolveInputs) -> Result<Resolved, JailError> {
         key: "profile".to_owned(),
         detail: None,
     }];
+    let mut grants: Vec<crate::records::Grant> = Vec::new();
 
     for layer in &inputs.layers {
-        apply_layer(inputs, &tokenizer, &mut authority, &mut provenance, layer)?;
+        apply_layer(
+            inputs,
+            &tokenizer,
+            &mut authority,
+            &mut provenance,
+            &mut grants,
+            layer,
+        )?;
     }
 
-    let snapshot = build_snapshot(inputs, &authority)?;
+    let snapshot = build_snapshot(inputs, &authority, workspace, scratch)?;
     let digest = snapshot.digest()?;
     let requirements = crate::capability::requirements(&snapshot);
     Ok(Resolved {
@@ -944,6 +1150,7 @@ pub fn resolve(inputs: &ResolveInputs) -> Result<Resolved, JailError> {
         requirements,
         ceilings: authority.limits,
         policy_name: inputs.policy_name.clone(),
+        grants,
     })
 }
 
@@ -952,6 +1159,7 @@ fn apply_layer(
     tokenizer: &Tokenizer,
     authority: &mut Authority,
     provenance: &mut Vec<ProvenanceEntry>,
+    grants: &mut Vec<crate::records::Grant>,
     layer: &Layer,
 ) -> Result<(), JailError> {
     let prefix = &layer.key_prefix;
@@ -977,9 +1185,33 @@ fn apply_layer(
         ("deny_read", &layer.delta.deny_read),
     ] {
         let key = format!("{prefix}filesystem.{kind}");
+        let grant = kind != "deny_read";
         for raw in entries {
             let absolute = normalize_path(layer.base_dir.as_deref(), &expand(raw), &key)?;
             let reference = tokenizer.tokenize(&absolute, &key)?;
+            // A grant written by the contained party is compared by filesystem
+            // identity. A denial is not: adding one never widens authority,
+            // whatever it names.
+            if layer.origin.is_untrusted() && grant {
+                let chain = untrusted_identities(&absolute, &key, &layer.origin.label())?;
+                if let Some(denied) = denied_identity(tokenizer, &base, &chain) {
+                    return Err(refuse(
+                        ErrorCode::PolicyWidening,
+                        &key,
+                        format!(
+                            "{} adds `{kind}` authority for an object that is {} the denied \
+                             {}, whatever its spelling",
+                            layer.origin.label(),
+                            if chain.last() == Some(&denied.1) {
+                                "exactly"
+                            } else {
+                                "beneath"
+                            },
+                            denied.0.to_display()
+                        ),
+                    ));
+                }
+            }
             if layer.narrowing {
                 let mode = base.mode_at(&reference);
                 let allowed = match kind {
@@ -1000,6 +1232,13 @@ fn apply_layer(
                         ),
                     ));
                 }
+            }
+            if layer.origin.is_operator_grant() {
+                grants.push(crate::records::Grant {
+                    kind: kind.to_owned(),
+                    value: native(absolute.clone(), &key)?,
+                    by: "operator".to_owned(),
+                });
             }
             match kind {
                 "read_write" => authority.read_write.push(reference),
@@ -1088,6 +1327,13 @@ fn apply_layer(
             refuse(code, &key, format!("{prefix}{error}"))
         })?;
         for rule in rules {
+            if layer.origin.is_operator_grant() {
+                grants.push(crate::records::Grant {
+                    kind: "allow_host".to_owned(),
+                    value: NativeString::Text(rule.canonical()),
+                    by: "operator".to_owned(),
+                });
+            }
             if layer.narrowing && !base.network_allow.iter().any(|base| base.covers(&rule)) {
                 return Err(refuse(
                     ErrorCode::PolicyWidening,
@@ -1183,8 +1429,10 @@ fn apply_layer(
 fn build_snapshot(
     inputs: &ResolveInputs,
     authority: &Authority,
+    workspace: Vec<u8>,
+    scratch: ScratchRoot,
 ) -> Result<PolicySnapshot, JailError> {
-    let workspace = native(inputs.workspace.clone(), "workspace")?;
+    let workspace = native(workspace, "workspace")?;
     let ceiling = |ceiling: &Option<Ceiling>| {
         ceiling.as_ref().map(|value| LimitCeiling {
             value: value.value.to_string(),
@@ -1214,7 +1462,7 @@ fn build_snapshot(
         platform: inputs.platform,
         roots: Roots {
             workspace,
-            scratch: inputs.scratch.clone(),
+            scratch,
             vendor_state: inputs.vendor_state,
         },
         filesystem: FilesystemSnapshot {

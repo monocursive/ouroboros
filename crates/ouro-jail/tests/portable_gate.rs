@@ -191,3 +191,59 @@ fn x02_a_non_utf8_frame_refuses() {
     payload.push(b'\n');
     expect_refusal(&payload, ErrorCode::GateInvalid, "non-UTF-8");
 }
+
+/// §8.2: "external gate wait: 60 seconds after prepared", enforced by the
+/// supervisor rather than by the owner's willingness to write.
+///
+/// The budget is a parameter so the deadline mechanism can be tested in
+/// milliseconds; the constant itself is asserted separately, so shortening the
+/// real wait would still be visible.
+#[test]
+fn x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever() {
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    let fifo = temp.path().join("gate.fifo");
+    let status = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(status.success());
+
+    // A writer that holds the fifo open and sends nothing, so the read blocks
+    // rather than seeing EOF.
+    let mut holder = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "exec 9>'{}'; exec sleep 30",
+            fifo.to_str().expect("a UTF-8 path")
+        ))
+        .spawn()
+        .expect("the holder starts");
+
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&fifo)
+        .expect("the fifo opens for reading");
+    let fd = std::os::fd::IntoRawFd::into_raw_fd(reader);
+
+    let started = Instant::now();
+    let error =
+        ouro_jail::supervisor::await_release(fd, &expectation(), Duration::from_millis(300), None)
+            .expect_err("a gate that never delivers must time out");
+    let elapsed = started.elapsed();
+    let _ = holder.kill();
+    let _ = holder.wait();
+
+    assert_eq!(error.code, ErrorCode::PrepareTimeout);
+    assert_eq!(error.exit_code(), 125);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the wait is bounded by its budget, not by the writer: {elapsed:?}"
+    );
+    assert_eq!(
+        ouro_jail::supervisor::GATE_WAIT,
+        Duration::from_secs(60),
+        "§8.2 names 60 seconds for the real wait"
+    );
+}

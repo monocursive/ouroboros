@@ -134,7 +134,7 @@ impl FileSink {
 
 impl TraceSink for FileSink {
     fn write_frame(&mut self, frame: &[u8], priority: Priority) -> Result<(), JailError> {
-        if frame.len() >= EVENT_MAX {
+        if frame.len() > EVENT_MAX {
             return Err(self.record_loss("serialized event exceeds the 64 KiB maximum"));
         }
         let needed = frame.len() as u64 + 1;
@@ -151,10 +151,13 @@ impl TraceSink for FileSink {
         let mut bytes = Vec::with_capacity(frame.len() + 1);
         bytes.extend_from_slice(frame);
         bytes.push(b'\n');
+        // The budget is charged before the write: a `write_all` that fails
+        // part-way has still consumed file space, and a cap that forgot those
+        // bytes would let a failing sink grow past 64 MiB.
+        self.written += needed;
         if let Err(error) = self.file.write_all(&bytes) {
             return Err(self.record_loss(&format!("local trace write failed: {error}")));
         }
-        self.written += needed;
         Ok(())
     }
 
@@ -258,7 +261,7 @@ impl FdSink {
 
 impl TraceSink for FdSink {
     fn write_frame(&mut self, frame: &[u8], _priority: Priority) -> Result<(), JailError> {
-        if frame.len() >= EVENT_MAX {
+        if frame.len() > EVENT_MAX {
             return Err(self.record_loss("serialized event exceeds the 64 KiB maximum"));
         }
         if self.queue.len() + frame.len() + 1 > self.queue_max {
@@ -276,10 +279,13 @@ impl TraceSink for FdSink {
 
 /// Switches `fd` to nonblocking mode.
 ///
+/// Shared with the control channel, which needs the same property for the same
+/// reason: a consumer that stops reading must not stall the supervisor.
+///
 /// # Errors
 /// Returns [`ErrorCode::InvalidFd`] when `fcntl` fails, which also detects a
 /// descriptor that is not open.
-fn set_nonblocking(fd: RawFd) -> Result<(), JailError> {
+pub fn set_nonblocking(fd: RawFd) -> Result<(), JailError> {
     let invalid = |message: String| {
         JailError::new(
             ErrorCode::InvalidFd,
@@ -320,6 +326,11 @@ mod tests {
         assert_eq!(EXTERNAL_QUEUE_MAX, 4 * 1024 * 1024);
         assert_eq!(EXTERNAL_NO_PROGRESS, Duration::from_secs(1));
         assert_eq!(EVENT_MAX, 64 * 1024);
+        assert_eq!(
+            crate::records::GATE_FRAME_MAX,
+            1024,
+            "every `maximum` in the specification is inclusive"
+        );
     }
 
     #[test]
@@ -352,7 +363,7 @@ mod tests {
         let handle = file.reopen().expect("a writable handle");
         let mut sink = FileSink::new(handle);
         let error = sink
-            .write_frame(&[b'x'; EVENT_MAX], Priority::Normal)
+            .write_frame(&[b'x'; EVENT_MAX + 1], Priority::Normal)
             .expect_err("an oversized event refuses");
         assert_eq!(error.code, ErrorCode::EvidenceLost);
         assert_eq!(sink.written(), 0);
