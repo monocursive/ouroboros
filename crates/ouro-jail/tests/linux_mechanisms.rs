@@ -730,7 +730,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
     // The observer's closed set, checked against the numbers the narrowing
     // filter really installs rather than against a second copy of the table.
     // The nineteen names are jail-v1 §11.2's list.
-    const CLOSED_SET_NAMES: [&str; 19] = [
+    const CLOSED_SET_NAMES: [&str; 22] = [
         "execve",
         "execveat",
         "open",
@@ -745,6 +745,11 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         "rmdir",
         "mkdir",
         "mkdirat",
+        // Revision 8 grew the set: a node is a directory entry, and a
+        // truncation by path is a mutation of a named file.
+        "mknod",
+        "mknodat",
+        "truncate",
         "link",
         "linkat",
         "symlink",
@@ -771,7 +776,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         "the narrowing filter does not trace exactly the closed set"
     );
     checked += expected.len();
-    assert_eq!(checked, 29 + 5 + 19);
+    assert_eq!(checked, 29 + 5 + 22);
 }
 
 // ===========================================================================

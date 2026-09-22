@@ -37,6 +37,7 @@ use crate::records::{
     ErrorCode, ErrorStage, JailError, NativeLifetime, NativeString, ObserveMode, Os,
     ProcessIdentity as RecordIdentity, ProcessRecord, Remediation, rfc3339_utc,
 };
+use crate::supervisor::TREE_BUDGET;
 
 use super::audit::AuditWriter;
 use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome};
@@ -850,12 +851,48 @@ impl Boundary {
             // SAFETY: as above.
             unsafe { libc::kill(self.bwrap_pid, libc::SIGKILL) };
         }
-        if let Some(tracer) = self.tracer.take() {
-            self.tracer_summary = Some(tracer.finish());
-        } else if let Some(mut child) = self.child.take() {
+        self.stop_observer(TREE_BUDGET);
+        if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
         self.remove_placeholders();
+    }
+
+    /// Stops the observer within `budget` and keeps its account.
+    ///
+    /// `finish_within` always returns: it interrupts the tracer thread, gives
+    /// a live tree up to `budget` to end, and on expiry kills what is left
+    /// and says how much it had to kill. Draining the channel first matters
+    /// because finishing drops the receiver with whatever is still in it.
+    fn stop_observer(&mut self, budget: Duration) {
+        let Some(tracer) = self.tracer.take() else {
+            return;
+        };
+        let summary = tracer.finish_within(budget);
+        if summary.loss.abandoned_tracees > 0 {
+            self.audit.record_gap(
+                super::tracer::GapReason::TraceesAbandoned,
+                super::tracer::OpSet::EMPTY,
+                0,
+                0,
+                Some(summary.loss.abandoned_tracees),
+            );
+        }
+        if !summary.unreaped_children.is_empty() {
+            self.audit.record_gap(
+                super::tracer::GapReason::UnreapedChildren,
+                super::tracer::OpSet::EMPTY,
+                0,
+                0,
+                u64::try_from(summary.unreaped_children.len()).ok(),
+            );
+        }
+        self.tracer_summary = Some(summary);
+    }
+
+    /// Whether the observer's own account permits a claim of tree death.
+    fn observer_verified_the_tree(&self) -> bool {
+        observer_verdict(self.tracer_summary.as_ref())
     }
 
     fn remove_placeholders(&mut self) {
@@ -881,6 +918,18 @@ impl Boundary {
         details.insert(
             "launcher_pid".to_owned(),
             Value::from(i64::from(self.launcher.pid)),
+        );
+        // Two filters are in force and they are not the same program: the
+        // baseline bubblewrap loads, recorded in `applied.syscalls`, and the
+        // observer's narrowing filter the launcher installs. The receipt names
+        // both, by the digest each of them reports for itself.
+        details.insert(
+            "narrowing_filter_digest".to_owned(),
+            if self.observe_on {
+                Value::from(super::tracer::narrowing_filter_digest())
+            } else {
+                Value::Null
+            },
         );
         for (key, value) in [
             ("pid_namespace", self.ns_ids.pid),
@@ -1223,12 +1272,24 @@ impl PreparedExecution for LinuxPrepared {
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
         let mut boundary = self.boundary;
         boundary.teardown();
+        // The target never ran, but the boundary existed, and whether its
+        // teardown was observed to complete is still a measured fact.
+        let verified = boundary.observer_verified_the_tree() && !init_alive(boundary.init_pid);
         Ok(Teardown {
-            tree: Some(TreeObservation {
-                tree_empty: Some(true),
-                verified_at: Some(SystemTime::now()),
-                verification_scope: "attempt_tree".to_owned(),
-                integrity: "verified".to_owned(),
+            tree: Some(if verified {
+                TreeObservation {
+                    tree_empty: Some(true),
+                    verified_at: Some(SystemTime::now()),
+                    verification_scope: "attempt_tree".to_owned(),
+                    integrity: "verified".to_owned(),
+                }
+            } else {
+                TreeObservation {
+                    tree_empty: None,
+                    verified_at: None,
+                    verification_scope: "attempt_tree".to_owned(),
+                    integrity: "pending".to_owned(),
+                }
             }),
         })
     }
@@ -1308,9 +1369,16 @@ impl LinuxRunning {
 
     fn handle_tracer_event(&mut self, event: &TracerEvent, launcher: libc::pid_t) {
         match event {
-            TracerEvent::Exec { pid, .. } => {
-                self.boundary.audit.record_exec(*pid);
-                if *pid == launcher && !self.exec_confirmed {
+            TracerEvent::Exec { pid, path, .. } => {
+                self.boundary.audit.record_exec(*pid, path.as_ref());
+                // A transition with no pathname is one whose entry the
+                // observer did not witness, which is what seizing a process
+                // that is already inside its own `execve` produces. The
+                // launcher is seized while blocked in `read(2)`, so its
+                // target exec is witnessed and carries a path; requiring one
+                // here means a transition we cannot attribute never becomes
+                // exec confirmation.
+                if *pid == launcher && !self.exec_confirmed && path.is_some() {
                     self.exec_confirmed = true;
                     self.pending.push(RunEvent::ExecConfirmed);
                 }
@@ -1341,14 +1409,21 @@ impl LinuxRunning {
             }
             TracerEvent::Gap {
                 reason,
+                ops,
                 from_ns,
                 to_ns,
                 count,
             } => {
                 self.boundary
                     .audit
-                    .record_gap(*reason, *from_ns, *to_ns, *count);
-                if !self.evidence_reported {
+                    .record_gap(*reason, *ops, *from_ns, *to_ns, *count);
+                // §11.4 counts a hole only where a result went missing. A gap
+                // whose operation set is empty is bookkeeping — an argument
+                // the observer could not read and the kernel rejected for the
+                // same reason, say — and stopping a strict run for it would
+                // let a tracee deny service to its own supervisor by passing
+                // pointers that cannot work.
+                if !ops.is_empty() && !self.evidence_reported {
                     self.evidence_reported = true;
                     self.pending.push(RunEvent::EvidenceLost {
                         reason: format!(
@@ -1359,6 +1434,10 @@ impl LinuxRunning {
                 }
             }
             TracerEvent::Finished => self.finished = true,
+            // §11.2 keeps fork out of the public audit set, and a thread is
+            // not a process: every count this consumer keeps is per thread
+            // group, which is what the observer's `pid` already is. Neither
+            // event adds a fact the receipt states.
             TracerEvent::Attached { .. } | TracerEvent::Fork { .. } => {}
         }
     }
@@ -1579,32 +1658,22 @@ impl RunningExecution for LinuxRunning {
     fn wait_tree(&mut self, budget: Duration) -> TreeObservation {
         let deadline = clock::Deadline::after(budget);
         let settle = clock::Deadline::after(SETTLE_GRACE.min(budget));
+        let mut natural = false;
         loop {
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
             self.pump_status();
             let tracer_done = self.boundary.tracer.is_none() || self.finished;
             if tracer_done && self.bwrap_status.is_some() && !init_alive(self.boundary.init_pid) {
-                self.boundary.remove_placeholders();
-                return TreeObservation {
-                    tree_empty: Some(true),
-                    verified_at: Some(SystemTime::now()),
-                    verification_scope: "attempt_tree".to_owned(),
-                    integrity: "verified".to_owned(),
-                };
+                natural = true;
+                break;
             }
             if settle.expired() {
                 // §9.3: target exit is itself a termination trigger.
                 self.hard_kill();
             }
             if deadline.expired() {
-                self.boundary.remove_placeholders();
-                return TreeObservation {
-                    tree_empty: None,
-                    verified_at: None,
-                    verification_scope: "attempt_tree".to_owned(),
-                    integrity: "pending".to_owned(),
-                };
+                break;
             }
             if self.boundary.tracer.is_some() {
                 self.pump_tracer(WAIT_STEP);
@@ -1612,17 +1681,43 @@ impl RunningExecution for LinuxRunning {
                 sleep_for(WAIT_STEP);
             }
         }
+
+        // Whatever the loop concluded, the observer is stopped inside what is
+        // left of the budget and its account decides. It is the only witness
+        // to whether every tracee really ended.
+        self.pump_tracer(Duration::ZERO);
+        self.boundary.stop_observer(deadline.remaining());
+        self.boundary.remove_placeholders();
+
+        let verified = natural && self.boundary.observer_verified_the_tree();
+        if verified {
+            TreeObservation {
+                tree_empty: Some(true),
+                verified_at: Some(SystemTime::now()),
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: "verified".to_owned(),
+            }
+        } else {
+            TreeObservation {
+                tree_empty: None,
+                verified_at: None,
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: "pending".to_owned(),
+            }
+        }
     }
 
     fn observer_summary(&mut self) -> Option<CoverageSummary> {
-        if let Some(tracer) = self.boundary.tracer.take() {
-            let summary = tracer.finish();
-            self.boundary.tracer_summary = Some(summary);
-        } else if let Some(mut child) = self.boundary.child.take() {
+        // `wait_tree` already stopped the observer inside its budget; this
+        // only covers a caller that skipped it.
+        self.boundary.stop_observer(TREE_BUDGET);
+        if self.boundary.tracer.is_none()
+            && let Some(mut child) = self.boundary.child.take()
+        {
             let _ = child.wait();
         }
         if self.boundary.observe_on {
-            let summary = self.boundary.tracer_summary.unwrap_or_default();
+            let summary = self.boundary.tracer_summary.clone().unwrap_or_default();
             return Some(self.boundary.audit.summary(&summary, true));
         }
         // §11.4: observation off makes every audit class unsupported with a
@@ -1633,6 +1728,23 @@ impl RunningExecution for LinuxRunning {
             self.boundary.audit.limits_class(),
         );
         Some(summary)
+    }
+}
+
+/// Whether an observer's account permits a claim that the tree died.
+///
+/// A tracee it had to kill on the way out, or a direct child whose exit status
+/// now has no route to this process, means the tree's end was not observed.
+/// §9.3: that is `tree_empty = null` and `tree_unknown`, never a claim of
+/// emptiness. With no observer there is nothing here to object.
+fn observer_verdict(summary: Option<&TracerSummary>) -> bool {
+    match summary {
+        Some(summary) => {
+            summary.loss.abandoned_tracees == 0
+                && summary.unreaped_children.is_empty()
+                && !summary.thread_panicked
+        }
+        None => true,
     }
 }
 
@@ -1713,6 +1825,38 @@ mod tests {
         let capability = capability_for("limit:wall", &[], "2026-09-22T00:00:00Z");
         assert!(capability.satisfies());
         assert_eq!(capability.mechanism.as_deref(), Some("boottime-deadline"));
+    }
+
+    #[test]
+    fn a_tracee_the_observer_had_to_kill_means_the_tree_is_unverified() {
+        // Nothing to object to when no observer ran.
+        assert!(observer_verdict(None));
+        assert!(observer_verdict(Some(&TracerSummary::default())));
+
+        let mut abandoned = TracerSummary::default();
+        abandoned.loss.abandoned_tracees = 1;
+        assert!(
+            !observer_verdict(Some(&abandoned)),
+            "a tracee killed on the way out is not an observed death"
+        );
+
+        let unreaped = TracerSummary {
+            unreaped_children: vec![4242],
+            ..TracerSummary::default()
+        };
+        assert!(
+            !observer_verdict(Some(&unreaped)),
+            "a child whose exit status has no route left is not an observed death"
+        );
+
+        let panicked = TracerSummary {
+            thread_panicked: true,
+            ..TracerSummary::default()
+        };
+        assert!(
+            !observer_verdict(Some(&panicked)),
+            "a panicked observer's counters cannot verify anything"
+        );
     }
 
     #[test]

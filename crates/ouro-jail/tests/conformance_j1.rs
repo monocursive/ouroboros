@@ -288,6 +288,21 @@ fn s11_allowed_write() {
         field(settled, "/applied/filesystem/mechanism"),
         "bubblewrap-binds"
     );
+    // Two filters are in force and the receipt names both: the baseline
+    // bubblewrap loaded, and the observer's narrowing filter the launcher
+    // installed, each by the digest it reports for itself.
+    assert_eq!(
+        field(settled, "/applied/syscalls/digest"),
+        &Value::from(
+            ouro_jail::platform::linux::seccomp::tool_baseline()
+                .expect("the baseline assembles")
+                .digest()
+        )
+    );
+    assert_eq!(
+        field(settled, "/lifetime/native/details/narrowing_filter_digest"),
+        &Value::from(ouro_jail::platform::linux::tracer::narrowing_filter_digest())
+    );
 }
 
 #[test]
@@ -378,6 +393,15 @@ fn s11_exec_descendant() {
     for event in audit_events(&run) {
         if event.get("operation").and_then(Value::as_str) == Some("proc.exec") {
             assert_eq!(field(event, "/outcome/completion"), "exec_transition");
+            // The observer witnessed the entry, so the transition names the
+            // image it established. A transition with no path is one whose
+            // entry was not seen, and exec confirmation refuses to use it.
+            assert_eq!(field(event, "/fields/path_basis"), "argument_snapshot");
+            assert_ne!(
+                field(event, "/fields/path_kind"),
+                "unavailable",
+                "an exec transition with no witnessed image: {event:#}"
+            );
         }
     }
 
@@ -488,6 +512,12 @@ fn s11_observe_off() {
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/observer/backend"), &Value::Null);
     assert_eq!(field(settled, "/observer/attached"), false);
+    // No observer, so no narrowing filter was installed and the receipt says
+    // so rather than naming one.
+    assert_eq!(
+        field(settled, "/lifetime/native/details/narrowing_filter_digest"),
+        &Value::Null
+    );
     assert_eq!(field(settled, "/containment"), "enforced");
     assert_eq!(field(settled, "/exec_observed"), true);
     assert_eq!(field(settled, "/lifetime/tree_empty"), true);
@@ -550,7 +580,7 @@ fn events_for_path<'a>(run: &'a Run, relative: &str) -> Vec<&'a Value> {
 }
 
 #[test]
-fn s11_mknod_is_covered_exactly_when_the_closed_set_traces_it() {
+fn s11_mknod_is_one_fs_create() {
     if !live() {
         return;
     }
@@ -580,28 +610,28 @@ fn s11_mknod_is_covered_exactly_when_the_closed_set_traces_it() {
         "the fixture made something other than a FIFO"
     );
 
+    // §11.2 revision 8 put `mknod`/`mknodat` in the closed set, and the
+    // filter that is installed is what settles it.
+    assert!(
+        closed_set_traces("mknodat"),
+        "the narrowing filter no longer traces mknodat"
+    );
     let named = events_for_path(&run, "fifo");
-    if closed_set_traces("mknodat") {
-        assert_eq!(
-            named.len(),
-            1,
-            "the closed set traces mknodat, so it owes exactly one event: {:?}",
-            operations(&run)
-        );
-        assert_eq!(field(named[0], "/operation"), "fs.create");
-        assert_eq!(field(named[0], "/fields/path_kind"), "workspace_relative");
-        assert_eq!(field(named[0], "/outcome/ok"), true);
-    } else {
-        assert!(
-            named.is_empty(),
-            "the closed set does not trace mknodat, so nothing may claim to have \
-             observed it: {named:?}"
-        );
-    }
+    assert_eq!(
+        named.len(),
+        1,
+        "a traced operation owes exactly one event: {:?}",
+        operations(&run)
+    );
+    assert_eq!(field(named[0], "/operation"), "fs.create");
+    assert_eq!(field(named[0], "/fields/syscall"), "mknodat");
+    assert_eq!(field(named[0], "/fields/path_kind"), "workspace_relative");
+    assert_eq!(field(named[0], "/fields/path_basis"), "argument_snapshot");
+    assert_eq!(field(named[0], "/outcome/ok"), true);
 }
 
 #[test]
-fn s11_truncate_is_covered_exactly_when_the_closed_set_traces_it() {
+fn s11_truncate_is_one_fs_write_that_says_it_truncated() {
     if !live() {
         return;
     }
@@ -630,23 +660,23 @@ fn s11_truncate_is_covered_exactly_when_the_closed_set_traces_it() {
         "the truncate did not take effect on the host"
     );
 
+    assert!(
+        closed_set_traces("truncate"),
+        "the narrowing filter no longer traces truncate"
+    );
     let named = events_for_path(&run, "shrink.txt");
-    if closed_set_traces("truncate") {
-        assert_eq!(
-            named.len(),
-            1,
-            "the closed set traces truncate, so it owes exactly one event: {:?}",
-            operations(&run)
-        );
-        assert_eq!(field(named[0], "/operation"), "fs.write");
-        assert_eq!(field(named[0], "/outcome/ok"), true);
-    } else {
-        assert!(
-            named.is_empty(),
-            "the closed set does not trace truncate, so nothing may claim to have \
-             observed it: {named:?}"
-        );
-    }
+    assert_eq!(
+        named.len(),
+        1,
+        "a traced operation owes exactly one event: {:?}",
+        operations(&run)
+    );
+    assert_eq!(field(named[0], "/operation"), "fs.write");
+    assert_eq!(field(named[0], "/fields/syscall"), "truncate");
+    // §11.2: an `fs.write` always carries its precise action, and a
+    // truncation is not an open.
+    assert_eq!(field(named[0], "/fields/action"), "truncated");
+    assert_eq!(field(named[0], "/outcome/ok"), true);
 }
 
 #[test]
@@ -691,6 +721,10 @@ fn s11_ftruncate_names_no_path_and_is_not_covered() {
     // mutation through the descriptor is not, and no event pretends otherwise.
     // This is the permanent half of the contrast: `truncate` may join the
     // closed set, `ftruncate` cannot, because it never names the object.
+    assert!(
+        !closed_set_traces("ftruncate"),
+        "ftruncate names a descriptor, not a path; it cannot be in the closed set"
+    );
     let named = events_for_path(&run, "by-descriptor.txt");
     assert_eq!(
         named.len(),
@@ -708,6 +742,156 @@ fn s11_ftruncate_names_no_path_and_is_not_covered() {
             "a descriptor-based mutation was reported as an observed operation"
         );
     }
+}
+
+/// Two hundred `openat` calls whose pathname argument points at a page with
+/// no access at all.
+///
+/// The observer cannot read the argument and the kernel rejects the call for
+/// the same reason, so there is no result to lose. §11.4 counts a hole only
+/// where a result went missing; if a tracee could manufacture loss by passing
+/// pointers that cannot work, strict evidence mode would be a denial of
+/// service against its own supervisor.
+const UNREADABLE_PATH_FIXTURE: &str = r#"
+import ctypes, errno, os
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.syscall.restype = ctypes.c_long
+PROT_NONE = 0
+MAP_PRIVATE_ANON = 0x22
+page = libc.mmap(None, 4096, PROT_NONE, MAP_PRIVATE_ANON, -1, 0)
+assert page not in (None, -1, ctypes.c_void_p(-1).value), "the page was not mapped"
+AT_FDCWD = -100
+NR_OPENAT = 257
+faults = 0
+other = 0
+for _ in range(200):
+    ctypes.set_errno(0)
+    r = libc.syscall(ctypes.c_long(NR_OPENAT), ctypes.c_long(AT_FDCWD),
+                     ctypes.c_void_p(page), ctypes.c_long(0o101), ctypes.c_long(0o600))
+    if r < 0 and ctypes.get_errno() == errno.EFAULT:
+        faults += 1
+    else:
+        other += 1
+        if r >= 0:
+            os.close(r)
+print("faults=%d" % faults)
+print("other=%d" % other)
+"#;
+
+#[test]
+fn o03_an_unreadable_argument_is_not_a_hole_in_coverage() {
+    if !live() {
+        return;
+    }
+    let validators = validators();
+    let case = case();
+    let run = case
+        .jail
+        .args(["--evidence", "strict"])
+        .target([
+            OsStr::new("/usr/bin/python3"),
+            OsStr::new("-c"),
+            OsStr::new(UNREADABLE_PATH_FIXTURE),
+        ])
+        .run()
+        .expect("the jail runs");
+
+    // The fixture really made the calls, and the kernel really refused them.
+    assert!(
+        run.stdout_text().contains("faults=200"),
+        "the fixture did not make 200 refused calls: {}",
+        run.stdout_text()
+    );
+    assert!(
+        run.stdout_text().contains("other=0"),
+        "{}",
+        run.stdout_text()
+    );
+
+    // Strict evidence did not stop the attempt, and nothing claimed a loss.
+    assert_eq!(
+        run.code(),
+        Some(0),
+        "strict evidence stopped a run that lost nothing: {}",
+        run.stderr_text()
+    );
+    let receipts = receipts_of(&run, &validators);
+    let settled = receipts.phase("settled");
+    assert_eq!(field(settled, "/outcome/kind"), "exited");
+    assert_eq!(field(settled, "/outcome/code"), 0);
+    assert_eq!(field(settled, "/lifetime/tree_empty"), true);
+    assert_eq!(
+        field(settled, "/observer/gaps").as_array().map(Vec::len),
+        Some(0),
+        "an unreadable argument was recorded as a gap"
+    );
+    for class in ["exec", "fs.write", "fs.deny", "net"] {
+        assert_eq!(
+            field(field(settled, &format!("/coverage/{class}")), "/status"),
+            "active",
+            "class {class} was degraded by a call that had nothing to observe"
+        );
+    }
+    for error in settled
+        .get("errors")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        assert_ne!(
+            error.get("code").and_then(Value::as_str),
+            Some("evidence_lost"),
+            "{error:#}"
+        );
+    }
+    assert!(
+        !run.trace_events.iter().any(|event| {
+            event.pointer("/fields/kind").and_then(Value::as_str) == Some("coverage_gap")
+        }),
+        "a coverage gap was written for a call that lost no result"
+    );
+}
+
+#[test]
+fn o02_a_thread_is_not_a_process() {
+    if !live() {
+        return;
+    }
+    let validators = validators();
+    let case = case();
+    let run = case
+        .jail
+        .target([case.fixture.as_os_str(), OsStr::new("thread")])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+
+    // The fixture really started and joined a thread.
+    let report = fixture_op(&run, "thread");
+    assert_eq!(field(&report, "/ret"), 0, "{report:#}");
+
+    // §11.2: one exec transition and one thread-group death. A worker thread
+    // is neither a process that execs nor a process that exits, and the
+    // observer's fork bookkeeping never becomes a public event.
+    let ops = operations(&run);
+    assert_eq!(
+        ops.iter().filter(|op| *op == "proc.exec").count(),
+        1,
+        "{ops:?}"
+    );
+    assert_eq!(
+        ops.iter().filter(|op| *op == "proc.exit").count(),
+        1,
+        "a thread was counted as a process ending: {ops:?}"
+    );
+    let receipts = receipts_of(&run, &validators);
+    assert_eq!(
+        field(receipts.phase("settled"), "/coverage/exec/observed_count")
+            .as_u64()
+            .unwrap_or(0),
+        2
+    );
 }
 
 // ===========================================================================

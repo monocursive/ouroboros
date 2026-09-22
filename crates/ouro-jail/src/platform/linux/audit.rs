@@ -17,7 +17,7 @@ use crate::records::{
 };
 use crate::trace::{Priority, SharedTrace};
 
-use super::tracer::{Args, ClosedOp, GapReason, PathSnapshot, TracerSummary};
+use super::tracer::{Args, ClosedOp, GapReason, OpSet, PathSnapshot, TracerSummary};
 
 /// `O_CREAT` on Linux.
 const O_CREAT: u64 = 0o100;
@@ -163,11 +163,15 @@ impl AuditWriter {
             );
         } else if operation == "fs.write" {
             // §11.2: a field named `fs.write` always carries its precise
-            // action, so a consumer cannot present it as a content diff.
-            fields.insert(
-                "action".to_owned(),
-                Value::from("opened_for_mutation".to_owned()),
-            );
+            // action, so a consumer cannot present it as a content diff. An
+            // open says it was opened for mutation; a `truncate` says the
+            // length was set, which is a different fact about the same class.
+            let action = if op == ClosedOp::Truncate {
+                "truncated"
+            } else {
+                "opened_for_mutation"
+            };
+            fields.insert("action".to_owned(), Value::from(action.to_owned()));
         }
         if op == ClosedOp::Open && args.flags.is_none() {
             // The create/write distinction could not be made, so the weaker
@@ -208,7 +212,12 @@ impl AuditWriter {
     }
 
     /// A confirmed exec transition (`PTRACE_EVENT_EXEC`).
-    pub fn record_exec(&mut self, pid: libc::pid_t) {
+    ///
+    /// `image` is the pathname argument of the `execve` that produced the
+    /// transition, when the observer witnessed that entry. `None` means it
+    /// did not, and the event says so rather than naming an image it never
+    /// saw.
+    pub fn record_exec(&mut self, pid: libc::pid_t, image: Option<&PathSnapshot>) {
         let mut fields = Map::new();
         fields.insert("pid".to_owned(), Value::from(i64::from(pid)));
         // §11.3: a descendant's argv is only digested when every byte was
@@ -218,6 +227,11 @@ impl AuditWriter {
             "argv_digest_reason".to_owned(),
             Value::from("descendant_argv_not_captured".to_owned()),
         );
+        fields.insert(
+            "path_basis".to_owned(),
+            Value::from("argument_snapshot".to_owned()),
+        );
+        self.describe_path(&mut fields, "path", image, None);
         let outcome = EventOutcome {
             ok: Some(true),
             return_value: None,
@@ -297,8 +311,19 @@ impl AuditWriter {
     }
 
     /// A hole in coverage. The affected classes are named explicitly (§11.4).
-    pub fn record_gap(&mut self, reason: GapReason, from_ns: u64, to_ns: u64, count: Option<u64>) {
-        let classes = classes_for(reason);
+    ///
+    /// `ops` is the observer's own account of which closed-set operations the
+    /// hole swallowed. An empty set means the loss was bookkeeping rather than
+    /// a result, and degrades nothing.
+    pub fn record_gap(
+        &mut self,
+        reason: GapReason,
+        ops: OpSet,
+        from_ns: u64,
+        to_ns: u64,
+        count: Option<u64>,
+    ) {
+        let classes = classes_for(ops);
         for class in &classes {
             self.degraded.insert(*class);
         }
@@ -517,9 +542,13 @@ fn base_operation(op: ClosedOp, flags: Option<u64>) -> &'static str {
                 "fs.write"
             }
         }
+        // §11.2 revision 8: a truncation by path is a mutation of an
+        // existing file, so it is `fs.write` with its own action. `ftruncate`
+        // names a descriptor rather than a path and stays outside the set.
+        ClosedOp::Truncate => "fs.write",
         ClosedOp::Rename => "fs.rename",
         ClosedOp::Unlink | ClosedOp::Rmdir => "fs.unlink",
-        ClosedOp::Mkdir | ClosedOp::Link | ClosedOp::Symlink => "fs.create",
+        ClosedOp::Mkdir | ClosedOp::Mknod | ClosedOp::Link | ClosedOp::Symlink => "fs.create",
         ClosedOp::Connect => "net.connect",
     }
 }
@@ -534,20 +563,20 @@ fn class_of(operation: &str) -> CoverageClass {
     }
 }
 
-/// The classes a gap of this kind affects.
-fn classes_for(reason: GapReason) -> Vec<CoverageClass> {
-    match reason {
-        GapReason::FinalStatusUnknown => vec![CoverageClass::Exec],
-        GapReason::PathUnreadable | GapReason::FlagsUnavailable => {
-            vec![CoverageClass::FsWrite, CoverageClass::FsDeny]
-        }
-        _ => vec![
-            CoverageClass::Exec,
-            CoverageClass::FsWrite,
-            CoverageClass::FsDeny,
-            CoverageClass::Net,
-        ],
+/// The classes a gap affects, from the operations it swallowed.
+///
+/// §11.4: "A gap names the affected classes explicitly". The observer knows
+/// which operations were lost, so the consumer degrades exactly the classes
+/// those operations are counted under. A lost result could also have been a
+/// denial, which is a different class from the operation's own, so both are
+/// named; nothing else is.
+fn classes_for(ops: OpSet) -> Vec<CoverageClass> {
+    let mut classes: BTreeSet<CoverageClass> = BTreeSet::new();
+    for op in ops.iter() {
+        classes.insert(class_of(base_operation(op, None)));
+        classes.insert(CoverageClass::FsDeny);
     }
+    classes.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -657,16 +686,34 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_names_the_classes_it_affects() {
+    fn a_gap_degrades_only_the_classes_its_own_operations_belong_to() {
+        // A lost exec result is an exec-class hole; it says nothing about
+        // whether a filesystem or network result was also lost.
         assert_eq!(
-            classes_for(GapReason::FinalStatusUnknown),
-            vec![CoverageClass::Exec]
+            classes_for(OpSet::of(ClosedOp::Exec)),
+            vec![CoverageClass::Exec, CoverageClass::FsDeny]
         );
         assert_eq!(
-            classes_for(GapReason::PathUnreadable),
+            classes_for(OpSet::of(ClosedOp::Connect)),
+            vec![CoverageClass::FsDeny, CoverageClass::Net]
+        );
+        assert_eq!(
+            classes_for(OpSet::of(ClosedOp::Truncate)),
             vec![CoverageClass::FsWrite, CoverageClass::FsDeny]
         );
-        assert_eq!(classes_for(GapReason::QueueFull).len(), 4);
+        // A gap that swallowed no result degrades nothing.
+        assert!(classes_for(OpSet::EMPTY).is_empty());
+    }
+
+    #[test]
+    fn the_two_operations_revision_eight_added_are_classified() {
+        assert_eq!(base_operation(ClosedOp::Mknod, None), "fs.create");
+        assert_eq!(base_operation(ClosedOp::Truncate, None), "fs.write");
+        assert_eq!(
+            base_operation(ClosedOp::Truncate, None),
+            base_operation(ClosedOp::Open, Some(1)),
+            "both are mutations of an existing file; their actions differ"
+        );
     }
 
     #[test]
@@ -685,13 +732,22 @@ mod tests {
             3,
         );
         assert_eq!(writer.count(CoverageClass::FsWrite), 1);
-        writer.record_gap(GapReason::QueueFull, 1, 2, Some(4));
+        writer.record_gap(
+            GapReason::QueueFull,
+            OpSet::of(ClosedOp::Open),
+            1,
+            2,
+            Some(4),
+        );
         let summary = writer.summary(&TracerSummary::default(), true);
         let coverage = summary.to_coverage();
         assert_eq!(coverage.fs_write.status, SourceStatus::Degraded);
         assert_eq!(coverage.fs_write.observed_count, None);
         assert_eq!(coverage.fs_write.gaps.len(), 1);
         assert_eq!(coverage.fs_write.gaps[0].lost_count, Some(4));
+        // The classes that gap did not touch keep their counts.
+        assert_eq!(coverage.exec.status, SourceStatus::Active);
+        assert_eq!(coverage.net.status, SourceStatus::Active);
     }
 
     #[test]
@@ -719,7 +775,7 @@ mod tests {
             &args,
             -i64::from(libc::EACCES),
         );
-        writer.record_exec(10);
+        writer.record_exec(10, Some(&snap("/work/space/tool")));
         writer.record_exit(10, 0);
         assert_eq!(
             writer.count(CoverageClass::FsWrite),
@@ -728,6 +784,23 @@ mod tests {
         );
         assert_eq!(writer.count(CoverageClass::FsDeny), 1);
         assert_eq!(writer.count(CoverageClass::Exec), 2);
+    }
+
+    #[test]
+    fn a_truncation_by_path_says_which_mutation_it_was() {
+        let mut writer = writer();
+        writer.record_syscall(
+            10,
+            10,
+            ClosedOp::Truncate,
+            "truncate",
+            &Args {
+                path: Some(snap("/work/space/a")),
+                ..Args::default()
+            },
+            0,
+        );
+        assert_eq!(writer.count(CoverageClass::FsWrite), 1);
     }
 
     #[test]
