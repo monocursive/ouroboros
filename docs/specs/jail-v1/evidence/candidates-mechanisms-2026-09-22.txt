@@ -1,0 +1,114 @@
+collected_at: 2026-09-22T03:56:48Z; mechanism notes from the candidates' own documentation at the pinned tags, not measurements
+=== anthropics/sandbox-runtime v0.0.77: README sections mentioning mechanisms
+5:`srt` uses native OS sandboxing primitives (`sandbox-exec` on macOS, `bubblewrap` on Linux) and proxy-based network filtering. It can be used to sandbox the behaviour of agents, local MCP servers, bash commands and arbitrary processes.
+47:- **Unix socket restrictions**: Control access to local IPC sockets
+107:- **macOS**: Uses `sandbox-exec` with dynamically generated [Seatbelt profiles](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf)
+108:- **Linux**: Uses [bubblewrap](https://github.com/containers/bubblewrap) for containerization with network namespace isolation
+122:**Network Isolation** (allow-only pattern): By default, all network access is denied. You must explicitly allow domains. An empty allowedDomains list means no network access. Network traffic is routed through proxy servers running on the host:
+124:- **Linux**: Requests are routed via the filesystem over a Unix domain socket. The network namespace of the sandboxed process is removed entirely, so all network traffic must go through the proxies running on the host (listening on Unix sockets that are bind-mounted into the sandbox)
+126:- **macOS**: The Seatbelt profile allows communication only to a specific localhost port. The proxies listen on this port, creating a controlled channel for all network access
+128:- **Windows**: A machine-wide WFP filter set blocks all outbound connections originating from the `srt-sandbox` account except loopback to the proxy port range. The proxies listen inside that range, creating a controlled channel for all network access
+130:Both HTTP/HTTPS (via HTTP proxy) and other TCP traffic (via SOCKS5 proxy) are mediated by these proxies, which enforce your domain allowlists and denylists.
+153:    ├── http-proxy.ts         # HTTP/HTTPS proxy for network filtering
+154:    ├── socks-proxy.ts        # SOCKS5 proxy for network filtering
+155:    ├── linux-sandbox-utils.ts # Linux bubblewrap sandboxing
+156:    ├── macos-sandbox-utils.ts # macOS sandbox-exec sandboxing
+193:proxy consults them per request. Filesystem rules are compiled into the
+245:// Initialize the sandbox (starts proxy servers, etc.)
+264:**Violation attribution (`commandId` / `commandText`).** Violations observed while a wrapped command runs (seatbelt log lines, seccomp events, proxy denies) are stored under an attribution key, and `annotateStderrWithSandboxFailures(key, stderr)` / `getViolationsForCommand(key)` look them up by that same key. By default the key is the wrapped string itself. Pass an opaque per-invocation `commandId` (e.g. a tool-use id) to key by that instead — recommended: keys compare on their first 100 characters, so long commands sharing a prefix would otherwise cross-attribute, and a rerun of the same text would inherit the earlier run's events. If the string you _execute_ is not the command the invocation _represents_ (e.g. you wrap an assembled `source <snapshot> && eval '<cmd>'`), also pass `commandText: '<cmd>'`: it is what `ignoreViolations` command patterns match against and what each violation reports as its `command`. A `commandId` you pass to `wrapWithSandbox` must be the same non-empty string you then pass to `annotateStderrWithSandboxFailures` / `getViolationsForCommand`; an empty one is treated as no `commandId` at all, so the key is the command.
+358:- `network.deniedDomainReasons` - Optional map from a `deniedDomains` entry (matched by exact string) to a model-facing reason that appears in the `<sandbox_violations>` line when that entry denies a connection — say what is blocked and the sanctioned alternative (e.g. `{"github.com:22": "SSH pushes to GitHub are blocked; use an https:// remote"}`). Entries without a reason report a generic one. For SSH destinations (port 22), the reason is also delivered in-band: an SSH client tunneled through a no-auth SOCKS ProxyCommand (e.g. BSD `nc -X 5`) receives a pre-key-exchange SSH disconnect whose description is the reason, which OpenSSH prints verbatim — keep such reasons under ~400 ASCII characters, imperative first, since OpenSSH truncates and escapes non-ASCII.
+361:**Resolved-address check.** The allow/deny lists match by _name_, but whoever controls a permitted name's DNS (or any label under a permitted wildcard) controls what it resolves to. So before dialing an allowed **hostname** directly, the proxy resolves it once, drops any address in a denied set, and connects to a surviving address (the address that passed the check is the one dialed — there is no second lookup). If nothing survives, the connection is refused like any other policy denial: HTTP/CONNECT get `403` (`X-Proxy-Error: blocked-by-sandbox-runtime`, the reason in the body), SOCKS gets "connection not allowed by ruleset", and a `deny network-outbound host:port (resolved to a loopback address)` line — naming the class of address (loopback, link-local, this host's, cloud metadata, deny-listed, listed, …), not the address itself, which only the debug log carries — is recorded in the violation store.
+365:What the check leaves alone: allowlist entries that **are** IP literals (allow-listing `127.0.0.1:3000` is an explicit choice) — and, by the same token, a hostname may resolve to an otherwise-denied address when that IP literal (on that port) is itself in `allowedDomains`, since reaching it by name grants nothing the literal entry does not (an IP literal in `deniedDomains` still wins, exactly as it does for a literal request). So a dev setup where `myapp.test` maps to a local server via `/etc/hosts` allow-lists `["myapp.test", "127.0.0.1:3000"]`; there is no separate carve-out list. `localhost` and names under `.localhost` resolve to loopback (or an allow-listed literal) and nothing else. The check is not evaluated for connections routed through `parentProxy` (including one picked up from `HTTP_PROXY` / `HTTPS_PROXY` in srt's own environment) or `mitmProxy` — that hop resolves the name and owns its own address policy — and it only governs what the proxy dials: on macOS, `allowLocalBinding` separately lets the sandboxed process connect to loopback ports without going through the proxy at all.
+369:**TLS termination** (`network.tlsTerminate`, experimental): when set, HTTPS CONNECTs are terminated in-process so SRT can see (and filter, via `network.filterRequest`) the decrypted requests. The sandboxed process is pointed at a trust bundle containing the MITM CA (`caCertPath`/`caKeyPath`, or an ephemeral CA if omitted) plus the host's regular roots, so proxy-minted certificates and real upstream certificates both verify.
+372:  - **mTLS upstreams** - only the in-sandbox client holds the client certificate, so the proxy cannot re-originate the connection on its behalf.
+389:**Unix Socket Settings** (platform-specific behavior):
+393:| `allowUnixSockets: string[]`   | Allowlist of socket paths | _Ignored_ (seccomp can't filter by path) |
+394:| `allowAllUnixSockets: boolean` | Allow all sockets         | Disable seccomp blocking                 |
+396:Unix sockets are **blocked by default** on both platforms.
+399:- **Linux**: Blocking uses seccomp filters (x64/arm64 only). If seccomp isn't available, sockets are unrestricted and a warning is shown. Use `allowAllUnixSockets: true` to explicitly disable blocking.
+436:bubblewrap binds concrete paths, so glob support is narrower than on macOS:
+442:- Symlinked directories are descended. A directory is listed once for each way the pattern can carry on beneath it, however many links lead to it, so the cost of the expansion follows the size of the tree and the length of the pattern, not the number or length of the names its links offer; what is found through a link is reported, and denied, where it really is. A link that leads back up the tree (to the directory holding it or above, or to the pattern's starting directory or above) is not descended. A `**` written against other text (`**.pem`, `a**/x`) and a bracket expression that can match `/` span directories as they do on macOS, through symlinked directories too. Only a pattern that does not read as written is matched against real paths alone, with every directory under its starting directory listed: one with a wildcard inside a bracket expression (`[a*]`), or with a second `[` that nothing closes. A link that itself matches it still denies what it leads to. Every `denyRead` mount goes where the path really is (bubblewrap 0.12 and later refuse to mount on a symlink), so an entry reached through a symlink is denied under every name that leads to it, and a link back up the tree denies everything it reaches, as a literal deny of the link would. A link that resolves to nothing is skipped. `allowRead` globs are not expanded through symlinks: they match the link itself.
+463:- `javaAgentJarPath` - macOS/Linux: absolute path to `srt-proxy-agent.jar`, the JVM agent injected via `JAVA_TOOL_OPTIONS` (see "JVM tools" under Network Isolation). Only needed by consumers that bundle sandbox-runtime and ship the jar separately; a normal npm install finds it under `vendor/java-proxy-agent/`.
+464:- `enableWeakerNetworkIsolation` - Allow access to `com.apple.trustd.agent` in the macOS sandbox (boolean, default: false). This is needed for Go programs (`gh`, `gcloud`, `terraform`, `kubectl`, etc.) to verify TLS certificates when using `httpProxyPort` with a MITM proxy and custom CA. **Security warning:** enabling this opens a potential data exfiltration vector through the trustd service.
+537:- **macOS**: Uses `sandbox-exec` with custom profiles (no additional dependencies)
+538:- **Linux**: Uses `bubblewrap` (bwrap) for containerization
+539:- **Windows**: Alpha — uses a bundled `srt-win.exe` helper (no additional dependencies). See [Windows (alpha)](#windows-alpha) below for setup, security model, and known limitations
+545:- `bubblewrap` - Container runtime
+546:  - Ubuntu/Debian: `apt-get install bubblewrap`
+547:  - Fedora: `dnf install bubblewrap`
+548:  - Arch: `pacman -S bubblewrap`
+549:- `socat` - Socket relay for proxy bridging
+558:**Ubuntu 24.04+ note:** These releases enable `kernel.apparmor_restrict_unprivileged_userns` by default, which allows `unshare(CLONE_NEWUSER)` but strips capabilities from the resulting namespace. Both bubblewrap and the seccomp isolation layer need capability-bearing user namespaces. Disable the restriction with:
+566:**Running as root:** a caller with euid 0 needs `CAP_SETFCAP` in its capability bounding set. Bubblewrap's user namespace maps the caller's uid, and Linux 5.12 — and the older distribution kernels that backported the change — lets a namespace map uid 0 only when its creator held that capability; the seccomp isolation layer's nested namespace has the same requirement. Without it every sandboxed command fails with `Operation not permitted` while writing a uid map, and `initialize()` refuses to start once bubblewrap has confirmed it. Grant the capability to the calling process — it is in Docker's default set, but `capsh --drop=cap_setfcap` and a tightened `CapabilityBoundingSet=` remove it — or run as a non-root user, for which none of this applies. The bounding set is what counts, because bubblewrap is reached by `execve` and the kernel recomputes a root caller's permitted set from it.
+=== anthropics/sandbox-runtime v0.0.77: src tree
+file cli.ts 22089
+file index.ts 3443
+dir sandbox 0
+dir utils 0
+=== GreyhavenHQ/greywall v0.3.7: ARCHITECTURE.md sections mentioning mechanisms
+6:2. **Routing network traffic** through an external SOCKS5 proxy (e.g., [GreyProxy](https://github.com/greyhavenhq/greyproxy)) via transparent TUN-based proxying
+7:3. **Sandboxing processes** using OS-native mechanisms (macOS sandbox-exec, Linux bubblewrap)
+21:        Proxy["SOCKS5 Proxy<br/>(e.g. GreyProxy)"]
+29:    Sandbox -->|tun2socks| Proxy
+38:│   └── main.go          # Includes --landlock-apply wrapper mode
+42:│   ├── proxy/           # GreyProxy detection, installation, and lifecycle
+44:│       ├── manager.go   # Orchestrates sandbox lifecycle
+45:│       ├── macos.go     # macOS sandbox-exec profiles
+46:│       ├── linux.go     # Linux bubblewrap + socat bridges + D-Bus proxy
+47:│       ├── linux_seccomp.go    # Seccomp BPF syscall filtering
+48:│       ├── linux_landlock.go   # Landlock filesystem control
+49:│       ├── linux_ebpf.go       # eBPF violation monitoring
+50:│       ├── linux_features.go   # Kernel feature detection
+51:│       ├── linux_*_stub.go     # Non-Linux build stubs
+52:│       ├── monitor.go   # macOS log stream violation monitoring
+53:│       ├── command.go   # Command blocking/allow lists
+54:│       ├── hardening.go # Environment sanitization
+55:│       ├── dangerous.go # Protected file/directory lists
+56:│       ├── shell.go     # Shell quoting utilities
+57:│       └── utils.go     # Path normalization
+58:└── pkg/greywall/           # Public Go API
+59:    └── greywall.go
+68:```go
+70:    Network    NetworkConfig    // Proxy URL, DNS, localhost controls
+85:```go
+90:### Proxy (`internal/proxy/`)
+92:Manages the external GreyProxy lifecycle (detection, installation, startup):
+94:- `detect.go` - Checks if greyproxy is installed and running (health endpoint)
+95:- `install.go` - Downloads and installs greyproxy from GitHub releases
+96:- `start.go` - Starts the greyproxy service
+98:Domain filtering and access control are handled entirely by the external proxy, not by greywall.
+102:#### Manager (`manager.go`)
+106:1. Sets up proxy and DNS bridges to the external SOCKS5 proxy (Linux)
+107:2. Extracts embedded `tun2socks` binary for transparent proxying
+112:#### Command Blocking (`command.go`)
+121:#### Environment Sanitization (`hardening.go`)
+130:#### macOS Implementation (`macos.go`)
+132:Uses Apple's `sandbox-exec` with Seatbelt profiles:
+138:        SE["sandbox-exec -p profile"]
+139:        ENV["Environment Variables<br/>HTTP_PROXY, HTTPS_PROXY<br/>ALL_PROXY, GIT_SSH_COMMAND"]
+155:Seatbelt profiles are generated dynamically based on config:
+158:- `(allow network-outbound (remote ip "localhost:*"))` - only allow proxy
+162:#### Linux Implementation (`linux.go`)
+164:Uses `bubblewrap` (bwrap) with network namespace isolation and transparent SOCKS5 proxying:
+169:        PROXY["External SOCKS5 Proxy<br/>(e.g. GreyProxy :43052)"]
+171:        PSOCAT["socat<br/>(proxy bridge)"]
+176:    subgraph Sandbox ["Sandbox (bwrap --unshare-net)"]
+182:    PROXY <--> PSOCAT
+193:With `--unshare-net`, the sandbox has its own isolated network namespace. Unix sockets provide filesystem-based IPC across namespace boundaries:
+195:1. Host creates Unix sockets, connects via socat to the external SOCKS5 proxy and DNS server
+=== GreyhavenHQ/greywall v0.3.7: go.mod requires
+module github.com/GreyhavenHQ/greywall
+
+go 1.25
+
+require (
+	github.com/bmatcuk/doublestar/v4 v4.9.1
+	github.com/spf13/cobra v1.8.1
+	github.com/tidwall/jsonc v0.3.2
+	golang.org/x/sys v0.39.0
+)
+
+require (
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
+)

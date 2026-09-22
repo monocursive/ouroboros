@@ -23,6 +23,7 @@ Produced by `doctor --json` on the operator-provisioned x86_64 VPS
 | `kernel.unprivileged_bpf_disabled` | 2 (manual 2026-09-22) |
 | `kernel.perf_event_paranoid` | 4 (manual 2026-09-22; Ubuntu's extra level, no `perf_event_open` without CAP_PERFMON) |
 | `kernel.yama.ptrace_scope` | 1 (manual 2026-09-22); `kernel.io_uring_disabled` 0 |
+| Kernel options | `SECURITY_LANDLOCK`, `SECCOMP_FILTER`, `USER_NS`, `SECURITY_APPARMOR`, `CGROUPS`, `BPF_LSM` all `y` (manual 2026-09-22, [evidence](evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)) |
 | Operator-installed AppArmor profile: name, executables granted `userns` | none installed; AppArmor enabled with Ubuntu's `bwrap-userns-restrict`, `unprivileged_userns`, `lxc-usernsexec` files and `bwrap`, `unpriv_bwrap` loaded; the legacy `ouroboros-sandbox-fleet` profile was removed 2026-09-22 (manual) |
 | Tracing capability provisioning: mechanism (ambient via unit / file caps) and set | not_started; login shell `CapEff` is 0 (manual 2026-09-22) |
 | Raw `doctor --json` output location | not_started; manual collection by [host-manifest.sh](host-manifest.sh): [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ouro-ci`, the account conformance runs under |
@@ -40,8 +41,20 @@ functionality probe of the mechanism the D9 lane builds on, not a §15 gate.
 | tmpfs write, PID namespace, `NoNewPrivs=1`, `CapEff=0` inside | pass |
 | `--unshare-net` blocks a connect | pass (ENETUNREACH) |
 | A nested user namespace inside the sandbox | pass (`unshare -U true` exits 0) |
-| seccomp | none installed unless a filter is passed (`Seccomp: 0`); filter loading under `unpriv_bwrap` not measured |
-| Not measured | mount and umount inside the namespace (agent nesting, §9.2), seccomp filter loading, pathname-socket isolation (§10), and what the `unpriv_bwrap` profile itself denies; read that profile before assuming any of them |
+| seccomp | none installed unless a filter is passed (`Seccomp: 0`); loading one through `--seccomp` works (`Seccomp: 2`, `NoNewPrivs: 1`) |
+| A nested user or mount namespace inside the sandbox (`unshare -Urm`) | fail, EPERM: every child runs under the stacked `bwrap//&unpriv_bwrap` profile, and `unpriv_bwrap` carries `audit deny capability`, so a process inside has no capabilities even in a new user namespace ([evidence](evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt), profile text included) |
+| bubblewrap inside bubblewrap, which sandbox-runtime and Greywall both do | fail: the inner bubblewrap cannot create its namespaces |
+| Not measured | pathname-socket isolation (§10) and what the distribution profile denies beyond capabilities |
+
+Consequence for D9 on this host: one containment layer, which is all `tool`
+and `build` need, works under the distribution profile with no operator
+change. The `agent` profile's nesting requirement (§4.6, §9.2) does not. It
+needs the operator-installed scoped AppArmor profile D9 names, giving the
+jail's launcher a profile without the capability denial, or the host-wide
+sysctl change that sandbox-runtime's README recommends; both are host policy
+the specification leaves to the operator. Which one, and its exact text, is
+the next enforcement measurement. Until it passes S03, `agent` refuses on
+this host, as §4.6 requires.
 
 On the legacy tree's Ubuntu 24.04 hosted runners the apt bubblewrap could not
 apply its mounts without a sysctl change; on this 26.04.1 host it can, under
@@ -89,6 +102,32 @@ with fixture evidence.
 | 7 Dependency footprint, startup, memory, integration size, license, maintenance | not_started | not_started | not_started |
 | 8 Reusable macOS mechanisms without dictating shared policy | not_started | not_started | not_started |
 | Unix-socket host-peer isolation mechanism (S03, N05) | not_started | not_started | not_started |
+
+### 3.1 Documented mechanisms at the pinned tags
+
+Documentation, not measurement ([mechanisms](evidence/candidates-mechanisms-2026-09-22.txt),
+[user-namespace notes](evidence/candidates-userns-notes-2026-09-22.txt)).
+It informs criteria 4 and 7; a criterion passes only with fixture evidence.
+
+- **sandbox-runtime**: Linux bubblewrap with user, network and PID namespaces;
+  HTTP and SOCKS5 proxies on the host reached over Unix sockets bridged by
+  `socat`; seccomp only to block Unix sockets (x86_64 and aarch64); optional
+  experimental TLS termination; Seatbelt on macOS; Windows alpha. Runtime
+  needs Node 20.11 or later plus `socat`. Its documentation describes no
+  resource limits and no receipt. Its answer to the Ubuntu 24.04+ restriction
+  is the host-wide sysctl `kernel.apparmor_restrict_unprivileged_userns=0`.
+  Its violation monitor reads seccomp and proxy events; it is not a syscall
+  sensor in the D10 sense.
+- **Greywall**: Go. Linux bubblewrap plus Landlock, seccomp BPF, `socat`
+  bridges and a D-Bus proxy; Seatbelt on macOS. Network policy is delegated
+  entirely to an external SOCKS5 proxy (GreyProxy) reached through a
+  `tun2socks` TUN device, and Greywall downloads and installs that proxy from
+  GitHub releases. Its eBPF "violation monitoring" is a generated `bpftrace`
+  script started after the command, filtering `pid >= sandbox pid` on
+  `sys_exit_*` tracepoints, needing CAP_BPF or root. That is the shape D10
+  rules out as the sensor: it attaches after exec, does not track descendants
+  and reports denials only. The extra proxy service and downloaded binaries
+  count under criterion 7.
 
 ## 4. Performance (§5.2 budgets)
 

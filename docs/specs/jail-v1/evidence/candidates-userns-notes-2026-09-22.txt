@@ -1,0 +1,105 @@
+=== sandbox-runtime v0.0.77 README: the Ubuntu 24.04+ paragraph in full
+**Ubuntu 24.04+ note:** These releases enable `kernel.apparmor_restrict_unprivileged_userns` by default, which allows `unshare(CLONE_NEWUSER)` but strips capabilities from the resulting namespace. Both bubblewrap and the seccomp isolation layer need capability-bearing user namespaces. Disable the restriction with:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+=== sandbox-runtime v0.0.77: how it handles the restriction in code (grep in src/sandbox)
+-- linux-sandbox-utils.ts
+84:   * vars (see {@link buildPosixGitSafeDirEnv}). Under `--unshare-user`
+586:// anything: bwrap's own --unshare-user writes a uid map containing uid 0, and
+1125: * Run `bwrap --unshare-user --dev-bind / / true` once and report whether this
+1137:    ['--unshare-user', '--dev-bind', '/', '/', 'true'],
+1160: * Linux network sandboxing uses bwrap --unshare-net which creates a completely isolated
+1176: * Linux's --unshare-net provides only all-or-nothing network isolation. Domain filtering happens
+2947: *   - Bubblewrap starts with isolated network namespace (--unshare-net)
+2948: *   - Bubblewrap applies PID namespace isolation (--unshare-pid and --proc)
+3130:    // Under `--unshare-user` the repo owner's uid is unmapped so git
+3148:      // Always unshare network namespace to isolate network access
+3150:      bwrapArgs.push('--unshare-net')
+3229:      // If no sockets provided, network is completely blocked (--unshare-net without proxy)
+-- linux-violation-monitor.ts
+78: * `--unshare-net` (abstract sockets are net-namespace-scoped) and bwrap closes
+=== greywall v0.3.7 linux_features.go: what it detects (comments and function names)
+17:// LinuxFeatures describes available Linux sandboxing features.
+53:// DetectLinuxFeatures checks what sandboxing features are available.
+54:// Results are cached for subsequent calls.
+55:func DetectLinuxFeatures() *LinuxFeatures {
+63:func (f *LinuxFeatures) detect() {
+71:	// Check seccomp support
+90:func (f *LinuxFeatures) parseKernelVersion() {
+106:func (f *LinuxFeatures) detectSeccomp() {
+107:	// Check if seccomp is supported via prctl
+108:	// PR_GET_SECCOMP returns 0 if seccomp is disabled, 1/2 if enabled, -1 on error
+111:		// EINVAL means seccomp is supported but not enabled for this process
+126:func (f *LinuxFeatures) detectLandlock() {
+133:	// landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)
+151:	attr := landlockRulesetAttr{
+167:func (f *LinuxFeatures) detectEBPF() {
+204:// detectNetworkNamespace probes whether bwrap --unshare-net works.
+205:// This can fail in containerized environments (Docker, GitHub Actions, etc.)
+206:// that don't have CAP_NET_ADMIN capability needed to set up the loopback interface.
+207:func (f *LinuxFeatures) detectNetworkNamespace() {
+226:// Summary returns a human-readable summary of available features.
+227:func (f *LinuxFeatures) Summary() string {
+242:			parts = append(parts, "seccomp+usernotif")
+244:			parts = append(parts, "seccomp+log")
+246:			parts = append(parts, "seccomp")
+250:		parts = append(parts, fmt.Sprintf("landlock-v%d", f.LandlockABI))
+254:			parts = append(parts, "ebpf(root)")
+256:			parts = append(parts, "ebpf(CAP_BPF)")
+263:// CanMonitorViolations returns true if we can monitor sandbox violations.
+264:func (f *LinuxFeatures) CanMonitorViolations() bool {
+265:	// seccomp LOG requires kernel 4.14+
+270:// CanUseLandlock returns true if Landlock is available.
+271:func (f *LinuxFeatures) CanUseLandlock() bool {
+275:// CanUseTransparentProxy returns true if transparent proxying via tun2socks is possible.
+276:func (f *LinuxFeatures) CanUseTransparentProxy() bool {
+280:// MinimumViable returns true if the minimum required features are available.
+281:func (f *LinuxFeatures) MinimumViable() bool {
+285:// PrintDependencyStatus prints a flat ✓/✗ checklist for Linux and returns remediation steps for any issues found.
+286:func PrintDependencyStatus() []string {
+311:		fmt.Println(CheckOK("seccomp"))
+313:		fmt.Println(CheckFail("seccomp"))
+=== greywall v0.3.7 linux_ebpf.go: attach approach and privilege notes
+18:// EBPFMonitor monitors sandbox violations using eBPF tracing.
+19:// This requires CAP_BPF or root privileges.
+26:	scriptPath string // Path to bpftrace script (for cleanup)
+29:// NewEBPFMonitor creates a new eBPF-based violation monitor.
+30:func NewEBPFMonitor(pid int, debug bool) *EBPFMonitor {
+37:// Start begins eBPF-based monitoring of filesystem and network violations.
+38:func (m *EBPFMonitor) Start() error {
+42:			fmt.Fprintf(os.Stderr, "[greywall:ebpf] eBPF monitoring not available (need CAP_BPF or root)\n")
+52:	if err := m.tryBpftrace(ctx); err != nil {
+54:			fmt.Fprintf(os.Stderr, "[greywall:ebpf] bpftrace not available: %v\n", err)
+67:// Stop stops the eBPF monitor.
+68:func (m *EBPFMonitor) Stop() {
+93:// tryBpftrace attempts to use bpftrace for monitoring.
+94:func (m *EBPFMonitor) tryBpftrace(ctx context.Context) error {
+95:	bpftracePath, err := exec.LookPath("bpftrace")
+97:		return fmt.Errorf("bpftrace not found: %w", err)
+100:	// Create a bpftrace script that monitors file operations and network syscalls
+101:	script := m.generateBpftraceScript()
+118:	m.cmd = exec.CommandContext(ctx, bpftracePath, tmpFile.Name()) //nolint:gosec // bpftracePath from LookPath
+130:		return fmt.Errorf("failed to start bpftrace: %w", err)
+133:	// Parse bpftrace output in background
+141:			if violation := m.parseBpftraceOutput(line); violation != "" {
+161:// generateBpftraceScript generates a bpftrace script for monitoring.
+162:// The script filters events to only show processes that are descendants of the sandbox.
+163:func (m *EBPFMonitor) generateBpftraceScript() string {
+167:	// Note: bpftrace can't directly check process ancestry, so we track
+172:	// PID tracking via fork doesn't work because bpftrace attaches after the command starts
+179:// Monitor filesystem errors (EPERM=-1, EACCES=-13, EROFS=-30)
+180:// Filter: pid >= SANDBOX_PID to exclude pre-existing processes
+181:tracepoint:syscalls:sys_exit_openat
+187:tracepoint:syscalls:sys_exit_unlinkat
+193:tracepoint:syscalls:sys_exit_mkdirat
+199:tracepoint:syscalls:sys_exit_connect
+208:// parseBpftraceOutput parses bpftrace output and formats violations.
+209:func (m *EBPFMonitor) parseBpftraceOutput(line string) string {
+234:// traceWithPerfEvents uses perf events for tracing (fallback when bpftrace unavailable).
+235:func (m *EBPFMonitor) traceWithPerfEvents() {
+256:	// We'd need to set up tracepoints first, which requires additional setup
+260:// getErrnoName returns a human-readable description of an errno value.
+261:func getErrnoName(errno int) string {
