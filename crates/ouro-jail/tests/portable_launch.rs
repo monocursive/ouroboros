@@ -303,6 +303,14 @@ struct Sim {
     release_fails: bool,
     /// Whether a failed release reports a verified teardown.
     release_teardown_verified: bool,
+    /// Whether a failed release reports a teardown that lost integrity.
+    release_teardown_lost: bool,
+    /// When set, the data directory in whose (single) attempt a
+    /// `vendor-state` directory appears during probing: an operator process
+    /// racing the claim.
+    plant_vendor_state: Option<PathBuf>,
+    /// Report no applied mechanisms (the `none` profile applies none).
+    unapplied: bool,
     /// What the "child" does in vendor state, given its host path.
     activity: Option<Activity>,
     seen: Arc<Mutex<Seen>>,
@@ -333,6 +341,16 @@ impl Platform for Sim {
         }
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
+        if let Some(data) = &self.plant_vendor_state {
+            let attempt = std::fs::read_dir(data.join("attempts"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            std::fs::create_dir(attempt.join("vendor-state")).unwrap();
+            std::fs::write(attempt.join("vendor-state/precious"), b"not this attempt's").unwrap();
+        }
         plan.requirements
             .iter()
             .map(|name| Capability {
@@ -413,6 +431,9 @@ impl PreparedExecution for SimPrepared {
         }
     }
     fn applied(&self) -> Option<ouro_jail::records::Applied> {
+        if self.sim.unapplied {
+            return None;
+        }
         // A scripted application with the shape the receipt contract requires
         // of an enforced boundary; the mechanisms say they are simulated.
         use ouro_jail::records::{Applied, AppliedFilesystem, AppliedNetwork, AppliedSyscalls};
@@ -459,12 +480,21 @@ impl PreparedExecution for SimPrepared {
         self: Box<Self>,
     ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         let verified = self.sim.release_teardown_verified;
+        let lost = self.sim.release_teardown_lost;
         self.release().map_err(|error| {
+            let tree = if lost {
+                Some(TreeObservation {
+                    tree_empty: None,
+                    verified_at: None,
+                    verification_scope: "attempt_tree".into(),
+                    integrity: "lost".into(),
+                })
+            } else {
+                verified.then(verified_tree)
+            };
             Box::new(ouro_jail::platform::ReleaseFailure {
                 error,
-                teardown: verified.then(|| Teardown {
-                    tree: Some(verified_tree()),
-                }),
+                teardown: tree.map(|tree| Teardown { tree: Some(tree) }),
             })
         })
     }
@@ -1248,6 +1278,10 @@ fn p04_credential_special_files_and_oversize_refuse_before_the_platform_prepares
         );
         assert_eq!(receipt["credentials"][0]["id"], "a-good");
         assert_eq!(receipt["state_cleanup"], "complete", "{label}");
+        // J3 review RM30: the refused receipt was persisted as `pending`
+        // before the removal, so a crash during it leaves a receipt `gc` can
+        // finish; the final one is the second revision.
+        assert_eq!(receipt["revision"], 2, "{label}");
         assert!(cleanup::absent(&attempt_dir(&report).join("vendor-state")));
         assert!(
             !receipt
@@ -1511,6 +1545,27 @@ fn c02_a_replaced_vendor_state_directory_is_never_deleted() {
     assert_eq!(receipt["state_cleanup"], "pending");
     assert_eq!(receipt["cleanup_error"], "managed_directory_replaced");
     assert_outside_untouched(&fixture);
+
+    // J3 review RM33: a real replaced directory, not a symlink. The
+    // registered one is renamed away and a new directory takes its name;
+    // only the recorded identity tells them apart, and neither is removed.
+    let sim = Sim {
+        activity: Some(Arc::new(|vendor: &Path| {
+            let parked = vendor.with_file_name("parked");
+            std::fs::rename(vendor, &parked).unwrap();
+            std::fs::create_dir(vendor).unwrap();
+            std::fs::write(vendor.join("precious"), b"not the registered directory").unwrap();
+        })),
+        ..Sim::default()
+    };
+    let report = fixture.run(sim, &["--launch", "plain"]);
+    let receipt = receipt_json(&report);
+    assert_schema("jail-receipt", &receipt);
+    assert_eq!(receipt["state_cleanup"], "pending");
+    assert_eq!(receipt["cleanup_error"], "managed_directory_replaced");
+    let attempt = attempt_dir(&report);
+    assert!(attempt.join("vendor-state/precious").exists());
+    assert!(attempt.join("parked/a").is_dir());
 }
 
 #[test]
@@ -1603,9 +1658,9 @@ fn stage_one_source(fixture: &Fixture, source: &Path) -> Result<(), (JailError, 
             mode: "copy_rw".into(),
         }],
     };
-    ouro_jail::credentials::stage(&launch, vendor.as_fd())
+    ouro_jail::credentials::stage(&launch, vendor.as_fd(), &[])
         .map(|_| ())
-        .map_err(|(error, staged)| (error, staged.len()))
+        .map_err(|refusal| (refusal.error, refusal.staged.len()))
 }
 
 #[test]
@@ -1865,4 +1920,543 @@ fn doctor_readiness_needs_every_credential_and_reports_support_apart_from_it() {
     assert_eq!(checks[0].reason_code, "ok");
     assert_eq!(checks[1].reason_code, "copy_budget_exceeded");
     assert!(!report.ready);
+}
+
+// ---------------------------------------------------------------------------
+// J3 review findings, adopted as tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn h2_a_preexisting_vendor_state_in_a_managed_attempt_root_refuses_and_survives() {
+    // Reviewer's R2: a managed caller's attempt root already holding
+    // `vendor-state/` was accepted, the create failed, and the refusal then
+    // deleted the directory the attempt never made.
+    let fixture = Fixture::new();
+    fixture.launch(
+        "fixture",
+        "name = \"fixture\"\njail = \"tool\"\nstate_var = \"FIX_HOME\"\n",
+    );
+    for artifact in ouro_jail::state::JAIL_OWNED_NAMES {
+        let id = format!("att_{}", uuid::Uuid::new_v4());
+        private_dir(&fixture.data.join("attempts"));
+        let attempt = fixture.data.join("attempts").join(&id);
+        private_dir(&attempt);
+        let planted = attempt.join(artifact);
+        if artifact.contains('.') {
+            std::fs::write(&planted, b"not this attempt's").unwrap();
+        } else {
+            private_dir(&planted);
+            std::fs::write(planted.join("precious"), b"not this attempt's").unwrap();
+        }
+        let (read, write) = std::io::pipe().unwrap();
+        let read: std::os::fd::OwnedFd = read.into();
+        let gate = std::os::fd::AsRawFd::as_raw_fd(&read).to_string();
+        let report = fixture.run(
+            Sim::default(),
+            &[
+                "--launch",
+                "fixture",
+                "--attempt-id",
+                &id,
+                "--gate-fd",
+                &gate,
+            ],
+        );
+        drop(write);
+        let error = report.error.as_ref().expect("a refusal");
+        assert_eq!(
+            error.code,
+            ErrorCode::AttemptExists,
+            "{artifact}: {error:?}"
+        );
+        assert!(
+            error.message.contains(artifact),
+            "{artifact}: {}",
+            error.message
+        );
+        if artifact.contains('.') {
+            assert_eq!(std::fs::read(&planted).unwrap(), b"not this attempt's");
+        } else {
+            assert!(planted.join("precious").exists(), "{artifact} was touched");
+        }
+    }
+}
+
+#[test]
+fn h2_a_vendor_state_appearing_after_the_claim_is_withdrawn_not_deleted() {
+    let fixture = Fixture::new();
+    fixture.launch(
+        "fixture",
+        "name = \"fixture\"\njail = \"tool\"\nstate_var = \"FIX_HOME\"\n",
+    );
+    let sim = Sim {
+        plant_vendor_state: Some(fixture.data.clone()),
+        ..Sim::default()
+    };
+    let seen = Arc::clone(&sim.seen);
+    let report = fixture.run(sim, &["--launch", "fixture"]);
+    assert_eq!(report.exit_code, 125, "{:?}", report.error);
+    assert!(!seen.lock().unwrap().prepared);
+    let receipt = receipt_json(&report);
+    assert_schema("jail-receipt", &receipt);
+    assert_eq!(receipt["phase"], "refused");
+    assert_eq!(
+        receipt["state_cleanup"], "not_needed",
+        "not this attempt's to clean"
+    );
+    let attempt = attempt_dir(&report);
+    assert_eq!(
+        std::fs::read(attempt.join("vendor-state/precious")).unwrap(),
+        b"not this attempt's"
+    );
+    let state = jail_state(&report);
+    assert_eq!(state["vendor_state"], serde_json::Value::Null);
+    // And gc will not touch it either.
+    let gc = fixture.gc(false).unwrap();
+    assert!(gc.incomplete.is_empty());
+    assert!(attempt.join("vendor-state/precious").exists());
+}
+
+#[test]
+fn m2_a_credential_source_inside_a_child_writable_grant_refuses() {
+    // Reviewer's R5: sources inside the workspace were staged, so the child
+    // could change the operator's credential through the workspace.
+    let fixture = Fixture::new();
+    let inside = fixture.workspace.join("config.toml");
+    std::fs::write(&inside, b"fixture-config").unwrap();
+    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o600)).unwrap();
+    for mode in ["bind_ro", "copy_rw"] {
+        fixture.launch(
+            "fixture",
+            &format!(
+                "name = \"fixture\"\njail = \"agent\"\n[credentials.c]\nsource = \"{}\"\n\
+                 dest = \"c\"\nmode = \"{mode}\"\n",
+                inside.display()
+            ),
+        );
+        let sim = Sim::default();
+        let seen = Arc::clone(&sim.seen);
+        let report = fixture.run(sim, &["--launch", "fixture"]);
+        let error = report.error.as_ref().expect("a refusal");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{mode}");
+        assert_eq!(
+            error.key_path.as_deref(),
+            Some("launch.credentials.c.source")
+        );
+        assert!(
+            report.receipt.is_none(),
+            "refused before any attempt existed"
+        );
+        assert!(!seen.lock().unwrap().prepared);
+    }
+    // A writable host grant counts as much as the workspace does.
+    let source = fixture.credential("token", b"t");
+    fixture.launch(
+        "fixture",
+        &format!(
+            "name = \"fixture\"\njail = \"agent\"\n[credentials.t]\nsource = \"{}\"\n\
+             dest = \"t\"\nmode = \"copy_rw\"\n",
+            source.display()
+        ),
+    );
+    let creds = fixture.creds.display().to_string();
+    let report = fixture.run(Sim::default(), &["--launch", "fixture", "--rw", &creds]);
+    assert_eq!(
+        report
+            .error
+            .as_ref()
+            .and_then(|error| error.key_path.as_deref()),
+        Some("launch.credentials.t.source")
+    );
+    // Staging repeats the comparison on its own walk, by identity.
+    use std::os::unix::fs::MetadataExt as _;
+    let grant = std::fs::metadata(&fixture.creds).unwrap();
+    let (error, staged) = stage_one_source_with(&fixture, &source, &[(grant.dev(), grant.ino())])
+        .expect_err("a grant on the walk refuses");
+    assert!(
+        error.message.contains("grant the child can write"),
+        "{}",
+        error.message
+    );
+    assert_eq!(staged, 0);
+}
+
+#[test]
+fn m2_a_bind_ro_source_with_another_link_refuses_and_a_copy_does_not() {
+    let fixture = Fixture::new();
+    let source = fixture.credential("token", b"fixture-token");
+    std::fs::hard_link(&source, fixture.outside.join("alias")).unwrap();
+    for (mode, refused) in [("bind_ro", true), ("copy_rw", false)] {
+        fixture.launch(
+            "fixture",
+            &format!(
+                "name = \"fixture\"\njail = \"agent\"\n[credentials.t]\nsource = \"{}\"\n\
+                 dest = \"t\"\nmode = \"{mode}\"\n",
+                source.display()
+            ),
+        );
+        let report = fixture.run(Sim::default(), &["--launch", "fixture"]);
+        if refused {
+            let error = report.error.as_ref().expect("a refusal");
+            assert_eq!(error.code, ErrorCode::CredentialUnavailable);
+            assert!(
+                error.message.contains("exactly one link"),
+                "{}",
+                error.message
+            );
+        } else {
+            assert_eq!(report.exit_code, 0, "{:?}", report.error);
+        }
+    }
+}
+
+#[test]
+fn m3_a_configured_profile_is_kept_or_the_conflict_refuses_never_replaced() {
+    // Reviewer's R7: `--launch` silently replaced the operator's configured
+    // profile and dropped its required ceilings.
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.config.join("strict.toml"),
+        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n[limits]\npids = 16\nwall = \"1m\"\n",
+    )
+    .unwrap();
+    let configure = |profile: &str| {
+        std::fs::write(
+            fixture.config.join("config.toml"),
+            format!("[jail]\nschema = \"ouro.jail.policy/1\"\nprofile = \"{profile}\"\n"),
+        )
+        .unwrap();
+    };
+    configure("strict.toml");
+    fixture.launch(
+        "tooled",
+        "name = \"tooled\"\njail = \"tool\"\nstate_var = \"FIX_HOME\"\n",
+    );
+    fixture.launch(
+        "agented",
+        "name = \"agented\"\njail = \"agent\"\nstate_var = \"FIX_HOME\"\n",
+    );
+    let limits =
+        |plan: &supervisor::Plan| serde_json::to_value(&plan.resolved.snapshot.limits).unwrap();
+    let without = fixture
+        .plan(PolicyArgs {
+            workspace: Some(fixture.workspace.clone()),
+            ..PolicyArgs::default()
+        })
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    let with = fixture
+        .plan(launch_args("tooled", &fixture.workspace))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(
+        limits(&with),
+        limits(&without),
+        "the configured profile's ceilings stay"
+    );
+    assert_eq!(
+        with.resolved.snapshot.limits.pids.as_ref().unwrap().value,
+        "16"
+    );
+
+    // Different bases: refuse, naming both and pointing at --profile.
+    let error = refused(
+        fixture.plan(launch_args("agented", &fixture.workspace)),
+        "conflict",
+    );
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(error.key_path.as_deref(), Some("jail.profile"));
+    assert!(error.message.contains("strict.toml") && error.message.contains("`agent`"));
+    assert!(error.message.contains("--profile"));
+    configure("tool");
+    let error = refused(
+        fixture.plan(launch_args("agented", &fixture.workspace)),
+        "conflict",
+    );
+    assert_eq!(error.key_path.as_deref(), Some("jail.profile"));
+
+    // `--profile` decides; with no configured profile the launch default does.
+    let mut args = launch_args("agented", &fixture.workspace);
+    args.profile = Some("agent".into());
+    assert_eq!(
+        fixture.plan(args).unwrap().resolved.snapshot.profile,
+        ProfileName::Agent
+    );
+    std::fs::remove_file(fixture.config.join("config.toml")).unwrap();
+    assert_eq!(
+        fixture
+            .plan(launch_args("agented", &fixture.workspace))
+            .unwrap()
+            .resolved
+            .snapshot
+            .profile,
+        ProfileName::Agent
+    );
+}
+
+#[test]
+fn l3_credentials_staged_before_a_refusal_reach_private_provenance_too() {
+    // Reviewer's R8.
+    let fixture = Fixture::new();
+    let a = fixture.credential("a", b"fixture-a");
+    fixture.launch(
+        "fixture",
+        &format!(
+            "name = \"fixture\"\njail = \"agent\"\n\
+             [credentials.a]\nsource = \"{}\"\ndest = \"a\"\nmode = \"copy_rw\"\n\
+             [credentials.b]\nsource = \"{}\"\ndest = \"b\"\nmode = \"copy_rw\"\n",
+            a.display(),
+            fixture.creds.join("missing").display()
+        ),
+    );
+    let report = fixture.run(Sim::default(), &["--launch", "fixture"]);
+    assert_eq!(report.exit_code, 125);
+    let receipt = receipt_json(&report);
+    let state = jail_state(&report);
+    let private = state["vendor_state"]["credentials"].as_array().cloned();
+    // Cleanup withdrew nothing: the registration keeps its history.
+    let private = private.unwrap_or_default();
+    assert_eq!(receipt["credentials"].as_array().unwrap().len(), 1);
+    assert_eq!(private.len(), 1, "{state:#}");
+    assert_eq!(private[0]["id"], "a");
+    use std::os::unix::fs::MetadataExt as _;
+    assert_eq!(
+        private[0]["source_ino"],
+        std::fs::metadata(&a).unwrap().ino().to_string()
+    );
+}
+
+#[test]
+fn rm16_the_copy_budget_is_cumulative_across_credentials() {
+    // Reviewer's R10: two 10 MiB copies must refuse on the second.
+    let fixture = Fixture::new();
+    let decl = |id: &str| {
+        let path = fixture.creds.join(id);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(10 * 1024 * 1024).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        ouro_jail::policy::CredentialDecl {
+            id: id.into(),
+            source: ouro_jail::records::NativeString::from_bytes(
+                path.as_os_str().as_bytes().to_vec(),
+            )
+            .unwrap(),
+            dest: ouro_jail::records::NativeString::Text(id.into()),
+            mode: "copy_rw".into(),
+        }
+    };
+    let launch = ouro_jail::policy::LaunchSnapshot {
+        state_var: None,
+        home_is_state: false,
+        state_subdirs: Vec::new(),
+        credentials: vec![decl("one"), decl("two")],
+    };
+    let vendor_path = fixture.root.join("vendor");
+    private_dir(&vendor_path);
+    let vendor = ouro_jail::state::anchored::Dir::open_trusted(&vendor_path).unwrap();
+    let refusal = ouro_jail::credentials::stage(&launch, vendor.as_fd(), &[])
+        .expect_err("20 MiB under a 16 MiB per-attempt budget");
+    assert_eq!(refusal.staged.len(), 1);
+    assert!(
+        refusal.error.message.contains("already copied"),
+        "{}",
+        refusal.error.message
+    );
+    assert_eq!(
+        ouro_jail::credentials::inspect(&launch, &[])
+            .iter()
+            .map(|check| check.reason_code)
+            .collect::<Vec<_>>(),
+        ["ok", "copy_budget_exceeded"]
+    );
+}
+
+#[test]
+fn m4_names_values_and_ids_outside_their_grammars_refuse_through_the_file() {
+    // Reviewer's RM50/RM18: the grammar is what keeps a NUL (and so extra
+    // bubblewrap options in the `--args` payload) out of the environment.
+    let fixture = Fixture::new();
+    for (label, text) in [
+        (
+            "NUL in a name",
+            "[environment]\n\"X\\u0000--ro-bind\\u0000/\\u0000/run/leak\" = \"v\"\n".to_owned(),
+        ),
+        ("= in a name", "[environment]\n\"A=B\" = \"v\"\n".to_owned()),
+        (
+            "leading digit",
+            "[environment]\n\"1A\" = \"v\"\n".to_owned(),
+        ),
+        ("dash", "[environment]\n\"A-B\" = \"v\"\n".to_owned()),
+        ("empty name", "[environment]\n\"\" = \"v\"\n".to_owned()),
+        (
+            "NUL in a value",
+            "[environment]\nFIX = \"x\\u0000--ro-bind\\u0000/\\u0000/run/leak\"\n".to_owned(),
+        ),
+        ("NUL in state_var", "state_var = \"A\\u0000B\"\n".to_owned()),
+        (
+            "credential id with a slash",
+            "[credentials.\"../x\"]\nsource = \"/c\"\ndest = \"x\"\nmode = \"copy_rw\"\n"
+                .to_owned(),
+        ),
+        (
+            "credential id with a space",
+            "[credentials.\"a b\"]\nsource = \"/c\"\ndest = \"x\"\nmode = \"copy_rw\"\n".to_owned(),
+        ),
+        (
+            "hidden credential id",
+            "[credentials.\".hidden\"]\nsource = \"/c\"\ndest = \"x\"\nmode = \"copy_rw\"\n"
+                .to_owned(),
+        ),
+        (
+            "NUL in a destination",
+            "[credentials.a]\nsource = \"/c\"\ndest = \"x\\u0000y\"\nmode = \"copy_rw\"\n"
+                .to_owned(),
+        ),
+    ] {
+        fixture.launch(
+            "fixture",
+            &format!("name = \"fixture\"\njail = \"agent\"\n{text}"),
+        );
+        let error = refused(
+            fixture.plan(launch_args("fixture", &fixture.workspace)),
+            label,
+        );
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{label}: {error:?}");
+    }
+}
+
+#[test]
+fn rm24_rm25_an_oversized_launch_file_or_a_shared_launch_directory_refuses() {
+    let fixture = Fixture::new();
+    let padding = format!("# {}\n", "x".repeat(70 * 1024));
+    fixture.launch(
+        "fixture",
+        &format!("{padding}name = \"fixture\"\njail = \"tool\"\n"),
+    );
+    let error = refused(
+        fixture.plan(launch_args("fixture", &fixture.workspace)),
+        "oversized",
+    );
+    assert!(error.message.contains("maximum"), "{}", error.message);
+
+    fixture.launch("fixture", "name = \"fixture\"\njail = \"tool\"\n");
+    assert!(
+        fixture
+            .plan(launch_args("fixture", &fixture.workspace))
+            .is_ok()
+    );
+    let launch_dir = fixture.config.join("launch");
+    std::fs::set_permissions(&launch_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+    let error = refused(
+        fixture.plan(launch_args("fixture", &fixture.workspace)),
+        "shared",
+    );
+    assert!(
+        error.message.contains("writable by others"),
+        "{}",
+        error.message
+    );
+    std::fs::set_permissions(&launch_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn rm11_a_teardown_that_lost_integrity_retains_vendor_state_and_says_why() {
+    let fixture = Fixture::new();
+    fixture.launch(
+        "plain",
+        "name = \"plain\"\njail = \"tool\"\nstate_subdirs = [\"a\"]\n",
+    );
+    let report = fixture.run(
+        Sim {
+            release_fails: true,
+            release_teardown_lost: true,
+            ..Sim::default()
+        },
+        &["--launch", "plain"],
+    );
+    assert_eq!(report.exit_code, 125);
+    let receipt = receipt_json(&report);
+    assert_schema("jail-receipt", &receipt);
+    assert_eq!(receipt["lifetime"]["integrity"], "lost");
+    assert_eq!(receipt["state_cleanup"], "pending");
+    assert_eq!(receipt["cleanup_error"], cleanup::REASON_INTEGRITY_LOST);
+    assert!(attempt_dir(&report).join("vendor-state/a").is_dir());
+}
+
+#[test]
+fn l1_gc_prints_its_report_even_when_a_cleanup_stays_pending() {
+    // Reviewer's live_gc_json: `gc --json` printed nothing when it exited 1.
+    let fixture = Fixture::new();
+    fixture.launch(
+        "plain",
+        "name = \"plain\"\njail = \"tool\"\nstate_subdirs = [\"a\"]\n",
+    );
+    let sim = Sim {
+        activity: Some(Arc::new(|vendor: &Path| {
+            let parked = vendor.with_file_name("parked");
+            std::fs::rename(vendor, &parked).unwrap();
+            std::fs::create_dir(vendor).unwrap();
+        })),
+        ..Sim::default()
+    };
+    let report = fixture.run(sim, &["--launch", "plain"]);
+    assert_eq!(receipt_json(&report)["state_cleanup"], "pending");
+    let output = jail_binary(&fixture, &["gc", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("gc printed no JSON report: {error}"));
+    assert_eq!(value["entries"][0]["action"], "pending", "{value}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("did not complete"));
+    let text = jail_binary(&fixture, &["gc"]);
+    assert_eq!(text.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&text.stdout).contains(" pending "));
+}
+
+#[test]
+fn a_run_that_created_no_managed_scratch_reports_cleanup_not_needed() {
+    // Integration finding: settlement said `complete` for a `none` run whose
+    // platform created no managed scratch; nothing created is `not_needed`.
+    let fixture = Fixture::new();
+    let report = fixture.run(
+        Sim {
+            unapplied: true,
+            ..Sim::default()
+        },
+        &["--profile", "none"],
+    );
+    assert_eq!(report.exit_code, 0, "{:?}", report.error);
+    let receipt = receipt_json(&report);
+    assert_eq!(receipt["phase"], "settled");
+    assert_eq!(receipt["state_cleanup"], "not_needed");
+}
+
+fn stage_one_source_with(
+    fixture: &Fixture,
+    source: &Path,
+    forbidden: &[(u64, u64)],
+) -> Result<(), (JailError, usize)> {
+    let vendor_path = fixture.root.join("vendor");
+    let _ = std::fs::remove_dir_all(&vendor_path);
+    private_dir(&vendor_path);
+    let vendor = ouro_jail::state::anchored::Dir::open_trusted(&vendor_path).unwrap();
+    let launch = ouro_jail::policy::LaunchSnapshot {
+        state_var: None,
+        home_is_state: false,
+        state_subdirs: Vec::new(),
+        credentials: vec![ouro_jail::policy::CredentialDecl {
+            id: "only".into(),
+            source: ouro_jail::records::NativeString::from_bytes(
+                source.as_os_str().as_bytes().to_vec(),
+            )
+            .unwrap(),
+            dest: ouro_jail::records::NativeString::Text("only".into()),
+            mode: "copy_rw".into(),
+        }],
+    };
+    ouro_jail::credentials::stage(&launch, vendor.as_fd(), forbidden)
+        .map(|_| ())
+        .map_err(|refusal| (refusal.error, refusal.staged.len()))
 }

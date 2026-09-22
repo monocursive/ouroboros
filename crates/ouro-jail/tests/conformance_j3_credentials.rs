@@ -211,8 +211,8 @@ fn stage_two(staging: &Staging) -> (PathBuf, PathBuf, std::os::fd::OwnedFd) {
         decl("auth", &auth, "auth.json", "copy_rw"),
         decl("config", &config, "conf/config.toml", "bind_ro"),
     ]);
-    let mut staged = credentials::stage(&launch, staging.vendor.as_fd())
-        .unwrap_or_else(|(error, _)| panic!("staging: {error:?}"));
+    let mut staged = credentials::stage(&launch, staging.vendor.as_fd(), &[])
+        .unwrap_or_else(|refusal| panic!("staging: {:?}", refusal.error));
     assert_eq!(staged.len(), 2);
     assert_eq!(staged[1].record.digest, None);
     assert_eq!(
@@ -477,8 +477,9 @@ fn p04_a_fifo_source_is_refused_without_ever_being_opened_for_io() {
     });
     std::thread::sleep(Duration::from_millis(50));
     let launch = launch_of(vec![decl("pipe", &fifo, "pipe", "copy_rw")]);
-    let (error, staged) =
-        credentials::stage(&launch, staging.vendor.as_fd()).expect_err("a FIFO source refuses");
+    let credentials::StagingRefusal { error, staged } =
+        credentials::stage(&launch, staging.vendor.as_fd(), &[])
+            .expect_err("a FIFO source refuses");
     assert_eq!(error.code, ErrorCode::CredentialUnavailable);
     assert!(error.message.contains("a FIFO"), "{}", error.message);
     assert!(staged.is_empty());
@@ -520,7 +521,8 @@ fn p04_every_special_or_oversized_source_refuses_at_staging_on_this_host() {
         ("oversize", big.as_path(), "copy_rw", "budget"),
     ] {
         let launch = launch_of(vec![decl(label, source, label, mode)]);
-        let (error, staged) = credentials::stage(&launch, staging.vendor.as_fd()).expect_err(label);
+        let credentials::StagingRefusal { error, staged } =
+            credentials::stage(&launch, staging.vendor.as_fd(), &[]).expect_err(label);
         assert_eq!(error.code, ErrorCode::CredentialUnavailable, "{label}");
         assert!(error.message.contains(needle), "{label}: {}", error.message);
         assert!(
@@ -1064,4 +1066,262 @@ fn an_agent_launch_profile_refuses_exactly_as_agent_does_on_this_host() {
     assert!(cleanup::absent(
         &attempt_of(&launched_run).join("vendor-state")
     ));
+}
+
+// ---------------------------------------------------------------------------
+// J3 review findings, adopted as live tests
+// ---------------------------------------------------------------------------
+
+/// Runs one `#[ignore]`d test of this binary inside a single bubblewrap
+/// layer (a user and PID namespace, no host configuration), with `binds`
+/// added after the runtime roots. Returns the combined output; panics with it
+/// when the inner test failed.
+fn run_inner_test(name: &str, binds: &[(&str, &Path, &str)], env: &[(&str, &Path)]) -> String {
+    let exe = std::env::current_exe().unwrap();
+    let mut command = Command::new(common::bwrap_path());
+    command.args(["--unshare-user", "--unshare-pid", "--die-with-parent"]);
+    for root in ouro_jail::platform::linux::bwrap::RUNTIME_ROOTS
+        .iter()
+        .filter_map(|path| ouro_jail::platform::linux::fs::resolve_runtime_root(Path::new(path)))
+    {
+        match root {
+            ouro_jail::platform::linux::fs::RootSpec::RoBind(path) => {
+                command.arg("--ro-bind").arg(&path).arg(&path);
+            }
+            ouro_jail::platform::linux::fs::RootSpec::Symlink { path, target } => {
+                command.arg("--symlink").arg(&target).arg(&path);
+            }
+        }
+    }
+    command.args(["--proc", "/proc", "--dev", "/dev"]);
+    for (flag, source, destination) in binds {
+        command.arg(flag).arg(source).arg(destination);
+    }
+    command.arg("--ro-bind").arg(&exe).arg("/testbin");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.args([
+        "/testbin",
+        "--ignored",
+        "--exact",
+        name,
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    let output = command.output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "{name} failed inside bubblewrap:\n{text}"
+    );
+    assert!(text.contains("1 passed"), "{name} did not run:\n{text}");
+    text
+}
+
+#[test]
+#[ignore = "runs inside bubblewrap from m1_a_read_only_bind_of_a_writable_filesystem_gets_no_digest"]
+fn m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem() {
+    // Reviewer's R4: `/r` is a read-only bind of the writable directory that
+    // is also mounted writable at `/w`. ST_RDONLY holds at `/r`, yet the
+    // inode changes through `/w`, so no digest may be recorded.
+    let vendor = Dir::open_trusted(Path::new("/vs")).unwrap();
+    let launch = LaunchSnapshot {
+        state_var: None,
+        home_is_state: false,
+        state_subdirs: Vec::new(),
+        credentials: vec![CredentialDecl {
+            id: "cfg".into(),
+            source: text("/r/cfg.toml"),
+            dest: text("cfg.toml"),
+            mode: "bind_ro".into(),
+        }],
+    };
+    let staged = credentials::stage(&launch, vendor.as_fd(), &[])
+        .unwrap_or_else(|refusal| panic!("staging refused: {:?}", refusal.error));
+    let record = staged[0].record.clone();
+    println!("receipt row: {record:?}");
+    assert_eq!(record.digest, None);
+    assert_eq!(
+        record.digest_unavailable_reason.as_deref(),
+        Some("source_mutable")
+    );
+    std::fs::write("/w/cfg.toml", b"content written after staging").unwrap();
+}
+
+#[test]
+fn m1_a_read_only_bind_of_a_writable_filesystem_gets_no_digest() {
+    if !common::live() {
+        return;
+    }
+    let root = common::private_tempdir();
+    let base = root.path().canonicalize().unwrap();
+    private_dir(&base.join("src"));
+    private_dir(&base.join("vs"));
+    fixture_file(&base.join("src/cfg.toml"), b"fixture config at staging");
+    let output = run_inner_test(
+        "m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem",
+        &[
+            ("--bind", &base.join("src"), "/w"),
+            ("--ro-bind", &base.join("src"), "/r"),
+            ("--bind", &base.join("vs"), "/vs"),
+        ],
+        &[],
+    );
+    assert!(output.contains("source_mutable"), "{output}");
+}
+
+#[test]
+#[ignore = "runs inside bubblewrap from foreign_owners_and_same_device_mounts_are_refused"]
+fn foreign_inner_owner_and_mount_checks() {
+    use ouro_jail::state::anchored::fstat;
+    // Inside an unprivileged user namespace, anything root owns shows as the
+    // overflow uid: a foreign owner a same-UID test can actually produce.
+    let passwd = std::fs::File::open("/own/rootfile").unwrap();
+    assert_ne!(
+        fstat(passwd.as_fd()).unwrap().uid,
+        ouro_jail::state::effective_uid(),
+        "the bound root-owned file must look foreign here"
+    );
+    let reasons = |source: &str| {
+        let launch = LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: vec![CredentialDecl {
+                id: "c".into(),
+                source: text(source),
+                dest: text("c"),
+                mode: "copy_rw".into(),
+            }],
+        };
+        ouro_jail::credentials::inspect(&launch, &[])[0].reason_code
+    };
+    // RM13: the file itself is foreign, its directory is ours.
+    assert_eq!(reasons("/own/rootfile"), "source_foreign_owner");
+    // RM14: a directory on the walk is foreign.
+    assert_eq!(reasons("/etc/passwd"), "source_path_foreign_owner");
+
+    let own = Dir::open_trusted(Path::new("/own")).unwrap();
+    // RM04: a foreign-owned root is refused as foreign, before anything else.
+    let removal = cleanup::remove_tree_at(
+        &own,
+        &Name::new(b"foreigndir").unwrap(),
+        None,
+        cleanup::Limits::DEFAULT,
+    );
+    assert_eq!(
+        removal.reason.as_deref(),
+        Some("managed_directory_foreign_owner"),
+        "{removal:?}"
+    );
+    // RM53: a bind mount of the same filesystem inside the tree has the same
+    // st_dev; only statx's mount-root attribute sees it, and nothing beneath
+    // it may be removed.
+    let removal = cleanup::remove_tree_at(
+        &own,
+        &Name::new(b"tree").unwrap(),
+        None,
+        cleanup::Limits::DEFAULT,
+    );
+    assert_eq!(
+        removal.reason.as_deref(),
+        Some("mount_crossing_refused"),
+        "{removal:?}"
+    );
+    assert!(Path::new("/own/tree/mnt/keep").exists());
+    println!("foreign and mount checks held");
+}
+
+#[test]
+fn foreign_owners_and_same_device_mounts_are_refused() {
+    if !common::live() {
+        return;
+    }
+    let root = common::private_tempdir();
+    let base = root.path().canonicalize().unwrap();
+    let own = base.join("own");
+    private_dir(&own);
+    fixture_file(&own.join("rootfile"), b"");
+    private_dir(&own.join("foreigndir"));
+    private_dir(&own.join("tree/mnt"));
+    let other = base.join("other");
+    private_dir(&other);
+    fixture_file(&other.join("keep"), b"not beneath the tree");
+    let output = run_inner_test(
+        "foreign_inner_owner_and_mount_checks",
+        &[
+            ("--bind", &own, "/own"),
+            ("--ro-bind", Path::new("/etc/passwd"), "/own/rootfile"),
+            ("--ro-bind", Path::new("/usr/share"), "/own/foreigndir"),
+            ("--ro-bind", Path::new("/etc"), "/etc"),
+            ("--bind", &other, "/own/tree/mnt"),
+        ],
+        &[],
+    );
+    assert!(output.contains("foreign and mount checks held"), "{output}");
+    assert_eq!(
+        std::fs::read(other.join("keep")).unwrap(),
+        b"not beneath the tree"
+    );
+}
+
+#[test]
+fn h1_a_read_only_chain_past_the_hoist_depth_no_longer_outlives_the_attempt() {
+    if !common::live() {
+        return;
+    }
+    // Reviewer's live L1: a 140-deep chain of 0500 directories holding a copy
+    // stopped every cleanup pass at the hoist with EACCES.
+    let (jail, workspace) = launched("fixture", PLAIN_PROFILE);
+    let trap = workspace.join("trap.py");
+    std::fs::write(
+        &trap,
+        "import os\nh = os.environ['FIX_HOME']\ncur = h + '/trap'\nos.mkdir(cur)\ndirs = []\n\
+         for _ in range(140):\n    cur += '/d'\n    os.mkdir(cur)\n    dirs.append(cur)\n\
+         open(cur + '/copy-of-a-credential', 'w').write('fixture bytes')\n\
+         for d in reversed(dirs):\n    os.chmod(d, 0o500)\n",
+    )
+    .unwrap();
+    let run = jail
+        .args(["--observe", "off"])
+        .target([OsString::from("/usr/bin/python3"), trap.into_os_string()])
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let attempt = attempt_of(&run);
+    let receipt = jail_json(&attempt);
+    assert_eq!(receipt["phase"], "settled");
+    assert_eq!(receipt["state_cleanup"], "complete", "{receipt:#}");
+    assert!(cleanup::absent(&attempt.join("vendor-state")));
+}
+
+#[test]
+fn a_non_launch_exec_error_verifies_its_teardown() {
+    if !common::live() {
+        return;
+    }
+    let jail = Jail::new().unwrap();
+    let workspace = jail.root().join("workspace");
+    private_dir(&workspace);
+    let run = jail
+        .arg("run")
+        .arg("--workspace")
+        .arg(&workspace)
+        .target([workspace.join("no-such-binary").into_os_string()])
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(125), "stderr: {}", run.stderr_text());
+    let attempt = attempt_of(&run);
+    let receipt = jail_json(&attempt);
+    assert_eq!(receipt["phase"], "refused");
+    assert_eq!(receipt["outcome"]["kind"], "exec_error");
+    assert_eq!(receipt["lifetime"]["tree_empty"], true, "{receipt:#}");
+    assert_eq!(receipt["lifetime"]["integrity"], "verified");
+    assert!(receipt["lifetime"]["verified_at"].is_string());
+    assert_eq!(receipt["state_cleanup"], "not_needed");
 }

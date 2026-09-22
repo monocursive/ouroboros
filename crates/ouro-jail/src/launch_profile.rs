@@ -281,10 +281,13 @@ fn relative_components(
             format!("`{text}` is not a relative path beneath vendor state: {error}"),
         )
     })?;
-    // Vendor state is a writable root, and a `tool` receipt claims that the
-    // protected segments existing at launch in its writable roots are
-    // protected. Vendor state is created empty, so that claim holds only if
-    // the launch profile itself never puts one there.
+    // Vendor state is attempt-private and removed at settlement, so the
+    // protected-path coverage a receipt reports (the workspace's own root
+    // literals and the protected segments existing at launch in the scanned
+    // roots) does not extend to it, and no placeholder is made there. It is
+    // created empty; refusing protected names here keeps it free of any
+    // protected segment the profile itself would plant at launch, so there
+    // is nothing in it that coverage could be read as describing.
     if let Some(protected) = components.iter().find(|name| {
         crate::profiles::PROTECTED_SEGMENTS
             .iter()

@@ -850,19 +850,32 @@ pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, Ja
     let attempt = open_attempt_dir(attempt_dir)?;
     let name = anchored::Name::new(VENDOR_STATE_NAME.as_bytes())
         .map_err(|error| write_failed(attempt_dir.root(), &error))?;
-    let vendor = attempt.mkdir_at(&name, DIRECTORY_MODE).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            unsafe_path(
-                &attempt_dir.vendor_state_path(),
-                "already exists in a fresh attempt; it is not this attempt's vendor state",
-            )
-        } else {
-            write_failed(&attempt_dir.vendor_state_path(), &error)
+    let vendor = match attempt.mkdir_at(&name, DIRECTORY_MODE) {
+        Ok(vendor) => vendor,
+        Err(error) => {
+            // Something already there is not this attempt's, and nothing
+            // created means nothing to clean: either way the registration is
+            // withdrawn, so no later cleanup can remove what this attempt did
+            // not make (J3 review H2). If an entry exists that this call may
+            // have made (a failure after `mkdirat`), it stays registered with
+            // no identity, which cleanup retains rather than deletes.
+            let ours_possibly =
+                error.kind() != std::io::ErrorKind::AlreadyExists && attempt.stat_at(&name).is_ok();
+            if !ours_possibly {
+                withdraw_vendor_registration(attempt_dir)?;
+            }
+            return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
+                unsafe_path(
+                    &attempt_dir.vendor_state_path(),
+                    "already exists in a fresh attempt; it is not this attempt's vendor state",
+                )
+            } else {
+                write_failed(&attempt_dir.vendor_state_path(), &error)
+            });
         }
-    })?;
-    attempt
-        .sync()
-        .map_err(|error| write_failed(attempt_dir.root(), &error))?;
+    };
+    // The identity is recorded before anything else can fail: cleanup never
+    // removes a registered directory whose identity was not recorded.
     let stat = vendor
         .stat()
         .map_err(|error| write_failed(&attempt_dir.vendor_state_path(), &error))?;
@@ -870,7 +883,72 @@ pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, Ja
         state["vendor_state"]["dev"] = serde_json::Value::from(stat.dev.to_string());
         state["vendor_state"]["ino"] = serde_json::Value::from(stat.ino.to_string());
     })?;
+    attempt
+        .sync()
+        .map_err(|error| write_failed(attempt_dir.root(), &error))?;
     Ok(vendor)
+}
+
+/// Withdraws a vendor-state registration whose directory this attempt did not
+/// create: jail state no longer names it, so nothing will ever clean it.
+fn withdraw_vendor_registration(attempt_dir: &AttemptDir) -> Result<(), JailError> {
+    update_attempt_state(attempt_dir, |state| {
+        state["vendor_state"] = serde_json::Value::Null;
+        state["vendor_state_withdrawn"] =
+            serde_json::Value::from("the directory was not created by this attempt");
+        state["state_cleanup"] = serde_json::Value::from(cleanup_word(StateCleanup::NotNeeded));
+        state["cleanup_reason"] = serde_json::Value::Null;
+    })
+}
+
+/// The jail-owned names of an attempt directory (§7), which an existing
+/// attempt root must not already hold before this supervisor claims it.
+pub const JAIL_OWNED_NAMES: [&str; 9] = [
+    "jail.lock",
+    "jail-state.json",
+    "policy.json",
+    "jail.json",
+    "trace.ndjson",
+    VENDOR_STATE_NAME,
+    "scratch",
+    "placeholders",
+    "proxy",
+];
+
+/// Refuses an attempt root that already holds any jail-owned artifact (§7:
+/// "An existing attempt root is acceptable only with validated
+/// ownership/permissions and no previous jail state or jail-owned
+/// artifacts").
+///
+/// Called before the lease is taken, so `jail.lock` is checked too: any
+/// `jail.lock` present then was not created by this supervisor.
+///
+/// # Errors
+/// Returns [`ErrorCode::AttemptExists`] naming the first artifact found.
+pub fn check_fresh_attempt(attempt_dir: &AttemptDir) -> Result<(), JailError> {
+    for name in JAIL_OWNED_NAMES {
+        match std::fs::symlink_metadata(attempt_dir.root().join(name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(JailError::new(
+                    ErrorCode::AttemptExists,
+                    ErrorStage::Resolving,
+                    Remediation::InspectState,
+                    format!(
+                        "the attempt directory already holds the jail-owned `{name}`; a prior \
+                         attempt, live or dead, owns it"
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Err(unsafe_path(
+                    &attempt_dir.root().join(name),
+                    format!("cannot be inspected: {error}"),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Records the private provenance of staged credentials in jail state.
@@ -917,6 +995,16 @@ pub fn record_cleanup(
 mod tests {
     use super::*;
 
+    /// A 0700 temporary directory whatever the umask: a state root under a
+    /// group-writable one is refused, rightly.
+    fn private_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .expect("a temporary directory")
+    }
+
     /// `expect_err` with a caller-supplied message, so a passing case names the
     /// input that was supposed to refuse.
     trait UnwrapErrOrPanic<E> {
@@ -930,6 +1018,85 @@ mod tests {
                 Err(error) => error,
             }
         }
+    }
+
+    fn claimed_attempt() -> (tempfile::TempDir, AttemptDir) {
+        let dir = private_tempdir();
+        let data = dir.path().canonicalize().unwrap().join("data");
+        let attempt = AttemptDir::new(&data, &AttemptId::generate());
+        attempt.create(&data).unwrap();
+        let state = serde_json::json!({
+            "schema": "ouro.jail.state/1",
+            "vendor_state": null,
+            "state_cleanup": "not_needed",
+        });
+        replace_atomically(&attempt.state_path(), &serde_json::to_vec(&state).unwrap()).unwrap();
+        (dir, attempt)
+    }
+
+    #[test]
+    fn an_attempt_root_holding_any_jail_owned_artifact_is_not_fresh() {
+        // J3 review H2: §7 refuses every jail-owned artifact, not only
+        // `jail-state.json`; `jail.lock` included, since the check runs before
+        // this supervisor takes its own lease.
+        for name in JAIL_OWNED_NAMES {
+            let dir = private_tempdir();
+            let data = dir.path().canonicalize().unwrap().join("data");
+            let attempt = AttemptDir::new(&data, &AttemptId::generate());
+            attempt.create(&data).unwrap();
+            assert!(
+                check_fresh_attempt(&attempt).is_ok(),
+                "{name}: empty is fresh"
+            );
+            std::fs::write(attempt.root().join("owner-reservation.json"), b"{}").unwrap();
+            assert!(
+                check_fresh_attempt(&attempt).is_ok(),
+                "an owner's own file is fine"
+            );
+            if name.contains('.') {
+                std::fs::write(attempt.root().join(name), b"").unwrap();
+            } else {
+                std::fs::create_dir(attempt.root().join(name)).unwrap();
+            }
+            let error = check_fresh_attempt(&attempt).unwrap_err();
+            assert_eq!(error.code, ErrorCode::AttemptExists, "{name}");
+            assert!(error.message.contains(name), "{name}: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_vendor_state_that_already_exists_is_withdrawn_not_registered() {
+        let (_dir, attempt) = claimed_attempt();
+        std::fs::create_dir(attempt.vendor_state_path()).unwrap();
+        std::fs::write(attempt.vendor_state_path().join("precious"), b"keep").unwrap();
+        let error = create_vendor_state(&attempt).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsafeStatePath);
+        assert_eq!(vendor_registration(&attempt).unwrap(), None);
+        let state = read_attempt_state(&attempt).unwrap();
+        assert_eq!(state["state_cleanup"], "not_needed");
+        assert!(attempt.vendor_state_path().join("precious").exists());
+    }
+
+    #[test]
+    fn created_vendor_state_is_registered_with_its_identity() {
+        use std::os::unix::fs::MetadataExt as _;
+        let (_dir, attempt) = claimed_attempt();
+        let vendor = create_vendor_state(&attempt).unwrap();
+        let metadata = std::fs::metadata(attempt.vendor_state_path()).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        let registration = vendor_registration(&attempt).unwrap().unwrap();
+        assert_eq!(
+            registration.identity,
+            Some((metadata.dev(), metadata.ino()))
+        );
+        assert_eq!(
+            registration.state_cleanup,
+            crate::records::StateCleanup::Pending
+        );
+        assert_eq!(
+            vendor.stat().unwrap().identity(),
+            (metadata.dev(), metadata.ino())
+        );
     }
 
     #[test]

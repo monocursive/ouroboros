@@ -748,30 +748,56 @@ pub fn fchmod(fd: BorrowedFd<'_>, mode: u32) -> io::Result<()> {
     check(unsafe { libc::fchmod(fd.as_raw_fd(), mode_t(mode)) })
 }
 
-/// Whether the filesystem holding `fd` is mounted read-only.
+/// Filesystem types whose content cannot change while mounted: squashfs,
+/// EROFS and ISO 9660 have no write path at all. A read-only *mount* of a
+/// writable filesystem is not on this list: the same inode stays writable
+/// through any other mount of that filesystem.
+#[cfg(target_os = "linux")]
+const IMMUTABLE_FILESYSTEMS: [u64; 3] = [
+    0x7371_7368, // SQUASHFS_MAGIC
+    0xE0F5_E1E2, // EROFS_SUPER_MAGIC_V1
+    0x0000_9660, // ISOFS_SUPER_MAGIC
+];
+
+/// Whether the object behind `fd` lies on a filesystem that has no write path
+/// (squashfs, EROFS, ISO 9660), read with `fstatfs`.
 ///
 /// # Errors
-/// The errno from `fstatvfs`.
-pub fn readonly_filesystem(fd: BorrowedFd<'_>) -> io::Result<bool> {
-    // SAFETY: an all-zero statvfs is a valid scratch buffer.
-    let mut buffer: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: the descriptor is live and `buffer` is a writable statvfs.
-    check(unsafe { libc::fstatvfs(fd.as_raw_fd(), &raw mut buffer) })?;
-    Ok(buffer.f_flag & libc::ST_RDONLY != 0)
+/// The errno from `fstatfs`.
+#[cfg(target_os = "linux")]
+pub fn immutable_filesystem(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    // SAFETY: an all-zero statfs is a valid scratch buffer the kernel fills.
+    let mut buffer: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: the descriptor is live and `buffer` is a writable statfs;
+    // fstatfs is permitted on an O_PATH descriptor.
+    check(unsafe { libc::fstatfs(fd.as_raw_fd(), &raw mut buffer) })?;
+    let magic = buffer.f_type.cast_unsigned() & 0xffff_ffff;
+    Ok(IMMUTABLE_FILESYSTEMS.contains(&magic))
 }
 
-/// Reopens an `O_PATH` handle for reading through `/proc/self/fd`.
+/// Off Linux no filesystem type is established as immutable, so no `bind_ro`
+/// digest is ever recorded.
+///
+/// # Errors
+/// Never.
+#[cfg(not(target_os = "linux"))]
+pub fn immutable_filesystem(_fd: BorrowedFd<'_>) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// Reopens an `O_PATH` handle for reading through `/proc/self/fd` and checks
+/// that the reopened object is `expected`.
 ///
 /// The magic link resolves to the exact object the handle holds, not to a
 /// path, so a rename or a replacement of the original name cannot change what
-/// is opened. The caller still compares identities: a reopen that reached a
-/// different object (an unexpected `/proc`) is refused, never used.
+/// is opened. The identity is still compared with the caller's own record of
+/// the object: a reopen that reached anything else (an unexpected `/proc`, a
+/// handle that is not the one examined) is refused, never used.
 ///
 /// # Errors
 /// The errno from `open`, or `Other` when the identities differ.
 #[cfg(target_os = "linux")]
-pub fn reopen_for_read(fd: BorrowedFd<'_>) -> io::Result<File> {
-    let before = fstat(fd)?;
+pub fn reopen_checked(fd: BorrowedFd<'_>, expected: &Stat) -> io::Result<File> {
     let path = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd()))
         .map_err(|_| io::Error::other("descriptor path contains NUL"))?;
     // SAFETY: `path` is NUL-terminated and outlives the call. O_NOFOLLOW is
@@ -784,7 +810,7 @@ pub fn reopen_for_read(fd: BorrowedFd<'_>) -> io::Result<File> {
         )
     };
     let file = File::from(owned(raw)?);
-    verify(&fstat(file.as_fd())?, Some(&before))?;
+    verify(&fstat(file.as_fd())?, Some(expected))?;
     Ok(file)
 }
 
@@ -856,6 +882,31 @@ mod tests {
         let error = dir.open_dir_at(&a, Some(&stat_b)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(dir.open_dir_at(&b, Some(&stat_b)).is_ok());
+        // The same check on the walk handle: a directory swapped between the
+        // inspection and the open is refused, whatever the open flags are.
+        let error = dir.open_walk_at(&a, Some(&stat_b)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(dir.open_walk_at(&b, Some(&stat_b)).is_ok());
+        // And on a file opened for reading.
+        std::fs::write(root.path().join("f"), b"f").unwrap();
+        let error = dir
+            .open_read_at(&Name::new(b"f").unwrap(), Some(&stat_b))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn an_exclusive_create_refuses_an_existing_regular_file() {
+        let (root, dir) = temp();
+        std::fs::write(root.path().join("there"), b"operator bytes").unwrap();
+        let error = dir
+            .create_file_at(&Name::new(b"there").unwrap(), 0o600)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(root.path().join("there")).unwrap(),
+            b"operator bytes"
+        );
     }
 
     #[test]
@@ -954,10 +1005,34 @@ mod tests {
         std::fs::rename(root.path().join("held"), root.path().join("moved")).unwrap();
         std::fs::write(root.path().join("held"), b"impostor").unwrap();
         let mut back = Vec::new();
-        reopen_for_read(fd.as_fd())
+        let expected = fstat(fd.as_fd()).unwrap();
+        reopen_checked(fd.as_fd(), &expected)
             .unwrap()
             .read_to_end(&mut back)
             .unwrap();
         assert_eq!(back, b"held-bytes");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reopen_that_reaches_another_object_than_expected_is_refused() {
+        let (root, dir) = temp();
+        std::fs::write(root.path().join("one"), b"1").unwrap();
+        std::fs::write(root.path().join("two"), b"2").unwrap();
+        let one = dir.open_path_at(&Name::new(b"one").unwrap()).unwrap();
+        let two = dir.stat_at(&Name::new(b"two").unwrap()).unwrap();
+        let error = reopen_checked(one.as_fd(), &two).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ordinary_filesystem_is_not_immutable() {
+        let (root, dir) = temp();
+        std::fs::write(root.path().join("f"), b"f").unwrap();
+        let handle = dir.open_path_at(&Name::new(b"f").unwrap()).unwrap();
+        assert!(!immutable_filesystem(handle.as_fd()).unwrap());
+        let proc_self = File::open("/proc/self/status").unwrap();
+        assert!(!immutable_filesystem(proc_self.as_fd()).unwrap());
     }
 }

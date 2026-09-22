@@ -149,6 +149,11 @@ pub struct GcReport {
     pub entries: Vec<GcEntry>,
     /// Whether this was a dry run.
     pub dry_run: bool,
+    // J3-launch begin: cleanups that did not complete (§6.4: exit 1)
+    /// Attempts whose vendor-state cleanup ran and stopped again, with the
+    /// reason; non-empty means `gc` exits 1 after printing its report.
+    pub incomplete: Vec<String>,
+    // J3-launch end
 }
 
 /// One attempt `gc` looked at.
@@ -249,13 +254,6 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
     // below applies.
     let selection = match (args.profile.as_deref(), operator_jail.profile.as_deref()) {
         (Some(cli), _) => cli.to_owned(),
-        // J3-launch begin: §6.1 "Default profile: `tool`, or the launch
-        // profile's `jail` when `--launch` is set."
-        (None, _) if launch.is_some() => launch.as_ref().map_or_else(
-            || "tool".to_owned(),
-            |launch| launch.jail.as_str().to_owned(),
-        ),
-        // J3-launch end
         (None, Some("none")) => {
             return Err(JailError::new(
                 ErrorCode::PolicyWidening,
@@ -267,7 +265,16 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             .with_key_path("jail.profile"));
         }
         (None, Some(configured)) => configured.to_owned(),
-        (None, None) => "tool".to_owned(),
+        // J3-launch begin: §6.1 "Default profile: `tool`, or the launch
+        // profile's `jail` when `--launch` is set." Precedence: `--profile`,
+        // then the operator's configured profile, then the launch default,
+        // then `tool`; a configured profile that disagrees with the launch
+        // default refuses below instead of being replaced (J3 review M3).
+        (None, None) => launch.as_ref().map_or_else(
+            || "tool".to_owned(),
+            |launch| launch.jail.as_str().to_owned(),
+        ),
+        // J3-launch end
     };
 
     let mut layers: Vec<Layer> = Vec::new();
@@ -326,8 +333,26 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         }
     };
     // J3-launch begin: §6.1 — the selected base must permit the launch
-    // profile's credentials and network, and `none` never runs one.
+    // profile's credentials and network, and `none` never runs one. A
+    // configured profile is never silently replaced by a launch default, and
+    // never silently replaces one either: when they name different bases the
+    // operator chooses with `--profile`.
     if let Some(launch) = &launch {
+        if args.profile.is_none()
+            && let Some(configured) = operator_jail.profile.as_deref()
+            && launch.jail != profile
+        {
+            return Err(usage(
+                "jail.profile",
+                format!(
+                    "config.toml selects `{configured}` (base `{}`), but launch profile `{}` \
+                     defaults to `{}`; pass `--profile` to choose one",
+                    profile.as_str(),
+                    launch.name,
+                    launch.jail.as_str()
+                ),
+            ));
+        }
         launch_profile::check_jail_permits(profile, launch)?;
     }
     // J3-launch end
@@ -503,6 +528,24 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             launch,
             &launch_forbidden_roots(&resolved, &workspace),
         )?;
+        // The same rule for every credential source, by identity (M2 of the
+        // J3 review): the child must not be able to change what it is given.
+        // A source that cannot be walked now is left to staging and doctor,
+        // which report it by reason.
+        let forbidden = forbidden_identities(&resolved, &workspace);
+        for credential in &launch.credentials {
+            if let Ok(chain) = crate::credentials::source_chain(credential.source.as_bytes())
+                && chain.iter().any(|identity| forbidden.contains(identity))
+            {
+                return Err(usage(
+                    &format!("launch.credentials.{}.source", credential.id),
+                    format!(
+                        "credential `{}` lies inside a grant the child can write",
+                        credential.id
+                    ),
+                ));
+            }
+        }
     }
     // J3-launch end
 
@@ -686,7 +729,12 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
             .snapshot
             .launch
             .as_ref()
-            .map(crate::credentials::inspect)
+            .map(|launch| {
+                crate::credentials::inspect(
+                    launch,
+                    &forbidden_identities(&plan.resolved, &plan.workspace),
+                )
+            })
             .unwrap_or_default(),
     });
     let ready = ready
@@ -725,6 +773,9 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
             return Ok(GcReport {
                 entries: Vec::new(),
                 dry_run: args.dry_run,
+                // J3-launch begin
+                incomplete: Vec::new(),
+                // J3-launch end
             });
         }
         Err(error) => {
@@ -748,6 +799,9 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
             return Ok(GcReport {
                 entries,
                 dry_run: args.dry_run,
+                // J3-launch begin
+                incomplete: Vec::new(),
+                // J3-launch end
             });
         }
         Err(error) => {
@@ -822,23 +876,16 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
         });
     }
     entries.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
-    // J3-launch begin: §6.4 "1 for failed cleanup or state access"
-    if !incomplete.is_empty() {
-        incomplete.sort();
-        return Err(JailError::new(
-            ErrorCode::StateWriteFailed,
-            ErrorStage::Reconciling,
-            Remediation::InspectState,
-            format!(
-                "vendor-state cleanup did not complete for: {}",
-                incomplete.join(", ")
-            ),
-        ));
-    }
+    // J3-launch begin: §6.4 "1 for failed cleanup or state access"; the
+    // report still reaches the caller, which prints it before exiting 1.
+    incomplete.sort();
     // J3-launch end
     Ok(GcReport {
         entries,
         dry_run: args.dry_run,
+        // J3-launch begin
+        incomplete,
+        // J3-launch end
     })
 }
 
@@ -1016,6 +1063,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
     let attempt_dir = AttemptDir::new(&plan.data_dir, &attempt_id);
     attempt_dir.create(&plan.data_dir)?;
+    // J3-launch begin: §7 — an existing attempt root must hold no jail-owned
+    // artifact at all, not only no `jail-state.json` (J3 review H2). Checked
+    // before the lease, so a `jail.lock` found here is not this supervisor's.
+    state::check_fresh_attempt(&attempt_dir)?;
+    // J3-launch end
     let Some(_lease) = state::Lease::acquire(&attempt_dir.lock_path())? else {
         return Err(JailError::new(
             ErrorCode::AttemptExists,
@@ -1116,7 +1168,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             &mut journal,
         ));
     }
-    let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record) {
+    let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record, budget.deadline) {
         Ok(handoff) => handoff,
         Err(error) => {
             return Ok(refuse(
@@ -1376,10 +1428,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 // the attempt reached release and the kernel answered, which
                 // is a different fact from a refusal before anything ran.
                 record.outcome = Outcome::exec_error(&errno);
-                // J3-launch begin: §13.2 row 4 — with vendor state (and so
-                // possibly credential copies) to remove, verify the teardown
-                // first, so the refusal can clean it rather than retain it.
-                if matches!(state::vendor_registration(&attempt_dir), Ok(Some(_))) {
+                // J3-launch begin: §13.2 row 4 — "true / timestamp only after
+                // teardown verification": every contained attempt verifies the
+                // teardown of a failed exec, so the refused receipt says what
+                // it established and vendor state can be removed.
+                if plan.profile.is_contained() {
                     let tree = running.wait_tree(TREE_BUDGET);
                     record_tree(&mut record, &tree);
                 }
@@ -1681,16 +1734,30 @@ fn remove_managed_scratch(attempt_dir: &AttemptDir, plan: &Plan) -> crate::recor
         return cleanup::not_needed();
     }
     let mut complete = true;
+    // J3-launch begin: `not_needed` when nothing was created (the `none`
+    // profile makes no managed scratch); `complete` only for a removal.
+    let mut created = false;
+    // J3-launch end
     for path in [
         attempt_dir.root().join("scratch"),
         attempt_dir.root().join("placeholders"),
     ] {
+        // J3-launch begin
+        if std::fs::symlink_metadata(&path).is_ok() {
+            created = true;
+        }
+        // J3-launch end
         match std::fs::remove_dir_all(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => complete = false,
         }
     }
+    // J3-launch begin
+    if !created {
+        return cleanup::not_needed();
+    }
+    // J3-launch end
     if complete {
         StateCleanup::Complete
     } else {
@@ -2105,6 +2172,7 @@ fn prepare_launch(
     attempt_dir: &AttemptDir,
     plan: &Plan,
     record: &mut AttemptRecord,
+    deadline: Instant,
 ) -> Result<Option<crate::credentials::LaunchHandoff>, JailError> {
     let snapshot = &plan.resolved.snapshot;
     if snapshot.roots.vendor_state.is_none() {
@@ -2132,28 +2200,28 @@ fn prepare_launch(
     };
     record.state_cleanup = StateCleanup::Pending;
     let vendor = state::create_vendor_state(attempt_dir)?;
-    let mut staged = match crate::credentials::stage(launch, vendor.as_fd()) {
-        Ok(staged) => staged,
-        Err((error, records)) => {
-            record.credentials = records;
-            return Err(error);
-        }
-    };
+    // §12 and the §8.2 preparation budget: staging runs in a worker bounded
+    // by what is left of it, and no source may lie in a child-writable grant.
+    let forbidden = forbidden_identities(&plan.resolved, &plan.workspace);
+    let mut staged =
+        match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, deadline) {
+            Ok(staged) => staged,
+            Err(refusal) => {
+                // Both the receipt rows and the private provenance of every
+                // input staged before the refusal are kept (§12).
+                record.credentials = refusal.records();
+                state::record_staged_credentials(
+                    attempt_dir,
+                    &private_provenance(&refusal.staged),
+                )?;
+                return Err(refusal.error);
+            }
+        };
     record.credentials = staged
         .iter()
         .map(|credential| credential.record.clone())
         .collect();
-    let private: Vec<state::PrivateCredential> = staged
-        .iter()
-        .map(|credential| state::PrivateCredential {
-            id: credential.record.id.clone(),
-            mode: credential.record.mode.clone(),
-            source_dev: credential.source.dev,
-            source_ino: credential.source.ino,
-            source_size: credential.source.size,
-        })
-        .collect();
-    state::record_staged_credentials(attempt_dir, &private)?;
+    state::record_staged_credentials(attempt_dir, &private_provenance(&staged))?;
     crate::credentials::LaunchHandoff::new(
         attempt_dir.vendor_state_path(),
         vendor.into_fd(),
@@ -2168,6 +2236,35 @@ fn prepare_launch(
             format!("vendor state could not be handed to the platform: {error}"),
         )
     })
+}
+
+/// The private provenance of staged credentials: identities, never paths.
+fn private_provenance(
+    staged: &[crate::credentials::StagedCredential],
+) -> Vec<state::PrivateCredential> {
+    staged
+        .iter()
+        .map(|credential| state::PrivateCredential {
+            id: credential.record.id.clone(),
+            mode: credential.record.mode.clone(),
+            source_dev: credential.source.dev,
+            source_ino: credential.source.ino,
+            source_size: credential.source.size,
+        })
+        .collect()
+}
+
+/// The `(dev, ino)` of every child-writable grant a credential source may not
+/// lie in: the workspace, an explicit scratch and every writable host grant.
+/// These are trusted operator roots, resolved as such; one that does not
+/// exist cannot contain a source.
+fn forbidden_identities(resolved: &Resolved, workspace: &Path) -> Vec<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    launch_forbidden_roots(resolved, workspace)
+        .iter()
+        .filter_map(|root| std::fs::metadata(root).ok())
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+        .collect()
 }
 
 /// Copies a tree observation into the receipt's lifetime group.

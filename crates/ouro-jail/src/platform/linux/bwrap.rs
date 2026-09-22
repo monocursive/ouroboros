@@ -667,6 +667,9 @@ pub enum PlanError {
     // J3-launch begin: a staged object is bound by descriptor or not at all
     /// A vendor-state or credential mount has no descriptor.
     StagedFdMissing(&'static str),
+    /// An argument contains NUL, which would split it into several options
+    /// in the NUL-separated `--args` payload.
+    ArgumentNul,
     // J3-launch end
 }
 
@@ -685,7 +688,11 @@ impl fmt::Display for PlanError {
                     f,
                     "the {what} mount has no descriptor; it is never bound by path"
                 )
-            } // J3-launch end
+            }
+            Self::ArgumentNul => write!(
+                f,
+                "an argument contains NUL, which would split it into bubblewrap options"
+            ), // J3-launch end
         }
     }
 }
@@ -1005,6 +1012,18 @@ impl BwrapPlan {
                 push(&[OsStr::new("--json-status-fd"), OsStr::new(&fd.to_string())]);
             }
         }
+        // J3-launch begin: no argument may carry a NUL (J3 review M4). The
+        // `--args` payload separates options with NUL, so one embedded in an
+        // environment name or value would become further bubblewrap options;
+        // the launch grammar refuses NUL, and this refuses it again here.
+        if tail
+            .iter()
+            .chain(self.inner.iter())
+            .any(|part| part.as_bytes().contains(&0))
+        {
+            return Err(PlanError::ArgumentNul);
+        }
+        // J3-launch end
         let size: usize = tail
             .iter()
             .chain(self.inner.iter())
@@ -1454,6 +1473,24 @@ mod tests {
             plan.render(),
             Err(PlanError::StagedFdMissing("credential"))
         ));
+    }
+    #[test]
+    fn an_argument_carrying_nul_refuses_to_render() {
+        let mut plan = sample_plan();
+        plan.env.push((
+            OsString::from("FIX"),
+            OsString::from("x\0--ro-bind\0/secret\0/run/leak"),
+        ));
+        assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
+        let mut plan = sample_plan();
+        plan.env
+            .push((OsString::from("A\0--bind\0/\0/x"), OsString::from("v")));
+        plan.force_args_fd = true;
+        plan.args_fd = Some(14);
+        assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
+        let mut plan = sample_plan();
+        plan.inner.push(OsString::from("tail\0--bind"));
+        assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
     }
     // J3-launch end
 }

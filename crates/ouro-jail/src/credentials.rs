@@ -8,29 +8,40 @@
 //!   else can write, and is read once: the digest is computed from exactly the
 //!   bytes written to the copy, and a source that changes while it is read
 //!   refuses rather than producing a torn copy. The total copied is bounded by
-//!   [`COPY_BUDGET`]; a larger input refuses before any byte of it is copied,
-//!   and in every case before the target executes.
+//!   [`COPY_BUDGET`] per attempt, across every credential; an input that
+//!   would exceed it refuses before any byte of it is copied, and in every
+//!   case before the target executes.
 //! - `bind_ro` exposes the exact granted source file read-only. Staging holds
 //!   a descriptor of that exact object (an `O_PATH` handle on Linux) and hands
 //!   it to the platform, which binds it with `--ro-bind-fd`, so the object the
-//!   checks examined is the object mounted. Its digest is recorded only when
-//!   stable content can be established — the source lies on a read-only
-//!   filesystem and did not change while it was hashed — and is otherwise
-//!   null with a safe reason: the operator's live file can change during the
-//!   attempt, and a digest of what it held at staging would claim more than
-//!   was established.
+//!   checks examined is the object mounted. A source with more than one link
+//!   refuses: another name for it could lie where the child can write. Its
+//!   digest is recorded only when stable content can be established — the
+//!   source lies on a filesystem with no write path at all (squashfs, EROFS,
+//!   ISO 9660) and did not change while it was hashed — and is otherwise null
+//!   with the reason `source_mutable`: a read-only *mount* of a writable
+//!   filesystem does not qualify, because the same inode stays writable
+//!   through any other mount.
 //!
-//! Nothing here recurses through a directory, follows a symlink or opens a
-//! special file for I/O: a FIFO, a socket, a device, a symlink and a directory
-//! all refuse, and on Linux they are refused after an `O_PATH` open that has
-//! no open-time side effect on the object. Error messages name the logical
-//! credential id, never a source path, because errors reach the receipt.
+//! No source may lie inside a child-writable grant: every directory on the
+//! no-follow walk and the file itself are compared by identity with the
+//! grants the caller names. Nothing here recurses through a directory,
+//! follows a symlink or opens a special file for I/O: a FIFO, a socket, a
+//! device, a symlink and a directory all refuse, and on Linux they are
+//! refused after an `O_PATH` open that has no open-time side effect on the
+//! object. Error messages name the logical credential id, never a source
+//! path, because errors reach the receipt.
+//!
+//! [`stage_within`] bounds all of it by a deadline (§8.2's preparation
+//! budget): a source on a hung filesystem blocks `read(2)` in a worker
+//! thread, not the supervisor, and the attempt refuses when the budget ends.
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use sha2::{Digest as _, Sha256};
 
@@ -50,13 +61,13 @@ pub const MODE_COPY_RW: &str = "copy_rw";
 /// `bind_ro`.
 pub const MODE_BIND_RO: &str = "bind_ro";
 
-/// The bound source can change during the attempt: it is not on a read-only
-/// filesystem, so no digest describes what the child will read.
-pub const REASON_SOURCE_MUTABLE: &str = "bind_ro_source_mutable";
+/// The bound source can change during the attempt: it is not on a filesystem
+/// without a write path, so no digest describes what the child will read.
+pub const REASON_SOURCE_MUTABLE: &str = "source_mutable";
 /// The bound source changed while it was being hashed.
-pub const REASON_SOURCE_CHANGED: &str = "bind_ro_source_changed_while_hashed";
+pub const REASON_SOURCE_CHANGED: &str = "source_changed_while_hashed";
 /// The bound source is larger than [`DIGEST_BUDGET`].
-pub const REASON_TOO_LARGE: &str = "bind_ro_source_exceeds_digest_budget";
+pub const REASON_TOO_LARGE: &str = "source_exceeds_digest_budget";
 
 /// A staged source's private identity (kept in jail state, never a receipt).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -81,6 +92,32 @@ pub struct StagedCredential {
     pub source: SourceIdentity,
 }
 
+/// A refused staging: the refusal, and every credential staged before it
+/// (§12: "Refusal can report inputs staged before the failure"), whose
+/// records reach the receipt and whose identities reach private jail state.
+#[derive(Debug)]
+pub struct StagingRefusal {
+    /// Why staging stopped.
+    pub error: JailError,
+    /// The credentials staged before it stopped, in id order.
+    pub staged: Vec<StagedCredential>,
+}
+
+impl StagingRefusal {
+    fn bare(error: JailError) -> StagingRefusal {
+        StagingRefusal {
+            error,
+            staged: Vec::new(),
+        }
+    }
+
+    /// The receipt rows of the credentials staged before the refusal.
+    #[must_use]
+    pub fn records(&self) -> Vec<CredentialRecord> {
+        self.staged.iter().map(|item| item.record.clone()).collect()
+    }
+}
+
 fn refusal(id: &str, remediation: Remediation, message: impl std::fmt::Display) -> JailError {
     JailError::new(
         ErrorCode::CredentialUnavailable,
@@ -103,28 +140,123 @@ fn state_failure(id: &str, what: &str, error: &std::io::Error) -> JailError {
 /// Stages every credential of `launch` into the vendor-state directory
 /// `vendor_state`, after creating its `state_subdirs` (§12).
 ///
-/// On success every declared credential is staged, in id order. On refusal
-/// the error comes with the records of the credentials staged before the
-/// failure, which §12 lets the refused receipt report.
+/// `forbidden` holds the `(dev, ino)` identities of every child-writable
+/// grant (the workspace, an explicit scratch, every writable host grant); a
+/// source whose no-follow walk passes through one of them, or is one of them,
+/// refuses. On success every declared credential is staged, in id order. On
+/// refusal the credentials staged before the failure come back with it.
 ///
 /// # Errors
-/// [`ErrorCode::CredentialUnavailable`] for a missing, special, foreign,
-/// shared-writable, oversized or changing source, and
+/// A [`StagingRefusal`] carrying [`ErrorCode::CredentialUnavailable`] for a
+/// missing, special, foreign, shared-writable, multiply-linked (`bind_ro`),
+/// oversized, changing or child-writable source, or
 /// [`ErrorCode::StateWriteFailed`] when vendor state cannot be written.
 pub fn stage(
     launch: &LaunchSnapshot,
     vendor_state: BorrowedFd<'_>,
-) -> Result<Vec<StagedCredential>, (JailError, Vec<CredentialRecord>)> {
+    forbidden: &[(u64, u64)],
+) -> Result<Vec<StagedCredential>, StagingRefusal> {
+    stage_reporting(launch, vendor_state, forbidden, &|_| {})
+}
+
+/// [`stage`] in a worker thread, bounded by `deadline`.
+///
+/// A source on a hung filesystem (FUSE, NFS) can block `read(2)`
+/// indefinitely. The worker is left behind on expiry: it holds only its own
+/// descriptors, and it ends with the process. The refusal then carries the
+/// credentials the worker reported staged before the deadline, without their
+/// bind descriptors (nothing is bound after a refusal).
+///
+/// # Errors
+/// As [`stage`], plus [`ErrorCode::CredentialUnavailable`] with remediation
+/// `retry` when the deadline passes first.
+pub fn stage_within(
+    launch: &LaunchSnapshot,
+    vendor_state: BorrowedFd<'_>,
+    forbidden: &[(u64, u64)],
+    deadline: Instant,
+) -> Result<Vec<StagedCredential>, StagingRefusal> {
+    let vendor = vendor_state
+        .try_clone_to_owned()
+        .map_err(|error| StagingRefusal::bare(state_failure("*", "descriptor", &error)))?;
+    let launch = launch.clone();
+    let forbidden = forbidden.to_vec();
+    let progress: Arc<Mutex<Vec<(CredentialRecord, SourceIdentity)>>> = Arc::default();
+    let report = Arc::clone(&progress);
+    let result = within(deadline, move || {
+        stage_reporting(&launch, vendor.as_fd(), &forbidden, &|credential| {
+            if let Ok(mut staged) = report.lock() {
+                staged.push((credential.record.clone(), credential.source));
+            }
+        })
+    });
+    match result {
+        Some(result) => result,
+        None => {
+            let staged = progress
+                .lock()
+                .map(|staged| staged.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(record, source)| StagedCredential {
+                    record,
+                    bind: None,
+                    source,
+                })
+                .collect();
+            Err(StagingRefusal {
+                error: JailError::new(
+                    ErrorCode::CredentialUnavailable,
+                    ErrorStage::Preparing,
+                    Remediation::Retry,
+                    "credential staging did not finish within the preparation budget; a \
+                     source may be on a filesystem that does not answer"
+                        .to_owned(),
+                )
+                .with_key_path("launch.credentials"),
+                staged,
+            })
+        }
+    }
+}
+
+/// Runs `work` on a worker thread and waits for it until `deadline`.
+///
+/// `None` means the deadline came first; the worker keeps running detached
+/// and its result is dropped whenever it arrives.
+pub fn within<T: Send + 'static>(
+    deadline: Instant,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
+        .name("ouro-jail-staging".to_owned())
+        .spawn(move || {
+            let _ = sender.send(work());
+        });
+    if spawned.is_err() {
+        return None;
+    }
+    let wait = deadline.saturating_duration_since(Instant::now());
+    receiver.recv_timeout(wait).ok()
+}
+
+fn stage_reporting(
+    launch: &LaunchSnapshot,
+    vendor_state: BorrowedFd<'_>,
+    forbidden: &[(u64, u64)],
+    staged_one: &dyn Fn(&StagedCredential),
+) -> Result<Vec<StagedCredential>, StagingRefusal> {
     let vendor = vendor_state
         .try_clone_to_owned()
         .map(Dir::from_owned)
-        .map_err(|error| (state_failure("*", "descriptor", &error), Vec::new()))?;
+        .map_err(|error| StagingRefusal::bare(state_failure("*", "descriptor", &error)))?;
 
     let mut subdirs: Vec<&NativeString> = launch.state_subdirs.iter().collect();
     subdirs.sort();
     for subdir in subdirs {
         let components = anchored::split_relative(subdir.as_bytes()).map_err(|error| {
-            (
+            StagingRefusal::bare(
                 JailError::new(
                     ErrorCode::InvalidConfig,
                     ErrorStage::Preparing,
@@ -132,14 +264,10 @@ pub fn stage(
                     format!("a state subdirectory is not a relative path: {error}"),
                 )
                 .with_key_path("launch.state_subdirs"),
-                Vec::new(),
             )
         })?;
         ensure_directories(&vendor, &components).map_err(|error| {
-            (
-                state_failure("state_subdirs", "create directory", &error),
-                Vec::new(),
-            )
+            StagingRefusal::bare(state_failure("state_subdirs", "create directory", &error))
         })?;
     }
 
@@ -148,12 +276,12 @@ pub fn stage(
     let mut staged: Vec<StagedCredential> = Vec::new();
     let mut copied: u64 = 0;
     for declaration in declarations {
-        match stage_one(&vendor, declaration, &mut copied) {
-            Ok(credential) => staged.push(credential),
-            Err(error) => {
-                let records = staged.iter().map(|item| item.record.clone()).collect();
-                return Err((error, records));
+        match stage_one(&vendor, declaration, forbidden, &mut copied) {
+            Ok(credential) => {
+                staged_one(&credential);
+                staged.push(credential);
             }
+            Err(error) => return Err(StagingRefusal { error, staged }),
         }
     }
     Ok(staged)
@@ -187,9 +315,20 @@ fn ensure_directories(base: &Dir, components: &[Name]) -> std::io::Result<Dir> {
     Ok(current)
 }
 
+/// Whether a `copy_rw` source of `size` bytes still fits the per-attempt
+/// budget after `copied` bytes: the budget is one total across every
+/// credential of the attempt, never per file.
+#[must_use]
+pub fn fits_copy_budget(copied: u64, size: u64) -> bool {
+    copied
+        .checked_add(size)
+        .is_some_and(|total| total <= COPY_BUDGET)
+}
+
 fn stage_one(
     vendor: &Dir,
     declaration: &CredentialDecl,
+    forbidden: &[(u64, u64)],
     copied: &mut u64,
 ) -> Result<StagedCredential, JailError> {
     let id = declaration.id.as_str();
@@ -216,21 +355,23 @@ fn stage_one(
         ));
     };
 
-    let source =
-        open_source(declaration.source.as_bytes()).map_err(|refused| refused.into_error(id))?;
+    let source = open_source(declaration.source.as_bytes(), forbidden)
+        .and_then(|source| check_mode(mode, &source.stat).map(|()| source))
+        .map_err(|refused| refused.into_error(id))?;
     let identity = SourceIdentity {
         dev: source.stat.dev,
         ino: source.stat.ino,
         size: source.stat.size,
     };
 
-    if mode == MODE_COPY_RW && source.stat.size > COPY_BUDGET.saturating_sub(*copied) {
+    if mode == MODE_COPY_RW && !fits_copy_budget(*copied, source.stat.size) {
         return Err(refusal(
             id,
             Remediation::Configuration,
             format!(
-                "copying {} bytes would exceed the {} byte credential-copy budget per attempt",
-                source.stat.size, COPY_BUDGET
+                "copying {} more bytes would exceed the {} byte credential-copy budget per \
+                 attempt ({} already copied)",
+                source.stat.size, COPY_BUDGET, *copied
             ),
         ));
     }
@@ -280,6 +421,25 @@ fn stage_one(
     })
 }
 
+/// Mode-specific source rules: a `bind_ro` source must have exactly one link.
+///
+/// The child sees a `bind_ro` source itself, read-only at its view; a second
+/// name for the same inode elsewhere (in the workspace, say) would be a
+/// writable route to the very file the view claims to pin. A `copy_rw` source
+/// is never seen by the child, so its link count does not matter.
+fn check_mode(mode: &str, stat: &Stat) -> Result<(), SourceRefusal> {
+    if mode == MODE_BIND_RO && stat.nlink != 1 {
+        return Err(SourceRefusal::configuration(
+            "source_multiply_linked",
+            format!(
+                "a bind_ro source must have exactly one link, and this one has {}",
+                stat.nlink
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// An opened credential source: the handle and what `fstat` said about it.
 struct Source {
     /// `O_PATH` on Linux; a read descriptor elsewhere.
@@ -291,7 +451,7 @@ impl Source {
     fn reader(&self) -> std::io::Result<File> {
         #[cfg(target_os = "linux")]
         {
-            anchored::reopen_for_read(self.handle.as_fd())
+            anchored::reopen_checked(self.handle.as_fd(), &self.stat)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -332,15 +492,35 @@ impl SourceRefusal {
     }
 }
 
-/// Opens an absolute source path with a no-follow walk from `/` (§12).
+/// The identities of every directory on an absolute source path's no-follow
+/// walk, then of the file itself, without opening the file.
 ///
-/// Every directory on the way is opened relative to the previous one with
-/// `O_NOFOLLOW`, checked to be the object `fstatat` described, and must be
-/// owned by this operator or root and not writable by anyone else unless it
-/// is sticky: a directory someone else can write lets them swap the next
-/// component. The final component must be a regular file owned by this
-/// operator or root with no group or other write bit.
-fn open_source(path: &[u8]) -> Result<Source, SourceRefusal> {
+/// Used by resolution to refuse a source inside a child-writable grant before
+/// anything is allocated; staging repeats the comparison on its own walk.
+///
+/// # Errors
+/// The [`SourceRefusal`] the walk would produce.
+pub fn source_chain(path: &[u8]) -> Result<Vec<(u64, u64)>, SourceRefusal> {
+    let walked = walk_to_source(path)?;
+    let mut chain = walked.chain;
+    chain.push(walked.stat.identity());
+    Ok(chain)
+}
+
+/// Where a no-follow walk to a source ended.
+struct Walked {
+    /// The directory holding the final component.
+    directory: Dir,
+    /// The final component.
+    name: Name,
+    /// Its `lstat`.
+    stat: Stat,
+    /// The identities of `/` and every directory walked.
+    chain: Vec<(u64, u64)>,
+}
+
+/// Walks an absolute source path with no symlink followed.
+fn walk_to_source(path: &[u8]) -> Result<Walked, SourceRefusal> {
     let uninspectable = |error: std::io::Error| {
         SourceRefusal::configuration(
             "source_uninspectable",
@@ -360,7 +540,9 @@ fn open_source(path: &[u8]) -> Result<Source, SourceRefusal> {
         ));
     };
     let mut current = Dir::open_root_for_walk().map_err(uninspectable)?;
-    check_directory(&current.stat().map_err(uninspectable)?)?;
+    let root = current.stat().map_err(uninspectable)?;
+    check_directory(&root)?;
+    let mut chain = vec![root.identity()];
     for component in directories {
         let stat = match current.stat_at(component) {
             Ok(stat) => stat,
@@ -386,6 +568,7 @@ fn open_source(path: &[u8]) -> Result<Source, SourceRefusal> {
             .open_walk_at(component, Some(&stat))
             .map_err(uninspectable)?;
         check_directory(&stat)?;
+        chain.push(stat.identity());
     }
     let stat = match current.stat_at(file_name) {
         Ok(stat) => stat,
@@ -397,8 +580,68 @@ fn open_source(path: &[u8]) -> Result<Source, SourceRefusal> {
         }
         Err(error) => return Err(uninspectable(error)),
     };
-    check_file(&stat)?;
-    let handle = open_final(&current, file_name, &stat).map_err(uninspectable)?;
+    Ok(Walked {
+        directory: current,
+        name: file_name.clone(),
+        stat,
+        chain,
+    })
+}
+
+/// Refuses a source whose walk passes through, or ends at, a child-writable
+/// grant (compared by identity, so no spelling or alias hides it).
+fn check_not_in_grant(chain: &[(u64, u64)], forbidden: &[(u64, u64)]) -> Result<(), SourceRefusal> {
+    if chain.iter().any(|identity| forbidden.contains(identity)) {
+        return Err(SourceRefusal::configuration(
+            "source_in_writable_grant",
+            "the source lies inside a grant the child can write, so the child could change \
+             it",
+        ));
+    }
+    Ok(())
+}
+
+/// Opens an absolute source path with a no-follow walk from `/` (§12).
+///
+/// Every directory on the way is opened relative to the previous one with
+/// `O_NOFOLLOW`, checked to be the object `fstatat` described, and must be
+/// owned by this operator or root and not writable by anyone else unless it
+/// is sticky: a directory someone else can write lets them swap the next
+/// component. The final component must be a regular file owned by this
+/// operator or root with no group or other write bit, and neither it nor any
+/// directory above it may be one of the `forbidden` grants.
+fn open_source(path: &[u8], forbidden: &[(u64, u64)]) -> Result<Source, SourceRefusal> {
+    let walked = walk_to_source(path)?;
+    let mut chain = walked.chain;
+    chain.push(walked.stat.identity());
+    check_not_in_grant(&chain, forbidden)?;
+    let (handle, opened) = open_checked(&walked.directory, &walked.name, &walked.stat)?;
+    Ok(Source {
+        handle,
+        stat: opened,
+    })
+}
+
+/// The final open of a source: `stat` is what `fstatat` saw; the object
+/// actually opened must be that object (a swap between the two refuses) and
+/// must itself pass the file checks (a change of kind, owner or mode between
+/// the two refuses).
+///
+/// # Errors
+/// The [`SourceRefusal`] for a failed check.
+pub fn open_checked(
+    directory: &Dir,
+    name: &Name,
+    stat: &Stat,
+) -> Result<(OwnedFd, Stat), SourceRefusal> {
+    let uninspectable = |error: std::io::Error| {
+        SourceRefusal::configuration(
+            "source_uninspectable",
+            format!("the source cannot be opened: {error}"),
+        )
+    };
+    check_file(stat)?;
+    let handle = open_final(directory, name, stat).map_err(uninspectable)?;
     let opened = anchored::fstat(handle.as_fd()).map_err(uninspectable)?;
     if opened.identity() != stat.identity() {
         return Err(SourceRefusal::new(
@@ -408,10 +651,7 @@ fn open_source(path: &[u8]) -> Result<Source, SourceRefusal> {
         ));
     }
     check_file(&opened)?;
-    Ok(Source {
-        handle,
-        stat: opened,
-    })
+    Ok((handle, opened))
 }
 
 #[cfg(target_os = "linux")]
@@ -420,8 +660,9 @@ fn open_final(dir: &Dir, name: &Name, _stat: &Stat) -> std::io::Result<OwnedFd> 
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_final(dir: &Dir, name: &Name, stat: &Stat) -> std::io::Result<OwnedFd> {
-    dir.open_read_at(name, Some(stat)).map(OwnedFd::from)
+fn open_final(dir: &Dir, name: &Name, _stat: &Stat) -> std::io::Result<OwnedFd> {
+    // The identity comparison happens in `open_checked`, on every platform.
+    dir.open_read_at(name, None).map(OwnedFd::from)
 }
 
 fn check_directory(stat: &Stat) -> Result<(), SourceRefusal> {
@@ -502,23 +743,26 @@ pub struct CredentialCheck {
     pub reason_code: &'static str,
 }
 
-/// Checks each credential's existence, type, ownership, mode and the copy
-/// budget exactly as [`stage`] would, without reading content and without
-/// writing anything (§14.1). The walk is the same no-follow walk; on Linux the
-/// final open is `O_PATH`, so even a special file is never opened for I/O.
+/// Checks each credential's existence, type, ownership, mode, link count,
+/// grant containment and the copy budget exactly as [`stage`] would, without
+/// reading content and without writing anything (§14.1). The walk is the
+/// same no-follow walk; on Linux the final open is `O_PATH`, so even a special
+/// file is never opened for I/O.
 #[must_use]
-pub fn inspect(launch: &LaunchSnapshot) -> Vec<CredentialCheck> {
+pub fn inspect(launch: &LaunchSnapshot, forbidden: &[(u64, u64)]) -> Vec<CredentialCheck> {
     let mut declarations: Vec<&CredentialDecl> = launch.credentials.iter().collect();
     declarations.sort_by(|left, right| left.id.cmp(&right.id));
     let mut copied: u64 = 0;
     declarations
         .into_iter()
         .map(|declaration| {
-            let reason = match open_source(declaration.source.as_bytes()) {
+            let opened = open_source(declaration.source.as_bytes(), forbidden)
+                .and_then(|source| check_mode(&declaration.mode, &source.stat).map(|()| source));
+            let reason = match opened {
                 Err(refused) => refused.reason,
                 Ok(source)
                     if declaration.mode == MODE_COPY_RW
-                        && source.stat.size > COPY_BUDGET.saturating_sub(copied) =>
+                        && !fits_copy_budget(copied, source.stat.size) =>
                 {
                     "copy_budget_exceeded"
                 }
@@ -597,7 +841,7 @@ fn copy_exactly(id: &str, source: &Source, target: &mut File) -> Result<String, 
             format!("the source cannot be inspected: {error}"),
         )
     })?;
-    if total != expected || !after.unchanged_since(&source.stat) {
+    if !read_was_stable(expected, total, &source.stat, &after) {
         return Err(refusal(
             id,
             Remediation::Retry,
@@ -608,14 +852,33 @@ fn copy_exactly(id: &str, source: &Source, target: &mut File) -> Result<String, 
     Ok(hex(&hasher.finalize()))
 }
 
+/// Whether one read of a source was a read of stable content: exactly the
+/// size `fstat` reported before, and the same object, size and times after.
+#[must_use]
+pub fn read_was_stable(expected: u64, total: u64, before: &Stat, after: &Stat) -> bool {
+    total == expected && after.unchanged_since(before)
+}
+
+/// Whether a `bind_ro` digest may be attempted at all: only for a source on
+/// a filesystem with no write path, within the digest budget.
+///
+/// # Errors
+/// The reason the digest is unavailable.
+pub fn digest_precondition(immutable_filesystem: bool, size: u64) -> Result<(), &'static str> {
+    if !immutable_filesystem {
+        return Err(REASON_SOURCE_MUTABLE);
+    }
+    if size > DIGEST_BUDGET {
+        return Err(REASON_TOO_LARGE);
+    }
+    Ok(())
+}
+
 /// The digest of a `bind_ro` source, when stable content can be established.
 fn bind_digest(source: &Source) -> (Option<String>, Option<&'static str>) {
-    match anchored::readonly_filesystem(source.handle.as_fd()) {
-        Ok(true) => {}
-        _ => return (None, Some(REASON_SOURCE_MUTABLE)),
-    }
-    if source.stat.size > DIGEST_BUDGET {
-        return (None, Some(REASON_TOO_LARGE));
+    let immutable = anchored::immutable_filesystem(source.handle.as_fd()).unwrap_or(false);
+    if let Err(reason) = digest_precondition(immutable, source.stat.size) {
+        return (None, Some(reason));
     }
     let Ok(reader) = source.reader() else {
         return (None, Some(REASON_SOURCE_CHANGED));
@@ -635,9 +898,9 @@ fn bind_digest(source: &Source) -> (Option<String>, Option<&'static str>) {
             Err(_) => return (None, Some(REASON_SOURCE_CHANGED)),
         }
     }
-    let unchanged = anchored::fstat(limited.get_ref().as_fd())
-        .is_ok_and(|after| after.unchanged_since(&source.stat));
-    if total != source.stat.size || !unchanged {
+    let stable = anchored::fstat(limited.get_ref().as_fd())
+        .is_ok_and(|after| read_was_stable(source.stat.size, total, &source.stat, &after));
+    if !stable {
         return (None, Some(REASON_SOURCE_CHANGED));
     }
     (Some(hex(&hasher.finalize())), None)
@@ -765,5 +1028,202 @@ mod tests {
             digest,
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    fn stat(size: u64, mtime: i64) -> Stat {
+        Stat {
+            dev: 1,
+            ino: 2,
+            kind: Kind::Regular,
+            mode: 0o600,
+            uid: crate::state::effective_uid(),
+            nlink: 1,
+            size,
+            mtime: (mtime, 0),
+            ctime: (mtime, 0),
+            mount_root: None,
+        }
+    }
+
+    #[test]
+    fn a_read_is_stable_only_when_size_count_object_and_times_all_agree() {
+        let before = stat(10, 5);
+        assert!(read_was_stable(10, 10, &before, &before));
+        assert!(!read_was_stable(10, 9, &before, &before), "short read");
+        assert!(!read_was_stable(10, 11, &before, &before), "grew");
+        assert!(!read_was_stable(10, 10, &before, &stat(10, 6)), "modified");
+        assert!(!read_was_stable(10, 10, &before, &stat(11, 5)), "resized");
+        let mut other = before;
+        other.ino = 3;
+        assert!(!read_was_stable(10, 10, &before, &other), "another object");
+    }
+
+    #[test]
+    fn a_bind_ro_digest_needs_a_filesystem_with_no_write_path() {
+        assert_eq!(digest_precondition(false, 1), Err(REASON_SOURCE_MUTABLE));
+        assert_eq!(digest_precondition(true, 1), Ok(()));
+        assert_eq!(
+            digest_precondition(true, DIGEST_BUDGET + 1),
+            Err(REASON_TOO_LARGE)
+        );
+        assert_eq!(REASON_SOURCE_MUTABLE, "source_mutable");
+    }
+
+    #[test]
+    fn the_copy_budget_is_one_total_per_attempt() {
+        assert!(fits_copy_budget(0, COPY_BUDGET));
+        assert!(!fits_copy_budget(0, COPY_BUDGET + 1));
+        assert!(fits_copy_budget(COPY_BUDGET - 10, 10));
+        assert!(!fits_copy_budget(COPY_BUDGET - 10, 11));
+        assert!(!fits_copy_budget(u64::MAX, 1), "no overflow into a pass");
+    }
+
+    #[test]
+    fn a_bind_ro_source_must_have_exactly_one_link() {
+        let mut linked = stat(1, 1);
+        assert!(check_mode(MODE_BIND_RO, &linked).is_ok());
+        linked.nlink = 2;
+        assert_eq!(
+            check_mode(MODE_BIND_RO, &linked).unwrap_err().reason,
+            "source_multiply_linked"
+        );
+        assert!(
+            check_mode(MODE_COPY_RW, &linked).is_ok(),
+            "the child never sees a copy_rw source"
+        );
+    }
+
+    fn directory() -> (tempfile::TempDir, std::path::PathBuf, Dir) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let handle = Dir::open_trusted(&path).unwrap();
+        (dir, path, handle)
+    }
+
+    #[test]
+    fn a_source_swapped_between_inspection_and_open_is_refused() {
+        // J3 review RM12: a real replacement between `fstatat` and the open,
+        // done deterministically between the two calls.
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_dir, path, handle) = directory();
+        std::fs::write(path.join("token"), b"original").unwrap();
+        std::fs::set_permissions(path.join("token"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let name = Name::new(b"token").unwrap();
+        let inspected = handle.stat_at(&name).unwrap();
+        std::fs::rename(path.join("token"), path.join("moved")).unwrap();
+        std::fs::write(path.join("token"), b"impostor").unwrap();
+        std::fs::set_permissions(path.join("token"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let refused = open_checked(&handle, &name, &inspected).unwrap_err();
+        assert_eq!(refused.reason, "source_replaced");
+        assert_eq!(refused.remediation, Remediation::Retry);
+    }
+
+    #[test]
+    fn a_source_made_shared_writable_between_inspection_and_open_is_refused() {
+        // J3 review RM45: same object, but its mode changed after the first
+        // check; the opened object is checked again.
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_dir, path, handle) = directory();
+        std::fs::write(path.join("token"), b"t").unwrap();
+        std::fs::set_permissions(path.join("token"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let name = Name::new(b"token").unwrap();
+        let inspected = handle.stat_at(&name).unwrap();
+        std::fs::set_permissions(path.join("token"), std::fs::Permissions::from_mode(0o666))
+            .unwrap();
+        let refused = open_checked(&handle, &name, &inspected).unwrap_err();
+        assert_eq!(refused.reason, "source_shared_writable");
+        let now = handle.stat_at(&name).unwrap();
+        assert_eq!(
+            open_checked(&handle, &name, &now).unwrap_err().reason,
+            "source_shared_writable"
+        );
+        std::fs::set_permissions(path.join("token"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let now = handle.stat_at(&name).unwrap();
+        assert!(open_checked(&handle, &name, &now).is_ok());
+    }
+
+    #[test]
+    fn work_past_its_deadline_is_abandoned_and_finishes_harmlessly_later() {
+        // The budget path of `stage_within` (J3 review L4), with a source that
+        // blocks until released: a closure blocked on a channel.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        let result = within(
+            Instant::now() + std::time::Duration::from_millis(150),
+            move || {
+                let _ = blocked.recv();
+                let _ = done.send(());
+                "staged"
+            },
+        );
+        assert_eq!(result, None);
+        let waited = started.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(150),
+            "{waited:?}"
+        );
+        assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+        release.send(()).unwrap();
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the abandoned worker still finishes");
+        assert_eq!(
+            within(Instant::now() + std::time::Duration::from_secs(5), || 7),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn stage_within_stages_inside_its_budget_and_refuses_past_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_dir, path, handle) = directory();
+        for name in ["a", "b"] {
+            std::fs::write(path.join(name), name).unwrap();
+            std::fs::set_permissions(path.join(name), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let vendor = handle.mkdir_at(&Name::new(b"vs").unwrap(), 0o700).unwrap();
+        let launch = LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: ["a", "b"]
+                .iter()
+                .map(|id| CredentialDecl {
+                    id: (*id).to_owned(),
+                    source: NativeString::from_bytes(
+                        path.join(id).as_os_str().as_encoded_bytes().to_vec(),
+                    )
+                    .unwrap(),
+                    dest: NativeString::Text((*id).to_owned()),
+                    mode: MODE_COPY_RW.to_owned(),
+                })
+                .collect(),
+        };
+        let staged = stage_within(
+            &launch,
+            vendor.as_fd(),
+            &[],
+            Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .expect("within a generous budget");
+        assert_eq!(staged.len(), 2);
+        let expired = stage_within(&launch, vendor.as_fd(), &[], Instant::now());
+        match expired {
+            Err(refusal) if refusal.error.remediation == Remediation::Retry => {
+                assert_eq!(refusal.error.code, ErrorCode::CredentialUnavailable);
+            }
+            // The worker can finish in the instant before the wait: then the
+            // destinations already exist, which is its own refusal.
+            Err(refusal) => assert!(refusal.error.message.contains("already exists")),
+            Ok(_) => panic!("the destinations exist; staging again cannot succeed"),
+        }
     }
 }

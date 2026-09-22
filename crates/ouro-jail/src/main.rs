@@ -448,6 +448,16 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
         }
         println!("scanned {}", report.entries.len());
     }
+    // J3-launch begin: §6.4 — a cleanup that stopped again exits 1, after the
+    // report is printed (J3 review L1).
+    if !report.incomplete.is_empty() {
+        eprintln!(
+            "ouro-jail: vendor-state cleanup did not complete for: {}",
+            report.incomplete.join(", ")
+        );
+        return ExitCode::from(1);
+    }
+    // J3-launch end
     ExitCode::SUCCESS
 }
 

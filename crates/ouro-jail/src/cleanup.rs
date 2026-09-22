@@ -38,6 +38,25 @@
 //!   is renamed up to the vendor-state root and visited from there, so an
 //!   arbitrarily deep tree needs no more descriptors, and a larger tree takes
 //!   more passes. Reaching the entry bound leaves `pending` with a reason.
+//!
+//! Termination. Every visit of an entry is one of: an unlink, a hoist, or a
+//! descent, and a descent is followed within `max_depth` visits by an unlink,
+//! a hoist or the removal of an emptied directory. A hoisted directory lands
+//! at depth two and is never hoisted again, so each entry is visited at most
+//! twice; a pass that stops on its budget revisits at most `max_depth`
+//! directories on its way back down in the next one. A tree of `N` entries
+//! therefore finishes in at most `ceil(2 * N / (max_entries - max_depth))`
+//! passes: one pass for any tree up to 49,936 entries with the defaults.
+//!
+//! What a same-UID child can build does not stop a pass: permissions it removes from its own directories are
+//! restored (`chmod`, identity-checked) before an entry is read, unlinked from
+//! or hoisted; it cannot create an entry owned by anyone else (that needs
+//! `CAP_CHOWN` in the initial user namespace), an immutable or append-only
+//! file (`CAP_LINUX_IMMUTABLE`), a device node (`CAP_MKNOD`), or a mount
+//! that survives its own mount namespace. What can still stop one is outside
+//! the child: an operator's or root's mount, attribute or ownership change,
+//! and I/O errors of the filesystem itself. Each leaves `pending` with a
+//! reason, and nothing is ever followed or crossed to get past it.
 
 use std::io;
 use std::path::Path;
@@ -59,6 +78,9 @@ pub const REASON_BUDGET: &str = "cleanup_budget_exhausted";
 pub const REASON_TREE_UNVERIFIED: &str = "tree_unverified";
 /// The reason recorded when boundary integrity was lost.
 pub const REASON_INTEGRITY_LOST: &str = "integrity_lost";
+/// The reason recorded when a registered vendor-state directory has no
+/// recorded identity, so nothing proves this attempt created it.
+pub const REASON_IDENTITY_UNRECORDED: &str = "vendor_state_identity_unrecorded";
 
 /// The cleanup status for an attempt that staged nothing.
 #[must_use]
@@ -169,6 +191,68 @@ fn enter(parent: &Dir, name: &Name, stat: &Stat) -> io::Result<Dir> {
     Ok(dir)
 }
 
+/// Gives the owner write and search permission on a directory entry before it
+/// is renamed, and checks the entry is still the directory `stat` described.
+///
+/// Renaming a directory to another parent rewrites its `..` entry, which
+/// needs write permission on the directory itself: a child that leaves a
+/// `0500` directory at the hoisting depth would otherwise stop every pass
+/// with `EACCES` (J3 review H1).
+fn make_writable(parent: &Dir, name: &Name, stat: &Stat) -> io::Result<()> {
+    if stat.mode & 0o700 == 0o700 {
+        return Ok(());
+    }
+    parent.chmod_at(name, 0o700)?;
+    let now = parent.stat_at(name)?;
+    if now.identity() != stat.identity() || now.kind != Kind::Directory {
+        return Err(io::Error::other(
+            "the directory was replaced while its mode was changed",
+        ));
+    }
+    Ok(())
+}
+
+/// Removes an emptied directory, but only while its name still is the
+/// directory that was emptied: a different (empty) directory put there in the
+/// meantime is not this traversal's to remove.
+///
+/// # Errors
+/// The safe reason the removal stopped.
+pub fn remove_emptied(parent: &Dir, name: &Name, expected: &Stat) -> Result<(), String> {
+    match parent.stat_at(name) {
+        Ok(now) if now.identity() == expected.identity() => {}
+        Ok(_) => return Err("managed_directory_replaced".to_owned()),
+        Err(error) => return Err(io_reason("inspect", &error)),
+    }
+    parent
+        .rmdir_at(name)
+        .map_err(|error| io_reason("remove directory", &error))
+}
+
+/// Why the root of a removal may not be touched, or `None`.
+///
+/// It must be a directory, be the registered one when an identity was
+/// registered, be owned by this operator, and lie on the anchor's device
+/// without being a mount root.
+#[must_use]
+pub fn root_refusal(
+    root: &Stat,
+    expected: Option<(u64, u64)>,
+    anchor_device: u64,
+    euid: u32,
+) -> Option<&'static str> {
+    if root.kind != Kind::Directory {
+        return Some("managed_directory_replaced");
+    }
+    if expected.is_some_and(|identity| identity != root.identity()) {
+        return Some("managed_directory_replaced");
+    }
+    if root.uid != euid {
+        return Some("managed_directory_foreign_owner");
+    }
+    mount_refusal(root, anchor_device)
+}
+
 fn hoist_name(counter: &mut u64) -> io::Result<Name> {
     *counter += 1;
     Name::new(format!(".ouro-hoist-{}-{}", counter, uuid::Uuid::new_v4().simple()).as_bytes())
@@ -200,20 +284,16 @@ pub fn remove_tree_at(
         }
         Err(error) => return Removal::stopped(io_reason("inspect", &error), 0),
     };
-    if root_stat.kind != Kind::Directory {
-        return Removal::stopped("managed_directory_replaced", 0);
-    }
-    if expected.is_some_and(|identity| identity != root_stat.identity()) {
-        return Removal::stopped("managed_directory_replaced", 0);
-    }
-    if root_stat.uid != state::effective_uid() {
-        return Removal::stopped("managed_directory_foreign_owner", 0);
-    }
     let anchor_stat = match anchor.stat() {
         Ok(stat) => stat,
         Err(error) => return Removal::stopped(io_reason("inspect", &error), 0),
     };
-    if let Some(reason) = mount_refusal(&root_stat, anchor_stat.dev) {
+    if let Some(reason) = root_refusal(
+        &root_stat,
+        expected,
+        anchor_stat.dev,
+        state::effective_uid(),
+    ) {
         return Removal::stopped(reason, 0);
     }
     let device = root_stat.dev;
@@ -243,15 +323,9 @@ pub fn remove_tree_at(
         if names.is_empty() {
             let Some(frame) = stack.pop() else { break };
             let parent = stack.last().map_or(anchor, |frame| &frame.dir);
-            // The name must still be the directory that was emptied.
-            match parent.stat_at(&frame.name) {
-                Ok(now) if now.identity() == frame.stat.identity() => {}
-                Ok(_) => return Removal::stopped("managed_directory_replaced", removed),
-                Err(error) => return Removal::stopped(io_reason("inspect", &error), removed),
-            }
             drop(frame.dir);
-            if let Err(error) = parent.rmdir_at(&frame.name) {
-                return Removal::stopped(io_reason("remove directory", &error), removed);
+            if let Err(reason) = remove_emptied(parent, &frame.name, &frame.stat) {
+                return Removal::stopped(reason, removed);
             }
             removed += 1;
             if stack.is_empty() {
@@ -298,7 +372,9 @@ pub fn remove_tree_at(
                     Ok(fresh) => fresh,
                     Err(error) => return Removal::stopped(io_reason("hoist", &error), removed),
                 };
-                if let Err(error) = top.dir.rename_at(&entry, &stack[0].dir, &fresh) {
+                if let Err(error) = make_writable(&top.dir, &entry, &stat)
+                    .and_then(|()| top.dir.rename_at(&entry, &stack[0].dir, &fresh))
+                {
                     return Removal::stopped(io_reason("hoist", &error), removed);
                 }
                 continue;
@@ -394,7 +470,19 @@ fn remove_registered(
         Ok(name) => name,
         Err(error) => return VendorCleanup::pending(io_reason("name", &error)),
     };
-    let removal = remove_tree_at(&attempt, &name, identity, limits);
+    // A registration without a recorded identity is never cleaned: whatever
+    // stands at that name, nothing proves this attempt made it (J3 review H2).
+    // An absent directory is still nothing to clean.
+    let Some(identity) = identity else {
+        return match attempt.stat_at(&name) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => VendorCleanup {
+                status: StateCleanup::Complete,
+                reason: None,
+            },
+            _ => VendorCleanup::pending(REASON_IDENTITY_UNRECORDED),
+        };
+    };
+    let removal = remove_tree_at(&attempt, &name, Some(identity), limits);
     if !removal.complete {
         return VendorCleanup {
             status: StateCleanup::Pending,
@@ -587,6 +675,16 @@ pub fn absent(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 0700 temporary directory whatever the umask: a state root under a
+    /// group-writable one is refused, rightly.
+    fn private_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .expect("a temporary directory")
+    }
     use std::os::unix::fs::PermissionsExt as _;
 
     fn anchor() -> (tempfile::TempDir, Dir) {
@@ -599,6 +697,292 @@ mod tests {
 
     fn name(text: &str) -> Name {
         Name::new(text.as_bytes()).unwrap()
+    }
+
+    /// A chain of `depth` directories below `anchor/top`, each left with
+    /// `mode` after a file is planted at the bottom: what a child can build.
+    fn locked_chain(anchor: &Dir, top: &str, depth: usize, mode: u32) {
+        let mut current = anchor.mkdir_at(&name(top), 0o700).unwrap();
+        let mut chain = Vec::new();
+        for _ in 0..depth {
+            current = current.mkdir_at(&name("d"), 0o700).unwrap();
+            chain.push(current.try_clone_fd().unwrap());
+        }
+        use std::io::Write as _;
+        current
+            .create_file_at(&name("stolen-copy"), 0o600)
+            .unwrap()
+            .write_all(b"fixture-credential-bytes")
+            .unwrap();
+        for fd in chain.iter().rev() {
+            crate::state::anchored::fchmod(std::os::fd::AsFd::as_fd(fd), mode).unwrap();
+        }
+    }
+
+    #[test]
+    fn read_only_directories_at_beyond_and_below_the_hoist_depth_are_removed() {
+        // J3 review H1: a child's 0500 chain at the hoisting depth stopped
+        // every pass with EACCES, because renaming a directory rewrites its
+        // `..` and needs write permission on it.
+        for mode in [0o500, 0o100, 0o000, 0o300] {
+            for depth in [1usize, 3, 4, 5, 12, 40] {
+                let (root, anchor) = anchor();
+                locked_chain(&anchor, "tree", depth, mode);
+                let removal = remove_tree_at(
+                    &anchor,
+                    &name("tree"),
+                    None,
+                    Limits {
+                        max_entries: 10_000,
+                        max_depth: 4,
+                    },
+                );
+                assert!(removal.complete, "mode {mode:o} depth {depth}: {removal:?}");
+                assert!(removal.peak_held <= 4);
+                assert!(absent(&root.path().canonicalize().unwrap().join("tree")));
+            }
+        }
+    }
+
+    #[test]
+    fn the_reviewers_140_deep_read_only_trap_is_removed_in_one_default_pass() {
+        let (root, anchor) = anchor();
+        locked_chain(&anchor, "vs", 140, 0o500);
+        let removal = remove_tree_at(&anchor, &name("vs"), None, Limits::DEFAULT);
+        assert!(removal.complete, "{removal:?}");
+        assert!(absent(&root.path().canonicalize().unwrap().join("vs")));
+    }
+
+    /// A deterministic generator, so a failing tree can be rebuilt.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) % bound
+        }
+    }
+
+    /// Builds a random tree a same-UID child could build under `base/tree`:
+    /// files, symlinks out of the tree and to `/`, hard links to an outside
+    /// file, and directories nested past the hoisting depth, each finally
+    /// left with a random owner-permission combination. Returns the number of
+    /// entries.
+    fn random_tree(base: &std::path::Path, seed: u64, outside: &std::path::Path) -> usize {
+        let mut rng = Lcg(seed);
+        let top = base.join("tree");
+        std::fs::create_dir(&top).unwrap();
+        let mut dirs: Vec<(std::path::PathBuf, usize)> = vec![(top, 0)];
+        let mut modes: Vec<(std::path::PathBuf, u32)> = Vec::new();
+        for index in 0..400 {
+            let pick = usize::try_from(rng.next(dirs.len() as u64)).unwrap();
+            let (parent, depth) = dirs[pick].clone();
+            let entry = parent.join(format!("e{index}"));
+            match rng.next(5) {
+                0 | 1 if depth < 20 => {
+                    std::fs::create_dir(&entry).unwrap();
+                    let mode = [0o000, 0o100, 0o300, 0o500, 0o555, 0o700]
+                        [usize::try_from(rng.next(6)).unwrap()];
+                    modes.push((entry.clone(), mode));
+                    dirs.push((entry, depth + 1));
+                }
+                2 => std::fs::write(&entry, b"x").unwrap(),
+                3 => {
+                    let target = if rng.next(2) == 0 {
+                        outside.to_path_buf()
+                    } else {
+                        std::path::PathBuf::from("/")
+                    };
+                    std::os::unix::fs::symlink(target, &entry).unwrap();
+                }
+                _ => std::fs::hard_link(outside.join("precious"), &entry).unwrap(),
+            }
+        }
+        // Deepest first, so no chmod locks the way to a later one.
+        for (path, mode) in modes.iter().rev() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(*mode)).unwrap();
+        }
+        400
+    }
+
+    #[test]
+    fn any_tree_a_same_uid_child_builds_is_removed_within_the_pass_bound() {
+        for seed in 1..=12u64 {
+            let (root, anchor) = anchor();
+            let base = root.path().canonicalize().unwrap();
+            let outside = base.join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("precious"), b"keep").unwrap();
+            let entries = random_tree(&base, seed, &outside);
+            let limits = Limits {
+                max_entries: 64,
+                max_depth: 4,
+            };
+            let bound = (2 * entries).div_ceil(limits.max_entries - limits.max_depth);
+            let mut passes = 0usize;
+            loop {
+                passes += 1;
+                let removal = remove_tree_at(&anchor, &name("tree"), None, limits);
+                if removal.complete {
+                    break;
+                }
+                assert_eq!(
+                    removal.reason.as_deref(),
+                    Some(REASON_BUDGET),
+                    "seed {seed}: only the budget may stop a pass: {removal:?}"
+                );
+                assert!(
+                    passes <= bound,
+                    "seed {seed}: {passes} passes > bound {bound}"
+                );
+            }
+            assert!(passes <= bound.max(1), "seed {seed}: {passes} > {bound}");
+            assert!(absent(&base.join("tree")), "seed {seed}");
+            assert_eq!(std::fs::read(outside.join("precious")).unwrap(), b"keep");
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn an_emptied_directory_replaced_before_its_removal_is_kept() {
+        // J3 review RM03: a real replacement (the directory renamed away and
+        // a new empty one made at its name), not a symlink.
+        let (root, anchor) = anchor();
+        let base = root.path().canonicalize().unwrap();
+        std::fs::create_dir(base.join("d")).unwrap();
+        let original = anchor.stat_at(&name("d")).unwrap();
+        std::fs::rename(base.join("d"), base.join("moved")).unwrap();
+        std::fs::create_dir(base.join("d")).unwrap();
+        assert_eq!(
+            remove_emptied(&anchor, &name("d"), &original).unwrap_err(),
+            "managed_directory_replaced"
+        );
+        assert!(
+            base.join("d").is_dir(),
+            "the replacement is not ours to remove"
+        );
+        let moved = anchor.stat_at(&name("moved")).unwrap();
+        assert!(remove_emptied(&anchor, &name("moved"), &moved).is_ok());
+    }
+
+    fn stat_with(kind: Kind, dev: u64, uid: u32, mount_root: Option<bool>) -> Stat {
+        Stat {
+            dev,
+            ino: 7,
+            kind,
+            mode: 0o700,
+            uid,
+            nlink: 2,
+            size: 0,
+            mtime: (0, 0),
+            ctime: (0, 0),
+            mount_root,
+        }
+    }
+
+    #[test]
+    fn the_root_of_a_removal_must_be_ours_registered_and_on_the_anchor_device() {
+        let good = stat_with(Kind::Directory, 1, 501, Some(false));
+        assert_eq!(root_refusal(&good, Some((1, 7)), 1, 501), None);
+        assert_eq!(root_refusal(&good, None, 1, 501), None);
+        assert_eq!(
+            root_refusal(&good, Some((1, 8)), 1, 501),
+            Some("managed_directory_replaced")
+        );
+        assert_eq!(
+            root_refusal(&stat_with(Kind::Symlink, 1, 501, Some(false)), None, 1, 501),
+            Some("managed_directory_replaced")
+        );
+        assert_eq!(
+            root_refusal(
+                &stat_with(Kind::Directory, 1, 65_534, Some(false)),
+                None,
+                1,
+                501
+            ),
+            Some("managed_directory_foreign_owner")
+        );
+        assert_eq!(
+            root_refusal(
+                &stat_with(Kind::Directory, 2, 501, Some(false)),
+                None,
+                1,
+                501
+            ),
+            Some("mount_crossing_refused")
+        );
+        assert_eq!(
+            root_refusal(
+                &stat_with(Kind::Directory, 1, 501, Some(true)),
+                None,
+                1,
+                501
+            ),
+            Some("mount_crossing_refused")
+        );
+    }
+
+    fn registered_attempt(identity: Option<(u64, u64)>) -> (tempfile::TempDir, AttemptDir) {
+        let dir = private_tempdir();
+        let data = dir.path().canonicalize().unwrap().join("data");
+        let id = crate::state::AttemptId::generate();
+        let attempt = AttemptDir::new(&data, &id);
+        attempt.create(&data).unwrap();
+        let vendor = match identity {
+            Some((dev, ino)) => serde_json::json!({
+                "name": "vendor-state", "dev": dev.to_string(), "ino": ino.to_string(),
+                "credentials": []
+            }),
+            None => serde_json::json!({
+                "name": "vendor-state", "dev": null, "ino": null, "credentials": []
+            }),
+        };
+        let state = serde_json::json!({
+            "schema": "ouro.jail.state/1",
+            "vendor_state": vendor,
+            "state_cleanup": "pending",
+        });
+        crate::state::replace_atomically(
+            &attempt.state_path(),
+            &serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        (dir, attempt)
+    }
+
+    #[test]
+    fn a_registration_without_a_recorded_identity_is_never_cleaned() {
+        // J3 review H2: whatever stands at `vendor-state`, nothing proves this
+        // attempt made it unless its identity was recorded.
+        let (_dir, attempt) = registered_attempt(None);
+        std::fs::create_dir(attempt.vendor_state_path()).unwrap();
+        std::fs::write(attempt.vendor_state_path().join("precious"), b"keep").unwrap();
+        let result = remove_vendor_state(&attempt, Limits::DEFAULT);
+        assert_eq!(result.status, StateCleanup::Pending);
+        assert_eq!(result.reason.as_deref(), Some(REASON_IDENTITY_UNRECORDED));
+        assert!(attempt.vendor_state_path().join("precious").exists());
+
+        let (_dir, attempt) = registered_attempt(None);
+        let result = remove_vendor_state(&attempt, Limits::DEFAULT);
+        assert_eq!(
+            result.status,
+            StateCleanup::Complete,
+            "nothing there, nothing to clean"
+        );
+    }
+
+    #[test]
+    fn a_registered_identity_is_the_only_directory_removed() {
+        let (_dir, attempt) = registered_attempt(Some((1, 1)));
+        std::fs::create_dir(attempt.vendor_state_path()).unwrap();
+        std::fs::write(attempt.vendor_state_path().join("precious"), b"keep").unwrap();
+        let result = remove_vendor_state(&attempt, Limits::DEFAULT);
+        assert_eq!(result.status, StateCleanup::Pending);
+        assert_eq!(result.reason.as_deref(), Some("managed_directory_replaced"));
+        assert!(attempt.vendor_state_path().join("precious").exists());
     }
 
     #[test]

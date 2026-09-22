@@ -1806,6 +1806,12 @@ fn validate_stdio(state_root: &Path) -> Result<(), JailError> {
 /// covered everything that existed and says `none` instead of overstating.
 /// A segment created later, deeper in the tree, is outside the claim either
 /// way (north-star §4.4).
+// J3-launch begin: vendor state is not a scanned root
+/// The claim covers the scanned writable roots (the workspace, scratch and
+/// operator `--rw` grants). Vendor state is attempt-private, removed at
+/// settlement and never scanned, so it is outside the claim: a protected name
+/// the child creates there protects nothing and is claimed by nothing.
+// J3-launch end
 fn scan_coverage(scan: &jfs::ProtectedScan) -> String {
     let within_bounds = scan.entries_seen <= jfs::ScanLimits::DEFAULT.max_entries
         && scan.max_depth_seen <= jfs::ScanLimits::DEFAULT.max_depth;
@@ -3493,6 +3499,23 @@ mod tests {
         assert!(
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&unbound))
                 .is_err()
+        );
+        // A bind whose id or destination the policy does not declare, with
+        // the count right (J3 review RM36).
+        let mut renamed = good.clone();
+        renamed.binds[0].dest = NativeString::Text("elsewhere".to_owned());
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&renamed))
+                .is_err()
+        );
+        let mut relabelled = good.clone();
+        relabelled.binds[0].id = "other".to_owned();
+        assert!(
+            super::staged_mounts(
+                &launch_snapshot(ProfileName::Agent, true),
+                Some(&relabelled)
+            )
+            .is_err()
         );
         // A descriptor that is not the object staging recorded.
         let mut swapped = good.clone();
