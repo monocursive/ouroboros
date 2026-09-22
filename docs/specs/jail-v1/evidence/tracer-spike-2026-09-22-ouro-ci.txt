@@ -1,0 +1,30 @@
+collected_at: 2026-09-22T04:17:12Z as ouro-ci on vps-450b3fe8, kernel 7.0.0-31-generic, spike 0eee65f53d6046fe built with rustc 1.98.1 (48a229cea 2026-09-01)
+=== 1 correctness: the fixture through bubblewrap, narrowed
+exit=0
+-- events involving the target files, the execs, and the exits:
+7465	proc.exec	-	transition
+7467	proc.exec	-	transition
+7467	openat	/tmp/a	3
+7468	proc.exec	-	transition
+7468	renameat2	/tmp/a	0
+7468	proc.exit	-	0
+7469	proc.exec	-	transition
+7469	unlinkat	/tmp/b	0
+7469	proc.exit	-	0
+7470	proc.exec	-	transition
+7470	proc.exit	-	0
+7467	proc.exit	-	0
+7465	proc.exit	-	0
+7466	proc.exit	-	0
+-- total lines: 157
+=== 2 correctness: same fixture, full mode (every syscall stops)
+exit=0
+-- closed-set lines: 157; differs from narrowed by: 2 lines
+=== 3 overhead (seconds, 5 runs, median)
+noop: untraced=0.00  spike-narrow=0.01  spike-full=0.02  strace-narrow=0.01
+descendants: untraced=0.13  spike-narrow=0.17  spike-full=0.40  strace-narrow=0.22
+fileops: untraced=0.15  spike-narrow=0.81  spike-full=1.17  strace-narrow=0.84
+=== 4 event accounting on the file workload, narrowed, written to a file
+lines: 15109; openat: 5069; rename: 5000; unlink: 5000; exec transitions: 2; exits: 3
+=== 5 stops per closed-set call in narrow mode (stops / events on the file workload)
+  ouro-tracer-spike: mode=narrow elapsed=0.875s stops=30220 tracees=3 exits=3 exec_transitions=2 gaps=0 events=[("creat", 7), ("execve", 8), ("mkdir", 9), ("open", 1), ("openat", 5069), ("rename", 5000), ("symlink", 10), ("unlink", 5000)]

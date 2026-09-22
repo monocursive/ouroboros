@@ -94,7 +94,7 @@ closed set (O01–O06) or the §4 overhead budget. jail-v1 §5.2 records the sam
 
 | Candidate | Closed-set coverage (§11.2) | Overhead | Known limits observed | Result |
 |---|---|---|---|---|
-| ptrace tracer with `SECCOMP_RET_TRACE` narrowing (stand-in: strace 6.19 `-f --seccomp-bpf`) | Attaches as `ouro-ci` with zero provisioning under `ptrace_scope=1`, including through bubblewrap's user and PID namespaces and its `unpriv_bwrap` confinement; sees the target's `execve` (with the PATH-search ENOENTs), `openat` with `O_CREAT`, `renameat2`, `unlinkat`, and the exec of each descendant, each with its return value and host pid; 15,000 of 15,000 closed-set events on the file workload, no loss by construction | Medians of 5 runs, strace as an upper bound (it decodes and formats every event): no-op 0.00→0.01 s; 200 fork+exec 0.14→0.21 s (+50%); 5,000 create/rename/unlink 0.15→0.78 s (+420%). Without narrowing: 0.03, 0.44, 1.25 s | Two stops per traced call even when narrowed; setup helpers (bubblewrap's own calls) appear before the target and need tagging as helpers; PID reuse and thread-group exit semantics not exercised | attaches; correctness looks right; overhead on syscall-dense work is over the §4 budget with the stand-in, so a purpose-built tracer using `PTRACE_GET_SYSCALL_INFO` must be measured before ptrace is judged on cost |
+| ptrace tracer with `SECCOMP_RET_TRACE` narrowing (stand-in: strace 6.19 `-f --seccomp-bpf`) | Attaches as `ouro-ci` with zero provisioning under `ptrace_scope=1`, including through bubblewrap's user and PID namespaces and its `unpriv_bwrap` confinement; sees the target's `execve` (with the PATH-search ENOENTs), `openat` with `O_CREAT`, `renameat2`, `unlinkat`, and the exec of each descendant, each with its return value and host pid; 15,000 of 15,000 closed-set events on the file workload, no loss by construction | Medians of 5 runs, strace as an upper bound (it decodes and formats every event): no-op 0.00→0.01 s; 200 fork+exec 0.14→0.21 s (+50%); 5,000 create/rename/unlink 0.15→0.78 s (+420%). Without narrowing: 0.03, 0.44, 1.25 s | Two stops per traced call even when narrowed; setup helpers (bubblewrap's own calls) appear before the target and need tagging as helpers; PID reuse and thread-group exit semantics not exercised | attaches; correct. The purpose-built tracer (branch `j0-tracer-spike`, [evidence](evidence/tracer-spike-2026-09-22-ouro-ci.txt)) reproduces the same events through bubblewrap with exactly two stops per closed-set call (30,220 stops for 15,109 events) and zero gaps, and costs what strace costs: +31% on fork+exec, +440% on the syscall-dense file workload. The cost is the kernel's ptrace stop, about 22 µs each on this virtual host, not decoding; ptrace cannot meet the §4 budget on that workload. It is the correct zero-provisioning baseline; eBPF is required wherever that budget matters |
 | `fanotify` (filesystem classes only; cannot alone satisfy the set) | not_started | not_started | not_started | not_started |
 
 ## 3. Enforcement candidates
@@ -167,18 +167,24 @@ Five runs each as `ouro-ci`, medians, strace 6.19 as the tracer, `/usr/bin/time`
 resolution 0.01 s ([evidence](evidence/ptrace-probe-2026-09-22-ouro-ci.txt)).
 Not the §4 measurement: fewer launches, a stand-in tracer, no RSS.
 
-| Workload | Untraced | ptrace, seccomp-narrowed to the closed set | ptrace, every syscall |
-|---|---|---|---|
-| No-op command | 0.00 s | 0.01 s | 0.03 s |
-| 200 fork+exec descendants | 0.14 s | 0.21 s | 0.44 s |
-| 5,000 create/rename/unlink (15,000 closed-set calls) | 0.15 s | 0.78 s | 1.25 s |
+| Workload | Untraced | strace, narrowed | Purpose-built tracer, narrowed | Purpose-built, every syscall |
+|---|---|---|---|---|
+| No-op command | 0.00 s | 0.01 s | 0.01 s | 0.02 s |
+| 200 fork+exec descendants | 0.13–0.14 s | 0.21–0.22 s | 0.17 s | 0.40 s |
+| 5,000 create/rename/unlink (15,000 closed-set calls) | 0.15 s | 0.78–0.84 s | 0.81 s | 1.17 s |
 
-Reading: narrowing halves the cost but cannot remove the two context switches
-per traced call, and the file workload is a syscall-dense worst case at about
-100,000 closed-set calls per second. A purpose-built tracer that reads only the
-needed arguments will sit between the untraced and strace numbers; whether it
-reaches the 20% median budget on this workload is the open measurement. eBPF
-has no per-event context switch, which is its case, and it costs provisioning.
+Two runs of the strace probe and the spike harness
+([strace](evidence/ptrace-probe-2026-09-22-ouro-ci.txt),
+[spike](evidence/tracer-spike-2026-09-22-ouro-ci.txt)); ranges show the two
+runs. Reading: the purpose-built tracer costs what strace costs, so the price
+is the two ptrace stops per traced call (a seccomp stop and an exit stop,
+measured at 30,220 stops for 15,109 events), about 22 µs per stop on this
+virtual host, not decoding. Narrowing halves the cost; nothing in user space
+removes it. The file workload is a worst case at about 100,000 closed-set
+calls per second; a representative workload, a build or a test run, should
+join the §4 set before the 20% budget is treated as the deciding number for
+ptrace on real agent work. eBPF has no per-event stop, which is its case, and
+it costs provisioning. The working assumption in §6 is confirmed on cost.
 
 ## 5. Gap-to-gate table
 
@@ -189,7 +195,9 @@ has no per-event context switch, which is its case, and it costs provisioning.
 ## 6. Decision
 
 Selected enforcement integration: none. Selected observer: none. Named
-blockers: none recorded. Working assumption (2026-09-22): the dual-backend
-observer of jail-v1 §5.2, ptrace baseline plus eBPF fast path, to be confirmed
-or refuted by the purpose-built tracer's numbers in §4. Raw fixture locations:
+blockers: none recorded. Working assumption (2026-09-22), confirmed on cost
+the same day by the purpose-built tracer (§4.1): the dual-backend observer of
+jail-v1 §5.2, ptrace baseline plus eBPF fast path. Still not a selection: the
+eBPF candidate has not attached yet, and attaching it needs the file
+capabilities the operator applies (§1). Raw fixture locations:
 the `evidence/` files cited above.

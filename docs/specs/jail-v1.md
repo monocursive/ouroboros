@@ -383,7 +383,12 @@ usable; eBPF is the fast path when the installer's file capabilities and
 tracefs access are present. Both emit the same closed set, events and
 receipts, and the receipt's observer backend field names which one ran. The
 tracer's overhead on the fixed file workload decides whether J1 needs eBPF or
-can defer it. This is an assumption to measure, not a selection.
+can defer it. Measured 2026-09-22: the purpose-built tracer costs what strace
+costs, so the price is the kernel's two stops per traced call, and ptrace
+alone cannot meet the fixed-workload budget; eBPF is needed where that budget
+matters and ptrace remains the baseline everywhere. The assumption is
+confirmed on cost; selection waits for the eBPF candidate to attach and pass
+the same fixture.
 
 The proof must identify attach points, kernel/configuration dependencies,
 required capabilities, attachment lifetime, descendant tracking, event loss,
