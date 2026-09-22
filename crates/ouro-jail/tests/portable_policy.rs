@@ -733,6 +733,59 @@ fn p02_a_trusted_layer_is_not_held_to_the_identity_rule() {
     ouro_jail::policy::resolve(&inputs).expect("an operator grant may name a symlink");
 }
 
+/// §6.2: "Only operator files expand a leading `~/` against the operator
+/// home"; CLI paths are relative to the invocation cwd. So `--rw '~/x'` must
+/// reach the resolver as the literal name `~/x` beneath the cwd, even though
+/// the operator home is known — not as a grant on the operator's home
+/// directory, which the operator never asked to expose.
+#[test]
+fn a_cli_tilde_path_is_cwd_relative_not_home_relative() {
+    let workspace = Workspace::new();
+    let mut baseline = profiles::baseline(ProfileName::Tool, Os::Linux, &|_| None);
+    baseline.read_only = Vec::new();
+    baseline.read_write = vec![workspace.reference("")];
+    let cwd = workspace.bytes();
+    let home: &[u8] = b"/home/operator";
+    let inputs = ResolveInputs {
+        platform: Os::Linux,
+        base_profile: ProfileName::Tool,
+        policy_name: "tool".to_owned(),
+        baseline,
+        workspace: cwd.clone(),
+        scratch: ScratchRoot::Managed,
+        vendor_state: None,
+        operator_home: Some(home.to_vec()),
+        translation_prefixes: Vec::new(),
+        layers: vec![Layer {
+            origin: LayerOrigin::CommandLine,
+            base_dir: Some(cwd),
+            key_prefix: String::new(),
+            narrowing: false,
+            delta: read_write(&["~/x"]),
+        }],
+    };
+    let resolved = ouro_jail::policy::resolve(&inputs).expect("the operator may grant");
+    let granted: Vec<&[u8]> = resolved
+        .grants
+        .iter()
+        .map(|grant| grant.value.as_bytes())
+        .collect();
+    let mut anchored = workspace.bytes();
+    anchored.push(b'/');
+    anchored.extend_from_slice(b"~/x");
+    let mut escaped = home.to_vec();
+    escaped.push(b'/');
+    escaped.extend_from_slice(b"x");
+    assert!(
+        granted.contains(&anchored.as_slice()),
+        "`~/x` resolves against the cwd: {granted:?}"
+    );
+    assert!(
+        !granted.contains(&escaped.as_slice()),
+        "the operator home is never substituted: {granted:?}"
+    );
+}
+
 #[test]
 fn p02_the_workspace_root_itself_is_a_real_directory() {
     // A guard for the harness: if the workspace stopped existing, every test

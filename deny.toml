@@ -1,5 +1,5 @@
-# Pinned dependency policy. cargo-deny is not run in CI yet; this file is the
-# policy that a future CI step enforces, not evidence that it was enforced.
+# Pinned dependency policy, enforced by the `rust` workflow's cargo-deny
+# step (bans, licenses, advisories).
 
 [licenses]
 allow = [

@@ -90,8 +90,8 @@ pub struct ProtectedScan {
     /// Protected names that were symlinks and so were neither followed nor
     /// reported as covering anything.
     pub skipped_symlinks: Vec<PathBuf>,
-    /// State of each root-level literal, in the order of [`PROTECTED_LITERALS`].
-    pub root_literals: Vec<(&'static str, RootLiteralState)>,
+    /// State of each root-level literal, in the order of the requested names.
+    pub root_literals: Vec<(String, RootLiteralState)>,
     /// Directory entries examined.
     pub entries_seen: usize,
     /// Greatest depth reached below the root.
@@ -102,11 +102,11 @@ impl ProtectedScan {
     /// The root-level literals that do not exist and therefore need a
     /// placeholder mount.
     #[must_use]
-    pub fn absent_root_literals(&self) -> Vec<&'static str> {
+    pub fn absent_root_literals(&self) -> Vec<String> {
         self.root_literals
             .iter()
             .filter(|(_, state)| *state == RootLiteralState::Absent)
-            .map(|(name, _)| *name)
+            .map(|(name, _)| name.clone())
             .collect()
     }
 }
@@ -182,27 +182,39 @@ impl From<PathError> for ScanError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The walk
-// ---------------------------------------------------------------------------
-
-/// Enumerate every `.git` and `.ouroboros` segment beneath `root`, with the
-/// spec's default limits.
+/// Enumerate protected segments with the built-in literals.
 ///
 /// # Errors
 ///
-/// [`ScanError`] on an unreadable directory or an exhausted bound. The caller
+/// [`ScanError`] when the root cannot be walked without following a symlink,
+/// a directory cannot be read, or a bound is reached; a partial walk
 /// must refuse rather than record partial coverage.
 pub fn scan_protected(root: &Path) -> Result<ProtectedScan, ScanError> {
-    scan_protected_with(root, ScanLimits::DEFAULT)
+    scan_protected_names(root, &PROTECTED_LITERALS, ScanLimits::DEFAULT)
 }
 
-/// Enumerate protected segments with explicit limits.
+/// Enumerate protected segments with explicit limits and the built-in
+/// literals.
 ///
 /// # Errors
 ///
 /// As [`scan_protected`].
 pub fn scan_protected_with(root: &Path, limits: ScanLimits) -> Result<ProtectedScan, ScanError> {
+    scan_protected_names(root, &PROTECTED_LITERALS, limits)
+}
+
+/// Enumerate protected segments by name: the two built-in literals plus any
+/// operator-configured `filesystem.protected_segments` (§6.3), with explicit
+/// limits.
+///
+/// # Errors
+///
+/// As [`scan_protected`].
+pub fn scan_protected_names(
+    root: &Path,
+    names: &[&str],
+    limits: ScanLimits,
+) -> Result<ProtectedScan, ScanError> {
     let root_c = cstring_from_path(root)?;
     let root_dir = DirHandle::open_root(&root_c).map_err(|errno| ScanError::BadRoot {
         path: root.to_owned(),
@@ -217,9 +229,9 @@ pub fn scan_protected_with(root: &Path, limits: ScanLimits) -> Result<ProtectedS
         skipped_symlinks: Vec::new(),
         root_found: Vec::new(),
     };
-    walk(&root_dir, root, 1, &mut state)?;
+    walk(&root_dir, root, 1, names, &mut state)?;
 
-    let root_literals = PROTECTED_LITERALS
+    let root_literals = names
         .iter()
         .map(|name| {
             let state = state
@@ -227,7 +239,7 @@ pub fn scan_protected_with(root: &Path, limits: ScanLimits) -> Result<ProtectedS
                 .iter()
                 .find(|(found, _)| found == name)
                 .map_or(RootLiteralState::Absent, |(_, s)| *s);
-            (*name, state)
+            ((*name).to_owned(), state)
         })
         .collect();
 
@@ -247,13 +259,14 @@ struct WalkState {
     max_depth_seen: usize,
     segments: Vec<ProtectedSegment>,
     skipped_symlinks: Vec<PathBuf>,
-    root_found: Vec<(&'static str, RootLiteralState)>,
+    root_found: Vec<(String, RootLiteralState)>,
 }
 
 fn walk(
     dir: &DirHandle,
     dir_path: &Path,
     depth: usize,
+    names: &[&str],
     state: &mut WalkState,
 ) -> Result<(), ScanError> {
     state.max_depth_seen = state.max_depth_seen.max(depth);
@@ -279,16 +292,15 @@ fn walk(
                 errno,
             })?;
 
-        let literal = PROTECTED_LITERALS
-            .iter()
-            .find(|l| name_os == OsStr::new(**l))
-            .copied();
+        let literal = names.iter().find(|l| name_os == OsStr::new(**l)).copied();
 
         if let Some(literal) = literal {
             if meta.is_symlink {
                 state.skipped_symlinks.push(child_path.clone());
                 if depth == 1 {
-                    state.root_found.push((literal, RootLiteralState::Symlink));
+                    state
+                        .root_found
+                        .push((literal.to_owned(), RootLiteralState::Symlink));
                 }
                 continue;
             }
@@ -302,7 +314,7 @@ fn walk(
             if depth == 1 {
                 state
                     .root_found
-                    .push((literal, RootLiteralState::Present(kind)));
+                    .push((literal.to_owned(), RootLiteralState::Present(kind)));
             }
             // Never descend into a protected segment: it is covered whole.
             continue;
@@ -328,7 +340,7 @@ fn walk(
                 path: child_path.clone(),
                 errno,
             })?;
-        walk(&child, &child_path, depth + 1, state)?;
+        walk(&child, &child_path, depth + 1, names, state)?;
     }
     Ok(())
 }
@@ -622,6 +634,24 @@ impl PinnedPath {
             });
         }
         Ok(())
+    }
+
+    /// Duplicate the `O_PATH` handle so a spawn map can install it at a fixed
+    /// descriptor number for `bwrap --ro-bind-fd`, while the pin itself stays
+    /// here for verification (§9.1).
+    ///
+    /// # Errors
+    ///
+    /// The errno from `dup`.
+    pub fn try_clone_fd(&self) -> io::Result<OwnedFd> {
+        // SAFETY: `self.fd` is a live owned descriptor; `dup` returns a new
+        // owned descriptor or -1.
+        let copy = unsafe { libc::dup(self.fd.as_raw_fd()) };
+        if copy < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `copy` was just created by `dup` and is owned here.
+        Ok(unsafe { OwnedFd::from_raw_fd(copy) })
     }
 }
 

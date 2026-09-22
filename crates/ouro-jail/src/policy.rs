@@ -1179,9 +1179,15 @@ fn apply_layer(
     // Narrowing decisions compare against the authority as it was before this
     // layer, so one layer cannot bootstrap itself into wider authority.
     let base = authority.clone();
+    // §6.2: "Only operator files expand a leading `~/` against the operator
+    // home." CLI paths are relative to the invocation cwd and a project file's
+    // paths are the contained party's own text, so `~/x` on the command line
+    // names the literal directory `~/x` under the cwd, never the home.
     let expand = |raw: &[u8]| match layer.origin {
-        LayerOrigin::ProjectConfig(_) => raw.to_vec(),
-        _ => expand_home(raw, inputs.operator_home.as_deref()),
+        LayerOrigin::OperatorProfileFile(_) | LayerOrigin::OperatorConfig(_) => {
+            expand_home(raw, inputs.operator_home.as_deref())
+        }
+        _ => raw.to_vec(),
     };
 
     for (kind, entries) in [

@@ -14,8 +14,8 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4, pinned by SHA
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff  # v6, pinned by SHA (third-party toolchain installer: highest-risk unpinned action)
       - run: uv run docs/specs/jail-v1/validate_contract.py
       - run: uv run docs/specs/managed-teams-v1/validate_policy.py
       - run: uv run docs/specs/validate_links.py

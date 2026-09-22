@@ -20,15 +20,20 @@ uv run docs/specs/jail-v1/validate_contract.py
 uv run docs/specs/managed-teams-v1/validate_policy.py
 ```
 
-This checks document contracts; the runtime and live backend conformance are not implemented yet.
+This checks document contracts; live backend conformance runs on the
+reference host through the `conformance` workflow.
 
-Nothing in the specifications is implemented. The next change is J0 of Jail v1:
-provision the x86_64 Linux reference host, measure the observer privilege model,
-evaluate the enforcement candidates, and fill
-[backend-evaluation.md](docs/specs/jail-v1/backend-evaluation.md), which is
-checked in with every value `not_started`. The Linux reference host is an
-x86_64 VPS on Ubuntu 26.04 LTS; its first manifest is under
-`docs/specs/jail-v1/evidence/`. CI is three workflows, `contracts`, `rust` and
-`conformance` ([Jail v1 §16](docs/specs/jail-v1.md#16-implementation-order-and-exit-criteria)).
+J0 and J1 of Jail v1 have landed. J0 measured the reference host (an x86_64
+VPS on Ubuntu 26.04 LTS; manifests under `docs/specs/jail-v1/evidence/`) and
+the observer privilege model: the ptrace tracer is the working baseline, and
+[eBPF remains unselected](docs/specs/jail-v1/backend-evaluation.md). J1 ships
+the first execution slice — policy resolution, capability probes, the
+bubblewrap containment boundary with source-pinned protected binds, the
+ptrace closed-set observer, the managed gate, limits as staged by §6.4 (the
+wall clock; explicit pids/mem/cpu ceilings refuse until J2 enforces them),
+prepared/enforced/settled receipts, and the macOS refusal lane. J2
+(complete mounts and filter families, limits, doctor) is next. CI is three
+workflows, `contracts`, `rust` and `conformance`
+([Jail v1 §16](docs/specs/jail-v1.md#16-implementation-order-and-exit-criteria)).
 The specifications link to the previous implementation at commit `f3b2dbfd`,
 reachable from branch `legacy` and tag `thesis-4-preserved` on the remote.

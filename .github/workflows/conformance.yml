@@ -17,14 +17,34 @@ concurrency:
   group: conformance-reference-host
   cancel-in-progress: false
 jobs:
+  # §16 makes a skipped required capability a failure; a wholly unconfigured
+  # host cannot run at all, but the skip must be loud, not a green silence.
+  not-configured-notice:
+    if: vars.OURO_CI_HOST == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Announce that conformance cannot run
+        run: |
+          {
+            echo "## ⚠️ conformance did not run"
+            echo
+            echo "OURO_CI_HOST is not configured, so the reference-host job was"
+            echo "skipped. A green push without this job proves nothing about the"
+            echo "live kernel features (jail-v1 §16). Configure OURO_CI_HOST,"
+            echo "OURO_CI_USER, OURO_CI_KNOWN_HOSTS and OURO_CI_SSH_KEY."
+          } >> "$GITHUB_STEP_SUMMARY"
   reference-host:
     if: vars.OURO_CI_HOST != ''
     runs-on: ubuntu-latest
+    # A wedged SSH session must fail the job, not hold the serialized lane.
+    timeout-minutes: 45
     env:
       CI_HOST: ${{ vars.OURO_CI_HOST }}
       CI_USER: ${{ vars.OURO_CI_USER }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4, pinned by SHA: this job holds the reference-host key
       - name: SSH identity
         env:
           KEY: ${{ secrets.OURO_CI_SSH_KEY }}
@@ -66,7 +86,7 @@ jobs:
             --host "$CI_HOST" --user "$CI_USER" \
             --key ~/.ssh/ouro_ci --known-hosts ~/.ssh/known_hosts \
             --evidence evidence/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4, pinned by SHA
         if: always()
         with:
           name: reference-host-evidence-${{ github.run_id }}

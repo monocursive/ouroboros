@@ -7,7 +7,7 @@
 //! establish one it says so with a reason rather than filling it in.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
@@ -45,7 +45,6 @@ pub struct AuditWriter {
     attempt_id: String,
     trace: Option<SharedTrace>,
     seq: u64,
-    started: Instant,
     workspace: Vec<u8>,
     scratch_inside: Vec<u8>,
     counts: BTreeMap<CoverageClass, u64>,
@@ -70,7 +69,6 @@ impl AuditWriter {
             attempt_id: attempt_id.to_owned(),
             trace,
             seq: 0,
-            started: Instant::now(),
             workspace: workspace.to_vec(),
             scratch_inside: scratch_inside.to_vec(),
             counts: BTreeMap::new(),
@@ -92,23 +90,35 @@ impl AuditWriter {
         self.counts.get(&class).copied().unwrap_or(0)
     }
 
-    fn emit(&mut self, event: &Event) {
+    /// Write one event frame; a frame that never reached a trace degrades the
+    /// class it would have been counted under, because §13.2 makes the count
+    /// a claim about delivered evidence ("every observation count is null
+    /// when ... incomplete") and §11.4 makes an undelivered result a loss.
+    fn emit(&mut self, event: &Event, class: CoverageClass) -> bool {
         let Some(trace) = self.trace.as_ref() else {
-            return;
+            // No trace configured (observation off): nothing is lost that
+            // anyone claimed to collect.
+            return true;
         };
         let Ok(frame) = serde_json::to_vec(event) else {
             self.lost_frames += 1;
-            return;
+            self.degraded.insert(class);
+            return false;
         };
         let written = match trace.lock() {
             Ok(mut sink) => sink.write_frame(&frame, Priority::Normal),
             Err(_) => {
                 self.lost_frames += 1;
-                return;
+                self.degraded.insert(class);
+                return false;
             }
         };
         if written.is_err() {
             self.lost_frames += 1;
+            self.degraded.insert(class);
+            false
+        } else {
+            true
         }
     }
 
@@ -202,13 +212,16 @@ impl AuditWriter {
             &self.attempt_id,
             seq,
             SystemTime::now(),
-            self.started.elapsed().as_nanos(),
+            crate::platform::elapsed_since_start_ns(),
             operation,
             outcome,
             fields,
         );
-        self.emit(&event);
-        self.bump(class_of(operation));
+        // An undelivered frame is not an observed result (§13.2): it
+        // degrades the class and adds nothing to its count.
+        if self.emit(&event, class_of(operation)) {
+            self.bump(class_of(operation));
+        }
     }
 
     /// A confirmed exec transition (`PTRACE_EVENT_EXEC`).
@@ -217,7 +230,12 @@ impl AuditWriter {
     /// transition, when the observer witnessed that entry. `None` means it
     /// did not, and the event says so rather than naming an image it never
     /// saw.
-    pub fn record_exec(&mut self, pid: libc::pid_t, image: Option<&PathSnapshot>) {
+    pub fn record_exec(
+        &mut self,
+        pid: libc::pid_t,
+        image: Option<&PathSnapshot>,
+        dirfd: Option<i32>,
+    ) {
         let mut fields = Map::new();
         fields.insert("pid".to_owned(), Value::from(i64::from(pid)));
         // §11.3: a descendant's argv is only digested when every byte was
@@ -231,7 +249,7 @@ impl AuditWriter {
             "path_basis".to_owned(),
             Value::from("argument_snapshot".to_owned()),
         );
-        self.describe_path(&mut fields, "path", image, None);
+        self.describe_path(&mut fields, "path", image, dirfd);
         let outcome = EventOutcome {
             ok: Some(true),
             return_value: None,
@@ -246,13 +264,14 @@ impl AuditWriter {
             &self.attempt_id,
             seq,
             SystemTime::now(),
-            self.started.elapsed().as_nanos(),
+            crate::platform::elapsed_since_start_ns(),
             "proc.exec",
             outcome,
             fields,
         );
-        self.emit(&event);
-        self.bump(CoverageClass::Exec);
+        if self.emit(&event, CoverageClass::Exec) {
+            self.bump(CoverageClass::Exec);
+        }
     }
 
     /// Final thread-group death of a process that was seen to exec.
@@ -301,13 +320,14 @@ impl AuditWriter {
             &self.attempt_id,
             seq,
             SystemTime::now(),
-            self.started.elapsed().as_nanos(),
+            crate::platform::elapsed_since_start_ns(),
             "proc.exit",
             outcome,
             fields,
         );
-        self.emit(&event);
-        self.bump(CoverageClass::Exec);
+        if self.emit(&event, CoverageClass::Exec) {
+            self.bump(CoverageClass::Exec);
+        }
     }
 
     /// A hole in coverage. The affected classes are named explicitly (§11.4).
@@ -343,7 +363,7 @@ impl AuditWriter {
             &self.attempt_id,
             seq,
             SystemTime::now(),
-            self.started.elapsed().as_nanos(),
+            crate::platform::elapsed_since_start_ns(),
             &gap,
         );
         // A gap note may use the reserve: it is the record of what was lost.
@@ -397,7 +417,12 @@ impl AuditWriter {
                 class,
                 ClassSummary {
                     status,
-                    observed_count: Some(self.count(class)),
+                    // §11.4: "Unsupported and degraded counts are null."
+                    observed_count: if status == SourceStatus::Degraded {
+                        None
+                    } else {
+                        Some(self.count(class))
+                    },
                     gaps: self
                         .gaps
                         .iter()
@@ -441,6 +466,9 @@ impl AuditWriter {
         snapshot: Option<&PathSnapshot>,
         dirfd: Option<i32>,
     ) {
+        // The nested {kind, value} shape is the documented contract
+        // (examples/event-open.json): a consumer reads fields.path.kind and
+        // gets the classification, not a flat key it has to know about.
         let complete = snapshot.is_some_and(|snap| snap.complete);
         fields.insert(format!("{key}_complete"), Value::from(complete));
         if let Some(fd) = dirfd
@@ -448,25 +476,26 @@ impl AuditWriter {
         {
             fields.insert(format!("{key}_dirfd"), Value::from(i64::from(fd)));
         }
-        match self.classify(snapshot, dirfd) {
-            PathClass::WorkspaceRelative(bytes) => {
-                fields.insert(format!("{key}_kind"), Value::from("workspace_relative"));
-                fields.insert(key.to_owned(), native_value(&bytes));
-            }
-            PathClass::ScratchRelative(bytes) => {
-                fields.insert(format!("{key}_kind"), Value::from("scratch_relative"));
-                fields.insert(key.to_owned(), native_value(&bytes));
-            }
-            PathClass::Digest(digest, reason) => {
-                fields.insert(format!("{key}_kind"), Value::from("digest"));
-                fields.insert(format!("{key}_digest"), Value::from(digest));
-                fields.insert(format!("{key}_reason"), Value::from(reason));
-            }
-            PathClass::Unavailable(reason) => {
-                fields.insert(format!("{key}_kind"), Value::from("unavailable"));
-                fields.insert(format!("{key}_reason"), Value::from(reason));
-            }
-        }
+        let path = match self.classify(snapshot, dirfd) {
+            PathClass::WorkspaceRelative(bytes) => serde_json::json!({
+                "kind": "workspace_relative",
+                "value": native_value(&bytes),
+            }),
+            PathClass::ScratchRelative(bytes) => serde_json::json!({
+                "kind": "scratch_relative",
+                "value": native_value(&bytes),
+            }),
+            PathClass::Digest(digest, reason) => serde_json::json!({
+                "kind": "digest",
+                "digest": digest,
+                "reason": reason,
+            }),
+            PathClass::Unavailable(reason) => serde_json::json!({
+                "kind": "unavailable",
+                "reason": reason,
+            }),
+        };
+        fields.insert(key.to_owned(), path);
     }
 
     fn classify(&self, snapshot: Option<&PathSnapshot>, dirfd: Option<i32>) -> PathClass {
@@ -775,7 +804,7 @@ mod tests {
             &args,
             -i64::from(libc::EACCES),
         );
-        writer.record_exec(10, Some(&snap("/work/space/tool")));
+        writer.record_exec(10, Some(&snap("/work/space/tool")), None);
         writer.record_exit(10, 0);
         assert_eq!(
             writer.count(CoverageClass::FsWrite),

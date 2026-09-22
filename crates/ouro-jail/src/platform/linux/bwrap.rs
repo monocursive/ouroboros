@@ -554,6 +554,17 @@ pub struct MountRow {
     pub destination: OsString,
 }
 
+/// One protected segment in the plan: the source path to bind read-only over
+/// itself, and the fixed descriptor number its pinned `O_PATH` handle was
+/// installed at, when it has one.
+#[derive(Clone, Debug)]
+pub struct ProtectedBind {
+    /// The source path, as scanned.
+    pub source: PathBuf,
+    /// Descriptor number, valid in the bubblewrap process, holding the pinned
+    /// source object (`--ro-bind-fd`); `None` binds by path.
+    pub fd: Option<RawFd>,
+}
 /// Everything needed to build a bubblewrap invocation.
 #[derive(Clone, Debug)]
 pub struct BwrapPlan {
@@ -569,11 +580,22 @@ pub struct BwrapPlan {
     pub scratch: PathBuf,
     /// Environment to set after `--clearenv`.
     pub env: Vec<(OsString, OsString)>,
-    /// Existing protected segments, each bound read-only over itself.
-    pub protected: Vec<PathBuf>,
+    /// Existing protected segments, each bound read-only over itself. A pin
+    /// whose `O_PATH` handle was handed to the spawn map is bound by
+    /// descriptor (`--ro-bind-fd`), which cannot be redirected by a path
+    /// swap between validation and mount (§9.1); the rest are bound by path
+    /// and re-verified at handoff.
+    pub protected: Vec<ProtectedBind>,
     /// Extra read-only binds with a destination of their own, used by the
-    /// doctor probes and by operator `--allow-host` grants.
+    /// doctor probes and by operator `--ro` grants (§6.1).
     pub extra_ro_binds: Vec<(PathBuf, PathBuf)>,
+    /// Extra writable binds from operator `--rw` grants, applied after the
+    /// workspace bind so a grant inside it stays writable (§6.1).
+    pub extra_rw_binds: Vec<(PathBuf, PathBuf)>,
+    /// Denied subtrees, masked with a `tmpfs` over the path after every
+    /// other mount (north-star §4.3: denied subtrees inside visible parents
+    /// are "absent or masked by the backend").
+    pub masked: Vec<PathBuf>,
     /// Placeholders for absent root-level literals.
     pub placeholders: Vec<PlaceholderMount>,
     /// The jail binary to bind at [`JAIL_INSIDE_PATH`].
@@ -662,6 +684,8 @@ impl BwrapPlan {
             ],
             protected: Vec::new(),
             extra_ro_binds: Vec::new(),
+            extra_rw_binds: Vec::new(),
+            masked: Vec::new(),
             placeholders: Vec::new(),
             jail_exe: jail_exe.to_owned(),
             seccomp_fd: None,
@@ -719,9 +743,13 @@ impl BwrapPlan {
         });
         for protected in &self.protected {
             rows.push(MountRow {
-                kind: "ro-bind",
-                source: Some(protected.as_os_str().to_owned()),
-                destination: protected.as_os_str().to_owned(),
+                kind: if protected.fd.is_some() {
+                    "ro-bind-fd"
+                } else {
+                    "ro-bind"
+                },
+                source: Some(protected.source.as_os_str().to_owned()),
+                destination: protected.source.as_os_str().to_owned(),
             });
         }
         for (source, destination) in &self.extra_ro_binds {
@@ -729,6 +757,20 @@ impl BwrapPlan {
                 kind: "ro-bind",
                 source: Some(source.as_os_str().to_owned()),
                 destination: destination.as_os_str().to_owned(),
+            });
+        }
+        for (source, destination) in &self.extra_rw_binds {
+            rows.push(MountRow {
+                kind: "bind",
+                source: Some(source.as_os_str().to_owned()),
+                destination: destination.as_os_str().to_owned(),
+            });
+        }
+        for path in &self.masked {
+            rows.push(MountRow {
+                kind: "tmpfs-mask",
+                source: None,
+                destination: path.as_os_str().to_owned(),
             });
         }
         for placeholder in &self.placeholders {
@@ -830,12 +872,22 @@ impl BwrapPlan {
                 self.workspace.as_os_str(),
                 self.workspace.as_os_str(),
             ]);
+            // §9.1: a pinned source is bound by descriptor, which no path
+            // swap can redirect; an unpinned one is bound by path and was
+            // re-verified immediately before spawn.
             for protected in &self.protected {
-                push(&[
-                    OsStr::new("--ro-bind"),
-                    protected.as_os_str(),
-                    protected.as_os_str(),
-                ]);
+                match protected.fd {
+                    Some(fd) => push(&[
+                        OsStr::new("--ro-bind-fd"),
+                        OsStr::new(&fd.to_string()),
+                        protected.source.as_os_str(),
+                    ]),
+                    None => push(&[
+                        OsStr::new("--ro-bind"),
+                        protected.source.as_os_str(),
+                        protected.source.as_os_str(),
+                    ]),
+                }
             }
             for (source, destination) in &self.extra_ro_binds {
                 push(&[
@@ -843,6 +895,18 @@ impl BwrapPlan {
                     source.as_os_str(),
                     destination.as_os_str(),
                 ]);
+            }
+            for (source, destination) in &self.extra_rw_binds {
+                push(&[
+                    OsStr::new("--bind"),
+                    source.as_os_str(),
+                    destination.as_os_str(),
+                ]);
+            }
+            // Denied subtrees are masked last, so the tmpfs lands over
+            // whatever the earlier mounts exposed there.
+            for path in &self.masked {
+                push(&[OsStr::new("--tmpfs"), path.as_os_str()]);
             }
             for placeholder in &self.placeholders {
                 push(&[

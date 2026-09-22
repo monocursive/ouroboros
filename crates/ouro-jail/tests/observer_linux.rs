@@ -991,10 +991,9 @@ fn o01_every_closed_set_result_matches_the_fixture() {
                 Some(libc::AF_UNIX as u16),
                 "{label}: family"
             );
-            let text = String::from_utf8_lossy(&sockaddr.bytes).into_owned();
             assert!(
-                text.contains(&report.path),
-                "{label}: the sockaddr must carry the path the fixture used: {text:?}"
+                sockaddr.complete,
+                "{label}: the whole address the caller declared was readable"
             );
         } else {
             let (a, b) = paths(event);

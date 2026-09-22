@@ -11,6 +11,7 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::net::Ipv6Addr;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -506,6 +507,60 @@ pub fn parse_evidence(key_path: &str, text: &str) -> Result<EvidenceMode, JailEr
     }
 }
 
+/// Canonicalizes `[jail_host.network] translation_prefixes` (§6.2).
+///
+/// Each entry must be an IPv6 CIDR `address/prefix`; it is re-rendered in
+/// RFC 5952 form (lowercase, longest run of zero groups compressed) through
+/// [`Ipv6Addr`]'s `Display` before it enters the policy, so equivalent
+/// spellings such as `2001:0db8::/96` and `2001:db8::/96` produce one digest
+/// (§6.3: "equivalent semantic inputs have the same digest"). A zone-id or
+/// embedded whitespace would make the entry name a link or two entries at
+/// once rather than a network, and anything that is not an IPv6 CIDR is
+/// refused instead of being carried into the snapshot as opaque text.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] naming `key_path` for an entry that
+/// is not an IPv6 CIDR with a prefix length of 0..=128.
+pub fn canonical_translation_prefixes(
+    key_path: &str,
+    entries: &[String],
+) -> Result<Vec<String>, JailError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let refuse_entry = |reason: String| {
+                invalid(key_path, format!("`{entry}` is not an IPv6 CIDR: {reason}"))
+            };
+            if entry.chars().any(char::is_whitespace) {
+                return Err(refuse_entry("it contains whitespace".to_owned()));
+            }
+            let Some((address, prefix)) = entry.split_once('/') else {
+                return Err(refuse_entry("it has no `/prefix` length".to_owned()));
+            };
+            if address.contains('%') {
+                return Err(refuse_entry(
+                    "a zone-id names a link, not a network".to_owned(),
+                ));
+            }
+            let address: Ipv6Addr = address
+                .parse()
+                .map_err(|error| refuse_entry(format!("the address is invalid: {error}")))?;
+            if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(refuse_entry(
+                    "the prefix length is not a decimal integer".to_owned(),
+                ));
+            }
+            let prefix: u8 = prefix
+                .parse()
+                .map_err(|_| refuse_entry("the prefix length is not a number".to_owned()))?;
+            if prefix > 128 {
+                return Err(refuse_entry("the prefix length exceeds 128".to_owned()));
+            }
+            Ok(format!("{address}/{prefix}"))
+        })
+        .collect()
+}
+
 /// The operator settings read from the environment allow-list (§6.2 step 3).
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct EnvSettings {
@@ -604,6 +659,48 @@ mod tests {
     fn an_unknown_cli_limit_key_refuses() {
         let error = ceilings_from_cli(&["disk=1".to_owned()]).expect_err("an unknown key refuses");
         assert_eq!(error.code, ErrorCode::InvalidConfig);
+    }
+
+    #[test]
+    fn translation_prefixes_are_canonicalized_or_refused() {
+        let key = "jail_host.network.translation_prefixes";
+        let canonical = canonical_translation_prefixes(
+            key,
+            &[
+                "2001:0db8::/96".to_owned(),
+                "FE80::/10".to_owned(),
+                "2001:db8:0:0:0:0:0:0/96".to_owned(),
+            ],
+        )
+        .expect("every spelling parses");
+        assert_eq!(
+            canonical,
+            vec![
+                "2001:db8::/96".to_owned(),
+                "fe80::/10".to_owned(),
+                "2001:db8::/96".to_owned()
+            ],
+            "equivalent spellings render as one RFC 5952 form"
+        );
+
+        for entry in [
+            "banana",
+            "2001:db8::",
+            "10.0.0.0/8",
+            "fe80::1%eth0/64",
+            "2001:db8:: /96",
+            "2001:db8::/129",
+            "2001:db8::/96/48",
+        ] {
+            let error = canonical_translation_prefixes(key, &[entry.to_owned()])
+                .expect_err("a non-CIDR entry refuses");
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "for `{entry}`");
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some(key),
+                "the refusal names the exact key path"
+            );
+        }
     }
 
     #[test]

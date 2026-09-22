@@ -78,6 +78,14 @@ pub trait TraceSink {
     /// within this sink's bounds. The sink stays usable and remembers the loss.
     fn write_frame(&mut self, frame: &[u8], priority: Priority) -> Result<(), JailError>;
 
+    /// Terminal drain at settlement (§13.3).
+    ///
+    /// The default is nothing: sinks whose writes are synchronous have no
+    /// queue to drain. A queued sink waits, bounded by its no-progress
+    /// deadline, and records whatever still cannot be delivered as evidence
+    /// loss instead of dropping it when the descriptor closes.
+    fn finish(&mut self) {}
+
     /// The loss this sink has recorded, if any.
     fn loss(&self) -> Option<&Loss>;
 }
@@ -249,6 +257,36 @@ impl FdSink {
         Ok(())
     }
 
+    /// Terminal drain, bounded by the no-progress deadline (§13.3).
+    ///
+    /// Waits for the external consumer to accept the queued bytes, records
+    /// anything still undelivered when the budget ends, and never blocks the
+    /// supervisor past the deadline. Called once at settlement; after it, the
+    /// queue is either empty or counted as evidence loss.
+    pub fn drain_final(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + self.no_progress;
+        while !self.queue.is_empty() {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            wait_writable(self.file.as_raw_fd(), remaining);
+            // A hard write failure is recorded inside flush_now; a slow but
+            // progressing consumer keeps last_progress fresh, and the loop's
+            // overall deadline bounds the total wait.
+            self.last_progress = Instant::now();
+            if self.flush_now().is_err() {
+                break;
+            }
+        }
+        if !self.queue.is_empty() {
+            let _ =
+                self.record_loss("trace fd could not deliver its queued frames before settlement");
+        }
+    }
+
     fn record_loss(&mut self, reason: &str) -> JailError {
         self.lost_frames += 1;
         self.loss = Some(Loss {
@@ -272,9 +310,27 @@ impl TraceSink for FdSink {
         self.flush_now()
     }
 
+    fn finish(&mut self) {
+        self.drain_final();
+    }
+
     fn loss(&self) -> Option<&Loss> {
         self.loss.as_ref()
     }
+}
+
+/// Wait until `fd` accepts a write, or `timeout` passes. Best effort: a poll
+/// error or a spurious wakeup simply returns and the caller retries within
+/// its own deadline.
+fn wait_writable(fd: RawFd, timeout: Duration) {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let millis = i32::try_from(timeout.as_millis().min(1_000)).unwrap_or(1_000);
+    // SAFETY: `pfd` is a live, writable pollfd for the call's duration.
+    let _ = unsafe { libc::poll(&raw mut pfd, 1, millis.max(1)) };
 }
 
 /// Switches `fd` to nonblocking mode.

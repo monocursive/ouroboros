@@ -30,8 +30,9 @@ pub struct Cli {
 pub enum Command {
     /// Prepare a boundary and run PROGRAM under it.
     Run(Box<RunArgs>),
-    /// Render the requested policy without probing or executing.
-    Explain(ExplainArgs),
+    /// Render the requested policy without probing or executing. Boxed:
+    /// `ExplainArgs` carries the full override set and dwarfs the rest.
+    Explain(Box<ExplainArgs>),
     /// Probe the capabilities the requested plan needs.
     Doctor(DoctorArgs),
     /// Report on registered attempt state.
@@ -40,8 +41,8 @@ pub enum Command {
     Version(VersionArgs),
 }
 
-/// Policy selection and override flags, shared by `run`, `explain` and
-/// `doctor`.
+/// Policy selection and override flags, shared by `run` and `explain`
+/// (§6.1). `doctor` has the narrower grammar of [`DoctorArgs`].
 #[derive(Debug, Default, Args)]
 pub struct PolicyArgs {
     /// Built-in profile name or a policy file path.
@@ -130,11 +131,18 @@ pub struct ExplainArgs {
 }
 
 /// `ouro-jail doctor`.
+///
+/// §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`: the
+/// policy override flags are not part of this verb's grammar, so they are
+/// simply not defined here and clap refuses them as usage errors (§6.4).
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
-    /// Policy selection and overrides.
-    #[command(flatten)]
-    pub policy: PolicyArgs,
+    /// Built-in profile name or a policy file path.
+    #[arg(long, value_name = "agent|tool|build|none|FILE")]
+    pub profile: Option<String>,
+    /// Launch profile name.
+    #[arg(long, value_name = "NAME")]
+    pub launch: Option<String>,
     /// Print JSON on stdout instead of text.
     #[arg(long)]
     pub json: bool,

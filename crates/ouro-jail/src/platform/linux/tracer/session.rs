@@ -32,10 +32,13 @@
 //! are what a consumer's loss looks like:
 //!
 //! * Results are droppable, lifecycle facts are not. A consumer that stops
-//!   reading loses `Syscall` events after a bounded stall; the `Exec`,
-//!   `Exit`, `UntracedChildExit`, `Gap` and `Finished` events queue in the
-//!   tracer's own buffer and are delivered when the consumer returns. A
-//!   supervisor never loses the exit status it exists to report.
+//!   reading loses `Syscall` events after a bounded stall; the lifecycle
+//!   facts queue in the tracer's own buffer and are delivered when the
+//!   consumer returns. The §11.4 byte budget bounds them too — an `Exec`
+//!   carries a child-chosen pathname, so it is dropped with a gap when the
+//!   budget is full — but a reserve the results may not touch keeps `Exit`,
+//!   `UntracedChildExit`, `Gap` and `Finished` flowing. A supervisor never
+//!   loses the exit status it exists to report.
 //! * The buffer is bounded in bytes, not in events, because §11.4 budgets
 //!   bytes and two four-kilobyte pathnames per event make a count meaningless.
 //! * Nothing is ever delivered with a bare `try_send`. Every send has a
@@ -76,6 +79,12 @@ const TERMINAL_POLL: Duration = Duration::from_millis(5);
 /// reading. They are tiny and bounded by the number of tasks; past this the
 /// backlog itself is the problem and is reported as one.
 const LIFECYCLE_MAX: usize = 16_384;
+
+/// Bytes of the §11.4 queue budget that results may not consume, so the
+/// lifecycle facts a supervisor must never lose — `Exit`, `Gap`, `Finished`
+/// — always have room to land behind them. Generous against their fixed
+/// [`EVENT_FIXED_BYTES`] size.
+const LIFECYCLE_RESERVE: usize = 64 * 1024;
 
 /// How long a killed tree is given to be reaped before the remaining tracees
 /// are recorded as abandoned.
@@ -134,7 +143,8 @@ pub(super) fn run(
     handles: Handles,
 ) -> TracerSummary {
     handles.tid.store(sys::gettid(), Ordering::Release);
-    let mut session = Session::new(config, tx);
+    let epoch_boottime_ns = config.epoch_boottime_ns;
+    let mut session = Session::new(config, tx, epoch_boottime_ns);
     match seize_and_confirm(launcher) {
         Ok(()) => {
             if ready.send(Ok(())).is_err() {
@@ -224,6 +234,9 @@ struct Session {
     lifecycle_pending: usize,
     /// The byte ceiling the outbox admits against.
     bytes_max: usize,
+    /// The byte ceiling results admit against: `bytes_max` short of the
+    /// lifecycle reserve, so the reserve stays free for lifecycle facts.
+    result_bytes_max: usize,
     /// True while the consumer is behind: results are dropped without
     /// waiting another second to find out again.
     stalled: bool,
@@ -231,6 +244,9 @@ struct Session {
     /// The loss being coalesced into a single `Gap`, per §11.4 ("Coalesce
     /// repeated losses into bounded interval summaries").
     coalesced: Option<CoalescedGap>,
+    /// The `CLOCK_BOOTTIME` reading at supervisor start. Gap endpoints are
+    /// elapsed time since it, not time since boot (§11.4).
+    epoch_boottime_ns: u64,
     /// The last moment an event reached the consumer. A gap bounds itself
     /// from here, which is what §11.4 means by the last known healthy point.
     last_healthy_ns: u64,
@@ -241,36 +257,56 @@ struct Session {
     /// may stop expecting their notification. Bounded, and pruned, so a
     /// recycled pid cannot be swallowed by a stale entry.
     retired: HashMap<pid_t, Instant>,
+    /// Tracees whose death was reported before their fork event arrived,
+    /// with the moment the late fork event can no longer follow. Fork-order
+    /// races: the child stopped nothing, ran nothing, and is not loss.
+    tracee_deaths: HashMap<pid_t, Instant>,
     inflight: usize,
     scratch: Vec<u8>,
 }
 
 impl Session {
-    fn new(config: TracerConfig, tx: SyncSender<TracerEvent>) -> Self {
+    fn new(config: TracerConfig, tx: SyncSender<TracerEvent>, epoch_boottime_ns: u64) -> Self {
         let scratch = vec![0u8; config.path_snapshot_max.max(128)];
         // §11.4 budgets the whole user-space queue. What the consumer has
         // already taken from the channel, and what the allocator rounded up,
         // are part of that budget too, so the buffer admits against three
         // quarters of it.
-        let bytes_max = config.queue_bytes_max - config.queue_bytes_max / 4;
+        let bytes_max =
+            (config.queue_bytes_max - config.queue_bytes_max / 4).max(EVENT_FIXED_BYTES);
+        // Results stop short of the reserve, so the reserve stays free for
+        // the lifecycle facts a supervisor must never lose.
+        let result_bytes_max = bytes_max
+            .saturating_sub(LIFECYCLE_RESERVE)
+            .max(EVENT_FIXED_BYTES);
         Session {
             config,
             tx,
             pending: VecDeque::new(),
             pending_bytes: 0,
             lifecycle_pending: 0,
-            bytes_max: bytes_max.max(EVENT_FIXED_BYTES),
+            bytes_max,
+            result_bytes_max,
             stalled: false,
             disconnected: false,
             coalesced: None,
-            last_healthy_ns: clock::boottime_ns(),
+            epoch_boottime_ns,
+            last_healthy_ns: clock::boottime_ns().saturating_sub(epoch_boottime_ns),
             summary: TracerSummary::default(),
             tasks: HashMap::new(),
             procs: HashMap::new(),
             retired: HashMap::new(),
+            tracee_deaths: HashMap::new(),
             inflight: 0,
             scratch,
         }
+    }
+
+    /// Now, as elapsed time since the supervisor started: the base every gap
+    /// endpoint is reported on. §11.4 bounds a gap from the last known
+    /// healthy point, which is an age and not an instant on the boot clock.
+    fn now_ns(&self) -> u64 {
+        clock::boottime_ns().saturating_sub(self.epoch_boottime_ns)
     }
 
     // ---------------------------------------------------------- the outbox
@@ -282,7 +318,6 @@ impl Session {
             TracerEvent::Syscall { args, .. } => {
                 args.path.as_ref().map_or(0, |p| p.bytes.len())
                     + args.path2.as_ref().map_or(0, |p| p.bytes.len())
-                    + args.sockaddr.as_ref().map_or(0, |s| s.bytes.len())
             }
             TracerEvent::Exec { path, .. } => path.as_ref().map_or(0, |p| p.bytes.len()),
             _ => 0,
@@ -294,6 +329,20 @@ impl Session {
     /// Lifecycle facts are not subject to result backpressure.
     fn is_lifecycle(event: &TracerEvent) -> bool {
         !matches!(event, TracerEvent::Syscall { .. })
+    }
+
+    /// Whether the event is a lifecycle fact a supervisor must never lose.
+    /// These are fixed-size, so admitting them whatever the byte budget can
+    /// overshoot it only by their own small size — the alternative is a
+    /// supervisor without the exit status it exists to report.
+    fn is_critical(event: &TracerEvent) -> bool {
+        matches!(
+            event,
+            TracerEvent::Exit { .. }
+                | TracerEvent::Gap { .. }
+                | TracerEvent::Finished
+                | TracerEvent::UntracedChildExit { .. }
+        )
     }
 
     /// The closed-set operations a lost event would have carried, so a gap
@@ -319,7 +368,7 @@ impl Session {
                         self.lifecycle_pending -= 1;
                     }
                     self.summary.emitted += 1;
-                    self.last_healthy_ns = clock::boottime_ns();
+                    self.last_healthy_ns = self.now_ns();
                 }
                 Err(TrySendError::Full(event)) => {
                     self.pending.push_front(Queued {
@@ -345,7 +394,7 @@ impl Session {
 
     fn room_for(&self, bytes: usize) -> bool {
         self.pending.len() < self.config.queue_max.max(1)
-            && self.pending_bytes + bytes <= self.bytes_max
+            && self.pending_bytes + bytes <= self.result_bytes_max
     }
 
     fn enqueue(&mut self, event: TracerEvent, bytes: usize, lifecycle: bool) {
@@ -387,6 +436,18 @@ impl Session {
 
         if lifecycle {
             if self.lifecycle_pending >= LIFECYCLE_MAX {
+                self.summary.loss.lifecycle_dropped += 1;
+                self.note_drop(GapReason::LifecycleDropped, ops);
+                return;
+            }
+            // §11.4 budgets bytes, lifecycle events included: an `Exec`
+            // carries a child-chosen pathname of up to
+            // `path_snapshot_max` bytes, so without this the lifecycle
+            // backlog alone could exceed the budget many times over. The
+            // critical facts below are exempt, and results stop short of
+            // [`LIFECYCLE_RESERVE`], so a dropped `Exec` means the budget
+            // was full of evidence, not that the reserve failed.
+            if self.pending_bytes + bytes > self.bytes_max && !Session::is_critical(&event) {
                 self.summary.loss.lifecycle_dropped += 1;
                 self.note_drop(GapReason::LifecycleDropped, ops);
                 return;
@@ -433,7 +494,7 @@ impl Session {
     /// Record loss into the coalesced gap. A gap of a different reason is
     /// materialised first rather than merged into one that would misname it.
     fn note_drop(&mut self, reason: GapReason, ops: OpSet) {
-        let now = clock::boottime_ns();
+        let now = self.now_ns();
         match &mut self.coalesced {
             Some(gap) if gap.reason == reason => {
                 gap.to_ns = now;
@@ -460,7 +521,7 @@ impl Session {
             reason,
             ops,
             from_ns: self.last_healthy_ns,
-            to_ns: clock::boottime_ns(),
+            to_ns: self.now_ns(),
             count,
         };
         self.summary.gaps += 1;
@@ -510,13 +571,17 @@ impl Session {
         }
         // Whatever these tracees were about to do is unobserved, whether or
         // not the kill and the reap below succeed. That is the loss, and it
-        // is recorded before anything is attempted.
+        // is recorded before anything is attempted, naming the closed-set
+        // calls that were in flight: a consumer degrades exactly the classes
+        // the abandoned entries could have changed (§11.4).
+        let mut ops = OpSet::EMPTY;
+        for task in self.tasks.values() {
+            if let Some(pending) = task.pending.as_ref() {
+                ops.insert(pending.entry.op);
+            }
+        }
         self.summary.loss.abandoned_tracees += alive.len() as u64;
-        self.gap(
-            GapReason::TraceesAbandoned,
-            OpSet::EMPTY,
-            Some(alive.len() as u64),
-        );
+        self.gap(GapReason::TraceesAbandoned, ops, Some(alive.len() as u64));
         for pid in &alive {
             let _ = sys::kill(*pid, libc::SIGKILL);
             let _ = sys::restart(*pid, sys::PTRACE_CONT, libc::SIGKILL);
@@ -542,6 +607,10 @@ impl Session {
 
     fn handle(&mut self, pid: pid_t, status: libc::c_int) {
         self.summary.stops += 1;
+        // Expired retirements and fork-race ghosts are dropped on every
+        // stop, not only when a death is delivered: a clone-and-exec loop
+        // can run for a long time without reporting a single one.
+        self.prune_retired();
         if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
             self.handle_death(pid, status);
             return;
@@ -660,10 +729,13 @@ impl Session {
         self.tasks.get(&tid).map_or(tid, |task| task.tgid)
     }
 
-    /// Forget retired tids once no notification for them can still arrive.
+    /// Forget expired retirement and fork-race entries. Both are time-bounded,
+    /// so a recycled pid cannot be swallowed by a stale one for longer than
+    /// the grace period.
     fn prune_retired(&mut self) {
         let now = Instant::now();
         self.retired.retain(|_, deadline| *deadline > now);
+        self.tracee_deaths.retain(|_, deadline| *deadline > now);
     }
 
     // ---------------------------------------------------------- events
@@ -675,6 +747,18 @@ impl Session {
             return;
         };
         let child = child as pid_t;
+        // Fork-ordering race: the child died before its first stop, so this
+        // late event names a task that no longer exists and never executed
+        // anything observable. No task entry, no identity gap, no `Fork` —
+        // recording the dead pid would be false loss plus an entry nothing
+        // would ever reap (§11.4: only what was seen is ever claimed).
+        let raced_death = self.tracee_deaths.remove(&child).is_some();
+        if proc::tgid(child).is_none() {
+            if !raced_death {
+                self.summary.late_fork_races += 1;
+            }
+            return;
+        }
         self.register(child);
         let parent = self.tgid_of(parent_tid);
         let child_tgid = self.tgid_of(child);
@@ -732,21 +816,34 @@ impl Session {
             self.retired.insert(thread, Instant::now() + KILL_GRACE);
             self.summary.tasks_destroyed_by_exec += 1;
             if let Some(task) = self.tasks.remove(&thread)
-                && task.pending.is_some()
+                && let Some(pending) = task.pending
             {
+                // The entry is in hand: the gap names the call it would have
+                // reported, not an anonymous hole (§11.4).
                 self.inflight = self.inflight.saturating_sub(1);
                 self.summary.loss.abandoned_entries += 1;
-                self.gap(GapReason::EntryAbandoned, OpSet::EMPTY, Some(1));
+                self.gap(
+                    GapReason::EntryAbandoned,
+                    OpSet::of(pending.entry.op),
+                    Some(1),
+                );
             }
         }
-        if carried.is_some() && self.tasks.get(&tid).is_some_and(|t| t.pending.is_some()) {
+        if carried.is_some()
+            && let Some(op) = self
+                .tasks
+                .get(&tid)
+                .and_then(|t| t.pending.as_ref().map(|pending| pending.entry.op))
+        {
             // Both the leader and the thread that execed had a call in
-            // flight; the leader's can no longer return.
+            // flight; the leader's can no longer return, and the gap names
+            // it because the entry is in hand.
             self.inflight = self.inflight.saturating_sub(1);
             self.summary.loss.abandoned_entries += 1;
-            self.gap(GapReason::EntryAbandoned, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::EntryAbandoned, OpSet::of(op), Some(1));
         }
         let mut path = None;
+        let mut dirfd = None;
         if let Some(task) = self.tasks.get_mut(&tid) {
             if let Some(pending) = carried {
                 task.pending = Some(pending);
@@ -756,11 +853,13 @@ impl Session {
             {
                 pending.exec_confirmed = true;
                 path = pending.args.path.clone();
+                dirfd = pending.args.dirfd;
             }
         }
         self.emit(TracerEvent::Exec {
             pid: tgid,
             path,
+            dirfd,
             monotonic_ns: clock::boottime_ns(),
         });
     }
@@ -819,12 +918,13 @@ impl Session {
         let replaced = self
             .tasks
             .get(&tid)
-            .is_some_and(|task| task.pending.is_some());
-        if replaced {
-            // The previous entry for this thread never returned.
+            .and_then(|task| task.pending.as_ref().map(|pending| pending.entry.op));
+        if let Some(op) = replaced {
+            // The previous entry for this thread never returned, and the gap
+            // names the call it was (§11.4).
             self.summary.loss.abandoned_entries += 1;
             self.inflight = self.inflight.saturating_sub(1);
-            self.gap(GapReason::EntryAbandoned, OpSet::EMPTY, Some(1));
+            self.gap(GapReason::EntryAbandoned, OpSet::of(op), Some(1));
         }
         if let Some(task) = self.tasks.get_mut(&tid) {
             task.pending = Some(pending);
@@ -934,10 +1034,21 @@ impl Session {
     }
 
     fn handle_death(&mut self, pid: pid_t, status: libc::c_int) {
-        self.prune_retired();
         let Some(task) = self.tasks.remove(&pid) else {
             if self.retired.remove(&pid).is_some() {
                 // A thread the kernel destroyed at a non-leader exec.
+                return;
+            }
+            if proc::tgid(pid).is_some() {
+                // A tracee reported dead before its first stop: under ptrace
+                // it stays in /proc as a zombie only its real parent can
+                // reap, while a genuinely untraced direct child was reaped
+                // by this very wait and is already gone. The fork event that
+                // names it is still in flight; nothing it did was observed
+                // to be lost, so this is a race to count, not a child exit
+                // to report and not a gap (§11.4).
+                self.summary.late_fork_races += 1;
+                self.tracee_deaths.insert(pid, Instant::now() + KILL_GRACE);
                 return;
             }
             self.summary.untraced_child_exits += 1;
@@ -945,10 +1056,16 @@ impl Session {
             return;
         };
         self.summary.reaped_tasks += 1;
-        if task.pending.is_some() {
+        if let Some(pending) = task.pending {
+            // The entry can no longer return, and the gap names the call it
+            // was, because the entry is in hand (§11.4).
             self.inflight = self.inflight.saturating_sub(1);
             self.summary.loss.abandoned_entries += 1;
-            self.gap(GapReason::EntryAbandoned, OpSet::EMPTY, Some(1));
+            self.gap(
+                GapReason::EntryAbandoned,
+                OpSet::of(pending.entry.op),
+                Some(1),
+            );
         }
         let Some(process) = self.procs.get_mut(&task.tgid) else {
             // A task whose thread group we no longer hold: its death cannot
@@ -1145,12 +1262,12 @@ impl Session {
 
     /// The `sockaddr` of a `connect`, as far as the closed set describes it.
     ///
-    /// The retained bytes are the family's own size, never the length the
-    /// caller declared: `addrlen` is the caller's claim, and a `sockaddr_in`
-    /// announced as 128 bytes would otherwise pull 112 bytes of unrelated
-    /// tracee memory into the observer (§11.1: read only the arguments the
-    /// closed set needs). For a family the set does not name, nothing but the
-    /// family is kept.
+    /// The address bytes are read — the family's own size, never the length
+    /// the caller declared, which is a claim and not a fact — only to decide
+    /// whether the whole address was readable, and are not retained: the
+    /// record names the family and the completeness of the claim, and §11.1
+    /// forbids collecting argument memory nothing downstream will ever see.
+    /// For a family the set does not name, only the family is read.
     fn read_sockaddr(
         &mut self,
         tid: pid_t,
@@ -1160,11 +1277,8 @@ impl Session {
         if addr == 0 {
             return (None, false);
         }
-        let declared_len = u32::try_from(len).unwrap_or(u32::MAX);
         let unknown = SockaddrSnapshot {
             family: None,
-            bytes: Vec::new(),
-            declared_len,
             complete: false,
         };
         if len < 2 {
@@ -1179,8 +1293,6 @@ impl Session {
             return (
                 Some(SockaddrSnapshot {
                     family: Some(family),
-                    bytes: Vec::new(),
-                    declared_len,
                     complete: false,
                 }),
                 false,
@@ -1191,11 +1303,10 @@ impl Session {
         (
             Some(SockaddrSnapshot {
                 family: Some(family),
-                bytes: self.scratch[..read].to_vec(),
-                declared_len,
                 // Complete means the whole address of this family was read
-                // and the caller declared at least that much.
-                complete: read == want && u64::try_from(family_len).unwrap_or(u64::MAX) <= len,
+                // and the caller declared at least that much, which
+                // `sockaddr_len` has already bounded by the claim.
+                complete: read == want,
             }),
             read == 0,
         )
@@ -1247,7 +1358,9 @@ impl Session {
 }
 
 /// How many bytes of a `sockaddr` belong to its family, bounded by what the
-/// caller declared. `None` for a family the closed set does not name.
+/// caller declared. This is what is read to decide whether the whole address
+/// was readable, and no more than that is ever touched. `None` for a family
+/// the closed set does not name.
 fn sockaddr_len(family: u16, declared: u64) -> Option<usize> {
     let size = match i32::from(family) {
         libc::AF_INET => 16,

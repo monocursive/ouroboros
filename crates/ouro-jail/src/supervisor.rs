@@ -206,11 +206,27 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         ));
     }
 
-    let selection = args
-        .profile
-        .clone()
-        .or_else(|| operator_jail.profile.clone())
-        .unwrap_or_else(|| "tool".to_owned());
+    // §6.1: `--profile none` is the only way to select `none`; files and
+    // environment cannot select it. `config.toml` is a defaults file, so a
+    // `none` written there would drop the operator onto the uncontained
+    // profile without the explicit act the clause demands, and it refuses
+    // instead — the same rule the profile-file `extends = "none"` refusal
+    // below applies.
+    let selection = match (args.profile.as_deref(), operator_jail.profile.as_deref()) {
+        (Some(cli), _) => cli.to_owned(),
+        (None, Some("none")) => {
+            return Err(JailError::new(
+                ErrorCode::PolicyWidening,
+                ErrorStage::Resolving,
+                Remediation::Configuration,
+                "config.toml may not select the `none` profile; pass `--profile none` explicitly"
+                    .to_owned(),
+            )
+            .with_key_path("jail.profile"));
+        }
+        (None, Some(configured)) => configured.to_owned(),
+        (None, None) => "tool".to_owned(),
+    };
 
     let mut layers: Vec<Layer> = Vec::new();
     let (profile, policy_name) = match ProfileName::parse(&selection) {
@@ -270,7 +286,9 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         )?;
         layers.push(Layer {
             origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
-            base_dir: config_dir.parent().map(os_bytes),
+            // §6.2: apply paths relative to the file containing them, and
+            // `config.toml` sits in `config_dir` itself — not its parent.
+            base_dir: Some(os_bytes(&config_dir)),
             key_prefix: "jail.".to_owned(),
             narrowing: false,
             delta,
@@ -367,11 +385,21 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         None => ScratchRoot::Managed,
     };
 
-    let translation_prefixes = operator
+    // §6.2: `[jail_host.network] translation_prefixes` is host configuration,
+    // merged into proxy policy before digest creation. Each entry is parsed
+    // and re-rendered in canonical RFC 5952 form so equivalent spellings of
+    // one prefix cannot yield two digests (§6.3).
+    let translation_prefixes = match operator
         .jail_host
         .and_then(|host| host.network)
         .map(|network| network.translation_prefixes)
-        .unwrap_or_default();
+    {
+        Some(entries) => config::canonical_translation_prefixes(
+            "jail_host.network.translation_prefixes",
+            &entries,
+        )?,
+        None => Vec::new(),
+    };
 
     let platform_os = ctx.platform.identity().os;
     let inputs = ResolveInputs {
@@ -516,7 +544,17 @@ pub fn explain(ctx: &Context, args: &ExplainArgs) -> Result<ExplainReport, JailE
 /// # Errors
 /// Returns the resolution errors of [`resolve_plan`].
 pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailError> {
-    let plan = resolve_plan(ctx, &args.policy)?;
+    // §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`:
+    // the override flags belong to `run` and `explain`, and cli::DoctorArgs
+    // does not define them, so only selection reaches the resolver here.
+    let plan = resolve_plan(
+        ctx,
+        &PolicyArgs {
+            profile: args.profile.clone(),
+            launch: args.launch.clone(),
+            ..PolicyArgs::default()
+        },
+    )?;
     let request = plan_request(&plan);
     let capabilities = ctx.platform.probe(&request);
     let ready = plan
@@ -703,6 +741,9 @@ pub fn run(ctx: &Context, args: &RunArgs) -> RunReport {
 
 #[allow(clippy::too_many_lines)]
 fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
+    // §13.1: pin the shared monotonic base before anything writes a trace
+    // event, so wrapper, audit and gap intervals all count from here.
+    crate::platform::mark_supervisor_start();
     // §6.1: PROGRAM is mandatory except with --label-only.
     if !args.label_only && args.argv.is_empty() {
         return Err(usage("PROGRAM", "a program to run is required"));
@@ -892,6 +933,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
+    // §7: the state file names the registered execution boundary once it
+    // exists, so crash reconciliation and GC can identify resources without
+    // parsing a receipt.
+    let _ = register_boundary_in_state(&attempt_dir, &boundary);
     if let Some(applied) = prepared.applied() {
         record.applied = applied;
     }
@@ -975,6 +1020,22 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     let wall_deadline = wall_deadline(&plan);
     let mut outcome_error: Option<JailError> = None;
     loop {
+        // §13.3 + I07: a trace-sink failure — budget exhausted, external
+        // consumer stalled past its deadline — is evidence loss, and under
+        // strict it stops the attempt exactly like the tracer-queue path
+        // does. Checking here means the stop does not wait for the next
+        // event to notice it.
+        if let Some(error) = journal.take_new_loss() {
+            record.errors.push(error.to_object());
+            if plan.resolved.snapshot.observation.evidence == crate::records::EvidenceMode::Strict {
+                record
+                    .outcome
+                    .cause
+                    .get_or_insert("evidence_loss".to_owned());
+                running.request_stop(StopReason::EvidenceLoss);
+            }
+            outcome_error.get_or_insert(error);
+        }
         if signals.as_ref().is_some_and(signals::SignalPipe::triggered) {
             running.request_stop(StopReason::OperatorSignal);
         }
@@ -1096,6 +1157,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     }
 
     // Step 9: verify tree death, drain observations, persist settlement.
+    // A sink loss that arrived after the last loop iteration still belongs
+    // in the settled receipt's errors (§13.3: the receipt is the bounded
+    // summary of what was lost).
+    if let Some(error) = journal.take_new_loss() {
+        record.errors.push(error.to_object());
+        outcome_error.get_or_insert(error);
+    }
     let tree = running.wait_tree(TREE_BUDGET);
     if let Some(summary) = running.observer_summary() {
         record.observer = summary.to_observer_record();
@@ -1131,8 +1199,19 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         record.errors.push(error.to_object());
         error
     });
+    // §13.3 terminal drain, before the settled receipt is written: whatever
+    // the external trace consumer has not accepted within the no-progress
+    // deadline is recorded as evidence loss, and that loss belongs in the
+    // receipt that summarizes what was lost. (The receipt's own final note,
+    // written by persist below, is drained once more after it is sent.)
+    if let Ok(mut sink) = journal.trace.lock() {
+        sink.finish();
+    }
+    if let Some(error) = journal.take_new_loss() {
+        record.errors.push(error.to_object());
+        outcome_error.get_or_insert(error);
+    }
     // The tree is already waited for at this point, so a failure here is
-    // reported rather than hiding the settlement that did happen.
     let receipt = match persist(&attempt_dir, &mut record, phase, args, &mut journal) {
         Ok(receipt) => receipt,
         Err(error) => {
@@ -1161,6 +1240,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         &receipt,
     );
 
+    // Drain once more so the receipt's own final note — written by persist
+    // after the drain above — is not dropped when the descriptor closes; a
+    // loss here is already beyond the receipt and reaches the report only.
+    if let Ok(mut sink) = journal.trace.lock() {
+        sink.finish();
+    }
     let exit_code = if let Some(error) = &tree_error {
         error.exit_code()
     } else if let Some(error) = &outcome_error {
@@ -1622,8 +1707,9 @@ struct Journal {
     attempt_id: String,
     trace: SharedTrace,
     seq: u64,
-    started: Instant,
     loss: Option<JailError>,
+    /// True while `loss` has not yet been surfaced to the supervision loop.
+    loss_pending: bool,
 }
 
 impl Journal {
@@ -1632,8 +1718,22 @@ impl Journal {
             attempt_id: attempt_id.to_owned(),
             trace,
             seq: 0,
-            started: Instant::now(),
             loss: None,
+            loss_pending: false,
+        }
+    }
+
+    /// The sink loss that has not been handled yet, if any (§13.3).
+    ///
+    /// The supervision loop calls this once per iteration so a strict run
+    /// stops on trace-sink loss without waiting for the next event; the
+    /// first loss is kept in `loss` for the final report.
+    fn take_new_loss(&mut self) -> Option<JailError> {
+        if self.loss_pending {
+            self.loss_pending = false;
+            self.loss.clone()
+        } else {
+            None
         }
     }
 
@@ -1654,6 +1754,7 @@ impl Journal {
             // Keep the first loss: later frames fail for the same reason and a
             // later message would hide the one that started it.
             self.loss.get_or_insert(error);
+            self.loss_pending = true;
         }
     }
 
@@ -1664,7 +1765,7 @@ impl Journal {
             &self.attempt_id,
             self.seq,
             SystemTime::now(),
-            self.started.elapsed().as_nanos(),
+            crate::platform::elapsed_since_start_ns(),
             transition,
         );
         self.emit(&event, Priority::Normal);
@@ -1680,7 +1781,7 @@ impl Journal {
             &self.attempt_id,
             self.seq,
             SystemTime::now(),
-            self.started.elapsed().as_nanos(),
+            crate::platform::elapsed_since_start_ns(),
             phase,
             &digest,
         );
@@ -1767,6 +1868,17 @@ fn claim_attempt(
         "kernel": identity.kernel,
         "component_version": env!("CARGO_PKG_VERSION"),
         "claimed_at": rfc3339_utc(SystemTime::now()),
+        // §7: boot identity and the live owner's birth identity, so a
+        // reconciler can tell this attempt's supervisor from a recycled pid
+        // without parsing a receipt.
+        "owner": ctx.platform.owner_identity().map_or(serde_json::Value::Null, |owner| {
+            serde_json::json!({
+                "pid": owner.pid,
+                "boot_id": owner.boot_id,
+                "start_time_ticks": owner.start_time_ticks,
+            })
+        }),
+        "boundary": serde_json::Value::Null,
         "vendor_state": serde_json::Value::Null,
         "state_cleanup": "not_needed",
     });
@@ -1800,6 +1912,13 @@ fn claim_attempt(
     let bytes = serde_json::to_vec_pretty(&state).unwrap_or_default();
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            // §7: a claim the directory does not remember is a claim a power
+            // loss can erase; every other state write syncs the parent, and
+            // the exclusive create deserves the same guarantee.
+            std::fs::File::open(path.parent().unwrap_or(Path::new(".")))
+                .and_then(|dir| dir.sync_all())
+        })
         .map_err(|error| {
             JailError::new(
                 ErrorCode::StateWriteFailed,
@@ -1808,6 +1927,47 @@ fn claim_attempt(
                 format!("{}: {error}", path.display()),
             )
         })
+}
+
+/// Record the registered execution boundary in the state file (§7), so crash
+/// reconciliation and GC can identify the boundary without parsing a receipt.
+fn register_boundary_in_state(
+    attempt_dir: &AttemptDir,
+    boundary: &crate::platform::BoundaryIdentity,
+) -> Result<(), JailError> {
+    let path = attempt_dir.state_path();
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        JailError::new(
+            ErrorCode::StateWriteFailed,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let mut state: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+        JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            format!("the attempt state could not be parsed back: {error}"),
+        )
+    })?;
+    state["boundary"] = serde_json::json!({
+        "kind": boundary.boundary,
+        "verification_scope": boundary.verification_scope,
+        "backend": boundary.backend,
+        "backend_version": boundary.backend_version,
+        "process": boundary.process,
+    });
+    let bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
+        JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            format!("the attempt state could not be serialized: {error}"),
+        )
+    })?;
+    state::replace_atomically(&path, &bytes)
 }
 
 fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailError> {

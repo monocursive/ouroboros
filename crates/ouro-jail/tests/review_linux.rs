@@ -2583,3 +2583,278 @@ fn r3_a_closed_stdin_is_not_silently_accepted() {
         eprintln!("the run did not reach the target: {:?}", out.status.code());
     }
 }
+
+// ===========================================================================
+// 9. The branch review's fixes
+// ===========================================================================
+
+/// P03/I11: a child-visible policy edit between prepared and release cannot
+/// change the running attempt's authority — the settled receipt's digest and
+/// applied mounts equal the prepared ones.
+#[test]
+fn r9_a_mid_run_policy_edit_cannot_widen_the_attempt() {
+    if !live() {
+        return;
+    }
+    use ouro_fixture::harness::Release;
+
+    let c = case();
+    let marker = c.workspace.join("target-ran");
+    std::fs::create_dir_all(c.workspace.join("secret")).unwrap();
+    std::fs::write(
+        c.workspace.join("ouro.toml"),
+        "[jail.filesystem]\ndeny_read = [\"./secret\"]\n",
+    )
+    .unwrap();
+
+    let mut spawned = c
+        .jail
+        .gate()
+        .target([
+            c.fixture.to_str().unwrap(),
+            "open",
+            marker.to_str().unwrap(),
+            "--create",
+            "--write",
+        ])
+        .spawn()
+        .expect("spawn");
+    let (attempt, prepared_digest, prepared_mounts) = {
+        let mut owner = spawned.owner();
+        let prepared = owner.await_prepared().expect("prepared");
+        let attempt = prepared
+            .get("attempt_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let receipt = receipt_in(spawned.root()).expect("prepared receipt");
+        let digest = receipt
+            .pointer("/policy/digest")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        let mounts = receipt
+            .pointer("/applied/filesystem/mounts")
+            .cloned()
+            .unwrap_or(Value::Null);
+        (attempt, digest, mounts)
+    };
+    // The child owns the workspace: rewrite the project policy to a wider
+    // shape while the attempt is prepared but not released.
+    std::fs::write(c.workspace.join("ouro.toml"), "\n").unwrap();
+    {
+        let mut owner = spawned.owner();
+        owner
+            .release(&Release::Valid, &attempt, &prepared_digest)
+            .expect("release");
+    }
+    let run = spawned.wait().expect("wait");
+    assert_eq!(run.code(), Some(0), "the target should have run");
+    assert!(marker.exists(), "the target did not run");
+    let settled = settled(&run);
+    assert_eq!(
+        settled.pointer("/policy/digest").and_then(Value::as_str),
+        Some(prepared_digest.as_str()),
+        "a mid-attempt policy edit changed the digest"
+    );
+    assert_eq!(
+        settled.pointer("/applied/filesystem/mounts"),
+        Some(&prepared_mounts),
+        "a mid-attempt policy edit changed the applied mounts"
+    );
+}
+
+/// M-B/I02: a symlinked root `.git` cannot certify existing_and_root, so the
+/// run refuses rather than proceed with silently downgraded coverage.
+#[test]
+fn r9_a_symlinked_root_git_refuses_rather_than_downgrade() {
+    if !live() {
+        return;
+    }
+    let c = case();
+    let marker = c.workspace.join("target-ran");
+    std::os::unix::fs::symlink("nowhere", c.workspace.join(".git")).unwrap();
+    let run = c
+        .jail
+        .target([
+            c.fixture.to_str().unwrap(),
+            "open",
+            marker.to_str().unwrap(),
+            "--create",
+            "--write",
+        ])
+        .run()
+        .expect("run");
+    assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
+    assert!(!marker.exists(), "the target ran despite the refusal");
+    let receipt = receipt_in(c.jail.root()).expect("a receipt");
+    let codes: Vec<&str> = receipt
+        .pointer("/errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|e| e.get("code").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        codes.contains(&"missing_capability"),
+        "expected missing_capability in {codes:?}"
+    );
+    // The symlink itself is untouched: a protected symlink is never followed
+    // and never removed.
+    assert!(
+        c.workspace
+            .join(".git")
+            .symlink_metadata()
+            .expect("the symlink survived")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// M-C/north-star §4.3: a `--deny-read` grant is enforced — the denied
+/// subtree is masked, its real content invisible to the child.
+#[test]
+fn r9_deny_read_grants_are_enforced_as_masks() {
+    if !live() {
+        return;
+    }
+    let c = case();
+    std::fs::create_dir_all(c.workspace.join("secret")).unwrap();
+    std::fs::write(c.workspace.join("secret/file"), b"classified\n").unwrap();
+    let script = c.workspace.join("ops.json");
+    let ops = serde_json::json!([["open", "secret/file", "--expect", "ENOENT"]]);
+    std::fs::write(&script, serde_json::to_vec(&ops).unwrap()).unwrap();
+
+    let run = c
+        .jail
+        .arg("--deny-read")
+        .arg(c.workspace.join("secret"))
+        .target([
+            c.fixture.to_str().unwrap(),
+            "script",
+            script.to_str().unwrap(),
+        ])
+        .run()
+        .expect("run");
+    assert_eq!(run.code(), Some(0), "fixture expectations were not all met");
+    let settled = settled(&run);
+    let masked: Vec<&Value> = settled
+        .pointer("/applied/filesystem/mounts")
+        .and_then(Value::as_array)
+        .map(|mounts| {
+            mounts
+                .iter()
+                .filter(|m| m.get("kind").and_then(Value::as_str) == Some("tmpfs-mask"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        masked.len(),
+        1,
+        "expected exactly one mask mount: {masked:?}"
+    );
+    assert!(
+        masked[0]
+            .get("destination")
+            .and_then(Value::as_str)
+            .is_some_and(|d| d.ends_with("/secret")),
+        "the mask must cover the denied subtree: {masked:?}"
+    );
+    // The real file is unchanged outside the jail.
+    assert_eq!(
+        std::fs::read(c.workspace.join("secret/file")).unwrap(),
+        b"classified\n"
+    );
+}
+
+/// M-K/§6.4: an explicit pids ceiling is a required limit; this slice cannot
+/// enforce it, so it refuses instead of running unbounded.
+#[test]
+fn r9_an_explicit_pids_ceiling_refuses_until_it_can_be_enforced() {
+    if !live() {
+        return;
+    }
+    let c = case();
+    let marker = c.workspace.join("target-ran");
+    let run = c
+        .jail
+        .arg("--limit")
+        .arg("pids=8")
+        .target([
+            c.fixture.to_str().unwrap(),
+            "open",
+            marker.to_str().unwrap(),
+            "--create",
+            "--write",
+        ])
+        .run()
+        .expect("run");
+    assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
+    assert!(!marker.exists(), "the target ran without the ceiling");
+}
+
+/// north-star §4.4: requiring all_descendants on Linux refuses (125) rather
+/// than underclaim coverage.
+#[test]
+fn r9_all_descendants_coverage_refuses_on_linux() {
+    if !live() {
+        return;
+    }
+    let c = case();
+    let profile = c.jail.root().join("all.toml");
+    std::fs::write(
+        &profile,
+        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n\n[filesystem]\nprotected_coverage = \"all_descendants\"\n",
+    )
+    .unwrap();
+    let marker = c.workspace.join("target-ran");
+    let run = c
+        .jail
+        .arg("--profile")
+        .arg(&profile)
+        .target([
+            c.fixture.to_str().unwrap(),
+            "open",
+            marker.to_str().unwrap(),
+            "--create",
+            "--write",
+        ])
+        .run()
+        .expect("run");
+    assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
+    assert!(!marker.exists(), "the target ran without the coverage");
+}
+
+/// H2/I07: an option tail larger than the pipe capacity must flow through the
+/// `--args` descriptor instead of deadlocking the supervisor before spawn.
+#[test]
+fn r9_a_large_option_tail_does_not_deadlock_the_supervisor() {
+    if !live() {
+        return;
+    }
+    let c = case();
+    let marker = c.workspace.join("target-ran");
+    // Enough protected segments to push the rendered option tail past the
+    // 128 KiB --args threshold and the payload past the default 64 KiB pipe
+    // capacity, with a command that stays short.
+    for index in 0..600 {
+        let name = format!("segment-{index:04}-abcdefghijklmnopqrstuvwxyz0123456789abcdefgh");
+        std::fs::create_dir_all(c.workspace.join(name).join(".git")).unwrap();
+    }
+    let run = c
+        .jail
+        .target([
+            c.fixture.to_str().unwrap(),
+            "open",
+            marker.to_str().unwrap(),
+            "--create",
+            "--write",
+        ])
+        .run()
+        .expect("run");
+    assert_eq!(run.code(), Some(0), "the run must complete, not hang");
+    assert!(marker.exists(), "the target did not run");
+}

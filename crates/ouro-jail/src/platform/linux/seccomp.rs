@@ -87,6 +87,14 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     ("chroot", 161),
     ("unshare", 272),
     ("setns", 308),
+    // Defense in depth beyond the spec's named list: page-fault control
+    // widens kernel race windows, handle-based opens can walk outside the
+    // bind view given a reachable mount fd, and the kernel log discloses
+    // host memory addresses where dmesg_restrict is lax.
+    ("userfaultfd", 323),
+    ("open_by_handle_at", 304),
+    ("name_to_handle_at", 303),
+    ("syslog", 103),
 ];
 
 /// `clone3`. Denied with `ENOSYS` because seccomp cannot safely dereference

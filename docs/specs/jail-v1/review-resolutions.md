@@ -84,3 +84,37 @@ here and in revision 8 of the specification.
 | A proved exec failure used `outcome.kind = refused` | §13.2: `exec_error` with the errno |
 | Scratch removal at settlement was a precondition, not an obligation | §14.2: removed at settlement after verified tree death, retained otherwise |
 | A supervisor killed during bubblewrap's startup leaves an orphaned outer bubblewrap holding stdio (bubblewrap clears the inherited parent-death signal) | §9.3: recorded limit; closing it is scheduled with L02 (J2) |
+
+## Revision 6 findings (2026-09-22, the branch review of J1)
+
+Findings from the full review of `dev` @ 3cb5a538 (PR #43). Each row names the
+fix that landed and the contract or test that pins it.
+
+| Review finding | Resolution | Contract / acceptance |
+|---|---|---|
+| Known-operation result loss reported as bookkeeping: EntryAbandoned/TraceesAbandoned gaps carried `OpSet::EMPTY`, suppressing the §11.4 strict stop and class degradation | Every abandonment gap names the abandoned entry's operation (or the union of still-alive pendings at force stop) | §11.4; O03; `r31_an_entry_destroyed_by_an_exec_names_its_operation` |
+| `--args` payload written to a fresh pipe before spawn deadlocked the supervisor on payloads over the pipe capacity, unbounded and uninterruptible | bwrap spawns first and blocks reading ARGS_FD; the payload is written with the reader alive, and a reader that dies surfaces as EPIPE teardown, not a hang | §2 I07; `r9_a_large_option_tail_does_not_deadlock_the_supervisor` |
+| P03 (mid-run policy-edit invariance, I11) had no test anywhere | Gated-run test edits the workspace `ouro.toml` between prepared and release and pins digest and applied-mount equality | §6.2, §7; P03; `r9_a_mid_run_policy_edit_cannot_widen_the_attempt` |
+| Source-identity pinning unwired: `PinnedPath` dead code, protected binds raced validation→mount by path | Protected segments and the workspace are pinned by `O_PATH|O_NOFOLLOW` handles, verified at mount handoff, and bound by descriptor (`--ro-bind-fd`) up to the spawn map's reserved range | §9.1; F02, F04 |
+| Required protected coverage recorded, never enforced; symlinked root literals downgraded silently; `all_descendants` never refused | A scan that cannot certify `existing_and_root` refuses before exec; `all_descendants` refuses on Linux with 125 | §2 I02; north-star §4.4; `r9_a_symlinked_root_git_refuses_rather_than_downgrade`, `r9_all_descendants_coverage_refuses_on_linux` |
+| Operator `--rw`/`--ro`/`--deny-read`/`protected_segments` resolved into policy but silently unenforced by the plan | Read-only grants bind, host-rooted writable grants bind, denied subtrees are masked with a tmpfs, operator segments extend the protected walk | §6.1, north-star §4.2–4.3; `r9_deny_read_grants_are_enforced_as_masks` |
+| Explicit pids/mem/cpu ceilings passed their capability probe and ran unenforced on delegating hosts | Explicit non-wall ceilings refuse pre-exec in this slice (limits are J2); preferred ceilings keep the record-and-run shape | §6.4, §2 I02; `r9_an_explicit_pids_ceiling_refuses_until_it_can_be_enforced` |
+| Strict mode never stopped on trace-sink loss; audit counts stayed active for undelivered frames; the external queue was dropped unrecorded at exit | Sink loss reaches the supervision loop as evidence loss (strict stops), undelivered frames degrade their class and null its count, and a bounded terminal drain records what it cannot deliver | §13.2–13.3, §11.4; R03, R04 |
+| `monotonic_ns` and gap intervals used three incompatible time bases and `Instant` (no suspend) | One supervisor-start `CLOCK_BOOTTIME` epoch feeds the wrapper journal, the audit writer and every tracer gap interval | §6.4, §13.1 |
+| Lifecycle (Exec) backlog bypassed the §11.4 byte budget (~71 MiB worst case) | Lifecycle events are admitted against the byte budget with a critical-event reserve; over-budget Exec drops are gaps naming the exec class | §11.4 |
+| `jail-state.json` omitted the §7 identity (boot id, owner birth, boundary) and the claim skipped the parent-directory sync | The claim records owner birth identity and syncs its parent; the boundary is registered in state once prepared | §7 |
+| §5.2 privilege boundary unimplemented | euid-0 and mismatched-UID supervisors refuse pre-exec; the file-capability eBPF path still requires the capability-clearing contract before it lands | §5.2 |
+| `config.toml` could select `none`, and its paths anchored one directory too high | Config `none` refuses with the `jail.profile` key path; paths anchor to the directory containing `config.toml` | §6.1–6.2; `config_toml_may_not_select_the_none_profile`, `config_toml_paths_anchor_to_the_config_directory` |
+| CLI `~/` expansion, uncanonical `translation_prefixes`, doctor's extra flags, stale redaction doc | CLI paths are cwd-relative; prefixes are parsed and re-rendered as RFC 5952 CIDRs before the digest; doctor takes only its §6.1 flags; the doc states the redaction contract only | §6.1–6.3; portable policy/macos refusal tests |
+| Defense-in-depth syscalls missing; `EINPROGRESS` rendered `E?` | `userfaultfd`, `open_by_handle_at`, `name_to_handle_at`, `syslog` join the deny table; the errno table names `EINPROGRESS` | §9.2; S01 |
+| Audit path fields diverged from the documented nested `{kind, value}` shape | The emitter matches `examples/event-open.json`; conformance assertions follow | §11.3, §13.1; R01 |
+| Birth-identity events collected and discarded; execveat's dirfd dropped on confirmed exec | `Exec` carries its dirfd into classification; per-pid birth identity on every audit event remains open for the J4 evidence work | §11.3 |
+| CI: mutable action tags (including in the job holding the host key), no job timeout, silent whole-job skip when unconfigured, deny.toml unenforced | Actions pinned by SHA; conformance job has a 45-minute timeout and a loud not-configured notice; `cargo deny check` runs in `rust` | §16; W-series findings |
+| README claimed nothing was implemented and J0 was all `not_started` | README states the J0/J1 landing and what J1 enforces | — |
+| P04's credential-special-files sub-clause had no code path in J1 | Scoped to J3 in §16; J1 refuses credential-bearing launch profiles fail-closed | §16 |
+
+Deferred with reasons: per-attempt cgroup limits (J2, and explicit ceilings
+refuse rather than run unenforced until then); receipt-fsync on a worker
+thread with the 5-second budget (§13.3 — the synchronous write is bounded by
+the filesystem; the thread split lands with J4's failure-injection work where
+it can be tested); per-pid birth identity on audit events (J4).

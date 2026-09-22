@@ -31,7 +31,9 @@ use crate::platform::{
     PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
     TreeObservation, kernel_release,
 };
-use crate::policy::{EnvValue, PathRef, PolicySnapshot, ProfileName, RootToken, ScratchRoot};
+use crate::policy::{
+    EnvValue, PathRef, PolicySnapshot, ProfileName, ProtectedCoverage, RootToken, ScratchRoot,
+};
 use crate::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
     ErrorCode, ErrorStage, JailError, NativeLifetime, NativeString, ObserveMode, Os,
@@ -59,6 +61,13 @@ const RELEASE_FD: RawFd = 12;
 const ERROR_FD: RawFd = 13;
 /// Descriptor a long argument list is handed over.
 const ARGS_FD: RawFd = 14;
+/// First fixed descriptor number used for pinned protected binds
+/// (`--ro-bind-fd`); the fixed channel descriptors live below it.
+const PINNED_FD_BASE: RawFd = 20;
+/// Exclusive upper bound for pinned-bind descriptors. Beyond this the
+/// remaining segments are bound by path and re-verified at handoff, which
+/// §9.1 permits where the backend cannot take another descriptor.
+const PINNED_FD_LIMIT: RawFd = 200;
 
 /// Preparation budget (§8.2).
 const PREPARE_BUDGET: Duration = Duration::from_secs(30);
@@ -424,7 +433,6 @@ struct Boundary {
     observe_on: bool,
     ns_ids: identity::NsIds,
 }
-
 impl Boundary {
     #[allow(clippy::too_many_lines)]
     fn create(
@@ -434,6 +442,22 @@ impl Boundary {
         deadline: clock::Deadline,
     ) -> Result<Boundary, JailError> {
         let snapshot = plan.request.snapshot.clone();
+        // §5.2: effective UID 0 and mismatched real/effective UIDs refuse in
+        // v1 — a privileged supervisor is a boundary this slice does not
+        // model, and the child-side capability readback is not a substitute
+        // for refusing to be privileged in the first place.
+        let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
+        if euid == 0 || ruid != euid {
+            return Err(error(
+                ErrorCode::UnsupportedPlatform,
+                ErrorStage::Preparing,
+                Remediation::HostSetup,
+                format!(
+                    "this slice refuses a privileged or setuid supervisor: real uid {ruid}, \
+                     effective uid {euid} (jail-v1 §5.2)"
+                ),
+            ));
+        }
         if snapshot.profile == ProfileName::Agent {
             return Err(error(
                 ErrorCode::NestingFailed,
@@ -476,35 +500,196 @@ impl Boundary {
         };
         create_private_dir(&scratch)?;
 
+        // §6.4 + I02: an explicit pids/mem/cpu ceiling is a required limit,
+        // and this slice applies only the wall clock (limits are staged at
+        // J2, jail-v1 §16). A requirement this slice cannot enforce refuses
+        // before exec; it is never satisfied with nothing behind it.
+        for (key, ceiling) in [
+            ("pids", &snapshot.limits.pids),
+            ("mem", &snapshot.limits.mem),
+            ("cpu", &snapshot.limits.cpu),
+        ] {
+            if let Some(limit) = ceiling
+                && limit.required
+            {
+                return Err(error(
+                    ErrorCode::MissingCapability,
+                    ErrorStage::Preparing,
+                    Remediation::Unsupported,
+                    format!(
+                        "an explicit {key} ceiling is required by the resolved policy, and \
+                         pids/mem/cpu enforcement is not implemented in this slice; it refuses \
+                         rather than run unenforced (jail-v1 §6.4)"
+                    ),
+                ));
+            }
+        }
+
+        // north-star §4.4 / jail-v1 §9.1: Linux cannot enforce
+        // all_descendants; a profile that requires it refuses (125) rather
+        // than underclaim.
+        if snapshot.filesystem.protected_coverage == ProtectedCoverage::AllDescendants {
+            return Err(error(
+                ErrorCode::MissingCapability,
+                ErrorStage::Preparing,
+                Remediation::Unsupported,
+                "the all_descendants protected-path coverage cannot be enforced on Linux; \
+                 it refuses rather than underclaim (north-star §4.4)"
+                    .to_owned(),
+            ));
+        }
+
         // Protected segments. A bound reached is a refusal, never a shorter
-        // answer (§9.1).
-        let scan = jfs::scan_protected(&plan.workspace).map_err(|err| {
-            error(
+        // answer (§9.1). Operator-configured protected_segments extend the
+        // built-in literals for the walk (§6.3).
+        let mut names: Vec<String> = jfs::PROTECTED_LITERALS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        for extra in &snapshot.filesystem.protected_segments {
+            if !names.iter().any(|name| name == extra) {
+                names.push(extra.clone());
+            }
+        }
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let scan = jfs::scan_protected_names(&plan.workspace, &name_refs, jfs::ScanLimits::DEFAULT)
+            .map_err(|err| {
+                error(
+                    ErrorCode::MissingCapability,
+                    ErrorStage::Preparing,
+                    Remediation::Configuration,
+                    err.to_string(),
+                )
+            })?;
+
+        // jail-v1 §2 I02: the tool profile requires existing_and_root, and a
+        // scan that cannot certify it — a protected symlink met on the walk,
+        // a root literal that is a symlink — refuses before exec instead of
+        // running with a silently downgraded receipt.
+        if snapshot.filesystem.protected_coverage == ProtectedCoverage::ExistingAndRoot
+            && scan_coverage(&scan) != "existing_and_root"
+        {
+            let skipped = skipped_protected_names(&scan);
+            return Err(error(
                 ErrorCode::MissingCapability,
                 ErrorStage::Preparing,
                 Remediation::Configuration,
-                err.to_string(),
-            )
-        })?;
+                format!(
+                    "the required existing_and_root protected coverage cannot be certified: \
+                     protected names that are symlinks are neither followed nor covered: {}",
+                    skipped.join(", ")
+                ),
+            ));
+        }
 
         let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
         bplan.bwrap = bwrap_path.to_path_buf();
         bplan.env = environment_for(&snapshot, &plan.workspace)?;
-        bplan.protected = scan.segments.iter().map(|item| item.path.clone()).collect();
+
+        // Operator grants are enforced, not merely recorded (I02, north-star
+        // §4.2): read-only grants become additional ro-binds at their
+        // resolved paths, host-rooted writable grants become binds, and
+        // denied subtrees are masked with a tmpfs over the path. Grants under
+        // the workspace or scratch are covered by the base binds and layered
+        // by mount order.
+        for reference in &snapshot.filesystem.read_only {
+            if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
+                let destination = resolve_path_ref(reference, &plan.workspace)?;
+                bplan
+                    .extra_ro_binds
+                    .push((host, PathBuf::from(destination)));
+            }
+        }
+        for reference in &snapshot.filesystem.read_write {
+            if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
+                if host.starts_with(&plan.workspace) || host.starts_with(&scratch) {
+                    // Inside a base writable bind already; layering an extra
+                    // bind of the same content would add nothing.
+                    continue;
+                }
+                let destination = resolve_path_ref(reference, &plan.workspace)?;
+                bplan
+                    .extra_rw_binds
+                    .push((host, PathBuf::from(destination)));
+            }
+        }
+        for reference in &snapshot.filesystem.deny_read {
+            let destination = resolve_path_ref(reference, &plan.workspace)?;
+            bplan.masked.push(PathBuf::from(destination));
+        }
+
+        // §9.1 source pinning: every protected segment and the workspace
+        // itself are pinned by O_PATH|O_NOFOLLOW handles at plan time and
+        // re-verified at mount handoff (immediately before spawn), so a
+        // replacement between validation and bind refuses rather than
+        // mounts. Pins whose descriptor fits the spawn map's reserved range
+        // are bound by descriptor (`--ro-bind-fd`), which removes the
+        // name-resolution race entirely; the rest are bound by path and
+        // verified.
+        let mut pins: Vec<jfs::PinnedPath> = Vec::with_capacity(scan.segments.len() + 1);
+        let mut pinned_fds: Vec<(std::os::fd::OwnedFd, RawFd)> = Vec::new();
+        let mut next_fd: RawFd = PINNED_FD_BASE;
+        let mut protected_binds = Vec::with_capacity(scan.segments.len());
+        for segment in &scan.segments {
+            let pin = jfs::PinnedPath::open(&segment.path).map_err(|err| {
+                preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!(
+                        "the protected path {} could not be pinned: {err}",
+                        segment.path.display()
+                    ),
+                )
+            })?;
+            let fd = if next_fd < PINNED_FD_LIMIT {
+                let target = next_fd;
+                next_fd += 1;
+                let copy = pin.try_clone_fd().map_err(|err| {
+                    preparing(
+                        ErrorCode::BackendUnavailable,
+                        format!(
+                            "the protected path {} could not be pinned: {err}",
+                            segment.path.display()
+                        ),
+                    )
+                })?;
+                pinned_fds.push((copy, target));
+                Some(target)
+            } else {
+                None
+            };
+            protected_binds.push(bwrap::ProtectedBind {
+                source: segment.path.clone(),
+                fd,
+            });
+            pins.push(pin);
+        }
+        let workspace_pin = jfs::PinnedPath::open(&plan.workspace).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!(
+                    "the workspace {} could not be pinned: {err}",
+                    plan.workspace.display()
+                ),
+            )
+        })?;
+        bplan.protected = protected_binds;
 
         // A root-level literal that does not exist is protected by a
         // placeholder whose identity is registered before use (§9.1).
         let holders = plan.attempt_dir.join("placeholders");
         let mut placeholders = Vec::new();
-        for (index, literal) in scan.absent_root_literals().iter().enumerate() {
+        for literal in scan.absent_root_literals() {
             create_private_dir(&holders)?;
-            let source = holders.join(format!("holder{index}"));
-            match Placeholder::create(&source, &plan.workspace.join(literal)) {
+            let source = holders.join(format!("holder{}", literal.replace('/', "_")));
+            match Placeholder::create(&source, &plan.workspace.join(&literal)) {
                 Ok(placeholder) => placeholders.push(placeholder),
                 Err(bwrap::PlaceholderError::DestinationExists(path)) => {
                     // It appeared between the scan and now: treat it as the
                     // pre-existing object it is, and never remove it.
-                    bplan.protected.push(path);
+                    bplan.protected.push(bwrap::ProtectedBind {
+                        source: path,
+                        fd: None,
+                    });
                 }
                 Err(err) => {
                     return Err(preparing(
@@ -584,20 +769,46 @@ impl Boundary {
         let (status_r, status_w) = exec::pipe().map_err(io)?;
         fds.add(release_r, RELEASE_FD).map_err(io)?;
         fds.add(error_w, ERROR_FD).map_err(io)?;
-        fds.add(status_w, STATUS_FD).map_err(io)?;
-        if let Some(payload) = rendered.args_payload.as_ref() {
+        for (copy, target) in pinned_fds {
+            fds.add(copy, target).map_err(io)?;
+        }
+        // jail-v1 §2 I07 (every wait bounded): the `--args` payload can exceed
+        // the pipe's capacity, so it must be written while the reader exists.
+        // bwrap is spawned below first and blocks reading ARGS_FD; writing
+        // before the spawn deadlocked the supervisor on a full pipe with no
+        // reader. If bwrap dies before consuming the payload, the write fails
+        // with EPIPE instead of hanging. `exec::pipe` is close-on-exec on both
+        // ends, so the parent's write end never reaches bwrap and its EOF is
+        // seen as soon as this side closes.
+        let mut args_writer = None;
+        if rendered.args_payload.is_some() {
             let (args_r, args_w) = exec::pipe().map_err(io)?;
-            write_all(args_w.as_raw_fd(), payload).map_err(io)?;
-            drop(args_w);
             fds.add(args_r, ARGS_FD).map_err(io)?;
+            args_writer = Some(args_w);
         }
         set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
         set_nonblocking(status_r.as_raw_fd()).map_err(io)?;
 
         let mut command = Command::new(&rendered.argv[0]);
         command.args(&rendered.argv[1..]);
+        // §9.1 mount-handoff verification: the workspace and every pinned
+        // protected segment must still resolve to the objects that were
+        // scanned, or the run refuses rather than bind a replacement.
+        workspace_pin.verify().map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the workspace changed during preparation: {err}"),
+            )
+        })?;
+        for pin in &pins {
+            pin.verify().map_err(|err| {
+                preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("a protected path changed during preparation: {err}"),
+                )
+            })?;
+        }
         // §8.3: stdio is inherited without capture; every other descriptor the
-        // supervisor holds is close-on-exec and never reaches the child.
         fds.apply(&mut command);
         let child = command.spawn().map_err(|err| {
             preparing(
@@ -608,6 +819,20 @@ impl Boundary {
                 ),
             )
         })?;
+        // The payload write happens with bwrap already blocked on ARGS_FD, so
+        // a payload larger than the pipe's capacity flows through instead of
+        // deadlocking. A failure here means bwrap died reading: tear it down
+        // rather than leak an orphan (§8.1 pre-exec failure refuses).
+        if let (Some(args_w), Some(payload)) =
+            (args_writer.as_ref(), rendered.args_payload.as_ref())
+        {
+            if let Err(err) = write_all(args_w.as_raw_fd(), payload) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io(std::io::Error::from(err)));
+            }
+        }
+        drop(args_writer);
         // The parent's copies close here, so the child's peers see EOF.
         drop(fds);
         let bwrap_pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
@@ -666,7 +891,15 @@ impl Boundary {
             return Err(err);
         }
         if observe_on {
-            match Tracer::attach(boundary.launcher.pid, TracerConfig::default()) {
+            // §13.1: gap intervals count from supervisor start on the same
+            // CLOCK_BOOTTIME base as every other monotonic_ns.
+            match Tracer::attach(
+                boundary.launcher.pid,
+                TracerConfig {
+                    epoch_boottime_ns: clock::mark_supervisor_start(),
+                    ..TracerConfig::default()
+                },
+            ) {
                 Ok(tracer) => boundary.tracer = Some(tracer),
                 Err(err) => {
                     boundary.teardown();
@@ -1368,6 +1601,37 @@ fn resolve_path_ref(reference: &PathRef, workspace: &Path) -> Result<OsString, J
     Ok(base.join(OsStr::from_bytes(suffix)).into_os_string())
 }
 
+/// The host-side path a reference names, for binding as a mount source.
+/// Unlike [`resolve_path_ref`], which produces the destination the child
+/// sees, this resolves the scratch token to the supervisor's scratch
+/// directory rather than `/tmp`.
+fn host_path_of(
+    reference: &PathRef,
+    workspace: &Path,
+    scratch: &Path,
+) -> Result<PathBuf, JailError> {
+    match reference.root {
+        RootToken::Workspace => Ok(join_suffix(workspace, reference)),
+        RootToken::Scratch => Ok(join_suffix(scratch, reference)),
+        RootToken::Host => Ok(join_suffix(Path::new("/"), reference)),
+        RootToken::VendorState => Err(error(
+            ErrorCode::CredentialUnavailable,
+            ErrorStage::Preparing,
+            Remediation::Unsupported,
+            "vendor state is a launch-profile feature this slice does not implement".to_owned(),
+        )),
+    }
+}
+
+/// Join a root with a reference's native-byte suffix.
+fn join_suffix(base: &Path, reference: &PathRef) -> PathBuf {
+    let suffix = reference.path.as_bytes();
+    if suffix.is_empty() {
+        return base.to_path_buf();
+    }
+    base.join(OsStr::from_bytes(suffix))
+}
+
 // ---------------------------------------------------------------------------
 // Prepared
 // ---------------------------------------------------------------------------
@@ -1544,8 +1808,8 @@ impl LinuxRunning {
 
     fn handle_tracer_event(&mut self, event: &TracerEvent, launcher: libc::pid_t) {
         match event {
-            TracerEvent::Exec { pid, path, .. } => {
-                self.boundary.audit.record_exec(*pid, path.as_ref());
+            TracerEvent::Exec { pid, path, dirfd } => {
+                self.boundary.audit.record_exec(*pid, path.as_ref(), *dirfd);
                 // A transition with no pathname is one whose entry the
                 // observer did not witness, which is what seizing a process
                 // that is already inside its own `execve` produces. The

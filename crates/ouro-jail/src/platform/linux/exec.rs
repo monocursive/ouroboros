@@ -14,8 +14,10 @@ use super::clock::Deadline;
 use super::identity::{pidfd_open, pidfd_send_signal};
 
 /// Descriptors the parent holds are first duplicated above this number, so
-/// that the `dup2` calls in the child can never overwrite a source.
-const RESERVE_BASE: RawFd = 20;
+/// that the `dup2` calls in the child can never overwrite a source. The
+/// reserved range also hosts the pinned protected-bind descriptors
+/// (`--ro-bind-fd`), which is why it is well above the fixed channel numbers.
+const RESERVE_BASE: RawFd = 256;
 
 /// A pipe with both ends close-on-exec.
 ///

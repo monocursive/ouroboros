@@ -166,12 +166,6 @@ fn explain(context: &Context, args: &ExplainArgs) -> ExitCode {
 
 /// Renders `explain --json`.
 ///
-/// The snapshot is printed in full, including environment values, because it
-/// is the operator's own requested policy and the thing whose digest they are
-/// checking. This slice loads no launch profile, so no credential value can
-/// appear here. When launch profiles land (J3) their environment values must be
-/// reduced to names before this is printed, exactly as §13.2 already requires
-/// of receipts and traces.
 /// Replaces every environment binding's value with its name.
 ///
 /// §13.2 and §12: receipts and traces carry environment names, never values,

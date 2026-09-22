@@ -514,6 +514,46 @@ fn usage_errors_exit_two() {
     );
 }
 
+/// §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`: the
+/// policy override flags belong to `run` and `explain`, so doctor rejects
+/// them as usage errors instead of silently probing a different plan than the
+/// one the operator meant to name. The flags it does spell still parse.
+#[test]
+fn doctor_takes_no_policy_override_flags() {
+    let harness = Harness::new();
+    for override_flag in [
+        vec!["doctor", "--workspace", "/tmp"],
+        vec!["doctor", "--scratch", "/tmp"],
+        vec!["doctor", "--rw", "/tmp"],
+        vec!["doctor", "--ro", "/tmp"],
+        vec!["doctor", "--deny-read", "/tmp"],
+        vec!["doctor", "--allow-host", "example.com"],
+        vec!["doctor", "--limit", "wall=1m"],
+        vec!["doctor", "--observe", "off"],
+        vec!["doctor", "--evidence", "best-effort"],
+    ] {
+        let output = harness.run(&override_flag);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{override_flag:?} must be a usage error, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // The spelled grammar still parses: on this platform doctor runs its
+    // probes and reports not-ready (125), never a usage error.
+    let output = harness.run(&["doctor", "--json", "--profile", "tool"]);
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(report["component"], serde_json::json!("ouro-jail"));
+}
+
 #[test]
 fn a_malformed_attempt_id_is_a_usage_error_not_a_path() {
     let harness = Harness::new();
@@ -742,6 +782,150 @@ fn a_profile_file_narrows_its_base_and_may_not_extend_none() {
         "a profile file may only narrow"
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("limits.wall"));
+}
+
+/// §6.1: `--profile none` is the only way to select `none`; files cannot
+/// select it. `config.toml` is a defaults file, so `jail.profile = "none"`
+/// refuses instead of silently dropping the operator onto the uncontained
+/// profile, while the explicit flag and a contained configured profile work.
+#[test]
+fn config_toml_may_not_select_the_none_profile() {
+    let harness = Harness::new();
+    std::fs::write(
+        harness.config.join("config.toml"),
+        "[jail]\nprofile = \"none\"\n",
+    )
+    .expect("the file is written");
+    let output = harness.run(&["explain"]);
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "a defaults file cannot select the uncontained profile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("jail.profile"),
+        "the refusal names the exact key path"
+    );
+
+    // The explicit act still selects it.
+    let output = harness.run(&["explain", "--json", "--profile", "none"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        report["policy"]["snapshot"]["profile"],
+        serde_json::json!("none")
+    );
+
+    // A contained profile from the defaults file still applies.
+    std::fs::write(
+        harness.config.join("config.toml"),
+        "[jail]\nprofile = \"tool\"\n",
+    )
+    .expect("the file is written");
+    let output = harness.run(&["explain", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        report["policy"]["snapshot"]["profile"],
+        serde_json::json!("tool")
+    );
+}
+
+/// §6.2: paths apply relative to the file containing them, and `config.toml`
+/// lives in the config directory itself. `./reference` must resolve beside
+/// the file, not one directory above it.
+#[test]
+fn config_toml_paths_anchor_to_the_config_directory() {
+    let harness = Harness::new();
+    std::fs::write(
+        harness.config.join("config.toml"),
+        "[jail.filesystem]\nread_only = [\"./reference\"]\n",
+    )
+    .expect("the file is written");
+    let output = harness.run(&["explain", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let read_only = report["policy"]["snapshot"]["filesystem"]["read_only"].clone();
+    let expected = harness.config.join("reference");
+    assert_eq!(
+        read_only,
+        serde_json::json!([{
+            "root": "host",
+            "path": expected.to_string_lossy().into_owned(),
+        }]),
+        "the anchor is the directory containing config.toml"
+    );
+}
+
+/// §6.2/§6.3: `[jail_host.network] translation_prefixes` is merged into proxy
+/// policy before digest creation, so equivalent spellings must render as one
+/// canonical RFC 5952 form — and text that is not an IPv6 CIDR refuses with
+/// the exact key path instead of entering the snapshot as opaque input.
+#[test]
+fn translation_prefixes_are_canonicalized_before_the_digest() {
+    let harness = Harness::new();
+    let write_config = |prefixes: &str| {
+        // Prefixes merge into proxy policy only, so the trusted defaults file
+        // also selects the proxy mode for this attempt.
+        std::fs::write(
+            harness.config.join("config.toml"),
+            format!(
+                "[jail.network]\nmode = \"proxy\"\n\n[jail_host.network]\ntranslation_prefixes = [{prefixes}]\n"
+            ),
+        )
+        .expect("the file is written");
+    };
+
+    write_config("\"2001:0db8::/96\"");
+    let output = harness.run(&["explain", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        report["policy"]["snapshot"]["network"]["translation_prefixes"],
+        serde_json::json!(["2001:db8::/96"]),
+        "the leading zero group is compressed and lowercased"
+    );
+    let canonical_digest = report["policy"]["digest"].clone();
+
+    // An equivalent spelling of the same prefix produces the same digest.
+    write_config("\"2001:db8:0:0:0:0:0:0/96\"");
+    let output = harness.run(&["explain", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        report["policy"]["digest"], canonical_digest,
+        "equivalent spellings have one digest"
+    );
+
+    // Anything that is not an IPv6 CIDR refuses, naming the key.
+    write_config("\"banana\"");
+    let output = harness.run(&["explain"]);
+    assert_eq!(output.status.code(), Some(2), "a non-CIDR entry refuses");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("jail_host.network.translation_prefixes"),
+        "the refusal names the exact key path"
+    );
 }
 
 #[test]

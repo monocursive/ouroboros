@@ -20,6 +20,46 @@ use crate::trace::SharedTrace;
 
 pub mod macos;
 
+/// Nanoseconds since this supervisor started, on the §6.4 continuous clock.
+///
+/// jail-v1 §13.1 fixes one base for every `monotonic_ns` in the trace, from
+/// every source: on Linux it is `CLOCK_BOOTTIME` at supervisor start, so
+/// suspend counts and wall-clock adjustments do not move it. Platforms that
+/// only refuse execution label their refusal-path notes with a monotonic
+/// fallback; no execution claim rides on it.
+#[must_use]
+pub fn elapsed_since_start_ns() -> u128 {
+    #[cfg(target_os = "linux")]
+    {
+        u128::from(linux::clock::supervisor_elapsed_ns())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        FALLBACK_START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_nanos()
+    }
+}
+
+/// Record the supervisor's start on the continuous clock.
+///
+/// Called once at the top of `run`; later calls are harmless because the
+/// first value wins.
+pub fn mark_supervisor_start() {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = linux::clock::mark_supervisor_start();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = FALLBACK_START.get_or_init(std::time::Instant::now);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+static FALLBACK_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 // `linux` is declared unconditionally: its `bpf` and `seccomp` modules describe
 // a Linux ABI without calling into it, so they build and test on every host;
 // everything that touches Linux is gated inside `platform/linux/mod.rs`.
@@ -179,10 +219,29 @@ pub struct Teardown {
     pub tree: Option<TreeObservation>,
 }
 
+/// The supervisor's own birth identity, for the state file (§7): the pid
+/// plus the boot id and start-time ticks that make it unambiguous across
+/// pid reuse and reboots.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OwnerIdentity {
+    /// The supervisor's process id.
+    pub pid: u32,
+    /// `/proc/sys/kernel/random/boot_id`.
+    pub boot_id: String,
+    /// The supervisor's field 22 of `/proc/<pid>/stat`.
+    pub start_time_ticks: u64,
+}
+
 /// The platform contract (§4).
 pub trait Platform {
     /// Who this binary is running as.
     fn identity(&self) -> PlatformIdentity;
+
+    /// The supervisor's birth identity, where the platform can establish one
+    /// (§7). `None` on platforms that only refuse execution.
+    fn owner_identity(&self) -> Option<OwnerIdentity> {
+        None
+    }
 
     /// Measures the capabilities the plan needs. `doctor` and `run` share it.
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability>;

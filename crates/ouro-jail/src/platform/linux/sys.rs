@@ -125,6 +125,9 @@ pub fn errno_name(errno: i32) -> &'static str {
         libc::EHOSTUNREACH => "EHOSTUNREACH",
         libc::EADDRNOTAVAIL => "EADDRNOTAVAIL",
         libc::EPROTONOSUPPORT => "EPROTONOSUPPORT",
+        // §11.2 names it for net.connect: the canonical non-blocking
+        // in-progress return, not an anonymous number.
+        libc::EINPROGRESS => "EINPROGRESS",
         libc::ESTALE => "ESTALE",
         libc::EDQUOT => "EDQUOT",
         _ => "E?",

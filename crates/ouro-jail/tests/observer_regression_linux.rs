@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use ouro_fixture::harness;
 use ouro_jail::platform::linux::seccomp;
 use ouro_jail::platform::linux::tracer::{
-    ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary,
+    ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary, clock,
     narrowing_filter_bytes,
 };
 
@@ -515,6 +515,22 @@ static int mode_threads_exec(int argc, char **argv) {
     for (;;) pause();
 }
 
+/* helper exec-over-inflight FIFO PROGRAM: a worker blocks in openat on the
+   FIFO while another thread execs. The kernel destroys the blocked thread
+   without ever reporting it, and its entry can no longer return. */
+static int mode_exec_over_inflight(int argc, char **argv) {
+    pthread_t t[2];
+    if (argc < 4) return 2;
+    g_fifo = argv[2];
+    g_exec_argv[0] = argv[3];
+    g_exec_argv[1] = NULL;
+    pthread_create(&t[0], NULL, blocker, NULL);
+    usleep(300000);
+    pthread_create(&t[1], NULL, execer, NULL);
+    report("leader", (long) getpid(), "", "");
+    for (;;) pause();
+}
+
 static int mode_abi(int argc, char **argv) {
     char i386[512], native[512], mk[512];
     char *low;
@@ -666,6 +682,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "inprogress")) return mode_inprogress();
     if (!strcmp(argv[1], "twopath")) return mode_twopath(argc, argv);
     if (!strcmp(argv[1], "threads-exec")) return mode_threads_exec(argc, argv);
+    if (!strcmp(argv[1], "exec-over-inflight")) return mode_exec_over_inflight(argc, argv);
     if (!strcmp(argv[1], "abi")) return mode_abi(argc, argv);
     if (!strcmp(argv[1], "rdonly")) return mode_rdonly(argc, argv);
     if (!strcmp(argv[1], "worker-fork")) return mode_worker_fork(argc, argv);
@@ -1338,9 +1355,11 @@ fn r6_hostile_path_pointers_never_produce_a_confident_path() {
     }
 }
 
-/// R7: a `sockaddr` whose declared length lies. The retained bytes are the
-/// family's own size, so a `sockaddr_in` announced as 128 bytes cannot pull
-/// 112 bytes of unrelated tracee memory into the observer.
+/// R7: a `sockaddr` whose declared length lies. Only the family and whether
+/// the whole address of that family was readable are kept: the address bytes
+/// are read to decide exactly that and dropped, so a `sockaddr_in`
+/// announced as 128 bytes cannot pull 112 bytes of unrelated tracee memory
+/// into the observer.
 #[test]
 fn r7_a_lying_sockaddr_length_retains_only_the_family_it_names() {
     let _serial = serial();
@@ -1375,28 +1394,29 @@ fn r7_a_lying_sockaddr_length_retains_only_the_family_it_names() {
             continue;
         }
         let sockaddr = sockaddr.expect("a snapshot");
-        assert!(
-            sockaddr.bytes.len() <= 28,
-            "{kind}: {} bytes retained, more than any family the set names",
-            sockaddr.bytes.len()
+        if kind == "zero-len" {
+            // The kernel rejects a length under two; there is no family.
+            assert_eq!(sockaddr.family, None, "{kind}");
+            assert!(!sockaddr.complete, "{kind}");
+            continue;
+        }
+        if kind == "unmapped" {
+            // The family itself is in unreadable memory: named as loss, and
+            // the kernel's EFAULT on the same pointer is not.
+            assert_eq!(sockaddr.family, None, "{kind}");
+            assert!(!sockaddr.complete, "{kind}");
+            continue;
+        }
+        assert_eq!(
+            sockaddr.family,
+            Some(libc::AF_INET as u16),
+            "{kind}: the family is read from the address the caller passed"
         );
         if kind == "lie-long" || kind == "huge-len" {
             assert!(
-                sockaddr.declared_len as usize > 16,
-                "{kind}: the caller's claim is kept as its own field"
+                sockaddr.complete,
+                "{kind}: the whole sockaddr_in was readable despite the lying claim"
             );
-            let marker = sockaddr.bytes.iter().filter(|b| **b == 0x5a).count();
-            assert_eq!(
-                marker, 0,
-                "{kind}: {marker} bytes of memory beyond the socket address the kernel \
-                 used were retained (jail-v1 §11.1)"
-            );
-            assert_eq!(
-                sockaddr.bytes.len(),
-                16,
-                "{kind}: a sockaddr_in is 16 bytes"
-            );
-            assert_eq!(sockaddr.family, Some(libc::AF_INET as u16));
         }
     }
 }
@@ -2438,4 +2458,88 @@ fn zombies() -> Vec<libc::pid_t> {
         }
     }
     out
+}
+
+/// R31: an entry destroyed by another thread's `execve` is reported as loss
+/// that names the operation it would have reported, never as bookkeeping. A
+/// consumer gates §11.4 strict mode and class degradation on the gap's op
+/// set, so an entry the tracer holds in hand must name the classes it would
+/// have changed.
+///
+/// The same run pins the §11.4 gap time base: the tracer was given the
+/// supervisor's start reading as its epoch, so every gap endpoint must be an
+/// age since that start — bounded by how long ago the test itself began —
+/// and not an instant on the boot clock.
+#[test]
+fn r31_an_entry_destroyed_by_an_exec_names_its_operation() {
+    let _serial = serial();
+    let Some(work) = setup("r31") else { return };
+    let fifo = work.path("f");
+    mkfifo(&fifo);
+    let helper = work.helper_s();
+    // The supervisor-start reading. Gap endpoints must be elapsed since it.
+    let epoch = clock::boottime_ns();
+    let mut run = launch(&work, &[&helper, "exec-over-inflight", &fifo, "/bin/true"]);
+    let tracer = attach(
+        run.pid,
+        TracerConfig {
+            epoch_boottime_ns: epoch,
+            ..TracerConfig::default()
+        },
+    );
+    run.release();
+    let reports = run.lines();
+    let observed = collect(tracer, Duration::from_secs(60));
+
+    Report::find(&reports, "leader");
+    let abandoned: Vec<(OpSet, Option<u64>)> = observed
+        .gaps()
+        .into_iter()
+        .filter(|(reason, _, _)| *reason == GapReason::EntryAbandoned)
+        .map(|(_, ops, count)| (ops, count))
+        .collect();
+    assert!(
+        !abandoned.is_empty(),
+        "the entry that was mid-syscall when the exec destroyed its thread is \
+         loss and must be reported:\n  {}",
+        observed.describe()
+    );
+    for (ops, _) in &abandoned {
+        assert!(
+            !ops.is_empty(),
+            "jail-v1 §11.4: a gap over an entry that is in hand must name the \
+             classes it affected, not report bookkeeping: {abandoned:?}"
+        );
+        assert!(
+            ops.contains(ClosedOp::Open),
+            "the destroyed entry was an openat on a FIFO, so the gap must name \
+             the fs class: {abandoned:?}"
+        );
+    }
+    assert!(
+        observed.summary.loss.abandoned_entries >= 1,
+        "{:?}",
+        observed.summary.loss
+    );
+    // The tree still ends properly: the exec survives as /bin/true and the
+    // supervisor receives its exit.
+    assert_eq!(
+        observed.exits(),
+        vec![(run.pid, 0)],
+        "{:?}",
+        observed.exits()
+    );
+    // Every gap endpoint is an age since the epoch: at most the time this
+    // test has itself been running, and never a boot-clock instant.
+    let elapsed = clock::boottime_ns().saturating_sub(epoch);
+    for event in &observed.events {
+        if let TracerEvent::Gap { from_ns, to_ns, .. } = event {
+            assert!(from_ns <= to_ns, "a gap bounds itself: {from_ns} > {to_ns}");
+            assert!(
+                *to_ns <= elapsed,
+                "gap endpoints are elapsed since the supervisor start, but {to_ns} \
+                 exceeds the {elapsed} ns this test has been running"
+            );
+        }
+    }
 }

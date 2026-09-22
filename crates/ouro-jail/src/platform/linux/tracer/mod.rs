@@ -89,6 +89,12 @@ pub struct TracerConfig {
     /// three quarters of this figure, and each event is charged a fixed
     /// [`EVENT_FIXED_BYTES`] on top of the bytes its snapshots hold.
     pub queue_bytes_max: usize,
+    /// The `CLOCK_BOOTTIME` reading, in nanoseconds, at which the supervisor
+    /// started. Gap endpoints are reported as elapsed time since this epoch
+    /// rather than as time since boot (§11.4 bounds every gap from "the last
+    /// known healthy point", which is an age, not an instant on the boot
+    /// clock). Zero leaves the raw boottime readings in place.
+    pub epoch_boottime_ns: u64,
 }
 
 /// What one queued event costs besides its snapshots: the enum itself, the
@@ -115,6 +121,7 @@ impl Default for TracerConfig {
             inflight_max: 16_384,
             queue_max: 16_384,
             queue_bytes_max: 4 * 1024 * 1024,
+            epoch_boottime_ns: 0,
         }
     }
 }
@@ -133,16 +140,17 @@ pub struct PathSnapshot {
 }
 
 /// The socket address of a `connect`, as far as the closed set describes it.
+///
+/// The address bytes are read only to decide whether the whole address of
+/// the family was readable, and are not retained: the audit record of a
+/// `connect` names the family and the completeness of the claim, and §11.1
+/// forbids collecting argument memory nothing downstream will ever see.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SockaddrSnapshot {
     /// `sa_family`, when at least two bytes could be read.
     pub family: Option<u16>,
-    /// The address bytes, for `AF_INET`, `AF_INET6` and `AF_UNIX` only.
-    /// Empty for any other family: §11.1 forbids collecting argument memory
-    /// the closed set does not need.
-    pub bytes: Vec<u8>,
-    /// The `addrlen` the caller passed, whatever was readable.
-    pub declared_len: u32,
+    /// True when the whole address of the family was readable and the
+    /// caller declared at least that much.
     pub complete: bool,
 }
 
@@ -328,6 +336,11 @@ pub enum TracerEvent {
         /// require a path, or attach only after the launcher has said it is
         /// past its own exec.
         path: Option<PathSnapshot>,
+        /// The directory fd the pathname was resolved against, when the
+        /// witnessed entry was an `execveat` with one. §11.3: `dirfd` is
+        /// accounted, never silently replaced by a cwd. `None` for a plain
+        /// `execve` and for a transition whose entry was not seen.
+        dirfd: Option<i32>,
         monotonic_ns: u64,
     },
     /// One completed closed-set call. `ret` is the signed raw return, so a
@@ -500,6 +513,11 @@ pub struct TracerSummary {
     /// whenever a process had more than one thread or never execed.
     pub reaped_tasks: u64,
     pub untraced_child_exits: u64,
+    /// Fork-ordering races in which a tracee died before its first stop and
+    /// its death and its fork event arrived in that order. Not loss: the
+    /// child never executed anything observable, so no gap is recorded, and
+    /// this does not feed [`LossCounters::total`].
+    pub late_fork_races: u64,
     /// `PTRACE_EVENT_EXEC` transitions.
     pub exec_transitions: u64,
     /// `Gap` events that reached the consumer.
@@ -797,6 +815,10 @@ mod tests {
         assert_eq!(
             config.queue_max, 16_384,
             "jail-v1 §11.4: a bounded user-space queue"
+        );
+        assert_eq!(
+            config.epoch_boottime_ns, 0,
+            "with no epoch supplied the gap endpoints are raw boottime readings"
         );
     }
 

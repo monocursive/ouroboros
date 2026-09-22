@@ -42,6 +42,26 @@ pub fn boottime_ns() -> u64 {
     clock_gettime_ns(libc::CLOCK_BOOTTIME).expect("CLOCK_BOOTTIME is always readable on Linux")
 }
 
+/// The instant this supervisor started, on the boot clock.
+///
+/// jail-v1 §13.1: every `monotonic_ns` in the trace, from every source,
+/// counts from this one base, so wrapper events, audit events and gap
+/// intervals can be correlated (§6.4 makes the base `CLOCK_BOOTTIME`, so
+/// suspend counts and clock adjustments do not move it).
+static SUPERVISOR_EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Record the supervisor's start if it was not recorded yet.
+#[must_use]
+pub fn mark_supervisor_start() -> u64 {
+    *SUPERVISOR_EPOCH.get_or_init(boottime_ns)
+}
+
+/// Nanoseconds since the supervisor started, suspend included.
+#[must_use]
+pub fn supervisor_elapsed_ns() -> u64 {
+    boottime_ns().saturating_sub(mark_supervisor_start())
+}
+
 /// A point on the boot clock.
 ///
 /// Every arithmetic operation saturates: a deadline can be in the past, but it

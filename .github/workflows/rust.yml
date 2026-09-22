@@ -27,7 +27,7 @@ jobs:
     # A hung test must fail the job, not hold the runner for six hours.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4, pinned by SHA
       - name: Install the pinned toolchain
         run: rustup toolchain install && rustup show
       - run: cargo fmt --all -- --check
@@ -36,6 +36,12 @@ jobs:
       # this before, so a vendor name landed green.
       - name: I02 vendor-name scan
         run: cargo run -p xtask -- i02-scan
+      # deny.toml is the pinned dependency policy (licenses, advisories);
+      # this is the step that makes it enforced rather than declared.
+      - name: Dependency policy (cargo-deny)
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny --workspace check bans licenses advisories
       - name: Tests
         # One test thread: a ptrace tracer owns every waitpid in its process, so two
         # observer tests in parallel reap each other (the conformance driver pins

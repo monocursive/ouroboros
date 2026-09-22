@@ -251,8 +251,8 @@ fn s11_allowed_write() {
         .collect();
     assert_eq!(creates.len(), 1, "operations: {:?}", operations(&run));
     let create = creates[0];
-    assert_eq!(field(create, "/fields/path_kind"), "workspace_relative");
-    assert_eq!(field(create, "/fields/path"), "allowed.txt");
+    assert_eq!(field(create, "/fields/path/kind"), "workspace_relative");
+    assert_eq!(field(create, "/fields/path/value"), "allowed.txt");
     assert_eq!(field(create, "/fields/path_basis"), "argument_snapshot");
     assert_eq!(field(create, "/fields/path_complete"), true);
     assert_eq!(field(create, "/outcome/ok"), true);
@@ -350,8 +350,8 @@ fn s11_protected_access_fails() {
         .unwrap_or_else(|| panic!("no fs.create for the refused open: {ops:?}"));
     assert_eq!(field(create, "/outcome/ok"), false);
     assert_eq!(field(create, "/outcome/errno"), "EROFS");
-    assert_eq!(field(create, "/fields/path_kind"), "workspace_relative");
-    assert_eq!(field(create, "/fields/path"), ".git/x");
+    assert_eq!(field(create, "/fields/path/kind"), "workspace_relative");
+    assert_eq!(field(create, "/fields/path/value"), ".git/x");
 
     let receipts = receipts_of(&run, &validators);
     let settled = receipts.phase("settled");
@@ -395,7 +395,7 @@ fn s11_exec_descendant() {
             // entry was not seen, and exec confirmation refuses to use it.
             assert_eq!(field(event, "/fields/path_basis"), "argument_snapshot");
             assert_ne!(
-                field(event, "/fields/path_kind"),
+                field(event, "/fields/path/kind"),
                 "unavailable",
                 "an exec transition with no witnessed image: {event:#}"
             );
@@ -631,7 +631,7 @@ fn s11_mknod_is_one_fs_create() {
     );
     assert_eq!(field(named[0], "/operation"), "fs.create");
     assert_eq!(field(named[0], "/fields/syscall"), "mknodat");
-    assert_eq!(field(named[0], "/fields/path_kind"), "workspace_relative");
+    assert_eq!(field(named[0], "/fields/path/kind"), "workspace_relative");
     assert_eq!(field(named[0], "/fields/path_basis"), "argument_snapshot");
     assert_eq!(field(named[0], "/outcome/ok"), true);
 }
