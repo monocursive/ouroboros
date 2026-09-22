@@ -24,6 +24,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # A hung test must fail the job, not hold the runner for six hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
@@ -35,7 +37,10 @@ jobs:
       - name: I02 vendor-name scan
         run: cargo run -p xtask -- i02-scan
       - name: Tests
-        run: cargo test --workspace -- --nocapture 2>&1 | tee test-output.txt
+        # One test thread: a ptrace tracer owns every waitpid in its process, so two
+        # observer tests in parallel reap each other (the conformance driver pins
+        # this too); the binaries also serialize themselves, this is the second wall.
+        run: cargo test --workspace -- --test-threads=1 --nocapture 2>&1 | tee test-output.txt
       # `tee` would otherwise mask the test step's own status.
       - name: Report what was not exercised
         if: always()
