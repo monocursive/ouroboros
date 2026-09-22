@@ -39,14 +39,8 @@ fn jail_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ouro-jail"))
 }
 
-fn bwrap_path() -> PathBuf {
-    for candidate in ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"] {
-        if Path::new(candidate).exists() {
-            return PathBuf::from(candidate);
-        }
-    }
-    panic!("bubblewrap is not installed; the Linux mechanisms cannot be measured without it");
-}
+mod common;
+use common::{bwrap_path, live, reference_host};
 
 fn temp_dir(tag: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -374,6 +368,9 @@ fn a_pinned_path_notices_that_it_was_replaced() {
 
 #[test]
 fn this_hosts_runtime_roots_are_merged_usr_symlinks() {
+    if !reference_host("the merged-/usr layout") {
+        return;
+    }
     let usr = jfs::resolve_runtime_root(Path::new("/usr"));
     assert!(
         matches!(usr, Some(jfs::RootSpec::RoBind(_))),
@@ -550,6 +547,9 @@ fn python_inner(script: &str, args: &[&str]) -> Vec<OsString> {
 
 #[test]
 fn the_baseline_filter_denies_the_syscalls_the_spec_lists() {
+    if !live() {
+        return;
+    }
     let with = run_in_tool_sandbox(python_inner(DENIAL_FIXTURE, &["1"]), true);
     assert_eq!(
         with.code(),
@@ -627,6 +627,9 @@ fn the_baseline_filter_denies_the_syscalls_the_spec_lists() {
 
 #[test]
 fn the_filter_is_what_denies_them_not_the_host() {
+    if !live() {
+        return;
+    }
     // The same fixture without `--seccomp`. For the syscalls an unprivileged
     // process may ordinarily make, the answer must differ; otherwise a green
     // denial test would prove nothing about the filter.
@@ -669,6 +672,9 @@ fn the_filter_is_what_denies_them_not_the_host() {
 
 #[test]
 fn ordinary_work_still_works_under_the_filter() {
+    if !live() {
+        return;
+    }
     let run = run_in_tool_sandbox(python_inner(ALLOWED_FIXTURE, &[]), true);
     assert_eq!(
         run.code(),
@@ -1120,6 +1126,9 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
 
 #[test]
 fn the_tool_profile_grants_what_it_says_and_nothing_else() {
+    if !live() {
+        return;
+    }
     let run = run_tool_profile(false, false);
     let field = |k: &str| run.fields.get(k).map_or("<missing>", String::as_str);
     let report = &run.captured.stdout;
@@ -1224,6 +1233,9 @@ fn the_tool_profile_grants_what_it_says_and_nothing_else() {
 
 #[test]
 fn the_same_plan_works_when_handed_over_the_args_descriptor() {
+    if !live() {
+        return;
+    }
     let run = run_tool_profile(true, false);
     assert_eq!(
         run.captured.code(),
@@ -1241,6 +1253,9 @@ fn the_same_plan_works_when_handed_over_the_args_descriptor() {
 
 #[test]
 fn bubblewrap_creates_an_absent_bind_destination_and_leaves_it_behind() {
+    if !live() {
+        return;
+    }
     // The measurement behind the placeholder design: given a destination that
     // does not exist inside a bind-mounted workspace, bubblewrap creates the
     // mount point on the shared inode and never removes it. Registering the
@@ -1314,6 +1329,9 @@ fn a_pre_existing_destination_is_never_treated_as_a_placeholder() {
 
 #[test]
 fn this_hosts_backend_version_is_the_pinned_one() {
+    if !live() {
+        return;
+    }
     let version = bwrap::bwrap_version(&bwrap_path()).expect("bwrap --version");
     assert_eq!(version.major, 0);
     assert!(
@@ -1329,6 +1347,9 @@ fn this_hosts_backend_version_is_the_pinned_one() {
 
 #[test]
 fn a_delegated_leaf_from_a_session_scope_records_the_kernels_own_answer() {
+    if !reference_host("a systemd-delegated cgroup subtree") {
+        return;
+    }
     // SAFETY: fork; the child calls only `pause`, which is
     // async-signal-safe, and never returns.
     let pid = unsafe { libc::fork() };
@@ -1394,6 +1415,9 @@ fn a_delegated_leaf_from_a_session_scope_records_the_kernels_own_answer() {
 
 #[test]
 fn the_probes_report_the_statuses_this_host_warrants() {
+    if !live() {
+        return;
+    }
     let results = probe::run_all(&jail_exe(), &bwrap_path());
     let by_name: BTreeMap<&str, &probe::ProbeResult> =
         results.iter().map(|r| (r.name, r)).collect();

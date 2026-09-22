@@ -72,21 +72,8 @@ fn validators() -> BTreeMap<String, Validator> {
         .collect()
 }
 
-fn bwrap_present() -> bool {
-    ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
-        .iter()
-        .any(|path| Path::new(path).exists())
-}
-
-/// Every live test starts here: without bubblewrap there is no boundary to
-/// measure, and in conformance mode that is a failure rather than a skip.
-fn live() -> bool {
-    if bwrap_present() {
-        return true;
-    }
-    harness::skip_or_fail("bubblewrap is not installed on this host");
-    false
-}
+mod common;
+use common::live;
 
 /// A workspace with the conformance fixture copied inside it.
 ///

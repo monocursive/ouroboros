@@ -26,29 +26,8 @@ use std::process::Command;
 use ouro_fixture::harness::{self, Jail, Run};
 use serde_json::Value;
 
-fn live() -> bool {
-    if !cfg!(target_os = "linux") {
-        harness::skip_or_fail("not linux");
-        return false;
-    }
-    if harness::try_jail_path().is_none() {
-        harness::skip_or_fail("no ouro-jail binary");
-        return false;
-    }
-    if !std::path::Path::new("/usr/bin/bwrap").exists() && which_bwrap().is_none() {
-        harness::skip_or_fail("no bwrap");
-        return false;
-    }
-    true
-}
-
-fn which_bwrap() -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|dir| dir.join("bwrap"))
-            .find(|candidate| candidate.is_file())
-    })
-}
+mod common;
+use common::live;
 
 fn workspace_with_fixture(root: &Path) -> (PathBuf, PathBuf) {
     let workspace = root.join("workspace");
