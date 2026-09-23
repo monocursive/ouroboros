@@ -615,5 +615,279 @@
         }
       }
     ]
+  },
+  {
+    "name": "degraded coverage cannot keep a count",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "exec",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      }
+    ]
+  },
+  {
+    "name": "unsupported coverage names no source",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "net",
+          "status"
+        ],
+        "value": "unsupported"
+      },
+      {
+        "path": [
+          "coverage",
+          "net",
+          "observed_count"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "supported coverage has no count",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "fs.deny",
+          "status"
+        ],
+        "value": "supported"
+      }
+    ]
+  },
+  {
+    "name": "active coverage requires a count",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "net",
+          "observed_count"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "active coverage has no gap",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "fs.write"
+            ],
+            "source": "audit",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "observed coverage names a source",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "limits",
+          "sources"
+        ],
+        "value": []
+      }
+    ]
+  },
+  {
+    "name": "exited requires observed exec",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "exec_observed"
+        ],
+        "value": false
+      }
+    ]
+  },
+  {
+    "name": "signaled requires observed exec",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "exec_observed"
+        ],
+        "value": false
+      },
+      {
+        "path": [
+          "outcome",
+          "kind"
+        ],
+        "value": "signaled"
+      },
+      {
+        "path": [
+          "outcome",
+          "code"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "outcome",
+          "signal"
+        ],
+        "value": 9
+      }
+    ]
+  },
+  {
+    "name": "degraded coverage with a gap is valid",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "fs.write"
+            ],
+            "source": "audit",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      }
+    ]
+  },
+  {
+    "name": "refusal after setup without teardown proof",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-exec-refused.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "tree_empty"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "lifetime",
+          "verified_at"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "refusal after setup cannot claim a tree without its time",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-exec-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "verified_at"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "refusal after setup never observed exec",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-exec-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "exec_observed"
+        ],
+        "value": true
+      }
+    ]
   }
 ]
