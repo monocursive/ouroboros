@@ -164,3 +164,14 @@ it can be tested); per-pid birth identity on audit events (J4).
 | Issue | Resolution | Contract / acceptance |
 |---|---|---|
 | §8.2 said `refused` is sent only before release, while §8.1 counts a failed target exec after release as a pre-exec failure (refused) | `refused` is sent while the target has not executed, including a failed exec after release; after a target exec the terminal message is `settled` or `unsettled` | §§8.1, 8.2; X04 |
+
+## Revision 14 decisions (2026-09-23, J4 record defects)
+
+Found by reading the code; each was reproduced by a failing test before the fix.
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| `gc`, including `--dry-run`, created `jail.lock` in every attempt root it probed, and a pre-created managed root then refused its first attempt with `attempt_exists` | `gc` locks only an existing `jail.lock` (read-only, no follow, nonblocking) and never creates one; a root without a lock is retained untouched and reported | §14.2; C03 (`j4_d3_*` in `portable_j4_records.rs`) |
+| A receipt revision became visible before its number was spent, so a failed extra copy or directory sync reused it | The revision is spent before the canonical rename; revisions increase strictly and may skip | §13.2; R02 (`j4_d4_*`) |
+| A later wall expiry or strict evidence loss overwrote `outcome.cause`, while the platform kept the first stop reason | The first stop reason the supervisor acted on stays the cause; later ones are recorded as limit hits and errors | §6.4; R04 (`j4_d5_*`) |
+| Credentials kept the resolver's `id` order and environment bindings their name order, while canonicalization sorts every array by canonical bytes | Keyed collections sort by their elements' canonical bytes; no golden digest moved (the P01 fixture has no launch group and its binding names sort the same either way; the bundled launch profiles' id order equals their dest order) | canonicalization.md; P01 (`j4_d7_keyed_collections_sort_by_their_canonical_bytes`) |

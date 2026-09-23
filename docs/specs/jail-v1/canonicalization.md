@@ -67,7 +67,9 @@ profile contract; the mutable probe results and chosen backend are separate.
 All arrays here are sets except environment bindings and credentials, which
 are keyed collections. Reject duplicate keys in those collections. Deduplicate
 set elements by their canonical bytes, then sort every array lexicographically
-by each element's RFC 8785 UTF-8 bytes. No array in a policy snapshot encodes
+by each element's RFC 8785 UTF-8 bytes. Keyed collections are sorted the same
+way, by their elements' canonical bytes and not by key; a credential's
+canonical bytes begin with `dest`. No array in a policy snapshot encodes
 ordering; argv ordering is handled separately below. Decimal strings have no
 sign or leading zeroes, and positive values are bounded by unsigned 64-bit.
 

@@ -1,7 +1,8 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 13, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 13 opens J4 and
+Status: implementation specification, revision 14, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 14 records the
+first J4 record fixes (§§6.4, 13.2, 14.2; canonicalization.md). Revision 13 opens J4 and
 resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
 the first real agent run required (§§6.2, 10, 12;
 [agent compatibility](jail-v1/agent-compatibility.md)). Revision 11 records what
@@ -689,6 +690,9 @@ signal-terminated child; 1 for a tool failure; 2 for invalid CLI/config syntax;
 125 for refusal before user exec. A post-launch tool error takes code 1 and
 preserves the separately observed child outcome in the receipt. Deadline or
 requested termination preserves the observed code/signal and records its cause.
+`outcome.cause` is the first stop reason the supervisor acted on; a later
+deadline, loss or signal is recorded (its limit's `hit`, `errors[]`) but does
+not replace it.
 A child exiting 125 is `outcome.kind=exited`, not `refused`.
 
 Inspection commands use 0 for success, 2 for invalid syntax/config, and 1 for
@@ -1622,7 +1626,10 @@ run; its `containment` still says none. `settled` requires verified tree death,
 but can preserve unknown execution outcome if evidence was lost. If tree
 death itself is unknown, retain the last nonsettled phase and update its
 outcome/coverage/error as unknown. `state_cleanup` can remain pending after
-settlement. Receipt revision advances on each successful replacement.
+settlement. Receipt revision advances on each replacement and is never
+reused: a number is spent once a replacement carrying it may be visible (from
+the canonical rename on), so a later failure skips a number. Revisions
+increase strictly but need not be contiguous.
 
 Every applied limit states its scope; every observation count is null when
 unsupported or incomplete. Zero is allowed only for a covered interval with
@@ -1746,13 +1753,16 @@ for provider sign-in. `explain` shows these as unmeasured requirements.
 ### 14.2 GC and crash handling
 
 `gc --dry-run` enumerates only the registered state root, takes nonblocking
-attempt locks, and reports actions/reasons in the same JSON shape as `gc`.
+locks on existing attempt `jail.lock` files, never creates one, and reports actions/reasons in the same JSON shape as `gc`.
 Cleanup is bounded per pass (initially 100,000 entries, 128 open directories)
 and resumable; `gc` prints its report even when it exits 1 because a cleanup
 stays pending. It removes a dead attempt's proxy directory only through the
 socket identity recorded at bind, and reports it in a `proxy_dir` field.
 It never discovers deletion targets by searching all of `/tmp`, HOME or cgroupfs.
 Active locks, unverifiable identities or foreign-platform resources are retained.
+An attempt root without a lock has no lease to take: `gc` retains it untouched
+and reports it, so a reserved root stays claimable and a dry run changes
+nothing on disk.
 
 For a dead supervisor, revalidate boot/process identity and every registered
 resource. In the same boot, a populated, positively identified orphan execution
