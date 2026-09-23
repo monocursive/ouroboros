@@ -6,7 +6,8 @@ third wave, the fixes its adversarial reviews forced: the lease held while
 persistence may be in flight, one loss one error, the attempt-named execution
 leaf and gc's association check, gc's intent records and finished attempts, the
 control digest, and the tracer's exec pairing and restart re-entry (§§6.2, 6.4,
-7, 8.1, 8.2, 9.3, 11.2, 11.4, 13.3, 14.2). Revision 16 records J4's
+7, 8.1, 8.2, 9.3, 11.2, 11.4, 13.3, 14.2); the J4 evidence and acceptance map
+are in [J4 authority](jail-v1/j4-authority.md). Revision 16 records J4's
 second wave and its reviews: loss reported whatever its timing, the execution
 leaf registered before it exists, gc's own records and leftovers, syscall
 restarts, the receipt digest's preimage, trace framing and the no-leaf limit
