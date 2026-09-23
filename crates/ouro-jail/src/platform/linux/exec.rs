@@ -201,6 +201,48 @@ impl FdMap {
 /// program uses.
 pub const EXIT_SUPERVISOR_GONE: i32 = 123;
 
+/// In the child of a `fork`: die with the process that forked it.
+///
+/// Arms `PR_SET_PDEATHSIG` and then re-reads the parent pid, because a parent
+/// that died between the `fork` and the `prctl` sends no signal; such a child
+/// leaves at once instead of becoming an orphan on pid 1. The signal follows
+/// the forking *thread*, so the forking thread must outlive the child (every
+/// caller kills and reaps its child before returning).
+///
+/// # Safety
+///
+/// Call only in the child of a `fork`, first. It calls only `prctl`,
+/// `getppid` and `_exit`, which are async-signal-safe; `parent` must be the
+/// forking process's pid, read before the fork.
+pub unsafe fn die_with_parent_after_fork(parent: libc::pid_t) {
+    // SAFETY: prctl and getppid take scalars and dereference nothing; _exit
+    // does not return.
+    unsafe {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) < 0
+            || libc::getppid() != parent
+        {
+            libc::_exit(EXIT_SUPERVISOR_GONE);
+        }
+    }
+}
+
+/// Make `command`'s child die with this process (§14.1: a probe owns its
+/// fixtures), closing the fork-to-`prctl` window as
+/// [`die_with_parent_after_fork`] does. For children that need no descriptor
+/// layout; [`FdMap::apply`] already does this for the ones that do.
+pub fn die_with_parent(command: &mut Command) {
+    // SAFETY: getpid takes no arguments and cannot fail.
+    let parent = unsafe { libc::getpid() };
+    // SAFETY: the closure calls only async-signal-safe functions over an
+    // integer copied before the fork.
+    unsafe {
+        command.pre_exec(move || {
+            die_with_parent_after_fork(parent);
+            Ok(())
+        });
+    }
+}
+
 /// `CLOSE_RANGE_CLOEXEC` from `linux/close_range.h`.
 const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;
 
