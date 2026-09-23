@@ -1650,7 +1650,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     }
 
     // J4-R: whatever the worker still holds is waited for within its budget
-    // and acknowledged in order before any terminal message.
+    // and acknowledged in order before any terminal message. The loop is
+    // over, so a failure here stopped nothing: it is a tool error (S5), not a
+    // stop cause.
     if let Some(error) = settle_in_flight(
         &mut in_flight,
         true,
@@ -1658,7 +1660,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         &record,
         &mut journal,
     ) {
-        persistence_failed(&mut record, &mut outcome_error, error);
+        persistence_failed_after(&mut record, &mut outcome_error, error);
     }
     // Step 9: verify tree death, drain observations, persist settlement.
     // A sink loss that arrived after the last loop iteration still belongs
