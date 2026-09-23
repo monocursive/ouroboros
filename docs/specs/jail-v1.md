@@ -1395,7 +1395,17 @@ status cannot be established, record a gap rather than a worker's status.
 
 An unmatched return, dropped entry, truncated required structure or untracked
 descendant is a coverage gap. Never manufacture a result to fill it. Syscall
-restarts must not create duplicate successes. `openat2` requires decoding only
+restarts must not create duplicate successes, nor hide the result a restart
+turns into. A kernel restart code at a syscall exit is not a result: the
+observer follows the call to the kernel's decision. A re-entry is the call's
+one result; `EINTR` at a signal handler's entry is its result; a thread that
+ends before the decision returned nothing and did nothing, which is neither a
+result nor a gap; a decision the observer cannot establish is a
+`restart_unresolved` gap naming the call's classes. The ptrace observer
+settles a restart code by single-stepping; for `ERESTARTSYS` it reads the
+effect of `SA_RESTART` from the `rax`/`rip` the kernel saved in the handler's
+frame, which a sibling thread rewriting that frame first can misstate for that
+one call, a call with no effect either way. `openat2` requires decoding only
 the supported size/flags of its argument structure; unknown or unreadable input
 is unavailable metadata and, if needed for classification, a gap.
 
@@ -1497,6 +1507,14 @@ observer's stop had no effect; it is a named exclusion, neither a result nor a
 gap. A trace stop the observer did not request, identified by trace data that
 is not the observer's, is continued (the call then runs, as under any tracer)
 and is neither a result nor a loss.
+
+Only a call the observer must follow takes an in-flight slot: a call outside
+the closed set is classified at its entry and is never `inflight_exhausted`. A
+tracee killed at an entry stop the observer has not resumed made no call (the
+kernel skips a syscall when a fatal signal is pending after the trace event),
+so it is neither a result nor a loss. A call already resumed when the kill
+came, including one killed at its exit stop before its return is read, is one
+`entry_abandoned` gap of its own classes.
 
 Initial bounds: 8 MiB kernel ring, 16,384 in-flight syscall entries, 4 KiB path
 snapshots, 4 MiB user-space event queue accounted in bytes (an event's size is
