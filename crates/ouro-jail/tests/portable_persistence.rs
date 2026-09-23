@@ -616,6 +616,10 @@ struct Outcome {
     report: supervisor::RunReport,
     /// Every control frame the reader got, parsed, in order.
     frames: Vec<Value>,
+    /// When each frame reached the reader.
+    arrivals: Vec<Instant>,
+    /// When the run returned.
+    finished_at: Instant,
     /// Bytes after the last LF: a frame that was cut short.
     torn_tail: Vec<u8>,
 }
@@ -719,12 +723,21 @@ impl Fixture {
             std::thread::spawn(move || {
                 std::thread::sleep(delay);
                 ouro_jail::trace::set_nonblocking(reader.as_raw_fd()).unwrap();
-                let mut bytes = Vec::new();
+                let mut pending = Vec::new();
+                let mut lines: Vec<(Vec<u8>, Instant)> = Vec::new();
                 let mut chunk = [0u8; 65536];
                 loop {
                     match reader.read(&mut chunk) {
                         Ok(0) => break,
-                        Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+                        Ok(count) => {
+                            pending.extend_from_slice(&chunk[..count]);
+                            while let Some(at) = pending.iter().position(|byte| *byte == b'\n') {
+                                let line: Vec<u8> = pending.drain(..=at).collect();
+                                if line.len() > 1 {
+                                    lines.push((line[..line.len() - 1].to_vec(), Instant::now()));
+                                }
+                            }
+                        }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             if done.load(std::sync::atomic::Ordering::SeqCst) {
                                 break;
@@ -734,36 +747,34 @@ impl Fixture {
                         Err(error) => panic!("reading the control pipe: {error}"),
                     }
                 }
-                bytes
+                (lines, pending)
             })
         });
         let ctx = self.context(sim);
         let report = state::with_persist_io(io, || supervisor::run(&ctx, &args));
+        let finished_at = Instant::now();
         done.store(true, std::sync::atomic::Ordering::SeqCst);
-        let bytes = match collector {
+        let (lines, torn_tail) = match collector {
             Some(handle) => handle.join().unwrap(),
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
         let mut frames = Vec::new();
-        let text_end = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |at| at + 1);
-        for line in bytes[..text_end].split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            frames.push(serde_json::from_slice(line).unwrap_or_else(|error| {
+        let mut arrivals = Vec::new();
+        for (line, at) in lines {
+            frames.push(serde_json::from_slice(&line).unwrap_or_else(|error| {
                 panic!(
                     "a control frame does not parse ({error}): {}",
-                    String::from_utf8_lossy(line)
+                    String::from_utf8_lossy(&line)
                 )
             }));
+            arrivals.push(at);
         }
         Outcome {
             report,
             frames,
-            torn_tail: bytes[text_end..].to_vec(),
+            arrivals,
+            finished_at,
+            torn_tail,
         }
     }
 
@@ -1269,6 +1280,13 @@ fn j4_r02_persistence_that_cannot_finish_in_5s_stops_the_child_unacknowledged() 
     assert_eq!(outcome.report.exit_code, 1, "S5: after exec a tool error");
     let error = outcome.report.error.as_ref().expect("an error");
     assert_eq!(error.code.as_str(), "state_write_failed", "{error}");
+    assert!(
+        error
+            .message
+            .ends_with("the transition is not acknowledged"),
+        "the reported error is the first cause, the stalled enforced receipt, not the terminal \
+         receipt that could not be written after it: {error}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,6 +1360,31 @@ fn j4_n4_a_queued_terminal_frame_is_delivered_once_the_reader_returns() {
     );
     assert_eq!(outcome.report.control_dropped, 0);
     assert!(outcome.torn_tail.is_empty(), "no frame is cut short");
+}
+
+/// N4: the loop polls the control sink, so a frame queued behind a full pipe
+/// reaches a reader that returns while the run goes on, not only when the next
+/// message happens to be sent or at the final drain.
+#[test]
+fn j4_n4_a_queued_frame_reaches_a_returning_reader_while_the_run_goes_on() {
+    let fixture = Fixture::new();
+    let outcome = fixture.run_with(
+        Sim::new(Scenario::Timed {
+            exit_after: Duration::from_millis(1500),
+        }),
+        &["--profile", "tool", "--limit", "wall=1h"],
+        real(),
+        Control::FullReadAfter(Duration::from_millis(200)),
+    );
+    assert_eq!(outcome.report.exit_code, 0, "{:?}", outcome.report.error);
+    let kinds: Vec<&Value> = outcome.frames.iter().map(|frame| &frame["kind"]).collect();
+    assert_eq!(kinds, ["prepared", "exec_confirmed", "settled"]);
+    let early = outcome.finished_at.duration_since(outcome.arrivals[1]);
+    assert!(
+        early >= Duration::from_millis(800),
+        "exec_confirmed reached the reader only {early:?} before the run ended: it waited for the \
+         next send instead of the loop's poll"
+    );
 }
 
 // ---------------------------------------------------------------------------
