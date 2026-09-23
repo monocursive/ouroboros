@@ -178,11 +178,15 @@ fn crash(site: &Site, point: Point) -> Vec<String> {
     if site.launch {
         let launch = jail.config_dir().join("launch");
         std::fs::create_dir_all(&launch).expect("launch dir");
+        let profile = launch.join("plain.toml");
         std::fs::write(
-            launch.join("plain.toml"),
+            &profile,
             "name = \"plain\"\njail = \"tool\"\nstate_subdirs = [\"a/b\"]\n",
         )
         .expect("launch profile");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600))
+            .expect("a private launch profile");
     }
     let data = jail.data_dir();
     jail = jail
@@ -329,10 +333,14 @@ fn crash(site: &Site, point: Point) -> Vec<String> {
         .iter()
         .filter(|temp| temp.starts_with(&format!(".{}.", site.record)))
         .count();
-    if point.temp_left != (ours == 1) || leftover.len() != ours {
+    // The claim is published by `link`, so after it (at `renamed`) the
+    // temporary name is a second link to the complete claim until it is
+    // removed; every other site renames it away.
+    let temp_left = point.temp_left || (site.name == "claim" && point.name == "renamed");
+    if temp_left != (ours == 1) || leftover.len() != ours {
         problems.push(format!(
             "{label}: leftover temporary files {leftover:?}, a crash here leaves {} of `.{}.*.tmp`",
-            u8::from(point.temp_left),
+            u8::from(temp_left),
             site.record
         ));
     }

@@ -1691,51 +1691,12 @@ fn r8_a_second_run_with_the_same_attempt_id_refuses() {
     let _ = first.wait();
 }
 
-/// §7: a receipt is replaced atomically — a SIGKILL mid-run leaves either the
-/// prepared or the enforced receipt, never a truncated file.
-#[test]
-fn r8_receipts_are_never_left_truncated() {
-    if !live() {
-        return;
-    }
-    let mut checked = 0;
-    for attempt in 0..8 {
-        let c = case();
-        let mut spawned = c
-            .jail
-            .target([c.fixture.to_str().unwrap(), "sleep", "5000"])
-            .spawn()
-            .expect("spawn");
-        // Let preparation get somewhere, then kill at a varying offset.
-        std::thread::sleep(std::time::Duration::from_millis(40 + attempt * 35));
-        let _ = spawned.kill();
-        let root = spawned.root().to_path_buf();
-        let _ = spawned.wait();
-        let attempts = root.join("data/attempts");
-        let Ok(entries) = std::fs::read_dir(&attempts) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path().join("jail.json");
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            checked += 1;
-            let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-                panic!("a receipt was left unparsable after a kill: {e}\n{text}")
-            });
-            let phase = value.get("phase").and_then(Value::as_str).unwrap_or("?");
-            eprintln!("attempt {attempt}: phase {phase} ({} bytes)", text.len());
-            assert!(
-                ["prepared", "enforced", "refused", "settled"].contains(&phase),
-                "unexpected phase {phase}"
-            );
-        }
-        // Reap anything the kill orphaned.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    eprintln!("receipts checked: {checked}");
-}
+// §7: "a receipt is replaced atomically". `r8_receipts_are_never_left_truncated`
+// killed the jail after a sleep of varying length and could pass without having
+// checked any receipt (J4 finding N10). It is superseded by
+// `j4_records_linux::j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file`,
+// which aborts the supervisor at each named point of each persistence site
+// through `OURO_JAIL_TEST_ABORT_AT` and fails when a point is never reached.
 
 // ===========================================================================
 // Batch 2
