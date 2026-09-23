@@ -1008,8 +1008,11 @@ fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Op
 pub fn run(ctx: &Context, args: &RunArgs) -> RunReport {
     match run_inner(ctx, args) {
         Ok(report) => report,
+        // Every early return of `run_inner` happens before release; after it,
+        // every path builds its own report. J4-R, S5: so a persistence failure
+        // here (the claim) refuses with 125.
         Err(error) => RunReport {
-            exit_code: error.exit_code(),
+            exit_code: error.refusal_exit_code(),
             error: Some(error),
             ..RunReport::default()
         },
@@ -1110,8 +1113,27 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             "another live supervisor holds this attempt's lease".to_owned(),
         ));
     };
-    claim_attempt(&attempt_dir, &attempt_id, ctx)?;
-    write_policy_file(&attempt_dir, &plan)?;
+    // J4-R: §13.3 — from here on every durable write runs on the persistence
+    // worker, and this thread waits for each step within its progress
+    // budget: a stalled disk ends a wait, it never holds the supervisor.
+    let persister = state::Persister::start().map_err(|error| {
+        JailError::new(
+            ErrorCode::StateWriteFailed,
+            ErrorStage::Preparing,
+            Remediation::Retry,
+            format!("the persistence worker could not be started: {error}"),
+        )
+    })?;
+    let _forwarding = state::install(persister.forwarding());
+    // J4-R: S9 — every OURO_JAIL_TEST_* variable in force, read once at the
+    // attempt's start and recorded in jail state and in every receipt that
+    // has native details (lifetime.native.details.test_seams).
+    let test_seams = state::test_seams();
+    claim_attempt(&attempt_dir, &attempt_id, ctx, test_seams.as_ref())?;
+    // J4-R: N6 — a failed policy.json write is a refusal like every other
+    // failure before exec: it is reported through `refuse` below, once the
+    // record and the sinks that carry a refusal exist.
+    let policy_written = write_policy_file(&attempt_dir, &plan);
 
     let now = SystemTime::now();
     let containment = if plan.profile.is_contained() {
@@ -1160,6 +1182,18 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     let mut control = open_control(args)?;
     let trace = open_trace(args, &attempt_dir)?;
     let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
+    // J4-R begin: N6
+    if let Err(error) = policy_written {
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
+    // J4-R end
 
     // Step 2: probe the selected mechanisms.
     if let Err(error) = budget
@@ -1286,6 +1320,22 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // J3-agent end
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
+    // J4-R: §13.2 row 4 — the application is part of the boundary's facts:
+    // a refusal after this point reports what was actually applied. It used
+    // to be read after the registration below, so a failed registration
+    // wrote a refused receipt claiming `enforced` containment with nothing
+    // applied, which the receipt schema rejects.
+    if let Some(applied) = prepared.applied() {
+        record.applied = applied;
+    }
+    // J4-R: S9 — the test seams in force are recorded in every receipt that
+    // has native details (a receipt before any boundary has none; jail state
+    // records them from the claim on).
+    if let (Some(seams), Some(native)) = (test_seams.as_ref(), record.lifetime.native.as_mut()) {
+        native
+            .details
+            .insert("test_seams".to_owned(), seams.clone());
+    }
     // §7: the state file names the registered execution boundary once it
     // exists, so crash reconciliation and GC can identify resources without
     // parsing a receipt.
@@ -1301,9 +1351,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             &mut journal,
         ));
     }
-    if let Some(applied) = prepared.applied() {
-        record.applied = applied;
-    }
     merge_wall_limit(&mut record, &plan);
     journal.lifecycle("prepared");
 
@@ -1311,6 +1358,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // last point at which nothing has been created, and every exit after it
     // goes through `abort`.
     let prepared_receipt = match persist(
+        state::Site::PreparedReceipt,
         &attempt_dir,
         &mut record,
         Phase::Prepared,
@@ -1391,7 +1439,25 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     let wall_deadline = wall_deadline(&plan);
     let mut outcome_error: Option<JailError> = None;
+    // J4-R: §13.3 — receipts written while the target runs are persisted by
+    // the worker while this loop keeps enforcing the wall, signals and
+    // evidence; each is acknowledged only once it is durable, in order.
+    let mut in_flight: std::collections::VecDeque<InFlight> = std::collections::VecDeque::new();
     loop {
+        // J4-R: N4 — whatever the control reader has room for now.
+        if let Some(control) = control.as_mut() {
+            control.poll();
+        }
+        if let Some(error) = settle_in_flight(
+            &mut in_flight,
+            false,
+            control.as_mut(),
+            &record,
+            &mut journal,
+        ) {
+            persistence_failed(&mut record, &mut outcome_error, error);
+            running.request_stop(StopReason::EvidenceLoss);
+        }
         // §13.3 + I07: a trace-sink failure — budget exhausted, external
         // consumer stalled past its deadline — is evidence loss, and under
         // strict it stops the attempt exactly like the tracer-queue path
@@ -1425,16 +1491,21 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             } else {
                 Phase::Prepared
             };
-            if let Err(error) = persist(&attempt_dir, &mut record, phase, args, &mut journal) {
-                // As for the exec confirmation: persistence that fails after
-                // release stops the tree (§7).
-                record.errors.push(error.to_object());
-                record
-                    .outcome
-                    .cause
-                    .get_or_insert("state_write_failed".to_owned());
-                outcome_error.get_or_insert(error);
-                running.request_stop(StopReason::EvidenceLoss);
+            // J4-R: persisted by the worker; a failure, or no progress within
+            // the budget, stops the tree (§7) when the loop sees it.
+            match submit_receipt(
+                &persister,
+                state::Site::IntegrityReceipt,
+                &attempt_dir,
+                &mut record,
+                phase,
+                args,
+            ) {
+                Ok(write) => in_flight.push_back(write),
+                Err(error) => {
+                    persistence_failed(&mut record, &mut outcome_error, error);
+                    running.request_stop(StopReason::EvidenceLoss);
+                }
             }
         }
         // J3-none end
@@ -1449,31 +1520,26 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 }
                 record.exec_observed = true;
                 journal.lifecycle("exec_confirmed");
-                match persist(
+                // J4-R: §13.3 — the enforced receipt is persisted by the
+                // worker while this loop keeps running; `exec_confirmed` is
+                // sent once it is durable, never before. §7: "Failed/ambiguous
+                // persistence ... after exec it stops the tree and leaves an
+                // incomplete receipt if necessary": a failure, or no progress
+                // within the budget, stops the tree unacknowledged.
+                match submit_receipt(
+                    &persister,
+                    state::Site::EnforcedReceipt,
                     &attempt_dir,
                     &mut record,
                     Phase::Enforced,
                     args,
-                    &mut journal,
                 ) {
-                    Ok(receipt) => send_control(
-                        control.as_mut(),
-                        &record,
-                        ControlKind::ExecConfirmed,
-                        Phase::Enforced,
-                        &receipt,
-                    ),
+                    Ok(mut write) => {
+                        write.ack = Some(ControlKind::ExecConfirmed);
+                        in_flight.push_back(write);
+                    }
                     Err(error) => {
-                        // §7: "Failed/ambiguous persistence ... after exec it
-                        // stops the tree and leaves an incomplete receipt if
-                        // necessary." Returning here would have left the tree
-                        // running with no one waiting for it.
-                        record.errors.push(error.to_object());
-                        record
-                            .outcome
-                            .cause
-                            .get_or_insert("state_write_failed".to_owned());
-                        outcome_error = Some(error);
+                        persistence_failed(&mut record, &mut outcome_error, error);
                         running.request_stop(StopReason::EvidenceLoss);
                     }
                 }
@@ -1515,6 +1581,17 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     Remediation::Configuration,
                     format!("the target exec failed with {errno}"),
                 );
+                // J4-R: a receipt still with the worker lands (or is given up
+                // on) before the refused one.
+                if let Some(failure) = settle_in_flight(
+                    &mut in_flight,
+                    true,
+                    control.as_mut(),
+                    &record,
+                    &mut journal,
+                ) {
+                    record.errors.push(failure.to_object());
+                }
                 return Ok(refuse(
                     &attempt_dir,
                     &mut record,
@@ -1560,7 +1637,8 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                         .get_or_insert("evidence_loss".to_owned());
                     running.request_stop(StopReason::EvidenceLoss);
                 }
-                outcome_error = Some(error);
+                // J4-D5 remainder: the first error is the reported one.
+                outcome_error.get_or_insert(error);
             }
             RunEvent::Unknown { reason } => {
                 record.outcome.kind = OutcomeKind::Unknown;
@@ -1578,6 +1656,19 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     }
 
+    // J4-R: whatever the worker still holds is waited for within its budget
+    // and acknowledged in order before any terminal message. The loop is
+    // over, so a failure here stopped nothing: it is a tool error (S5), not a
+    // stop cause.
+    if let Some(error) = settle_in_flight(
+        &mut in_flight,
+        true,
+        control.as_mut(),
+        &record,
+        &mut journal,
+    ) {
+        persistence_failed_after(&mut record, &mut outcome_error, error);
+    }
     // Step 9: verify tree death, drain observations, persist settlement.
     // A sink loss that arrived after the last loop iteration still belongs
     // in the settled receipt's errors (§13.3: the receipt is the bounded
@@ -1645,10 +1736,25 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         if settled {
             record.state_cleanup = StateCleanup::Pending;
             record.cleanup_error = None;
-            match persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+            match persist(
+                state::Site::PendingReceipt,
+                &attempt_dir,
+                &mut record,
+                phase,
+                args,
+                &mut journal,
+            ) {
                 Ok(_) => {
                     let vendor =
                         cleanup::remove_vendor_state(&attempt_dir, cleanup::Limits::DEFAULT);
+                    // J4-R: S5 — the cleanup record is persistence after exec.
+                    if let Some(error) = vendor.record_error.clone() {
+                        persistence_failed_after(
+                            &mut record,
+                            &mut outcome_error,
+                            error.in_stage(ErrorStage::Settled),
+                        );
+                    }
                     let scratch = remove_managed_scratch(&attempt_dir, &plan);
                     match (vendor.status, scratch) {
                         (
@@ -1670,12 +1776,22 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 Err(error) => {
                     // No durable settled receipt, so nothing would permit a
                     // later `gc` to finish a removal started now.
-                    record.errors.push(error.to_object());
                     record.cleanup_error = Some("state_write_failed".to_owned());
+                    // J4-R: S5 — a persistence failure after exec is a tool
+                    // error (exit 1), recorded but not a stop cause.
+                    persistence_failed_after(
+                        &mut record,
+                        &mut outcome_error,
+                        error.in_stage(ErrorStage::Reconciling),
+                    );
                 }
             }
-        } else {
-            retain_vendor_state(&attempt_dir, &mut record);
+        } else if let Some(error) = retain_vendor_state(&attempt_dir, &mut record) {
+            persistence_failed_after(
+                &mut record,
+                &mut outcome_error,
+                error.in_stage(ErrorStage::Reconciling),
+            );
         }
     } else if settled {
         record.state_cleanup = remove_managed_scratch(&attempt_dir, &plan);
@@ -1700,7 +1816,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     });
     // J3-none end
     // J3-agent begin: the proxy stopped inside `wait_tree`
-    remove_proxy_directory(&attempt_dir, &mut record);
+    if let Some(error) = remove_proxy_directory(&attempt_dir, &mut record) {
+        // J4-R: S5 — its state record is persistence after exec.
+        outcome_error.get_or_insert(error.in_stage(ErrorStage::Reconciling));
+    }
     // J3-agent end
     // §13.3 terminal drain, before the settled receipt is written: whatever
     // the external trace consumer has not accepted within the no-progress
@@ -1717,15 +1836,27 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     if journal.loss.is_some() {
         degrade_trace_coverage(&mut record);
     }
-    let receipt = match persist_terminal(&attempt_dir, &mut record, phase, args, &mut journal) {
+    let receipt = match persist_terminal(
+        state::Site::TerminalReceipt,
+        &attempt_dir,
+        &mut record,
+        phase,
+        args,
+        &mut journal,
+    ) {
         Ok(receipt) => receipt,
         Err(error) => {
+            // J4-R: the terminal transition is not acknowledged; the receipt
+            // on disk stays the last one that persisted. S5: a tool error
+            // after exec, and the first cause is the reported error.
+            let error = error.in_stage(ErrorStage::Reconciling);
+            let reported = tree_error.or(outcome_error).unwrap_or(error);
             return Ok(RunReport {
-                exit_code: error.exit_code(),
-                error: Some(error),
+                exit_code: 1,
+                error: Some(reported),
                 receipt_path: Some(attempt_dir.receipt_path()),
                 trace_error: journal.loss.clone(),
-                control_dropped: control.as_ref().map_or(0, ControlSink::dropped),
+                control_dropped: finish_control(control.as_mut()),
                 ..RunReport::default()
             });
         }
@@ -1767,7 +1898,8 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         error: tree_error.or(outcome_error),
         receipt_path: Some(attempt_dir.receipt_path()),
         trace_error: journal.loss.clone(),
-        control_dropped: control.as_ref().map_or(0, ControlSink::dropped),
+        // J4-R: N4 — a bounded final drain, then an honest count.
+        control_dropped: finish_control(control.as_mut()),
         ..RunReport::default()
     })
 }
@@ -2163,6 +2295,7 @@ fn refuse(
     control: Option<&mut ControlSink>,
     journal: &mut Journal,
 ) -> RunReport {
+    let mut control = control;
     // A proved exec failure keeps its own kind (§13.2); everything else that
     // reaches here refused before the target ran.
     record.outcome = if record.outcome.kind == OutcomeKind::ExecError {
@@ -2180,36 +2313,200 @@ fn refuse(
     refuse_vendor_state(attempt_dir, record, args, journal);
     // J3-launch end
     // J3-agent begin: the proxy stopped with the boundary's teardown
-    remove_proxy_directory(attempt_dir, record);
+    let _ = remove_proxy_directory(attempt_dir, record);
     // J3-agent end
-    let receipt = persist_terminal(attempt_dir, record, Phase::Refused, args, journal);
+    let receipt = persist_terminal(
+        state::Site::RefusedReceipt,
+        attempt_dir,
+        record,
+        Phase::Refused,
+        args,
+        journal,
+    );
+    // J4-R: S5 — everything that reaches here refused before the target
+    // executed, so a persistence failure exits 125 like the refusal itself.
+    let exit_code = error.refusal_exit_code();
     match receipt {
         Ok(receipt) => {
             send_control(
-                control,
+                control.as_deref_mut(),
                 record,
                 ControlKind::Refused,
                 Phase::Refused,
                 &receipt,
             );
             RunReport {
-                exit_code: error.exit_code(),
+                exit_code,
                 receipt: Some(receipt),
                 error: Some(error.clone()),
                 receipt_path: Some(attempt_dir.receipt_path()),
                 trace_error: journal.loss.clone(),
+                control_dropped: finish_control(control),
                 ..RunReport::default()
             }
         }
-        Err(write_error) => RunReport {
-            exit_code: write_error.exit_code(),
-            error: Some(write_error),
-            receipt_path: Some(attempt_dir.receipt_path()),
-            trace_error: journal.loss.clone(),
-            ..RunReport::default()
-        },
+        // J4-R: the refusal is still the cause (first cause wins); the report
+        // says the refused receipt did not persist, and no `refused` message
+        // acknowledges it.
+        Err(write_error) => {
+            let mut reported = error.clone();
+            reported.message = format!(
+                "{}; the refused receipt was not persisted: {}",
+                reported.message, write_error.message
+            );
+            RunReport {
+                exit_code,
+                error: Some(reported),
+                receipt_path: Some(attempt_dir.receipt_path()),
+                trace_error: journal.loss.clone(),
+                control_dropped: finish_control(control),
+                ..RunReport::default()
+            }
+        }
     }
 }
+
+// J4-R begin: persistence failures, the worker's receipts, their acknowledgement
+
+/// Records a persistence failure after release that stops the tree (§7):
+/// in `errors[]`, as the stop cause unless one came first (D5), and as the
+/// reported error unless one came first.
+fn persistence_failed(
+    record: &mut AttemptRecord,
+    outcome_error: &mut Option<JailError>,
+    error: JailError,
+) {
+    record
+        .outcome
+        .cause
+        .get_or_insert("state_write_failed".to_owned());
+    persistence_failed_after(record, outcome_error, error);
+}
+
+/// Records a persistence failure after exec that is a tool error (S5: exit
+/// 1) but not a reason to stop anything: the tree is already stopped.
+fn persistence_failed_after(
+    record: &mut AttemptRecord,
+    outcome_error: &mut Option<JailError>,
+    error: JailError,
+) {
+    record.errors.push(error.to_object());
+    outcome_error.get_or_insert(error);
+}
+
+/// A receipt handed to the persistence worker, and what it acknowledges once
+/// it is durable.
+struct InFlight {
+    pending: state::Pending<Result<(), JailError>>,
+    receipt: Receipt,
+    phase: Phase,
+    ack: Option<ControlKind>,
+}
+
+/// Renders the receipt for `phase` and hands it to the worker (§13.3).
+///
+/// The revision is spent here, before any byte carrying it can be visible
+/// (§13.2): a write that fails or stalls skips its number, it never hands it
+/// to a different receipt.
+fn submit_receipt(
+    persister: &state::Persister,
+    site: state::Site,
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    args: &RunArgs,
+) -> Result<InFlight, JailError> {
+    record.updated_at = SystemTime::now();
+    let receipt = record.receipt(phase);
+    let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
+        JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Running,
+            Remediation::InspectState,
+            format!("the receipt could not be serialized: {error}"),
+        )
+    })?;
+    record.revision += 1;
+    let canonical = attempt_dir.receipt_path();
+    let extra = args.receipt.clone();
+    let pending = persister.submit(move || {
+        state::replace_atomically_at(site, &canonical, &bytes)?;
+        if let Some(extra) = extra {
+            state::replace_atomically_at(site, &extra, &bytes)?;
+        }
+        Ok(())
+    });
+    Ok(InFlight {
+        pending,
+        receipt,
+        phase,
+        ack: None,
+    })
+}
+
+/// Acknowledges the receipts the worker has made durable, in order, and
+/// returns the first failure. With `wait`, each is waited for within the
+/// worker's progress budget; without it, only finished ones are taken. A
+/// receipt that failed or stalled is never acknowledged, and neither is any
+/// receipt after it (its content would claim what the earlier one did not
+/// persist).
+fn settle_in_flight(
+    in_flight: &mut std::collections::VecDeque<InFlight>,
+    wait: bool,
+    mut control: Option<&mut ControlSink>,
+    record: &AttemptRecord,
+    journal: &mut Journal,
+) -> Option<JailError> {
+    while let Some(front) = in_flight.front() {
+        let outcome = match front.pending.poll() {
+            state::Progress::Done(result) => result,
+            state::Progress::Stalled(stalled) => Err(stalled_error(stalled)),
+            state::Progress::Waiting if !wait => return None,
+            state::Progress::Waiting => front
+                .pending
+                .wait()
+                .unwrap_or_else(|stalled| Err(stalled_error(stalled))),
+        };
+        let done = in_flight.pop_front().expect("the front was just seen");
+        match outcome {
+            Ok(()) => acknowledge(&done, control.as_deref_mut(), record, journal),
+            Err(error) => {
+                // Nothing after a failed transition is acknowledged either;
+                // dropping them makes the worker skip what has not started.
+                in_flight.clear();
+                return Some(error.in_stage(ErrorStage::Running));
+            }
+        }
+    }
+    None
+}
+
+fn stalled_error(stalled: state::Stalled) -> JailError {
+    JailError::new(
+        ErrorCode::StateWriteFailed,
+        ErrorStage::Running,
+        Remediation::InspectState,
+        format!("{stalled} (§13.3); the transition is not acknowledged"),
+    )
+}
+
+fn acknowledge(
+    done: &InFlight,
+    control: Option<&mut ControlSink>,
+    record: &AttemptRecord,
+    journal: &mut Journal,
+) {
+    journal.receipt(done.phase, &done.receipt, false);
+    if let Some(kind) = done.ack {
+        send_control(control, record, kind, done.phase, &done.receipt);
+    }
+}
+
+/// The control channel's bounded final drain, then its honest count (N4).
+fn finish_control(control: Option<&mut ControlSink>) -> u64 {
+    control.map_or(0, |control| control.finish(CONTROL_DRAIN))
+}
+// J4-R end
 
 fn pending_applied(plan: &Plan) -> Applied {
     let mode = if plan.profile.is_contained() {
@@ -2397,11 +2694,14 @@ fn cleanup_reason_to_wait(record: &AttemptRecord) -> Option<&'static str> {
 
 /// Retains registered vendor state, recording why (§12: "Attempts with
 /// unproved live trees retain state").
-fn retain_vendor_state(attempt_dir: &AttemptDir, record: &mut AttemptRecord) {
+///
+/// J4-R: a failed record of it is returned, not dropped: it is persistence
+/// like any other.
+fn retain_vendor_state(attempt_dir: &AttemptDir, record: &mut AttemptRecord) -> Option<JailError> {
     let reason = cleanup_reason_to_wait(record).unwrap_or(cleanup::REASON_TREE_UNVERIFIED);
     record.state_cleanup = StateCleanup::Pending;
     record.cleanup_error = Some(reason.to_owned());
-    let _ = state::record_cleanup(attempt_dir, StateCleanup::Pending, Some(reason));
+    state::record_cleanup(attempt_dir, StateCleanup::Pending, Some(reason)).err()
 }
 
 /// Vendor state on a refusal: removed when the refusal proves no tree can be
@@ -2426,17 +2726,29 @@ fn refuse_vendor_state(
         }
     }
     if cleanup_reason_to_wait(record).is_some() {
-        retain_vendor_state(attempt_dir, record);
+        if let Some(error) = retain_vendor_state(attempt_dir, record) {
+            record.errors.push(error.to_object());
+        }
         return;
     }
     record.state_cleanup = StateCleanup::Pending;
     record.cleanup_error = None;
-    if let Err(error) = persist(attempt_dir, record, Phase::Refused, args, journal) {
+    if let Err(error) = persist(
+        state::Site::PendingReceipt,
+        attempt_dir,
+        record,
+        Phase::Refused,
+        args,
+        journal,
+    ) {
         record.errors.push(error.to_object());
         record.cleanup_error = Some("state_write_failed".to_owned());
         return;
     }
     let result = cleanup::remove_vendor_state(attempt_dir, cleanup::Limits::DEFAULT);
+    if let Some(error) = &result.record_error {
+        record.errors.push(error.to_object());
+    }
     record.state_cleanup = result.status;
     record.cleanup_error = result.reason;
 }
@@ -2507,7 +2819,13 @@ fn prepare_proxy_dir(
 /// Removes the proxy directory once the platform stopped the proxy. A
 /// directory that cannot be removed is retained and said so in jail state
 /// and in the receipt's errors; it never changes the outcome.
-fn remove_proxy_directory(attempt_dir: &AttemptDir, record: &mut AttemptRecord) {
+///
+/// J4-R: a failure to record the removal in jail state is returned too: it is
+/// persistence, and after exec a tool error (S5).
+fn remove_proxy_directory(
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+) -> Option<JailError> {
     match state::remove_proxy_dir(attempt_dir) {
         Ok(state::ProxyDirRemoval::Retained(reason)) => {
             record.errors.push(
@@ -2519,9 +2837,13 @@ fn remove_proxy_directory(attempt_dir: &AttemptDir, record: &mut AttemptRecord) 
                 )
                 .to_object(),
             );
+            None
         }
-        Ok(_) => {}
-        Err(error) => record.errors.push(error.to_object()),
+        Ok(_) => None,
+        Err(error) => {
+            record.errors.push(error.to_object());
+            Some(error)
+        }
     }
 }
 // J3-agent end
@@ -2684,11 +3006,19 @@ pub fn write_receipt(
     phase: Phase,
     extra_copy: Option<&Path>,
 ) -> Result<Receipt, JailError> {
-    write_receipt_with(attempt_dir, record, phase, extra_copy, &state::Fsync)
+    let io = state::current_io();
+    write_receipt_at(
+        state::Site::Unnamed,
+        attempt_dir,
+        record,
+        phase,
+        extra_copy,
+        &*io,
+    )
 }
 
-/// [`write_receipt`] against an explicit durability implementation, the seam
-/// failure injection uses to fail each sync step.
+/// [`write_receipt`] against an explicit persistence seam, the seam failure
+/// injection uses to fail each step.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
@@ -2697,7 +3027,29 @@ pub fn write_receipt_with(
     record: &mut AttemptRecord,
     phase: Phase,
     extra_copy: Option<&Path>,
-    durable: &dyn state::Durable,
+    io: &dyn state::PersistIo,
+) -> Result<Receipt, JailError> {
+    write_receipt_at(
+        state::Site::Unnamed,
+        attempt_dir,
+        record,
+        phase,
+        extra_copy,
+        io,
+    )
+}
+
+/// [`write_receipt_with`] at a named persistence site (R02).
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
+pub fn write_receipt_at(
+    site: state::Site,
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    extra_copy: Option<&Path>,
+    io: &dyn state::PersistIo,
 ) -> Result<Receipt, JailError> {
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
@@ -2709,7 +3061,7 @@ pub fn write_receipt_with(
             format!("the receipt could not be serialized: {error}"),
         )
     })?;
-    let canonical = state::TempWrite::create_with(&attempt_dir.receipt_path(), &bytes, durable)?;
+    let canonical = state::TempWrite::create_at(site, &attempt_dir.receipt_path(), &bytes, io)?;
     // J4-D4: the rename below can land and a later step still fail (its
     // directory sync, or the extra copy), leaving this revision visible under
     // an error. Spending it here, before the rename, means the next receipt
@@ -2717,19 +3069,28 @@ pub fn write_receipt_with(
     record.revision += 1;
     canonical.commit()?;
     if let Some(path) = extra_copy {
-        state::replace_atomically_with(path, &bytes, durable)?;
+        state::TempWrite::create_at(site, path, &bytes, io)?.commit()?;
     }
     Ok(receipt)
 }
 
 fn persist(
+    site: state::Site,
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
     phase: Phase,
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
-    let receipt = write_receipt(attempt_dir, record, phase, args.receipt.as_deref())?;
+    let io = state::current_io();
+    let receipt = write_receipt_at(
+        site,
+        attempt_dir,
+        record,
+        phase,
+        args.receipt.as_deref(),
+        &*io,
+    )?;
     journal.receipt(
         phase,
         &receipt,
@@ -2742,20 +3103,29 @@ fn persist(
 /// that drain requires one durable correction, without another trace write
 /// that could recursively fail and invalidate the correction.
 fn persist_terminal(
+    site: state::Site,
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
     phase: Phase,
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
-    let receipt = persist(attempt_dir, record, phase, args, journal)?;
+    let receipt = persist(site, attempt_dir, record, phase, args, journal)?;
     if let Ok(mut sink) = journal.trace.lock() {
         sink.finish();
     }
     if let Some(error) = journal.take_new_loss() {
         record.errors.push(error.to_object());
         degrade_trace_coverage(record);
-        return write_receipt(attempt_dir, record, phase, args.receipt.as_deref());
+        let io = state::current_io();
+        return write_receipt_at(
+            site,
+            attempt_dir,
+            record,
+            phase,
+            args.receipt.as_deref(),
+            &*io,
+        );
     }
     Ok(receipt)
 }
@@ -2764,8 +3134,8 @@ fn claim_attempt(
     attempt_dir: &AttemptDir,
     attempt_id: &AttemptId,
     ctx: &Context,
+    test_seams: Option<&serde_json::Value>,
 ) -> Result<(), JailError> {
-    use std::os::unix::fs::OpenOptionsExt as _;
     let identity = ctx.platform.identity();
     let owner = ctx.platform.owner_identity();
     if identity.os == crate::records::Os::Linux && owner.is_none() {
@@ -2798,51 +3168,30 @@ fn claim_attempt(
         "vendor_state": serde_json::Value::Null,
         "state_cleanup": "not_needed",
     });
+    // J4-R: S9 — a test seam in force is recorded where gc and a reader of
+    // jail state see it, from the claim on.
+    let mut state = state;
+    if let Some(seams) = test_seams {
+        state["test_seams"] = seams.clone();
+    }
     let path = attempt_dir.state_path();
-    // §7: claim the root with exclusive creation while holding the lock. A
-    // previous jail claim, live or dead, refuses rather than spawning again.
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(state::FILE_MODE)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(JailError::new(
-                ErrorCode::AttemptExists,
-                ErrorStage::Resolving,
-                Remediation::InspectState,
-                "this attempt directory already carries a jail claim".to_owned(),
-            ));
-        }
-        Err(error) => {
-            return Err(JailError::new(
-                ErrorCode::StateWriteFailed,
-                ErrorStage::Preparing,
-                Remediation::InspectState,
-                format!("{}: {error}", path.display()),
-            ));
-        }
-    };
+    // J4-R: §7, R02 — the claim is written and synced under a temporary name
+    // and then linked into place, which fails when a claim exists. The link is
+    // exclusive and atomic, so the claim is never visible, and never left by a
+    // crash, with fewer than all its bytes (it used to be created empty and
+    // then written, so every run had an unparseable claim for a moment).
     let bytes = serde_json::to_vec_pretty(&state).unwrap_or_default();
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            // §7: a claim the directory does not remember is a claim a power
-            // loss can erase; every other state write syncs the parent, and
-            // the exclusive create deserves the same guarantee.
-            std::fs::File::open(path.parent().unwrap_or(Path::new(".")))
-                .and_then(|dir| dir.sync_all())
-        })
-        .map_err(|error| {
-            JailError::new(
-                ErrorCode::StateWriteFailed,
-                ErrorStage::Preparing,
-                Remediation::InspectState,
-                format!("{}: {error}", path.display()),
-            )
-        })
+    match state::create_exclusively_at(state::Site::Claim, &path, &bytes)? {
+        state::Published::Created => Ok(()),
+        // A previous jail claim, live or dead, refuses rather than spawning
+        // again.
+        state::Published::Exists => Err(JailError::new(
+            ErrorCode::AttemptExists,
+            ErrorStage::Resolving,
+            Remediation::InspectState,
+            "this attempt directory already carries a jail claim".to_owned(),
+        )),
+    }
 }
 
 /// Record the registered execution boundary in the state file (§7), so crash
@@ -2883,7 +3232,7 @@ fn register_boundary_in_state(
             format!("the attempt state could not be serialized: {error}"),
         )
     })?;
-    state::replace_atomically(&path, &bytes)
+    state::replace_atomically_at(state::Site::Boundary, &path, &bytes)
 }
 
 fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailError> {
@@ -2902,7 +3251,7 @@ fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailEr
             format!("the policy envelope could not be serialized: {error}"),
         )
     })?;
-    state::replace_atomically(&attempt_dir.policy_path(), &bytes)
+    state::replace_atomically_at(state::Site::Policy, &attempt_dir.policy_path(), &bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -2985,7 +3334,12 @@ fn fd_access(fd: RawFd) -> Option<libc::c_int> {
 /// and reported, never waited on.
 pub struct ControlSink {
     file: std::fs::File,
-    queue: std::collections::VecDeque<u8>,
+    /// Whole frames not yet fully written, oldest first.
+    frames: std::collections::VecDeque<Vec<u8>>,
+    /// Bytes of the front frame already written.
+    written: usize,
+    /// The reader is gone (EPIPE, or any error but `WouldBlock`).
+    broken: bool,
     dropped: u64,
     seq: u64,
 }
@@ -2994,12 +3348,20 @@ pub struct ControlSink {
 pub const CONTROL_QUEUE_MAX: usize = 4 * crate::records::CONTROL_FRAME_MAX;
 /// Capacity inside that queue that only a terminal message may use.
 pub const CONTROL_QUEUE_RESERVE: usize = crate::records::CONTROL_FRAME_MAX;
+/// J4-R, N4: how long the final drain waits for a reader that makes no
+/// progress, the same no-progress deadline §13.3 gives external trace writes.
+pub const CONTROL_DRAIN: Duration = Duration::from_secs(1);
 
 impl ControlSink {
     /// The next message number (§8.2: monotonically increasing per attempt).
     fn next_seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq
+    }
+
+    /// Bytes queued and not yet written.
+    fn queued(&self) -> usize {
+        self.frames.iter().map(Vec::len).sum::<usize>() - self.written
     }
 
     /// Queues one frame and drains what the descriptor will take right now.
@@ -3012,30 +3374,71 @@ impl ControlSink {
         } else {
             CONTROL_QUEUE_MAX - CONTROL_QUEUE_RESERVE
         };
-        if self.queue.len() + frame.len() > budget {
+        if self.broken || self.queued() + frame.len() > budget {
             self.dropped += 1;
             return false;
         }
-        self.queue.extend(frame.iter().copied());
-        self.flush_now();
+        self.frames.push_back(frame.to_vec());
+        self.poll();
         true
     }
 
-    /// Writes what fits without blocking. A full pipe leaves the rest queued.
-    fn flush_now(&mut self) {
-        while !self.queue.is_empty() {
-            let chunk = self.queue.as_slices().0.to_vec();
-            match self.file.write(&chunk) {
-                Ok(0) => break,
-                Ok(written) => {
-                    self.queue.drain(..written);
+    /// Writes what fits without blocking, resuming a partly written frame at
+    /// its offset. A full pipe leaves the rest queued. J4-R, N4: the
+    /// supervision loop calls this every iteration, so a frame queued behind
+    /// a full pipe goes out as soon as the reader makes room, not only when
+    /// the next message happens to be sent.
+    pub fn poll(&mut self) {
+        while let Some(front) = self.frames.front() {
+            if self.broken {
+                return;
+            }
+            match self.file.write(&front[self.written..]) {
+                Ok(0) => return,
+                Ok(count) => {
+                    self.written += count;
+                    if self.written == front.len() {
+                        self.frames.pop_front();
+                        self.written = 0;
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                // WouldBlock or a broken pipe: the supervisor keeps going. The
-                // control channel is reporting, not an approval protocol.
-                Err(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                // A broken pipe: the reader is gone and nothing queued can
+                // reach it. The control channel is reporting, not an approval
+                // protocol; the supervisor keeps going.
+                Err(_) => self.broken = true,
             }
         }
+    }
+
+    /// J4-R, N4: the final drain. Keeps writing while the reader makes
+    /// progress, gives up after `no_progress` without any, and counts every
+    /// frame that never fully reached the descriptor (a partly written one
+    /// included: the reader has a truncated frame, not a message) as dropped.
+    /// Returns the total dropped. It never waits longer than `no_progress`
+    /// past the reader's last progress.
+    pub fn finish(&mut self, no_progress: Duration) -> u64 {
+        let mut last_progress = Instant::now();
+        let mut remaining = self.queued();
+        loop {
+            self.poll();
+            if self.frames.is_empty() || self.broken {
+                break;
+            }
+            let now_remaining = self.queued();
+            if now_remaining < remaining {
+                remaining = now_remaining;
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= no_progress {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.dropped += self.frames.len() as u64;
+        self.frames.clear();
+        self.written = 0;
+        self.dropped
     }
 
     /// Messages that never reached the descriptor.
@@ -3056,7 +3459,9 @@ fn open_control(args: &RunArgs) -> Result<Option<ControlSink>, JailError> {
     crate::trace::set_nonblocking(fd)?;
     Ok(Some(ControlSink {
         file,
-        queue: std::collections::VecDeque::new(),
+        frames: std::collections::VecDeque::new(),
+        written: 0,
+        broken: false,
         dropped: 0,
         seq: 0,
     }))
@@ -3112,15 +3517,18 @@ fn send_control(
     let digest = serde_json::to_vec(receipt)
         .map(|bytes| crate::canonical::sha256_prefixed(&bytes))
         .unwrap_or_else(|_| "sha256:".to_owned());
+    // J4-R: the message states what the acknowledged receipt says, which
+    // for a receipt persisted by the worker is not what the record says now.
+    let _ = record;
     let message = ControlMessage {
         schema: crate::records::SCHEMA_CONTROL.to_owned(),
-        attempt_id: record.attempt_id.clone(),
+        attempt_id: receipt.attempt_id.clone(),
         seq: control.next_seq(),
         kind,
         receipt_phase: phase,
         receipt_digest: digest,
-        outcome: record.outcome.clone(),
-        error: record.outcome.error.clone(),
+        outcome: receipt.outcome.clone(),
+        error: receipt.outcome.error.clone(),
     };
     let terminal = matches!(
         kind,
