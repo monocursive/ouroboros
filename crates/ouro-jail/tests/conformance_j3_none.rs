@@ -474,8 +474,7 @@ fn r06_a_target_that_leaves_the_leaf_while_live_is_never_settled() {
             .target([PYTHON, "-c", &code])
             .spawn()
             .expect("the jail starts");
-        wait_for("the target to move", || moved.exists());
-        let target: i32 = std::fs::read_to_string(&moved).unwrap().parse().unwrap();
+        let target = written_pid("the target to move", &moved);
         let enforced = receipt_in_phase(&spawned, "enforced");
         let (leaf, inode) = leaf_of(&enforced);
         // The registered boundary is empty and the target is alive.
@@ -695,8 +694,7 @@ fn r06_a_replaced_leaf_loses_integrity_and_is_never_touched() {
         .target([PYTHON, "-c", &code])
         .spawn()
         .expect("the jail starts");
-    wait_for("the leaf to be replaced", || replaced.exists());
-    let target: i32 = std::fs::read_to_string(&replaced).unwrap().parse().unwrap();
+    let target = written_pid("the leaf to be replaced", &replaced);
     let (leaf, inode) = leaf_of(&receipt_in_phase(&spawned, "enforced"));
     assert_ne!(std::fs::metadata(&leaf).unwrap().ino(), inode);
     assert!(
@@ -1745,4 +1743,20 @@ impl Drop for ChildMade {
             let _ = std::fs::remove_dir(&self.path);
         }
     }
+}
+
+/// The pid a fixture wrote to `path`, once the whole number is there.
+///
+/// Python's `open(p, 'w').write(s)` creates the file before it writes, so a
+/// test that only waits for the file to exist can read it empty on a busy
+/// host (seen once on the reference host, 2026-09-23).
+fn written_pid(what: &str, path: &std::path::Path) -> i32 {
+    let mut pid = None;
+    wait_for(what, || {
+        pid = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        pid.is_some()
+    });
+    pid.expect("wait_for returns only once the pid parsed")
 }
