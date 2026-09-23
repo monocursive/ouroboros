@@ -898,6 +898,36 @@ fn a_connect_fails_closed_when_the_mediator_stops() {
     );
 }
 
+/// J3 agent: `stop()` is bounded however the pool was woken. RECV ignores
+/// `O_NONBLOCK`, so a worker that lost the race for a notification used to
+/// sleep inside it where the stop pipe could not reach it, and joining it
+/// hung (measured: this binary hung in the test above). Attempted: bursts of
+/// concurrent mediated connects, which wake several workers per
+/// notification, then `stop()` on its own thread. Verdict: every connect is
+/// answered, and `stop()` returns within a few seconds every time.
+#[test]
+fn stop_returns_after_bursts_of_concurrent_connects() {
+    if !common::live() {
+        return;
+    }
+    for round in 0..5 {
+        let mut rig = start_rig().expect("rig");
+        for _ in 0..8 {
+            assert_eq!(rig.run_raw("F 16"), "done 16", "round {round}");
+        }
+        let mediator = rig._mediator.take().expect("a mediator");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            mediator.stop();
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "round {round}: stop() did not return: a worker is stuck in NOTIF_RECV"
+        );
+    }
+}
+
 /// Review fix 1: the filter is safe on its own — a connect issued through a
 /// non-native ABI (x32, and i386 int-0x80 where the kernel offers it) is
 /// refused, never allowed through unmediated. `EPERM` is the filter's denial;

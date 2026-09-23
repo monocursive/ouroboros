@@ -276,6 +276,18 @@ struct Workers {
     sink: Arc<dyn MediationSink>,
     // J3-agent begin
     authorized: Option<(u64, u64)>,
+    /// Held while a worker checks for a pending notification and receives
+    /// it. `SECCOMP_IOCTL_NOTIF_RECV` ignores `O_NONBLOCK`: with nothing
+    /// pending it waits for the next request, so a worker woken by `poll`
+    /// together with others, that lost the race for the one notification,
+    /// would sleep inside RECV where the stop pipe cannot reach it, and
+    /// `stop()` would wait for it for ever (measured on the reference host:
+    /// a live test hung joining `ouro-unixpeer-1`). Under this lock a worker
+    /// receives only after a zero-timeout `poll` shows a notification still
+    /// pending, and only lock holders receive, so RECV finds it (or `ENOENT`
+    /// if its task died meanwhile) and never waits. The slow part of a
+    /// mediation runs outside the lock.
+    recv: std::sync::Mutex<()>,
     // J3-agent end
     // Kept alive so the stop pipe read end outlives every worker.
     _stop_r_owned: OwnedFd,
@@ -315,6 +327,7 @@ pub fn spawn(authority: PeerAuthority, sink: Arc<dyn MediationSink>) -> io::Resu
         sockdiag: std::sync::Mutex::new(sockdiag),
         sink,
         authorized,
+        recv: std::sync::Mutex::new(()),
         _stop_r_owned: stop_r,
     });
     let mut joins = Vec::with_capacity(WORKERS);
@@ -375,7 +388,23 @@ fn worker_loop(w: &Workers) {
 fn service_one(w: &Workers) -> io::Result<()> {
     let listener = w.listener;
     let sink = w.sink.as_ref();
-    let notif = match notif_recv(listener) {
+    // J3-agent begin: receive only what is still pending (see `Workers::recv`)
+    let received = {
+        let _guard = w
+            .recv
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending(listener) {
+            Some(notif_recv(listener))
+        } else {
+            None
+        }
+    };
+    let Some(received) = received else {
+        return Ok(());
+    };
+    // J3-agent end
+    let notif = match received {
         Ok(n) => n,
         // A stale notification (the task went away) or a spurious poll wakeup on
         // the non-blocking listener is not fatal: skip and return to poll, where
@@ -683,6 +712,22 @@ fn notif_recv(listener: RawFd) -> io::Result<libc::seccomp_notif> {
     }
     Ok(n)
 }
+
+// J3-agent begin: a notification is pending on the listener right now
+/// Whether a notification is waiting to be received, by a `poll` that does
+/// not wait. A closed or broken listener counts as pending, so the caller's
+/// RECV reports the failure instead of this hiding it.
+fn pending(listener: RawFd) -> bool {
+    let mut pfd = libc::pollfd {
+        fd: listener,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one live pollfd; a zero timeout never waits.
+    let rc = unsafe { libc::poll(&raw mut pfd, 1, 0) };
+    rc > 0 && pfd.revents != 0
+}
+// J3-agent end
 
 fn notif_id_valid(listener: RawFd, id: u64) -> bool {
     let mut id = id;
