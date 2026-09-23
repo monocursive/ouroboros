@@ -179,10 +179,10 @@ pub fn closed_set_table() -> String {
     );
     out.push_str(
         "\nper profile\n\
-         tool, build  the baseline refuses other ABIs, x32, a notification listener and\n\
-         \x20            clone(CLONE_UNTRACED) with EPERM and clone3 with ENOSYS before this\n\
-         \x20            filter runs (ERRNO outranks TRACE); AF_UNIX sockets are refused, so\n\
-         \x20            connect is AF_INET or AF_INET6\n\
+         tool, build  the baseline answers other ABIs, x32, a notification listener and\n\
+         \x20            clone(CLONE_UNTRACED) with EPERM and clone3 with ENOSYS; ERRNO\n\
+         \x20            outranks TRACE, so none of these ever stops here; AF_UNIX sockets\n\
+         \x20            are refused, so connect is AF_INET or AF_INET6\n\
          agent        the same baseline refusals except the listener, which the jail's\n\
          \x20            own mediation listener makes fail with EBUSY; connect is mediated\n\
          \x20            (USER_NOTIF outranks TRACE) and its result carries\n\

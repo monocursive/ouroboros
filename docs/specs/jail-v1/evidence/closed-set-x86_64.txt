@@ -49,10 +49,10 @@ descriptor-based mutation, io_uring, payloads and file contents; a read-only
 open is outside the set (no event, not a loss)
 
 per profile
-tool, build  the baseline refuses other ABIs, x32, a notification listener and
-             clone(CLONE_UNTRACED) with EPERM and clone3 with ENOSYS before this
-             filter runs (ERRNO outranks TRACE); AF_UNIX sockets are refused, so
-             connect is AF_INET or AF_INET6
+tool, build  the baseline answers other ABIs, x32, a notification listener and
+             clone(CLONE_UNTRACED) with EPERM and clone3 with ENOSYS; ERRNO
+             outranks TRACE, so none of these ever stops here; AF_UNIX sockets
+             are refused, so connect is AF_INET or AF_INET6
 agent        the same baseline refusals except the listener, which the jail's
              own mediation listener makes fail with EBUSY; connect is mediated
              (USER_NOTIF outranks TRACE) and its result carries

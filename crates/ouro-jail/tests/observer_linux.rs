@@ -2106,7 +2106,7 @@ fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
 
     assert_eq!(
         reports.len(),
-        27,
+        31,
         "the fixture still runs: the bound is ours, not the tracee's"
     );
     assert!(
@@ -2115,7 +2115,7 @@ fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
     );
     assert_eq!(observed.summary.ops.total(), 0);
     assert!(
-        observed.summary.loss.inflight_rejected >= 26,
+        observed.summary.loss.inflight_rejected >= 30,
         "every closed-set entry was refused: {}",
         observed.summary.loss.inflight_rejected
     );
