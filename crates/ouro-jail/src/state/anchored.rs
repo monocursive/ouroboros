@@ -95,6 +95,8 @@ pub struct Stat {
     pub mode: u32,
     /// Owner.
     pub uid: u32,
+    /// Owning group.
+    pub gid: u32,
     /// Hard-link count.
     pub nlink: u64,
     /// Size in bytes.
@@ -159,6 +161,7 @@ fn stat_from(stat: &libc::stat) -> Stat {
         kind: Kind::from_mode(mode),
         mode: mode & 0o7777,
         uid: stat.st_uid,
+        gid: stat.st_gid,
         nlink: wide_u64(stat.st_nlink),
         size: u64::try_from(stat.st_size).unwrap_or(0),
         mtime: (wide_i64(stat.st_mtime), wide_i64(stat.st_mtime_nsec)),

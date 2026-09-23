@@ -1767,6 +1767,75 @@ print(json.dumps({"abstract": a.recv(1).decode()}))
 /// refused by identity (the node at the path is not the pinned one), the
 /// rogue listener never sees a connection, and the replaced directory is
 /// retained and reported rather than emptied by name.
+/// A multi-threaded runtime connects from worker threads, and
+/// `seccomp_notif.pid` then names a thread that is not its group's leader. The
+/// mediator must resolve that thread rather than refuse it as gone (found
+/// running OpenCode, a Bun program, under `agent` on 2026-09-23: every
+/// connect failed ESRCH and the agent hung). From worker threads: an attempt
+/// listener is reached, a host socket is refused EACCES (never ESRCH), and the
+/// bridge is reached over TCP.
+#[test]
+fn n05_connects_from_worker_threads_are_mediated_like_any_other() {
+    if !common::live() {
+        return;
+    }
+    let c = case("agent");
+    let host_path = c.workspace.join("host.sock");
+    let host = UnixProbe::bind(&host_path).unwrap();
+    const SCRIPT: &str = r#"
+import errno, json, socket, sys, threading
+out = {}
+def attempt(sock_type):
+    path = "/tmp/worker-%d.sock" % sock_type
+    srv = socket.socket(socket.AF_UNIX, sock_type)
+    srv.bind(path)
+    srv.listen(1)
+    return connect(socket.socket(socket.AF_UNIX, sock_type), path)
+def connect(sock, address):
+    try:
+        sock.connect(address)
+        return "ok"
+    except OSError as error:
+        return errno.errorcode.get(error.errno, str(error.errno))
+cases = {
+    "attempt_stream": lambda: attempt(socket.SOCK_STREAM),
+    "attempt_seqpacket": lambda: attempt(socket.SOCK_SEQPACKET),
+    "host": lambda: connect(socket.socket(socket.AF_UNIX), sys.argv[1]),
+    "bridge": lambda: connect(socket.socket(), ("127.0.0.1", 3128)),
+}
+for name, case in cases.items():
+    worker = threading.Thread(target=lambda: out.__setitem__(name, case()))
+    worker.start()
+    worker.join()
+out["main_thread_is_leader"] = threading.main_thread() is threading.current_thread()
+print(json.dumps(out))
+"#;
+    let run = c
+        .jail
+        .target(py(SCRIPT, &[host_path.to_str().unwrap()]))
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let out = py_out(&run);
+    assert_eq!(out["attempt_stream"], "ok", "{out}");
+    assert_eq!(out["attempt_seqpacket"], "ok", "{out}");
+    assert_eq!(out["host"], "EACCES", "{out}");
+    assert_eq!(out["bridge"], "ok", "{out}");
+    assert_eq!(
+        host.stop(),
+        0,
+        "the host socket was reached from a worker thread"
+    );
+    let denied: Vec<&Value> = mediated(&run)
+        .into_iter()
+        .filter(|event| event["outcome"]["errno"] == "ESRCH")
+        .collect();
+    assert!(
+        denied.is_empty(),
+        "a worker-thread connect was refused as gone: {denied:#?}"
+    );
+}
+
 #[test]
 fn n05_a_proxy_replaced_before_the_first_connect_is_never_reached() {
     if !common::live() {

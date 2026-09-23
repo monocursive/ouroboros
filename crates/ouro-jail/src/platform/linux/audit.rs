@@ -41,8 +41,7 @@ enum PathClass {
 }
 
 // J3-agent begin: one mediated connect, as the audit writer needs it
-/// One `connect` the unix-peer mediator decided, with the result the child
-/// received.
+/// One `connect` whose mediated response the kernel accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediatedConnect {
     /// The connecting thread.
@@ -53,7 +52,7 @@ pub struct MediatedConnect {
     pub family: Option<u16>,
     /// Whether the whole address was read.
     pub address_complete: bool,
-    /// The value the child's `connect` returned: 0 or `-errno`.
+    /// The value accepted as the child's `connect` response: 0 or `-errno`.
     pub ret: i64,
     /// The mediator's safe reason code.
     pub reason: &'static str,
@@ -268,7 +267,7 @@ impl AuditWriter {
     /// outranks the observer's `SECCOMP_RET_TRACE` — so for `agent` the
     /// mediator is the witness of every native `connect` in the attempt's
     /// tree, and this is the audit source's `net.connect` result for it, with
-    /// the return value the child's `connect` actually got. It follows the
+    /// the return value the kernel accepted for the child's `connect`. It follows the
     /// closed set's classification exactly: an `EACCES`/`EPERM` result is one
     /// `fs.deny` with `attempted_operation = net.connect`, counted under
     /// `fs.deny` only. `fields.observation` says which mechanism saw it; the
@@ -350,6 +349,21 @@ impl AuditWriter {
         let mut ops = OpSet::EMPTY;
         ops.insert(ClosedOp::Connect);
         self.record_gap(GapReason::QueueFull, ops, from_ns, to_ns, Some(lost));
+    }
+
+    /// A mediated result that was decided but whose seccomp response the
+    /// kernel did not accept. No child syscall return is established, so this
+    /// is a gap in both possible connect-result classes, not an audit result.
+    pub fn record_mediation_response_loss(&mut self, at_ns: u64) {
+        let mut ops = OpSet::EMPTY;
+        ops.insert(ClosedOp::Connect);
+        self.record_gap(
+            GapReason::MediationResponseUndelivered,
+            ops,
+            at_ns,
+            at_ns,
+            Some(1),
+        );
     }
     // J3-agent end
 
@@ -826,6 +840,25 @@ mod tests {
         assert_eq!(class_of("net.connect"), CoverageClass::Net);
         assert_eq!(class_of("fs.create"), CoverageClass::FsWrite);
         assert_eq!(class_of("proc.exit"), CoverageClass::Exec);
+    }
+
+    #[test]
+    fn an_undelivered_response_is_a_gap_without_a_syscall_result() {
+        let mut writer = writer();
+        writer.record_mediation_response_loss(17);
+        assert_eq!(writer.count(CoverageClass::Net), 0);
+        assert_eq!(writer.count(CoverageClass::FsDeny), 0);
+        assert_eq!(writer.gaps().len(), 1);
+        assert_eq!(writer.gaps()[0].reason, "mediation_response_undelivered");
+        assert_eq!(writer.gaps()[0].lost_count, Some(1));
+        let summary = writer.summary(&TracerSummary::default(), true);
+        for class in [CoverageClass::Net, CoverageClass::FsDeny] {
+            assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
+            assert_eq!(summary.classes[&class].observed_count, None);
+        }
+        for class in [CoverageClass::Exec, CoverageClass::FsWrite] {
+            assert_eq!(summary.classes[&class].status, SourceStatus::Active);
+        }
     }
 
     #[test]

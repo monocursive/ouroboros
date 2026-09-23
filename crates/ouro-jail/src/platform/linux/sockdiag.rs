@@ -143,6 +143,12 @@ pub fn parse_dump(buf: &[u8], expect_seq: u32, out: &mut Vec<Entry>) -> io::Resu
         match ty {
             NLMSG_DONE => return Ok(true),
             NLMSG_ERROR => {
+                if len < 20 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sock_diag: truncated netlink error",
+                    ));
+                }
                 let err = i32::from_ne_bytes(buf[off + 16..off + 20].try_into().unwrap());
                 if err == 0 {
                     return Ok(true); // an ACK, treated as a clean end
@@ -533,6 +539,18 @@ mod tests {
         let mut out = Vec::new();
         let err = parse_dump(&msg, 3, &mut out).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn a_short_nlmsg_error_is_rejected_without_panicking() {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&16u32.to_ne_bytes());
+        msg.extend_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        msg.extend_from_slice(&0u16.to_ne_bytes());
+        msg.extend_from_slice(&3u32.to_ne_bytes());
+        msg.extend_from_slice(&0u32.to_ne_bytes());
+        let err = parse_dump(&msg, 3, &mut Vec::new()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

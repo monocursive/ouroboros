@@ -520,7 +520,13 @@ impl AgentNet {
     ) -> Option<String> {
         let mut loss = None;
         while let Ok(record) = self.records.try_recv() {
-            self.account(audit, observe_on, &record);
+            if self.account(audit, observe_on, &record) {
+                loss.get_or_insert_with(|| {
+                    "the unix-peer mediator could not deliver a connect response, so the \
+                     child's syscall result is unknown"
+                        .to_owned()
+                });
+            }
         }
         self.drain_bridge_report();
         let dropped = self.queue.dropped.load(Ordering::SeqCst);
@@ -576,7 +582,13 @@ impl AgentNet {
         }
     }
 
-    fn account(&mut self, audit: &mut AuditWriter, observe_on: bool, record: &MediationRecord) {
+    /// Whether this record lost a target result and strict observation must stop.
+    fn account(
+        &mut self,
+        audit: &mut AuditWriter,
+        observe_on: bool,
+        record: &MediationRecord,
+    ) -> bool {
         // A helper's connect (the bridge reaching the proxy) is the jail's
         // own plumbing, not a target operation (§11.1: "Setup helpers are
         // tagged as helpers, not attributed as user target operations"). The
@@ -590,15 +602,21 @@ impl AgentNet {
             .is_some_and(|bridge| is_bridge(record, bridge.pid, bridge.start_ticks));
         if helper {
             self.helper_connects += 1;
-            return;
+            return false;
         }
         if !observe_on {
             // §11.4: `--observe off` emits no audit source.
-            return;
+            return false;
         }
         let ret = match record.verdict {
             Verdict::Allowed => 0,
             Verdict::Denied(errno) => -i64::from(errno),
+            Verdict::Undelivered => {
+                let now =
+                    u64::try_from(crate::platform::elapsed_since_start_ns()).unwrap_or(u64::MAX);
+                audit.record_mediation_response_loss(now);
+                return true;
+            }
         };
         audit.record_mediated_connect(&MediatedConnect {
             tid: record.pid,
@@ -608,6 +626,7 @@ impl AgentNet {
             ret,
             reason: record.reason,
         });
+        false
     }
 
     fn helper_note(&self, helper: &str, transition: &str) {
