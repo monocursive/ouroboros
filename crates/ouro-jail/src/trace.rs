@@ -805,6 +805,11 @@ mod tests {
         assert_eq!(LOCAL_CAP, 64 * 1024 * 1024);
         assert_eq!(LOCAL_RESERVE, 256 * 1024);
         assert_eq!(EXTERNAL_QUEUE_MAX, 4 * 1024 * 1024);
+        assert_eq!(
+            EXTERNAL_RESERVE, LOCAL_RESERVE as usize,
+            "the external reserve mirrors the local one"
+        );
+        assert_eq!(TRACE_CAP_SEAM_MIN, 4096);
         assert_eq!(EXTERNAL_NO_PROGRESS, Duration::from_secs(1));
         assert_eq!(EVENT_MAX, 64 * 1024);
         assert_eq!(
