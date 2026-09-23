@@ -882,6 +882,7 @@ mod d5 {
     fn evidence_lost() -> RunEvent {
         RunEvent::EvidenceLost {
             reason: "the simulated tracer queue overflowed".into(),
+            after_target_end: false,
         }
     }
 

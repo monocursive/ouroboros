@@ -1328,52 +1328,88 @@ fn j4_r04_ptrace_loss_best_effort_none() {
 /// after the observer let it run, so whether it had its effect is unknown
 /// (for an `O_CREAT` open it may well have); the result is not invented and
 /// its classes are degraded. Here a background child's thread is parked in
-/// `openat(FIFO)` when the target exits. (Whether the jail also reports this
-/// as an `evidence_lost` error depends today on when the supervisor reads it
-/// — see the J4 slice L report — so only the coverage is asserted.)
-fn teardown_loss(profile: &str) {
+/// `openat(FIFO)` when the target exits.
+///
+/// J4 wave 2 (R-1, R-2): the loss is always an `evidence_lost` error and the
+/// jail exits 1, whenever the supervisor reads it — in the run loop, while
+/// it verifies the tree, or only from the observer's final account (slice L
+/// measured exit 0 with `errors: []` in 11 of 12 runs, and otherwise
+/// `outcome.cause: evidence_loss` beside `exited 0`). The loss came after
+/// the target's own end, so it is never the cause: the outcome is the
+/// target's exit 0 with a null cause, under strict evidence as under
+/// best-effort.
+fn teardown_loss(profile: &str, evidence: &str) {
     let _serial = serial();
     if !live(profile) {
         return;
     }
-    let Some(c) = case(profile, "strict") else {
+    let Some(c) = case(profile, evidence) else {
         return;
     };
+    let label = format!("{profile}/{evidence}");
     let argv = c.argv("bg-park", &[&c.fifo]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
     let settled = receipt(&run, "settled");
-    assert_eq!(line(&out, "parked").raw, 0, "{profile}: {out:#?}");
-    assert_eq!(settled["outcome"]["kind"], "exited", "{profile}");
-    assert_eq!(settled["outcome"]["code"], 0, "{profile}");
-    assert_eq!(settled["lifetime"]["tree_empty"], true, "{profile}: X07");
+    assert_eq!(line(&out, "parked").raw, 0, "{label}: {out:#?}");
+    assert_eq!(settled["outcome"]["kind"], "exited", "{label}");
+    assert_eq!(settled["outcome"]["code"], 0, "{label}");
+    assert_eq!(settled["lifetime"]["tree_empty"], true, "{label}: X07");
     for class in ["fs.write", "fs.deny"] {
         let gap = assert_degraded(&settled, class, "entry_abandoned");
-        assert_eq!(gap["lost_count"], 1, "{profile}: {gap:#}");
+        assert_eq!(gap["lost_count"], 1, "{label}: {gap:#}");
     }
     // The target's exec and exit; the child never execs.
     assert_active(&settled, "exec", 2);
     assert_active(&settled, "net", 0);
-    assert_eq!(gap_notes(&run, "entry_abandoned").len(), 1, "{profile}");
+    assert_eq!(gap_notes(&run, "entry_abandoned").len(), 1, "{label}");
     assert!(
         results_on(&run, "fifo").is_empty(),
-        "{profile}: no result for the interrupted open"
+        "{label}: no result for the interrupted open"
     );
-    println!(
-        "{profile}: exit {:?}, errors {:?}",
+    // R-1: reported, whatever its timing.
+    let losses = error_codes(&settled)
+        .iter()
+        .filter(|code| *code == "evidence_lost")
+        .count();
+    assert_eq!(
+        losses, 1,
+        "{label}: one evidence_lost error: {:#}",
+        settled["errors"]
+    );
+    assert_eq!(
         run.code(),
-        error_codes(&settled)
+        Some(1),
+        "{label}: a degraded class at settlement exits 1: stderr {}",
+        run.stderr_text()
+    );
+    // R-2: after the target's own end, so never its cause.
+    assert_eq!(
+        settled["outcome"]["cause"],
+        Value::Null,
+        "{label}: {:#}",
+        settled["outcome"]
     );
 }
 
 #[test]
 fn j4_r04_a_call_in_flight_at_teardown_is_loss_tool() {
-    teardown_loss("tool");
+    teardown_loss("tool", "strict");
 }
 
 #[test]
 fn j4_r04_a_call_in_flight_at_teardown_is_loss_none() {
-    teardown_loss("none");
+    teardown_loss("none", "strict");
+}
+
+#[test]
+fn j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool() {
+    teardown_loss("tool", "best-effort");
+}
+
+#[test]
+fn j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none() {
+    teardown_loss("none", "best-effort");
 }
 
 // ===========================================================================

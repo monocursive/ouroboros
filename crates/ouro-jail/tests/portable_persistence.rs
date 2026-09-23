@@ -1402,6 +1402,7 @@ fn j4_n4_a_queued_frame_reaches_a_returning_reader_while_the_run_goes_on() {
 fn lost(reason: &str) -> RunEvent {
     RunEvent::EvidenceLost {
         reason: reason.to_owned(),
+        after_target_end: false,
     }
 }
 

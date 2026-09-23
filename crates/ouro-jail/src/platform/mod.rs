@@ -232,6 +232,13 @@ pub enum RunEvent {
     EvidenceLost {
         /// A safe reason.
         reason: String,
+        // J4 W2-S begin: R-2
+        /// Whether the platform had already seen the target's own end when it
+        /// processed the loss. Such a loss is recorded, but the target's end
+        /// is not a stop the supervisor acted on, so the loss never becomes
+        /// `outcome.cause` (§6.4) and nothing is left to stop for it.
+        after_target_end: bool,
+        // J4 W2-S end
     },
     /// The facts needed are missing; never a fabricated outcome.
     Unknown {

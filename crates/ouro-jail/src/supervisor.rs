@@ -1287,6 +1287,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     let wall_deadline = wall_deadline(&plan);
     let mut outcome_error: Option<JailError> = None;
+    // J4 W2-S: R-1 — whether the platform reported an evidence loss while the
+    // loop ran; a class degraded at settlement without one is reported there.
+    let mut platform_loss_reported = false;
     // J4-R: §13.3 — receipts written while the target runs are persisted by
     // the worker while this loop keeps enforcing the wall, signals and
     // evidence; each is acknowledged only once it is durable, in order.
@@ -1467,7 +1470,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 }
                 running.request_stop(StopReason::WallExpiry);
             }
-            RunEvent::EvidenceLost { reason } => {
+            RunEvent::EvidenceLost {
+                reason,
+                after_target_end,
+            } => {
                 let error = JailError::new(
                     ErrorCode::EvidenceLost,
                     ErrorStage::Running,
@@ -1475,8 +1481,14 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     reason,
                 );
                 record.errors.push(error.to_object());
+                platform_loss_reported = true;
+                // J4 W2-S: R-2 — a loss after the target's own end is
+                // recorded (the error, and exit 1 below) but it is not a stop
+                // the supervisor acted on: the target's end already was the
+                // termination trigger (§9.3), so it never becomes the cause.
                 if plan.resolved.snapshot.observation.evidence
                     == crate::records::EvidenceMode::Strict
+                    && !after_target_end
                 {
                     // J4-D5: the first stop wins (see `WallExpired`).
                     record
@@ -1542,6 +1554,15 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     if let Some(summary) = running.observer_summary() {
         record.observer = summary.to_observer_record();
         record.coverage = summary.to_coverage();
+        // J4 W2-S: R-1 — a loss the platform queued while the tree was being
+        // verified, or found only when its observer stopped, never reached
+        // the loop. Any evidence class degraded at settlement is an
+        // `evidence_lost` error and exit 1, whatever the loss's timing; it
+        // is never a cause, because nothing was stopped for it.
+        if !platform_loss_reported && let Some(error) = settlement_loss(&summary) {
+            record.errors.push(error.to_object());
+            outcome_error.get_or_insert(error);
+        }
     }
     // J3-agent begin: what the helpers did, known now that they stopped
     if let Some(native) = record.lifetime.native.as_mut() {
@@ -1751,6 +1772,56 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         ..RunReport::default()
     })
 }
+
+// J4 W2-S begin: R-1
+/// The evidence classes: the audit classes and `proxy.net`, whose loss §11.4
+/// handles as evidence loss. (`limits` is the wrapper's own class.)
+const EVIDENCE_CLASSES: [crate::observer::CoverageClass; 5] = [
+    crate::observer::CoverageClass::Exec,
+    crate::observer::CoverageClass::FsWrite,
+    crate::observer::CoverageClass::FsDeny,
+    crate::observer::CoverageClass::Net,
+    crate::observer::CoverageClass::ProxyNet,
+];
+
+/// The `evidence_lost` error for the evidence classes the observer's final
+/// account leaves degraded, or `None` when none is.
+fn settlement_loss(summary: &crate::observer::CoverageSummary) -> Option<JailError> {
+    let mut classes = Vec::new();
+    let mut reasons: Vec<&str> = Vec::new();
+    for class in EVIDENCE_CLASSES {
+        let Some(entry) = summary.classes.get(&class) else {
+            continue;
+        };
+        if entry.status != crate::records::SourceStatus::Degraded {
+            continue;
+        }
+        classes.push(class.as_str());
+        for gap in &entry.gaps {
+            if !reasons.contains(&gap.reason.as_str()) {
+                reasons.push(gap.reason.as_str());
+            }
+        }
+    }
+    if classes.is_empty() {
+        return None;
+    }
+    Some(JailError::new(
+        ErrorCode::EvidenceLost,
+        ErrorStage::Reconciling,
+        Remediation::InspectState,
+        format!(
+            "coverage was lost by settlement in {} ({}); the loss reached no run event",
+            classes.join(", "),
+            if reasons.is_empty() {
+                "no gap named".to_owned()
+            } else {
+                reasons.join(", ")
+            }
+        ),
+    ))
+}
+// J4 W2-S end
 
 fn wall_deadline(plan: &Plan) -> Option<Instant> {
     plan.resolved
