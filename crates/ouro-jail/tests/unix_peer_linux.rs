@@ -385,6 +385,11 @@ fn build() -> Result<&'static (PathBuf, PathBuf), String> {
 /// One running sandbox: the launcher inside bwrap and the mediator in-process.
 struct Rig {
     coord: RawFd,
+    // bwrap's --info-fd read end, held open for bwrap's lifetime: bwrap keeps
+    // writing its info JSON after the child pid, and closing the read end
+    // early made those writes fail EPIPE and bwrap exit 1 before the launcher
+    // connected (the unix_peer_linux flake).
+    _info: OwnedFd,
     _coord_listener: OwnedFd,
     _host_listeners: Vec<OwnedFd>,
     child: libc::pid_t,
@@ -417,6 +422,28 @@ impl Rig {
 
     fn verdicts(&self) -> Vec<Verdict> {
         self.sink.drain().into_iter().map(|r| r.verdict).collect()
+    }
+}
+
+/// SIGKILLs and reaps a forked child on drop unless disarmed.
+struct KillOnDrop(Option<libc::pid_t>);
+
+impl KillOnDrop {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: pid is the bwrap child this test forked and has not reaped.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                let mut st = 0;
+                libc::waitpid(pid, &raw mut st, 0);
+            }
+        }
     }
 }
 
@@ -550,12 +577,16 @@ fn start_rig() -> Option<Rig> {
     // SAFETY: closing the write end we own in the parent.
     unsafe { libc::close(info_w) };
 
-    let init_pid = read_child_pid(info_r);
-    // SAFETY: closing the read end we own.
-    unsafe { libc::close(info_r) };
+    // Kill and reap bwrap if anything below panics before the Rig (whose
+    // Drop does the orderly shutdown) exists; otherwise a failed setup leaves
+    // bwrap and its sandbox running with the helper waiting for "GO".
+    let mut setup_guard = KillOnDrop(Some(child));
+    // SAFETY: info_r is the pipe read end we own; nothing else closes it.
+    let info = unsafe { OwnedFd::from_raw_fd(info_r) };
+    let init_pid = read_child_pid(info.as_raw_fd());
 
     // Accept the launcher's coordination connection.
-    accept_with_timeout(coord_listener.as_raw_fd(), child);
+    accept_with_timeout(coord_listener.as_raw_fd(), &mut setup_guard);
     // SAFETY: accept on a listening socket we own; readiness confirmed above.
     let coord = unsafe {
         libc::accept(
@@ -592,9 +623,11 @@ fn start_rig() -> Option<Rig> {
     let sink = Arc::new(CollectingSink::default());
     let mediator = spawn(authority, sink.clone() as Arc<_>).expect("spawn mediator");
     send(coord, "GO");
+    setup_guard.disarm();
 
     Some(Rig {
         coord,
+        _info: info,
         _coord_listener: coord_listener,
         _host_listeners: host_listeners,
         child,
@@ -670,7 +703,8 @@ fn bwrap_args(
 
 /// Poll for the coord connection, and if bwrap dies first, reap it and report
 /// its status so a startup failure is a clear panic, not an accept() hang.
-fn accept_with_timeout(listener: RawFd, child: libc::pid_t) {
+fn accept_with_timeout(listener: RawFd, guard: &mut KillOnDrop) {
+    let child = guard.0.expect("armed guard");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let mut pfd = libc::pollfd {
@@ -687,6 +721,8 @@ fn accept_with_timeout(listener: RawFd, child: libc::pid_t) {
         // SAFETY: waitpid on the child we started, non-blocking.
         let w = unsafe { libc::waitpid(child, &raw mut st, libc::WNOHANG) };
         if w == child {
+            // Reaped: the guard must not signal a pid that may be reused.
+            guard.0 = None;
             panic!(
                 "bwrap exited before the launcher connected (status {st:#x}); \
                  no coordination connection"
