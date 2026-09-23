@@ -914,7 +914,19 @@ fn j4_r03_the_trace_cap_seam_can_only_shrink() {
         local_bounds(Some(&LOCAL_CAP.to_string())),
         (LOCAL_CAP, LOCAL_RESERVE)
     );
-    for ignored in ["", "abc", "-1", "0", "4095", &(LOCAL_CAP + 1).to_string()] {
+    // Only plain decimal digits: a sign or a leading zero is not the
+    // canonical spelling the receipt's test_seams records it by.
+    for ignored in [
+        "",
+        "abc",
+        "-1",
+        "0",
+        "4095",
+        "+8192",
+        "08192",
+        " 8192",
+        &(LOCAL_CAP + 1).to_string(),
+    ] {
         assert_eq!(
             local_bounds(Some(ignored)),
             (LOCAL_CAP, LOCAL_RESERVE),
@@ -993,4 +1005,53 @@ fn j4_r03_a_consumer_past_its_deadline_gets_no_second_one_at_settlement() {
         "the frames still queued at settlement are counted as lost"
     );
     drop(reader);
+}
+
+/// Adversarial review (J4 wave 2): the terminal drain gave up with a frame
+/// half on the wire, cleared the queue and left the sink merely lost, so the
+/// gap note and the receipt note that settlement writes next (reserve
+/// priority) started right after the torn bytes: a corrupt stream, which
+/// §13.3 says no conforming writer produces. Frames above the pipe's atomic
+/// size make the partial write certain; the consumer is paused through the
+/// drain and resumes after it, as a slow ledger would.
+#[test]
+fn j4_r03_a_drain_that_gives_up_mid_frame_writes_nothing_after_it() {
+    use ouro_jail::trace::{TraceState, read_frames, shared};
+    use std::os::fd::AsRawFd as _;
+    let _serial = serial();
+    let (mut reader, sink) = pipe_sink();
+    let trace = shared(sink.with_bounds(4 * 1024 * 1024, Duration::from_millis(100)));
+    let big = "t".repeat(10_000);
+    for _ in 0..20 {
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&lifecycle(&big), Priority::Normal)
+            .expect("queued");
+    }
+    // The settlement sequence: the terminal drain with the consumer paused,
+    // the loop's poll, the terminal receipt note (reserve), a second drain.
+    trace.lock().unwrap().finish();
+    let mut received = read_available(&mut reader);
+    let _ = trace.lock().unwrap().poll();
+    let _ = trace
+        .lock()
+        .unwrap()
+        .write_event(&receipt_note(), Priority::Reserve);
+    received.extend(read_available(&mut reader));
+    trace.lock().unwrap().finish();
+    received.extend(read_available(&mut reader));
+    assert!(
+        trace.lock().unwrap().loss().is_some(),
+        "the drain gave up: a loss"
+    );
+    drop(trace);
+    let _ = reader.as_raw_fd();
+    let readback = read_frames(&received);
+    assert_ne!(
+        readback.state,
+        TraceState::Corrupt,
+        "bytes were written after a torn frame (bad line ends {:?})",
+        String::from_utf8_lossy(&readback.bad_line[readback.bad_line.len().saturating_sub(200)..])
+    );
 }

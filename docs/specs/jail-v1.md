@@ -1801,7 +1801,11 @@ or deadline expiry is evidence loss. The writer preserves unwritten offsets;
 it never retries a whole partially written JSON frame as a second event.
 Strict mode stops the tree; best-effort can continue with the sink marked lost.
 After any evidence loss a sink keeps a prefix: it refuses and counts ordinary
-events and accepts only reserve notes. The first loss writes one wrapper
+events and accepts only reserve notes (the gap and receipt notes, and at most
+one lifecycle note per `agent` helper, whose end can explain a stop). An
+external frame already partly written when the terminal drain gives up ends
+the stream: nothing is written after its torn bytes, so the consumer sees a
+visibly incomplete last line, never a corrupt one. The first loss writes one wrapper
 `coverage_gap` note (`trace_transport_loss`) with reserve priority, starting
 from the last point every accepted frame had been delivered. A local write that
 fails part-way is truncated back to the last frame boundary; if that fails,

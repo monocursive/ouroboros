@@ -9,7 +9,10 @@
 //! reason and counts every frame it could not deliver, and the caller decides
 //! what strict or best-effort evidence mode means. After a loss a sink keeps
 //! a prefix of the stream and accepts only reserve notes (the gap and receipt
-//! notes), so a reader never finds ordinary frames after a silent hole.
+//! notes, and the `agent` profile's helper lifecycle notes, at most one per
+//! helper, because a helper's end explains a stop), so a reader never finds
+//! ordinary frames after a silent hole. An external frame torn by a drain
+//! that gave up ends the stream: nothing is written after it.
 //!
 //! The external writer queues whole frames and resumes a partially written
 //! one at its own offset, never re-sending it as a second event. The local
@@ -239,11 +242,15 @@ pub const TRACE_CAP_SEAM_MIN: u64 = 4096;
 /// so the final gap and receipt notes still fit in a small cap.
 #[must_use]
 pub fn local_bounds(seam: Option<&str>) -> (u64, u64) {
-    seam.and_then(|text| text.parse::<u64>().ok())
-        .filter(|cap| (TRACE_CAP_SEAM_MIN..=LOCAL_CAP).contains(cap))
-        .map_or((LOCAL_CAP, LOCAL_RESERVE), |cap| {
-            (cap, LOCAL_RESERVE.min(cap / 2))
-        })
+    seam.filter(|text| {
+        // Plain decimal digits only, no sign and no leading zero.
+        !text.starts_with('0') && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+    })
+    .and_then(|text| text.parse::<u64>().ok())
+    .filter(|cap| (TRACE_CAP_SEAM_MIN..=LOCAL_CAP).contains(cap))
+    .map_or((LOCAL_CAP, LOCAL_RESERVE), |cap| {
+        (cap, LOCAL_RESERVE.min(cap / 2))
+    })
 }
 
 /// One bounded NDJSON trace sink.
@@ -641,8 +648,17 @@ impl FdSink {
         }
         if !self.frames.is_empty() {
             let undelivered = self.frames.len() as u64;
+            // A frame already partly on the wire cannot be finished later, and
+            // anything written after its torn bytes would join them on one
+            // line: a corrupt stream. Nothing more is written then, and the
+            // consumer sees a visibly incomplete last line. With no partial
+            // frame the stream still ends on a frame boundary, so the reserve
+            // notes may follow.
+            let torn = self.front_written > 0;
             self.clear_queue();
-            if self.state == FdState::Open {
+            if torn {
+                self.state = FdState::Broken;
+            } else if self.state == FdState::Open {
                 self.state = FdState::Lost;
             }
             let _ = self.lose(
