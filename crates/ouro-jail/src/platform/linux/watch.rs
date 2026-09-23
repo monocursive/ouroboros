@@ -5,7 +5,13 @@
 //! readiness can the bootstrap exec bubblewrap. The watcher inherits no stdio or
 //! policy/evidence descriptors and stays outside the execution cgroup. If the
 //! watcher dies, the live supervisor stops the boundary; if the supervisor dies,
-//! the watcher kills the backend even while bubblewrap has cleared PDEATHSIG.
+//! the watcher kills the whole execution cgroup through the leaf's
+//! `cgroup.kill`, then the backend through its pidfd.
+//!
+//! Killing only the backend is not enough (J4, measured 2026-09-23):
+//! bubblewrap's namespace init arms its own parent-death signal late in its
+//! startup and before that waits on an eventfd only the outer process writes,
+//! so an outer process killed in that window left the init alive on pid 1.
 
 use std::ffi::OsString;
 use std::io;
@@ -18,6 +24,9 @@ use std::time::Duration;
 use super::{clock::Deadline, exec, identity};
 
 pub const START_FD: i32 = 15;
+/// Where the watcher receives the leaf's `cgroup.kill`, when there is a leaf.
+pub const CGROUP_KILL_FD: i32 = 6;
+const CGROUP_KILL_ARG: &str = "--cgroup-kill-fd";
 
 pub struct Watcher {
     child: Child,
@@ -25,7 +34,15 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    pub fn start(exe: &Path, backend: i32, deadline: Deadline) -> io::Result<Self> {
+    /// `cgroup_kill` is the execution leaf's `cgroup.kill`
+    /// ([`super::cgroup::ExecutionCgroup::kill_handle`]); the backend must
+    /// already be placed in that leaf.
+    pub fn start(
+        exe: &Path,
+        backend: i32,
+        cgroup_kill: Option<OwnedFd>,
+        deadline: Deadline,
+    ) -> io::Result<Self> {
         let supervisor = identity::pidfd_open(unsafe { libc::getpid() })?;
         let backend = identity::pidfd_open(backend)?;
         let (ready_r, ready_w) = exec::pipe()?;
@@ -34,8 +51,12 @@ impl Watcher {
         fds.add(backend, 4)?;
         fds.add(ready_w, 5)?;
         let mut command = Command::new(exe);
+        command.arg("__watch");
+        if let Some(kill) = cgroup_kill {
+            fds.add(kill, CGROUP_KILL_FD)?;
+            command.arg(CGROUP_KILL_ARG).arg(CGROUP_KILL_FD.to_string());
+        }
         command
-            .arg("__watch")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -132,9 +153,21 @@ pub fn bootstrap_main(args: &[OsString]) -> ! {
     std::process::exit(125);
 }
 
-pub fn watcher_main() -> ! {
+pub fn watcher_main(args: &[OsString]) -> ! {
     // pidfd validity is checked by poll below; malformed direct invocations
     // refuse rather than busy-looping or signalling a numeric pid.
+    let cgroup_kill = match args {
+        [] => None,
+        [flag, fd]
+            if flag == CGROUP_KILL_ARG
+                && fd.to_str() == Some(&CGROUP_KILL_FD.to_string())
+                // SAFETY: F_GETFD on a descriptor number reads its flags only.
+                && unsafe { libc::fcntl(CGROUP_KILL_FD, libc::F_GETFD) } >= 0 =>
+        {
+            Some(CGROUP_KILL_FD)
+        }
+        _ => std::process::exit(125),
+    };
     let byte = 1u8;
     if unsafe { libc::write(5, (&raw const byte).cast(), 1) } != 1 {
         std::process::exit(125);
@@ -168,11 +201,27 @@ pub fn watcher_main() -> ! {
         {
             std::process::exit(125);
         }
-        if fds[1].revents & libc::POLLIN != 0 {
+        // A dead supervisor decides, whatever else happened. Its death also
+        // fires bubblewrap's own --die-with-parent, so the backend can end in
+        // the same instant; seeing that first and leaving would spare a
+        // namespace init that has not armed its own signal yet. The supervisor
+        // is re-read when only the backend's end was seen: a backend killed
+        // by the supervisor's death ends after it, so a supervisor that is
+        // still alive here is the normal end of a run it will settle itself.
+        if fds[0].revents & libc::POLLIN != 0 || (fds[1].revents & libc::POLLIN != 0 && readable(3))
+        {
+            // The whole leaf first: it also holds what the backend started,
+            // including a namespace init whose own parent-death signal is not
+            // armed yet. Then the backend, in case it never reached the leaf.
+            if let Some(fd) = cgroup_kill {
+                // SAFETY: a one-byte write from a live byte to an inherited
+                // descriptor; a failure leaves the pidfd kill below.
+                unsafe { libc::write(fd, b"1".as_ptr().cast(), 1) };
+            }
+            let _ = identity::pidfd_send_signal(4, libc::SIGKILL);
             std::process::exit(0);
         }
-        if fds[0].revents & libc::POLLIN != 0 {
-            let _ = identity::pidfd_send_signal(4, libc::SIGKILL);
+        if fds[1].revents & libc::POLLIN != 0 {
             std::process::exit(0);
         }
     }

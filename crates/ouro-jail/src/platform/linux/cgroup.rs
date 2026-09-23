@@ -564,6 +564,14 @@ impl ExecutionCgroup {
         self.write("cgroup.kill", "1")
     }
 
+    /// A write-only descriptor for this leaf's `cgroup.kill`, opened through
+    /// the pinned directory after an identity check, for the lifetime
+    /// watcher: if the supervisor dies it kills everything in the leaf
+    /// (§9.3), not only the backend it holds a pidfd for.
+    pub fn kill_handle(&self) -> io::Result<std::os::fd::OwnedFd> {
+        Ok(self.file("cgroup.kill", true)?.into())
+    }
+
     pub fn populated(&self) -> io::Result<bool> {
         match counter(&self.read("cgroup.events")?, "populated")? {
             0 => Ok(false),

@@ -957,14 +957,27 @@ impl Boundary {
             reap_until(&mut child, deadline);
             return Err(io(err));
         }
-        let watcher = match super::watch::Watcher::start(&exe, child.id() as i32, deadline) {
-            Ok(watcher) => watcher,
+        let cgroup_kill = match cgroup
+            .as_ref()
+            .map(ExecutionCgroup::kill_handle)
+            .transpose()
+        {
+            Ok(kill) => kill,
             Err(err) => {
                 let _ = child.kill();
                 reap_until(&mut child, deadline);
                 return Err(io(err));
             }
         };
+        let watcher =
+            match super::watch::Watcher::start(&exe, child.id() as i32, cgroup_kill, deadline) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    let _ = child.kill();
+                    reap_until(&mut child, deadline);
+                    return Err(io(err));
+                }
+            };
         if let Err(err) = write_all(start_w.as_raw_fd(), &[1]) {
             let _ = child.kill();
             reap_until(&mut child, deadline);

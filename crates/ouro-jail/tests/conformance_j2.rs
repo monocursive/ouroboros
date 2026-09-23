@@ -509,6 +509,7 @@ fn startup_supervisor_helper() {
     let watcher = watch::Watcher::start(
         &harness::jail_path(),
         backend.id() as i32,
+        None,
         Deadline::after(Duration::from_secs(5)),
     )
     .unwrap();

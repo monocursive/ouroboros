@@ -2,8 +2,8 @@
 
 Status: implementation specification, revision 14, 2026-09-23. No implementation
 or backend conformance is claimed by this document. Revision 14 records the
-first J4 fixes to records and observation (§§6.4, 9.2, 11.2, 11.4, 13.2, 14.2;
-canonicalization.md). Revision 13 opens J4 and
+first J4 fixes to records, observation and supervisor death (§§6.4, 9.2, 9.3,
+11.2, 11.4, 13.2, 14.2; canonicalization.md). Revision 13 opens J4 and
 resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
 the first real agent run required (§§6.2, 10, 12;
 [agent compatibility](jail-v1/agent-compatibility.md)). Revision 11 records what
@@ -1034,9 +1034,17 @@ leaves bubblewrap's outer process orphaned, holding the run's stdio open; the
 namespace and the target still die. J2 closes this window with a trusted blocked
 bootstrap and an outside watcher holding supervisor/backend pidfds. The bootstrap
 cannot exec bubblewrap until the watcher confirms readiness; supervisor death
-makes the watcher kill bubblewrap, and watcher death makes the supervisor stop
-the boundary. A synchronized fixture covers death before bootstrap release and
-after a backend clears its parent-death signal. A stdio consumer must not treat
+makes the watcher kill the execution cgroup (through the leaf's `cgroup.kill`,
+opened by the supervisor after the backend is placed in the leaf) and then
+bubblewrap, even when bubblewrap's own parent-death signal ended it in the same
+instant, and watcher death makes the supervisor stop the boundary. Killing
+only bubblewrap is not enough: its namespace init arms its own parent-death
+signal late in its startup and, before that, waits on an event only the outer
+process sends, so an outer process killed in that window left the init alive
+(measured 2026-09-23). A synchronized fixture covers death before bootstrap
+release and after a backend clears its parent-death signal; a stand-in fixture
+covers a leaf member that is not the backend. Every process `doctor` starts for
+a probe dies with `doctor` (§14.1). A stdio consumer must not treat
 EOF as the only sign that a run ended. Linux kills
 remaining namespace processes when its init dies; this is the mechanism behind
 the required parent-death test, not an assumption about process groups.
