@@ -1525,7 +1525,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 ));
             }
             RunEvent::WallExpired => {
-                record.outcome.cause = Some("wall_expiry".to_owned());
+                // J4-D5: the first stop wins, as it does in the platform's
+                // `request_stop`; an expiry during another stop's grace is
+                // recorded as the limit's hit, not as the cause.
+                record.outcome.cause.get_or_insert("wall_expiry".to_owned());
                 // §13.2: "Limits report hits in `applied.limits[].hit` with
                 // `outcome.cause`". The supervisor owns the wall deadline, so
                 // it is the source of this hit.
@@ -1550,7 +1553,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 if plan.resolved.snapshot.observation.evidence
                     == crate::records::EvidenceMode::Strict
                 {
-                    record.outcome.cause = Some("evidence_loss".to_owned());
+                    // J4-D5: the first stop wins (see `WallExpired`).
+                    record
+                        .outcome
+                        .cause
+                        .get_or_insert("evidence_loss".to_owned());
                     running.request_stop(StopReason::EvidenceLoss);
                 }
                 outcome_error = Some(error);

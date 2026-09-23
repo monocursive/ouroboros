@@ -6,6 +6,8 @@
 //! - D4 (§13.2): a receipt revision number is never reused, whichever step of
 //!   the replacement fails (canonical copy or `--receipt` copy; temporary
 //!   file, file sync, rename or directory sync).
+//! - D5 (§6.4, §13.2): the first stop cause wins; a later wall expiry or strict
+//!   evidence loss does not overwrite `outcome.cause`.
 //!
 //! Portable: the platform is simulated, the filesystem is real.
 
@@ -839,5 +841,93 @@ mod d4 {
             failures.extend(seen.verdict(label, after.revision, highest));
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D5: the first stop cause wins
+// ---------------------------------------------------------------------------
+
+mod d5 {
+    use super::*;
+
+    fn stopped_by(events: Vec<RunEvent>) -> (Value, Vec<StopReason>) {
+        let fixture = Fixture::new();
+        let script = Script {
+            events,
+            ..Script::default()
+        };
+        let stops = Arc::clone(&script.stops);
+        let report = fixture.run(
+            script,
+            &[
+                "--profile",
+                "none",
+                "--evidence",
+                "strict",
+                "--limit",
+                "wall=1h",
+            ],
+        );
+        let receipt = valid_receipt(&report);
+        assert_eq!(receipt["phase"], "settled", "{receipt:#}");
+        let stops = stops.lock().unwrap().clone();
+        (receipt, stops)
+    }
+
+    fn evidence_lost() -> RunEvent {
+        RunEvent::EvidenceLost {
+            reason: "the simulated tracer queue overflowed".into(),
+        }
+    }
+
+    #[test]
+    fn j4_d5_a_later_evidence_loss_does_not_replace_a_wall_expiry() {
+        let (receipt, stops) = stopped_by(vec![
+            RunEvent::ExecConfirmed,
+            RunEvent::WallExpired,
+            evidence_lost(),
+            RunEvent::TargetSignaled { signal: 15 },
+        ]);
+        assert_eq!(
+            stops.first(),
+            Some(&StopReason::WallExpiry),
+            "the stop the platform keeps"
+        );
+        assert_eq!(
+            receipt["outcome"]["cause"], "wall_expiry",
+            "the receipt must name the stop the platform acted on: {:#}",
+            receipt["outcome"]
+        );
+        // The later loss is still recorded, as an error rather than as the cause.
+        assert!(
+            receipt["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error["code"] == "evidence_lost"),
+            "{:#}",
+            receipt["errors"]
+        );
+    }
+
+    #[test]
+    fn j4_d5_a_later_wall_expiry_does_not_replace_an_evidence_loss() {
+        let (receipt, stops) = stopped_by(vec![
+            RunEvent::ExecConfirmed,
+            evidence_lost(),
+            RunEvent::WallExpired,
+            RunEvent::TargetSignaled { signal: 15 },
+        ]);
+        assert_eq!(
+            stops.first(),
+            Some(&StopReason::EvidenceLoss),
+            "the stop the platform keeps"
+        );
+        assert_eq!(
+            receipt["outcome"]["cause"], "evidence_loss",
+            "the receipt must name the stop the platform acted on: {:#}",
+            receipt["outcome"]
+        );
     }
 }
