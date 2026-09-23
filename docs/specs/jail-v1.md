@@ -1,7 +1,9 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 14, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 14 records the
+Status: implementation specification, revision 15, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 15 records J4's
+first wave: atomic records and persistence, GC reconciliation, and closed-set
+attribution (§§6.2, 6.4, 7, 8.2, 9.2, 11.2, 11.3, 13.2, 13.3, 14.2). Revision 14 records the
 first J4 fixes to records, observation, supervisor death and the trace (§§6.4,
 9.2, 9.3, 11.2, 11.4, 13.2, 13.3, 14.2; canonicalization.md). Revision 13 opens J4 and
 resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
@@ -550,9 +552,20 @@ Apply configuration in this order:
 3. Operator environment settings from a fixed documented allow-list:
    `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
    `OURO_JAIL_EVIDENCE`. No environment-derived path or host grants.
-   `OURO_JAIL_TEST_MEDIATION_QUEUE` is a test-only knob: it can only shrink
-   the unix-peer mediation record queue (1 to 4096), never widens authority,
-   leaves the policy digest unchanged, and is recorded in the receipt.
+   Every `OURO_JAIL_TEST_*` variable is a test-only knob: it can only shrink
+   a bound or end an attempt early, never widens authority, and leaves the
+   policy digest unchanged. At attempt start every such variable set is
+   recorded, name to value, in `jail-state.json` `test_seams` and in
+   `lifetime.native.details.test_seams` of every receipt that has native
+   details (a refusal before a boundary exists has none, so there only jail
+   state records them). The knobs: `OURO_JAIL_TEST_MEDIATION_QUEUE` (the
+   unix-peer mediation record queue, 1 to 4096), `OURO_JAIL_TEST_TRACE_CAP`
+   (the local trace cap, 4096 bytes to 64 MiB, half of it at most 256 KiB
+   reserve, and named in every loss it causes), `OURO_JAIL_TEST_ABORT_AT`
+   (`<site>:<point>` aborts at one named point, `temp_written`,
+   `temp_synced`, `renamed` or `dir_synced`, of the first write at one
+   persistence site) and `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
+   entry bound, reported in gc's `test_seams`).
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 
@@ -694,7 +707,9 @@ requested termination preserves the observed code/signal and records its cause.
 `outcome.cause` is the first stop reason the supervisor acted on; a later
 deadline, loss or signal is recorded (its limit's `hit`, `errors[]`) but does
 not replace it.
-A child exiting 125 is `outcome.kind=exited`, not `refused`.
+A child exiting 125 is `outcome.kind=exited`, not `refused`. A persistence
+failure (`state_write_failed`) before exec is a refusal (125); after exec it
+is a tool error (1).
 
 Inspection commands use 0 for success, 2 for invalid syntax/config, and 1 for
 an operational failure. `doctor` and `run --label-only` additionally use 125
@@ -741,16 +756,23 @@ Local attempts are not deduplicated operator requests.
 The supervisor holds `jail.lock` through settlement/cleanup. A future owner
 uses its own lease, not this lock. An existing attempt root is acceptable only
 with validated ownership/permissions and no previous jail state or jail-owned
-artifacts. Claim it with exclusive creation of `jail-state.json` while holding
-the lock. A prior jail claim, live or dead, refuses `attempt_exists`; the caller
+artifacts. Claim it while holding the lock: `jail-state.json` is written and
+synced under a temporary name and published by an exclusive link, so the claim
+is never visible incomplete. A prior jail claim, live or dead, refuses
+`attempt_exists`; the caller
 reconciles it rather than spawning again. Test concurrent claims and crashes
 after claim creation. The child cannot inherit the lock.
 Register resource ownership before populating credentials
 or launching helpers. State updates use create-new temporary file, write,
 file sync, atomic rename, and parent-directory sync. A successful rename alone
 is not a durable acknowledgment. Platform code defines and tests its sync
-guarantee. Failed/ambiguous persistence before exec refuses; after exec it
-stops the tree and leaves an incomplete receipt if necessary.
+guarantee. A failed write removes its temporary file; a crash can leave one
+(`.<name>.<id>.tmp`), which never replaced anything. Every durable write names
+its persistence site (review-resolutions revision 15 lists P1 to P13), where
+faults and crashes are injected in tests. Failed/ambiguous persistence before
+exec refuses (125, a refused receipt when one can still be written, and
+`refused` only once that receipt is durable); after exec it stops the tree and
+leaves an incomplete receipt if necessary.
 
 `--receipt PATH` is an additional atomically replaced receipt copy; canonical
 state stays under the attempt directory. The path must be outside every
@@ -861,8 +883,9 @@ which §8.1 counts as a pre-exec failure; once the target has executed, the
 terminal message is `settled` or `unsettled`. `unsettled` is the terminal
 message after exec when tree death could not be
 verified, and the receipt then keeps its last nonsettled phase with
-`tree_empty: null` and the `tree_unknown` error. Messages carry receipt phase/digest and safe outcome,
-never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or
+`tree_empty: null` and the `tree_unknown` error. A control message
+acknowledges only a receipt that is durable. Messages carry receipt
+phase/digest and safe outcome, never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or
 interactive approval protocol.
 
 ### 8.3 Fds, stdio and supervision
@@ -972,7 +995,13 @@ installs no such filter and retains the documented closed-set exclusions.
 Cover both legacy and modern mount interfaces and namespace flags in `clone`.
 Because seccomp cannot safely dereference `clone3`'s argument structure, the
 initial tool/build policy returns `ENOSYS` for `clone3` and tests the normal
-thread-creation fallback; it does not pretend to inspect that pointer. Deny
+thread-creation fallback; it does not pretend to inspect that pointer. Every
+contained baseline refuses `clone` with `CLONE_UNTRACED` (EPERM). In `none`
+the observer stops on it, and a created task is an `untraced_descendant` gap
+in every audit class with no count and no end; that task's closed-set calls
+fail with ENOSYS. The observer's filter answers `clone3` with ENOSYS in every
+observed profile, so a runtime that cannot fall back to `clone` does not run
+under observation. Deny
 `AF_UNIX` creation through both `socket` and `socketpair` for those profiles.
 They also refuse `seccomp(2)` whose flags contain
 `SECCOMP_FILTER_FLAG_NEW_LISTENER` (EPERM), because a child's own notification
@@ -1294,7 +1323,14 @@ artifacts from the test runner.
 
 Attach supported native ABI variants of the operations below. The implementation
 must publish its exact hook/syscall table. Calls absent on an architecture are
-identified as absent; equivalent variants that exist must be tested. A call
+identified as absent; equivalent variants that exist must be tested. The
+x86_64 table is published as
+[`evidence/closed-set-x86_64.txt`](jail-v1/evidence/closed-set-x86_64.txt),
+generated from the observer's rows and by running the installed narrowing
+filter; it names the narrowing-filter digest that receipts record in
+`lifetime.native.details.narrowing_filter_digest`, and conformance compares
+the table with the build and the digest with a live receipt. A successful
+exec's `proc.exec` names its call in `fields.syscall`. A call
 under another ABI (a non-native architecture, or the x32 bit) is never decoded
 from the native table. Contained baselines refuse those ABIs; in `none` the
 observer stops on each, and one the kernel did not reject as nonexistent
@@ -1375,7 +1411,18 @@ actually captured. Otherwise `argv_digest=null` with a reason; a prefix hash
 cannot be labelled as the full argv digest. Executable identity records the
 observed process image identity, not a promise that its file contents remain
 unchanged. Public numeric PIDs are diagnostic; internal attribution includes
-boot/birth identity and namespace mapping.
+boot/birth identity and namespace mapping. Every audit result carries
+`fields.pid` (host thread-group id) and `fields.pid_start_ticks`, the start
+time of that group's leader, read when the observer first takes the group on
+(null if unknown); with the receipt's `boot_id` the pair names one process on
+one boot. A non-leader exec keeps it, and a later process given the same
+number has its own. Namespace pids are not recorded per event. PID reuse is
+not forced live: on a stock host `ns_last_pid`, `clone3` `set_tid` and a
+namespace `pid_max` need `CAP_SYS_ADMIN`, so the evidence is the birth on
+every live result plus a unit-level test hook that simulates a recycled tid.
+Nested namespaces are evidenced by `none` running the host's bubblewrap,
+traced one layer down with host pids and matching births; a pid namespace
+inside a contained profile is refused by the host and not claimed.
 
 ### 11.4 Loss and coverage
 
@@ -1664,7 +1711,8 @@ death itself is unknown, retain the last nonsettled phase and update its
 outcome/coverage/error as unknown. `state_cleanup` can remain pending after
 settlement. Receipt revision advances on each replacement and is never
 reused: a number is spent once a replacement carrying it may be visible (from
-the canonical rename on), so a later failure skips a number. Revisions
+the canonical rename on) or once it is handed to the persistence worker, so a
+later failure skips a number. Revisions
 increase strictly but need not be contiguous.
 
 Every applied limit states its scope; every observation count is null when
@@ -1752,10 +1800,18 @@ conforming writer produces. A trace is complete only if its last frame is the
 `jail.receipt` note of the attempt's final receipt.
 
 Control uses a separate bounded queue with reserved terminal-message capacity;
-trace backpressure cannot delay a stop. Disk sync runs independently of the
-supervision loop with a 5-second progress budget. If persistence cannot finish,
-stop the child and keep the transition unacknowledged. Do not wait forever for
-a writer while descendants continue running. No disk spool, replay daemon or
+trace backpressure cannot delay a stop. Control is polled on every loop
+iteration and gets a final drain bounded by the 1-second no-progress deadline;
+every message not fully delivered, a partial frame included, is counted as
+dropped. Every durable write after the lease runs on one persistence worker
+with a 5-second no-progress budget: a write is stalled when the worker
+completes no I/O step for 5 s while it is outstanding. Receipts written while
+the target runs are persisted while the loop keeps enforcing deadlines,
+signals and evidence; their control message follows durability, in order. On
+failure or stall, stop the child with cause `state_write_failed`, keep the
+transition unacknowledged, leave the receipt at its last persisted phase, and
+do not start abandoned work later. Do not wait forever for a writer while
+descendants continue running. No disk spool, replay daemon or
 external custody service is added to jail v1.
 
 ## 14. Doctor and recovery
@@ -1802,9 +1858,16 @@ for provider sign-in. `explain` shows these as unmeasured requirements.
 ### 14.2 GC and crash handling
 
 `gc --dry-run` enumerates only the registered state root, takes nonblocking
-locks on existing attempt `jail.lock` files, never creates one, and reports actions/reasons in the same JSON shape as `gc`.
-Cleanup is bounded per pass (initially 100,000 entries, 128 open directories)
-and resumable; `gc` prints its report even when it exits 1 because a cleanup
+locks on the existing `jail.lock` files of claimed roots only (a root with
+`jail-state.json`), never creates one, and reports actions/reasons in the same
+JSON shape as `gc`. A root with `jail.lock` but no claim is unclaimed: a
+supervisor holds that lock between creating it and claiming, so a lock taken
+there would refuse its claim; gc retains the root untouched and reports it
+with exit 0. `attempts/` must be a private directory, and an entry that is a
+symlink or not a directory is skipped, never followed.
+Cleanup is bounded per invocation, the listing of `attempts/` included
+(initially 100,000 entries, 128 open directories); a listing the bound ends is
+reported incomplete and gc exits 1. Cleanup is resumable; `gc` prints its report even when it exits 1 because a cleanup
 stays pending. It removes a dead attempt's proxy directory only through the
 socket identity recorded at bind, and reports it in a `proxy_dir` field.
 It never discovers deletion targets by searching all of `/tmp`, HOME or cgroupfs.
@@ -1814,9 +1877,26 @@ and reports it, so a reserved root stays claimable and a dry run changes
 nothing on disk.
 
 For a dead supervisor, revalidate boot/process identity and every registered
-resource. In the same boot, a populated, positively identified orphan execution
+resource. The recorded owner is dead when its boot is not the current boot, or
+its pid names no process, a process with another birth time, or a zombie; an
+owner alive with the same boot, pid and birth time is retained whole even
+without the lease, and an owner whose liveness cannot be read keeps its
+cgroup. In the same boot, a populated, positively identified orphan execution
 cgroup may be killed by this explicit GC invocation, as permitted by the north
-star. Record `gc_terminated_orphan` and verify emptiness before deleting state.
+star. Positive identification: the registration names a direct child of the
+operator's delegated subtree with the execution-leaf name, on cgroup v2, with
+the recorded device and inode, and every control file is opened relative to
+that pinned directory; a leaf is killed only when the supervisor did not
+verify the tree's end. gc records `gc_terminating_orphan` before `cgroup.kill`,
+verifies emptiness within §9.3's 5-second budget, records
+`gc_terminated_orphan`, then removes the leaf (`gc_removed_cgroup`) and
+managed scratch (`gc_removed_scratch`). Its reconciliation records go to jail
+state (`gc_actions`) and its report, never to the supervisor's receipt;
+finishing a pending vendor-state cleanup still completes the receipt's
+`state_cleanup`, as J3 specified. A cgroup recorded in another boot is never
+probed or touched. Records that disagree about the boot, lost integrity, and a
+replaced, absent or unverifiable leaf are retained and reported. A corrupt
+state file or receipt is §6.4's failed state access (exit 1).
 After host reboot, the old processes cannot be alive, but any reused cgroup
 path must not be treated as the original resource. Never signal from a stale
 PID or delete a directory solely because its name looks like an attempt id.
