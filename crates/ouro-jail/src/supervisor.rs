@@ -2779,10 +2779,31 @@ impl Journal {
     }
 
     /// A `jail.receipt` event referencing a receipt that is already durable.
+    ///
+    /// The note names the receipt by `sha256:` over its RFC 8785 canonical
+    /// bytes (canonicalization.md), which a consumer can recompute from
+    /// `jail.json` alone. A receipt that cannot be canonicalized (a float,
+    /// which no receipt field is) gets no note with an invented digest: the
+    /// missing note is recorded as trace loss.
     fn receipt(&mut self, phase: Phase, receipt: &Receipt, terminal: bool) {
-        let digest = serde_json::to_vec(receipt)
-            .map(|bytes| crate::canonical::sha256_prefixed(&bytes))
-            .unwrap_or_else(|_| "sha256:".to_owned());
+        let canonical = serde_json::to_value(receipt)
+            .map_err(|error| error.to_string())
+            .and_then(|value| crate::canonical::to_jcs(&value).map_err(|error| error.to_string()));
+        let digest = match canonical {
+            Ok(bytes) => crate::canonical::sha256_prefixed(&bytes),
+            Err(reason) => {
+                if self.loss.is_none() {
+                    self.loss = Some(JailError::new(
+                        ErrorCode::EvidenceLost,
+                        ErrorStage::Running,
+                        Remediation::InspectState,
+                        format!("the {phase:?} receipt note has no canonical digest: {reason}"),
+                    ));
+                    self.loss_pending = true;
+                }
+                return;
+            }
+        };
         let event = crate::records::Event::receipt_note(
             &self.attempt_id,
             0, // assigned under the shared stream lock

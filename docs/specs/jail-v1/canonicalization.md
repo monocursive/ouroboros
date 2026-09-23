@@ -106,6 +106,13 @@ lookup; do not replace argv[0] with the resolved executable. The public digest
 uses the same sha256 prefix. Credential content hashes are ordinary SHA-256 of
 the copied bytes, not policy/argv hashes. Digests of guesses remain guessable.
 
+A receipt digest, as a `jail.receipt` trace note carries it, is `sha256:` over
+the receipt's RFC 8785 canonical bytes, with no domain prefix: the receipt
+already names its schema. A consumer recomputes it from `jail.json` (which is
+written pretty-printed) by parsing the document and canonicalizing it; the
+file's own bytes are not the preimage. No receipt field is a floating-point
+number, so the integer-only encoding above covers every receipt.
+
 ## Golden inputs and expected results
 
 [canonical-input.toml](fixtures/canonical-input.toml) and

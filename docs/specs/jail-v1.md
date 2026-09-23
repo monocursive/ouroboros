@@ -1668,7 +1668,9 @@ Jail emits only its own facts; `intent.*` is reserved for the future ledger
 owner and rejected for audit/proxy sources. A coverage gap is a wrapper `note`
 with `fields.kind=coverage_gap`, classes, interval, reason and known/null count.
 Receipt updates are wrapper `jail.receipt` events referencing receipt digest
-and phase. Avoid recursively embedding the entire event stream in a receipt.
+and phase; the digest is over the receipt's RFC 8785 canonical bytes
+([canonicalization](jail-v1/canonicalization.md)), so it can be recomputed from
+`jail.json` alone. Avoid recursively embedding the entire event stream in a receipt.
 
 Validate jail output with [jail-event.schema.json](jail-v1/jail-event.schema.json),
 a producer-specific restriction of the shared envelope. Its wrapper operations

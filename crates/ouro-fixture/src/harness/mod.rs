@@ -20,6 +20,10 @@ pub mod pipes;
 // not depend on `ouro-jail`.
 #[path = "../../../ouro-jail/src/trace/readback.rs"]
 pub mod readback;
+// The product's RFC 8785 serializer, included by path for the same reason:
+// the receipt digest a trace note carries is over these canonical bytes.
+#[path = "../../../ouro-jail/src/canonical/jcs.rs"]
+pub mod jcs;
 pub mod tempdir;
 pub mod unix_probe;
 
@@ -1219,10 +1223,8 @@ pub fn trace_guard(
 /// receipt file's bytes.
 ///
 /// The product names a receipt by `sha256:` and the lowercase hex SHA-256 of
-/// its compact JSON (`serde_json::to_vec`), and writes the same receipt
-/// pretty-printed; the two differ only in whitespace outside strings, which
-/// [`compact_json`] removes. An NDJSON file's last document is its latest
-/// receipt.
+/// its RFC 8785 canonical bytes (canonicalization.md), whatever layout the
+/// file uses. An NDJSON file's last document is its latest receipt.
 ///
 /// # Errors
 /// Why the bytes hold no receipt with a phase.
@@ -1243,8 +1245,9 @@ pub fn receipt_note_of(bytes: &[u8]) -> Result<(String, String), String> {
         .and_then(Value::as_str)
         .ok_or("a receipt without a phase")?
         .to_owned();
+    let canonical = jcs::to_jcs(&value).map_err(|error| error.to_string())?;
     let mut digest = String::from("sha256:");
-    for byte in Sha256::digest(compact_json(document)) {
+    for byte in Sha256::digest(canonical) {
         digest.push_str(&format!("{byte:02x}"));
     }
     Ok((phase, digest))
@@ -1652,7 +1655,7 @@ mod tests {
     }
 
     /// A pretty-printed receipt and the frame naming it, as the product
-    /// writes them: the note's digest is over the compact form.
+    /// writes them: the note's digest is over the canonical bytes.
     fn receipt_and_note(phase: &str) -> (Vec<u8>, Vec<u8>) {
         use sha2::{Digest as _, Sha256};
         let receipt = serde_json::json!({
@@ -1662,11 +1665,11 @@ mod tests {
             "errors": [],
             "empty": {},
             "text": "a b\t\"c\" \\ d \u{e9}",
-            "nested": {"list": [1, 2.5, null, true, {"k": "v w"}]},
+            "nested": {"list": [1, -25, null, true, {"k": "v w"}]},
         });
         let pretty = serde_json::to_vec_pretty(&receipt).unwrap();
         let mut digest = String::from("sha256:");
-        for byte in Sha256::digest(serde_json::to_vec(&receipt).unwrap()) {
+        for byte in Sha256::digest(jcs::to_jcs(&receipt).unwrap()) {
             digest.push_str(&format!("{byte:02x}"));
         }
         let note = serde_json::json!({
