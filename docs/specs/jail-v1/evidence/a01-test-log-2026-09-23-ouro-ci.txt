@@ -6,12 +6,12 @@
    Compiling autocfg v1.5.1
    Compiling linux-raw-sys v0.12.1
    Compiling bitflags v2.13.2
-   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260923T135525Z-156e645db813/crates/ouro-fixture)
+   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260923T152341Z-6c6588d174e3/crates/ouro-fixture)
    Compiling num-traits v0.2.19
    Compiling fastrand v2.5.0
    Compiling tempfile v3.27.0
-   Compiling foldhash v0.2.0
    Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
    Compiling hashbrown v0.17.1
    Compiling num-integer v0.1.47
    Compiling getrandom v0.3.4
@@ -21,49 +21,49 @@
    Compiling toml_datetime v0.6.11
    Compiling serde_spanned v0.6.9
    Compiling ahash v0.8.12
+   Compiling ref-cast v1.0.27
    Compiling parking_lot_core v0.9.12
    Compiling regex-syntax v0.8.11
-   Compiling ref-cast v1.0.27
    Compiling toml_edit v0.22.27
    Compiling num-rational v0.4.2
    Compiling num-iter v0.1.46
    Compiling num-complex v0.4.6
    Compiling aho-corasick v1.1.5
    Compiling ref-cast-impl v1.0.27
-   Compiling scopeguard v1.2.0
    Compiling smallvec v1.16.1
+   Compiling scopeguard v1.2.0
    Compiling lock_api v0.4.14
    Compiling regex-automata v0.4.18
    Compiling num v0.4.3
    Compiling toml v0.8.23
    Compiling syn v2.0.119
-   Compiling borrow-or-share v0.2.4
    Compiling unicode-general-category v1.1.0
+   Compiling borrow-or-share v0.2.4
    Compiling bit-vec v0.8.0
    Compiling bit-set v0.8.0
    Compiling fluent-uri v0.4.1
    Compiling strum_macros v0.28.0
    Compiling fraction v0.17.0
    Compiling parking_lot v0.12.5
-   Compiling vsimd v0.8.0
    Compiling percent-encoding v2.3.2
+   Compiling vsimd v0.8.0
+   Compiling outref v0.5.2
+   Compiling micromap v0.3.0
    Compiling num-cmp v0.1.0
    Compiling bytecount v0.6.9
-   Compiling micromap v0.3.0
-   Compiling outref v0.5.2
-   Compiling uuid-simd v0.8.0
    Compiling referencing v0.57.0
    Compiling jsonschema-value v0.57.0
+   Compiling uuid-simd v0.8.0
    Compiling strum v0.28.0
    Compiling fancy-regex v0.19.2
    Compiling regex v1.13.1
    Compiling jsonschema-regex v0.57.0
    Compiling email_address v0.2.9
    Compiling data-encoding v2.11.1
+   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260923T152341Z-6c6588d174e3/crates/ouro-jail)
    Compiling jsonschema v0.57.0
-   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260923T135525Z-156e645db813/crates/ouro-jail)
-   Compiling xtask v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260923T135525Z-156e645db813/crates/xtask)
-    Finished `release` profile [optimized] target(s) in 4m 26s
+   Compiling xtask v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260923T152341Z-6c6588d174e3/crates/xtask)
+    Finished `release` profile [optimized] target(s) in 4m 15s
      Running unittests src/lib.rs (target/release/deps/ouro_fixture-a9d4e6d84ff4b78c)
 
 running 96 tests
@@ -164,7 +164,7 @@ test unix::tests::a_message_without_descriptors_yields_none ... ok
 test unix::tests::more_descriptors_than_fit_are_cut_by_the_kernel_not_written_past_the_buffer ... ok
 test unix::tests::the_control_buffer_holds_the_descriptors_it_promises ... ok
 
-test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
 
      Running unittests src/main.rs (target/release/deps/ouro_fixture-673fa744fd6a0fdc)
 
@@ -220,7 +220,7 @@ test the_report_can_be_moved_off_stdout_by_descriptor ... ok
 test truncate_sets_the_length_by_path ... ok
 test write_mmap_writes_through_the_descriptor_and_the_mapping ... ok
 
-test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
 
      Running tests/harness_gate.rs (target/release/deps/harness_gate-f509b72ebe7585ea)
 
@@ -321,7 +321,7 @@ test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
      Running unittests src/lib.rs (target/release/deps/ouro_jail-7b08de089c02fce9)
 
-running 339 tests
+running 342 tests
 test canonical::tests::argv_framing_is_length_prefixed_not_delimited ... ok
 test canonical::tests::escapes_the_ecmascript_set_and_leaves_other_characters_literal ... ok
 test canonical::tests::refuses_floats_rather_than_inventing_a_number_form ... ok
@@ -421,6 +421,7 @@ test platform::linux::audit::tests::a_truncated_snapshot_makes_no_path_claim ...
 test platform::linux::audit::tests::a_truncation_by_path_says_which_mutation_it_was ... ok
 test platform::linux::audit::tests::a_workspace_path_is_reported_relative_to_the_workspace ... ok
 test platform::linux::audit::tests::an_unapplied_ceiling_leaves_an_explanatory_wrapper_note ... ok
+test platform::linux::audit::tests::an_undelivered_response_is_a_gap_without_a_syscall_result ... ok
 test platform::linux::audit::tests::counts_follow_the_class_assignment ... ok
 test platform::linux::audit::tests::dot_components_never_reveal_a_raw_outside_suffix ... ok
 test platform::linux::audit::tests::every_directory_entry_creation_is_fs_create ... ok
@@ -532,6 +533,7 @@ test platform::linux::sockdiag::tests::a_different_inode_is_not_a_match ... ok
 test platform::linux::sockdiag::tests::a_listening_socket_with_a_matching_vfs_is_found ... ok
 test platform::linux::sockdiag::tests::a_non_listening_socket_is_not_a_match ... ok
 test platform::linux::sockdiag::tests::a_sequence_mismatch_is_an_error_not_an_empty_result ... ok
+test platform::linux::sockdiag::tests::a_short_nlmsg_error_is_rejected_without_panicking ... ok
 test platform::linux::sockdiag::tests::a_truncated_message_is_an_error ... ok
 test platform::linux::sockdiag::tests::an_inode_beyond_u32_cannot_form_a_vfs_identity ... ok
 test platform::linux::sockdiag::tests::an_nlmsg_error_is_surfaced ... ok
@@ -595,12 +597,13 @@ test platform::linux::uncontained::tests::only_processes_of_this_tree_are_attrib
 test platform::linux::uncontained::tests::restrictions_none_cannot_apply_are_never_available ... ok
 test platform::linux::uncontained::tests::the_boundary_names_the_restriction_it_would_not_apply ... ok
 test platform::linux::uncontained::tests::walked_processes_are_attributed_before_they_are_recorded_or_signalled ... ok
+test platform::linux::unixpeer::live::tests::a_failed_notification_send_never_records_a_delivered_return ... ok
 test platform::linux::unixpeer::tests::a_family_only_address_is_unnamed ... ok
 test platform::linux::unixpeer::tests::a_non_unix_family_is_reported ... ok
 test platform::linux::unixpeer::tests::a_pathname_address_is_read_up_to_its_nul ... ok
 test platform::linux::unixpeer::tests::a_short_buffer_is_unnamed_not_a_panic ... ok
 test platform::linux::unixpeer::tests::a_wide_inode_denies_via_the_sockdiag_identity ... ok
-test platform::linux::unixpeer::tests::absolute_and_relative_paths_pick_root_and_cwd ... ok
+test platform::linux::unixpeer::tests::absolute_and_relative_paths_use_the_child_root ... ok
 test platform::linux::unixpeer::tests::an_abstract_address_keeps_its_leading_nul_out_of_the_name ... ok
 test platform::linux::unixpeer::tests::the_digest_is_stable_and_specific ... ok
 test platform::linux::unixpeer::tests::the_filter_table ... ok
@@ -662,7 +665,7 @@ test trace::tests::an_oversized_event_is_refused_rather_than_truncated ... ok
 test trace::tests::the_bounds_are_the_ones_the_specification_names ... ok
 test trace::tests::the_payload_budget_stops_before_the_reserve_and_the_reserve_still_writes ... ok
 
-test result: ok. 339 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.41s
+test result: ok. 342 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.46s
 
      Running unittests src/main.rs (target/release/deps/ouro_jail-50b32906a45b7cdc)
 
@@ -695,7 +698,7 @@ test x05_streams ... ok
 test x06_no_private_authority ... ok
 test x07_background_descendant_is_terminated ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.56s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.40s
 
      Running tests/conformance_j2.rs (target/release/deps/conformance_j2-117e285a081ffa3b)
 
@@ -716,7 +719,7 @@ test l04_pids_ceiling_is_aggregate_across_forked_children ... ok
 test s04_io_uring_and_compat_abis_cannot_bypass_the_filter ... ok
 test startup_supervisor_helper ... ignored, subprocess helper invoked by l02_startup_parent_death_window_is_closed
 
-test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.35s
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.61s
 
      Running tests/conformance_j3_agent.rs (target/release/deps/conformance_j3_agent-77c4a9884759c6d9)
 
@@ -756,7 +759,7 @@ test s03_each_outer_boundary_reversal_fails_and_changes_nothing ... ok
 test s03_the_named_limits_are_what_the_specification_says ... ok
 test x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target ... ok
 
-test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.98s
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.52s
 
      Running tests/conformance_j3_credentials.rs (target/release/deps/conformance_j3_credentials-cb75511a0ad15d0f)
 
@@ -781,7 +784,7 @@ test m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem ... ig
 test p04_a_fifo_source_is_refused_without_ever_being_opened_for_io ... ok
 test p04_every_special_or_oversized_source_refuses_at_staging_on_this_host ... ok
 
-test result: ok. 17 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 7.67s
+test result: ok. 17 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 7.75s
 
      Running tests/conformance_j3_none.rs (target/release/deps/conformance_j3_none-7005cfa7637e7a2d)
 
@@ -808,7 +811,7 @@ test r06_a_target_that_leaves_the_leaf_while_live_is_never_settled ... ok
 test the_boundary_itself_refuses_a_restriction_it_would_not_apply ... ok
 test x06_none_reserved_names_and_private_channels_do_not_reach_the_child ... ok
 
-test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.74s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.65s
 
      Running tests/linux_mechanisms.rs (target/release/deps/linux_mechanisms-2f612cbd7d177875)
 
@@ -850,7 +853,7 @@ test the_walk_finds_nested_and_file_form_protected_segments ... ok
 test this_hosts_backend_version_is_the_pinned_one ... ok
 test this_hosts_runtime_roots_are_merged_usr_symlinks ... ok
 
-test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
 
      Running tests/macos_refusal.rs (target/release/deps/macos_refusal-498dbbea088800c5)
 
@@ -879,7 +882,7 @@ test perf_the_j0_file_workload_costs_what_the_spike_cost ... ok
 test the_launcher_installs_the_published_filter ... ok
 test the_narrowing_filter_without_a_tracer_fails_closed_with_enosys ... ok
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.75s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.74s
 
      Running tests/observer_regression_linux.rs (target/release/deps/observer_regression_linux-bab66227939d1cf0)
 
@@ -916,7 +919,7 @@ test r7_a_lying_sockaddr_length_retains_only_the_family_it_names ... ok
 test r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi ... ok
 test r9_open_how_sizes_are_decoded_or_declared_unavailable ... ok
 
-test result: ok. 28 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 16.23s
+test result: ok. 28 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 16.14s
 
      Running tests/portable_canonical.rs (target/release/deps/portable_canonical-3ee97e258336148b)
 
@@ -984,7 +987,7 @@ test rm16_the_copy_budget_is_cumulative_across_credentials ... ok
 test rm24_rm25_an_oversized_launch_file_or_a_shared_launch_directory_refuses ... ok
 test s6_1_tool_and_build_reject_credentials_and_none_rejects_any_launch ... ok
 
-test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.55s
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.33s
 
      Running tests/portable_lifetime.rs (target/release/deps/portable_lifetime-bf77ddbcafc60d29)
 
@@ -1014,7 +1017,7 @@ test the_ownership_predicate_refuses_a_foreign_owner ... ok
 test the_pipe_helper_really_carries_bytes ... ok
 test the_receipt_revision_advances_on_each_successful_replacement ... ok
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
 
      Running tests/portable_network_rules.rs (target/release/deps/portable_network_rules-46d645ab72ca55a3)
 
@@ -1124,7 +1127,7 @@ test n04_unusable_budgets_refuse_to_start ... ok
 test n04_upstream_death_mid_tunnel_closes_the_client_and_is_reported ... ok
 test proxy_limits_helper ... ignored, child helper invoked by the n04 descriptor tests
 
-test result: ok. 47 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 8.81s
+test result: ok. 47 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 8.75s
 
      Running tests/portable_records.rs (target/release/deps/portable_records-523d11701fa64928)
 
@@ -1141,7 +1144,7 @@ test tuple_none_preparation_complete_is_still_unprotected ... ok
 test tuple_refusal_before_boundary_creation ... ok
 test tuple_verified_settlement ... ok
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 
      Running tests/portable_signals.rs (target/release/deps/portable_signals-4b1ce1768078b5b7)
 
@@ -1165,7 +1168,7 @@ running 1 test
 running 1 test
 ok
 
-test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running tests/portable_trace.rs (target/release/deps/portable_trace-62a361f9528f3573)
 
@@ -1251,11 +1254,11 @@ test r9_all_descendants_coverage_refuses_on_linux ... ok
 test r9_an_explicit_pids_ceiling_runs_only_when_enforced ... ok
 test r9_deny_read_grants_are_enforced_as_masks ... ok
 
-test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.62s
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.65s
 
      Running tests/unix_peer_linux.rs (target/release/deps/unix_peer_linux-f82a4936e2a1ce37)
 
-running 14 tests
+running 15 tests
 test a_connect_fails_closed_when_the_mediator_stops ... ok
 test a_full_backlog_does_not_wedge_the_mediator ... ok
 test a_wide_inode_has_no_vfs_identity_and_is_denied ... ok
@@ -1267,11 +1270,12 @@ test mutation_pathname_guards_each_produce_their_distinct_denial ... ok
 test nested_user_namespace_is_unavailable_here ... ok
 test non_native_abi_connects_are_refused ... ok
 test pathname_and_abstract_addresses_classify ... ok
+test relative_parent_and_absolute_symlink_reach_the_same_attempt_socket ... ok
 test stop_returns_after_bursts_of_concurrent_connects ... ok
 test the_filter_digest_is_stable ... ok
 test the_parser_finds_only_a_matching_listener ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
 
      Running unittests src/main.rs (target/release/deps/xtask-9c4e6cf466e61bd5)
 
@@ -1338,7 +1342,7 @@ test crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail (line 73) ..
 
 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-all doctests ran in 0.14s; merged doctests compilation took 0.13s
+all doctests ran in 0.13s; merged doctests compilation took 0.13s
    Doc-tests ouro_jail
 
 running 1 test
@@ -1346,4 +1350,4 @@ test crates/ouro-jail/src/platform/linux/tracer/mod.rs - platform::linux::tracer
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-all doctests ran in 0.20s; merged doctests compilation took 0.19s
+all doctests ran in 0.16s; merged doctests compilation took 0.16s

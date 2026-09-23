@@ -28,8 +28,9 @@ Evidence: [run record](evidence/a01-opencode-run-2026-09-23-ubuntu.txt) and
   refused by the unix-peer mediation (`92e7db7c`), and the default state root
   was refused on a stock Ubuntu home (`3c3638c4`). Both are fixed and pinned
   by tests on the reference host; the full conformance suite passes with them
-  ([run `20260923T135525Z-156e645db813`](evidence/a01-test-log-2026-09-23-ouro-ci.txt),
-  1022 passed, 0 failed).
+  and with `8a5ab780` merged
+  ([run `20260923T152341Z-6c6588d174e3`](evidence/a01-test-log-2026-09-23-ouro-ci.txt),
+  1026 passed, 0 failed).
 - **Known behaviour.** In 1 of 16 repeat runs a file operation was still in
   flight in a thread when OpenCode exited; strict evidence reported the loss
   and `ouro-jail` exited 1, with the target's own exit 0 kept in the receipt.
