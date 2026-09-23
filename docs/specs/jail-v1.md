@@ -1062,37 +1062,49 @@ never signal a PID recovered from a file without revalidating its identity.
 
 For a contained run, record the namespace-init identity and verify the selected
 backend's entire death chain, including any intermediate launcher. Recorded
-limit of the bubblewrap integration (measured 2026-09-22): bubblewrap clears an
-inherited parent-death signal during its own startup before arming its own for
-`--die-with-parent`, so a supervisor killed with SIGKILL inside that window
-leaves bubblewrap's outer process orphaned, holding the run's stdio open; the
-namespace and the target still die. J2 closes this window with a trusted blocked
-bootstrap and an outside watcher holding supervisor/backend pidfds. The bootstrap
+limit of the bubblewrap integration (measured 2026-09-22 and 2026-09-23):
+bubblewrap clears an inherited parent-death signal during its own startup
+before arming its own for `--die-with-parent`, and its namespace init arms its
+own later still, after waiting on an event only the outer process sends. A
+supervisor killed with SIGKILL inside that window therefore leaves bubblewrap's
+outer process, and possibly the namespace init with whatever it started,
+orphaned and holding the run's stdio open. J2 and J4 close the window where the
+attempt has an execution leaf, with a trusted blocked bootstrap and an outside
+watcher holding supervisor/backend pidfds and the leaf's `cgroup.kill` (opened
+by the supervisor after the backend is placed in the leaf). The bootstrap
 cannot exec bubblewrap until the watcher confirms readiness; supervisor death
-makes the watcher kill the execution cgroup (through the leaf's `cgroup.kill`,
-opened by the supervisor after the backend is placed in the leaf) and then
-bubblewrap, and watcher death makes the supervisor stop the boundary. The
-supervisor releases the watcher, over a private pipe, as soon as it sees the
-backend's end; the pipe's end-of-file, like the supervisor's pidfd, means the
-supervisor is gone. The backend's end without a release starts a short grace
+makes the watcher kill the whole leaf and then bubblewrap, and watcher death
+makes the supervisor stop the boundary. The supervisor releases the watcher,
+over a private pipe, as soon as it sees the backend's end; the pipe's
+end-of-file, like the supervisor's pidfd, means the supervisor is gone, and a
+supervisor that drops the watcher unreleased on an error path gets the same
+kill by design. The backend's end without a release starts a short grace
 (500 ms) rather than the watcher's exit, because bubblewrap's parent-death
 signal follows the supervisor thread that started it and can fire while the
 rest of a dying supervisor still looks alive: a supervisor that dies within
-the grace still has its leaf killed, and one that outlives it owns the rest. Killing
-only bubblewrap is not enough: its namespace init arms its own parent-death
-signal late in its startup and, before that, waits on an event only the outer
-process sends, so an outer process killed in that window left the init alive
-(measured 2026-09-23). A synchronized fixture covers death before bootstrap
-release and after a backend clears its parent-death signal; a stand-in fixture
-covers a leaf member that is not the backend. Every process `doctor` starts for
-a probe dies with `doctor` (§14.1). A stdio consumer must not treat
+the grace still has its leaf killed, and one that outlives it owns the rest.
+Without an execution leaf (a supervisor outside a delegated user scope, where
+no required limit demands one), the watcher can kill only bubblewrap's outer
+process, and a supervisor killed during bubblewrap's startup can leave the
+namespace init, and under `agent` its bridge, alive and holding the run's
+stdout, where `gc` cannot find them (measured 2026-09-23: 6 of 20 synchronized
+kills outside a scope, 0 of 20 inside one). Running a contained profile in a
+delegated user scope (for example `systemd-run --user --scope`) closes it. A
+synchronized fixture covers death before bootstrap release and after a
+backend clears its parent-death signal; a stand-in fixture covers a leaf
+member that is not the backend. Every process `doctor` starts for a probe
+dies with `doctor` (§14.1); the agent probe's jail has the limit above when
+`doctor` runs outside a delegated scope. A stdio consumer must not treat
 EOF as the only sign that a run ended. Linux kills
 remaining namespace processes when its init dies; this is the mechanism behind
 the required parent-death test, not an assumption about process groups.
 See [PID namespace semantics](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
 
-When required by a limit or observer, create a unique cgroup beneath an
-operator-delegated v2 subtree. Keep the supervisor outside that execution leaf.
+For a contained run, create a unique cgroup beneath an operator-delegated v2
+subtree when one is available. A limit that requires it refuses without one;
+otherwise the run proceeds with the cgroup recorded unavailable and without
+what depends on it: preferred limits, the cgroup check of tree emptiness and
+the watcher's whole-leaf kill above. Keep the supervisor outside that execution leaf.
 Register its path, filesystem identity and attempt association; place the
 blocked target inside before release. Delegation must permit the required
 controllers, membership operations, `cgroup.kill` and population checks.

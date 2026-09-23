@@ -138,7 +138,9 @@ impl FdMap {
     /// window inside bubblewrap's startup between clearing ours and arming its
     /// own: a supervisor killed in that instant still leaves an orphan on pid
     /// 1 holding this run's descriptors. The production platform closes that
-    /// window with [`super::watch`]'s blocked bootstrap and outside pidfd watcher.
+    /// window with [`super::watch`]'s blocked bootstrap and outside pidfd
+    /// watcher, fully only where the attempt has an execution cgroup the
+    /// watcher can kill (jail-v1 §9.3).
     ///
     /// Then every descriptor above stdio is marked close-on-exec, so nothing
     /// the supervisor happens to hold — the gate, control and trace channels

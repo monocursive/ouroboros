@@ -6,7 +6,9 @@
 //! policy/evidence descriptors and stays outside the execution cgroup. If the
 //! watcher dies, the live supervisor stops the boundary; if the supervisor dies,
 //! the watcher kills the whole execution cgroup through the leaf's
-//! `cgroup.kill`, then the backend through its pidfd.
+//! `cgroup.kill` when the attempt has one, then the backend through its pidfd.
+//! Without a leaf only the backend can be killed, and a namespace init still
+//! waiting on bubblewrap's startup event outlives it (jail-v1 §9.3 limit).
 //!
 //! The supervisor releases the watcher (one byte on a private pipe) as soon as
 //! it sees the backend's end, which also proves the supervisor was alive
@@ -128,7 +130,7 @@ impl Watcher {
         if let Some(fd) = self.release.take() {
             // SAFETY: a one-byte write from a live byte to an owned pipe; if
             // it fails, dropping the pipe below still ends the watcher (it
-            // then kills the leaf, which is empty once the backend has ended).
+            // then kills the leaf, which is normally empty once the backend has ended).
             unsafe { libc::write(fd.as_raw_fd(), [RELEASED].as_ptr().cast(), 1) };
         }
     }

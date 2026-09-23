@@ -256,21 +256,27 @@ fn j4_a_backend_that_ends_before_its_supervisor_dies_still_gets_its_leaf_killed(
     );
 }
 
-/// A normal end: the backend ended and the supervisor released the watcher,
-/// which leaves without touching anything still in the leaf.
+/// A release makes the watcher leave at once and kill nothing. The backend
+/// is left running here, so the watcher has no grace to wait out: only the
+/// release byte can end it (adversarial review: a watcher that ignored the
+/// byte and left when its grace ran out passed the earlier version of this
+/// test, which ended the backend first, and cost every run 500 ms).
 #[test]
 fn j4_a_released_watcher_leaves_without_killing() {
     if !live() {
         return;
     }
     let mut stand = Stand::start();
-    stand.backend.kill().unwrap();
-    stand.backend.wait().unwrap();
     stand.release();
     let watcher = exited(&mut stand.watcher, Duration::from_secs(3));
-    let stranded_alive = !exited(&mut stand.stranded, Duration::from_millis(300));
+    let backend_alive = !exited(&mut stand.backend, Duration::from_millis(100));
+    let stranded_alive = !exited(&mut stand.stranded, Duration::from_millis(100));
     let _ = stand.outcome();
-    assert!(watcher, "a released watcher exits");
+    assert!(
+        watcher,
+        "a released watcher exits without waiting for anything"
+    );
+    assert!(backend_alive, "a released watcher killed the backend");
     assert!(stranded_alive, "a released watcher killed the leaf");
 }
 
