@@ -3,6 +3,9 @@
 //! - D3 (§7, §14.2): `gc`, dry run or not, never creates `jail.lock` for an
 //!   attempt root that has none, so a pre-created managed root stays
 //!   claimable, and a dry run changes nothing on disk.
+//! - D4 (§13.2): a receipt revision number is never reused, whichever step of
+//!   the replacement fails (canonical copy or `--receipt` copy; temporary
+//!   file, file sync, rename or directory sync).
 //!
 //! Portable: the platform is simulated, the filesystem is real.
 
@@ -521,5 +524,320 @@ mod d3 {
             assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
         }
         drop(held);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D4: a receipt revision is never reused
+// ---------------------------------------------------------------------------
+
+mod d4 {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use ouro_jail::records::{
+        Applied, AppliedNetwork, AttemptRecord, Containment, EvidenceMode, JailRecord, Lifetime,
+        ObserveMode, Outcome, Phase, PlatformRecord, PolicyRecord, StateCleanup,
+    };
+    use ouro_jail::state::{self, Durable};
+
+    const RECORDED: &str = "att_4d4a0000-0000-4000-8000-000000000004";
+
+    fn minimal_record() -> AttemptRecord {
+        AttemptRecord {
+            attempt_id: RECORDED.to_owned(),
+            revision: 1,
+            platform: PlatformRecord {
+                os: Os::Macos,
+                arch: "aarch64".to_owned(),
+                kernel: "test".to_owned(),
+            },
+            jail: JailRecord {
+                component: "ouro-jail".to_owned(),
+                version: "0.0.0-test".to_owned(),
+                backend: None,
+                backend_version: None,
+            },
+            policy: PolicyRecord {
+                name: "tool".to_owned(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                observe: ObserveMode::On,
+                evidence: EvidenceMode::Strict,
+                requirements: Vec::new(),
+                grants: Vec::new(),
+            },
+            containment: Containment::Pending,
+            exec_observed: false,
+            argv_digest: None,
+            applied: Applied {
+                filesystem: None,
+                network: AppliedNetwork {
+                    mode: "pending".to_owned(),
+                    mechanism: None,
+                    allowed_hosts: Vec::new(),
+                },
+                syscalls: None,
+                limits: Vec::new(),
+                environment_names: Vec::new(),
+                removed_environment_names: Vec::new(),
+            },
+            observer: CoverageSummary::unobserved().to_observer_record(),
+            coverage: CoverageSummary::unobserved().to_coverage(),
+            process: None,
+            lifetime: Lifetime::pending(),
+            outcome: Outcome::pending(),
+            state_cleanup: StateCleanup::NotNeeded,
+            cleanup_error: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+            errors: Vec::new(),
+            credentials: Vec::new(),
+        }
+    }
+
+    /// Every receipt either copy ever showed, by revision. A revision that shows
+    /// two different documents is a reused revision.
+    #[derive(Default)]
+    struct Seen {
+        by_revision: BTreeMap<u64, Vec<u8>>,
+        history: Vec<(String, u64)>,
+        reused: Vec<String>,
+    }
+
+    impl Seen {
+        fn look(&mut self, paths: &[&Path]) {
+            for path in paths {
+                let Ok(metadata) = std::fs::symlink_metadata(path) else {
+                    continue;
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                let bytes = std::fs::read(path).unwrap();
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                let revision = value["revision"].as_u64().unwrap();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                self.history.push((name.clone(), revision));
+                match self.by_revision.get(&revision) {
+                    Some(earlier) if *earlier != bytes => self.reused.push(format!(
+                        "revision {revision} reused for a different receipt at {name}"
+                    )),
+                    Some(_) => {}
+                    None => {
+                        self.by_revision.insert(revision, bytes);
+                    }
+                }
+            }
+        }
+
+        fn highest(&self) -> u64 {
+            self.by_revision.keys().copied().max().unwrap_or(0)
+        }
+
+        /// What went wrong at this step, if anything.
+        fn verdict(&self, label: &str, after: u64, highest: u64) -> Option<String> {
+            let mut problems = self.reused.clone();
+            if after <= highest {
+                problems.push(format!(
+                    "revision {after} written after {highest} was visible"
+                ));
+            }
+            (!problems.is_empty()).then(|| {
+                format!(
+                    "{label}: {problems:?}; (file, revision) seen: {:?}",
+                    self.history
+                )
+            })
+        }
+    }
+
+    /// A fresh attempt directory and an extra `--receipt` copy path in its own
+    /// private directory.
+    fn receipt_dirs() -> (tempfile::TempDir, AttemptDir, PathBuf) {
+        let temp = common::private_tempdir();
+        let root = temp.path().canonicalize().unwrap();
+        let data = root.join("data");
+        private_dir(&data);
+        let dir = AttemptDir::new(&data, &AttemptId::parse(RECORDED).unwrap());
+        dir.create(&data).unwrap();
+        let copies = root.join("copies");
+        private_dir(&copies);
+        (temp, dir, copies.join("receipt.json"))
+    }
+
+    /// The same failures, injected through the filesystem so that nothing but
+    /// `write_receipt` itself is involved: the temporary file cannot be created,
+    /// or the rename cannot land, for the canonical copy and for the extra copy.
+    #[test]
+    fn j4_d4_a_failed_receipt_copy_never_reuses_a_revision() {
+        type Obstruct = fn(&AttemptDir, &Path) -> Box<dyn FnOnce()>;
+        let steps: [(&str, Obstruct); 4] = [
+            ("canonical temporary file", |dir, _| {
+                let root = dir.root().to_path_buf();
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+                Box::new(move || {
+                    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                })
+            }),
+            ("canonical rename", |dir, _| {
+                let target = dir.receipt_path();
+                std::fs::remove_file(&target).unwrap();
+                std::fs::create_dir(&target).unwrap();
+                std::fs::write(target.join("occupied"), b"x").unwrap();
+                Box::new(move || std::fs::remove_dir_all(&target).unwrap())
+            }),
+            ("extra temporary file", |_, extra| {
+                let parent = extra.parent().unwrap().to_path_buf();
+                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+                Box::new(move || {
+                    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                })
+            }),
+            ("extra rename", |_, extra| {
+                let target = extra.to_path_buf();
+                std::fs::remove_file(&target).unwrap();
+                std::fs::create_dir(&target).unwrap();
+                std::fs::write(target.join("occupied"), b"x").unwrap();
+                Box::new(move || std::fs::remove_dir_all(&target).unwrap())
+            }),
+        ];
+        let mut failures = Vec::new();
+        for (label, obstruct) in steps {
+            let (_temp, dir, extra) = receipt_dirs();
+            let receipt = dir.receipt_path();
+            let paths = [receipt.as_path(), extra.as_path()];
+            let mut record = minimal_record();
+            let mut seen = Seen::default();
+
+            record.cleanup_error = Some("first".to_owned());
+            supervisor::write_receipt(&dir, &mut record, Phase::Refused, Some(&extra))
+                .unwrap_or_else(|error| panic!("{label}: the first write: {error}"));
+            seen.look(&paths);
+
+            let undo = obstruct(&dir, &extra);
+            record.cleanup_error = Some("obstructed".to_owned());
+            let failed = supervisor::write_receipt(&dir, &mut record, Phase::Refused, Some(&extra));
+            undo();
+            assert!(
+                failed.is_err(),
+                "{label}: the obstruction must fail the write"
+            );
+            seen.look(&paths);
+            let highest = seen.highest();
+
+            record.cleanup_error = Some("after".to_owned());
+            let after = supervisor::write_receipt(&dir, &mut record, Phase::Refused, Some(&extra))
+                .unwrap_or_else(|error| panic!("{label}: the write after: {error}"));
+            seen.look(&paths);
+            failures.extend(seen.verdict(label, after.revision, highest));
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A [`Durable`] that fails its `fail_at`-th call (file and directory syncs
+    /// counted together, in call order) and performs every other one for real.
+    struct FailAt {
+        fail_at: Option<usize>,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl FailAt {
+        fn new(fail_at: Option<usize>) -> Self {
+            FailAt {
+                fail_at,
+                calls: std::cell::Cell::new(0),
+            }
+        }
+
+        fn step(&self) -> std::io::Result<()> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if Some(call) == self.fail_at {
+                return Err(std::io::Error::other("injected sync failure"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Durable for FailAt {
+        fn sync_file(&self, file: &std::fs::File) -> std::io::Result<()> {
+            self.step()?;
+            state::Fsync.sync_file(file)
+        }
+
+        fn sync_dir(&self, path: &Path) -> std::io::Result<()> {
+            self.step()?;
+            state::Fsync.sync_dir(path)
+        }
+    }
+
+    /// §7's four durability steps of one receipt with an extra copy, in order: the
+    /// canonical file sync (before its rename), the canonical directory sync
+    /// (after it), then the same two for the `--receipt` copy. A failure at any of
+    /// them fails the write; none of them may let the next write reuse a revision
+    /// that one of the copies already shows.
+    #[test]
+    fn j4_d4_no_failed_sync_step_reuses_a_revision() {
+        let steps = [
+            "canonical file sync",
+            "canonical directory sync",
+            "extra file sync",
+            "extra directory sync",
+        ];
+        let mut failures = Vec::new();
+        for (fail_at, label) in steps.iter().enumerate() {
+            let (_temp, dir, extra) = receipt_dirs();
+            let receipt = dir.receipt_path();
+            let paths = [receipt.as_path(), extra.as_path()];
+            let mut record = minimal_record();
+            let mut seen = Seen::default();
+
+            record.cleanup_error = Some("first".to_owned());
+            supervisor::write_receipt_with(
+                &dir,
+                &mut record,
+                Phase::Refused,
+                Some(&extra),
+                &FailAt::new(None),
+            )
+            .unwrap_or_else(|error| panic!("{label}: the first write: {error}"));
+            seen.look(&paths);
+
+            let injected = FailAt::new(Some(fail_at));
+            record.cleanup_error = Some("injected".to_owned());
+            let failed = supervisor::write_receipt_with(
+                &dir,
+                &mut record,
+                Phase::Refused,
+                Some(&extra),
+                &injected,
+            );
+            assert!(
+                failed.is_err(),
+                "{label}: the injected failure must fail the write"
+            );
+            assert_eq!(
+                injected.calls.get(),
+                fail_at + 1,
+                "{label}: the write stops at the failed step"
+            );
+            seen.look(&paths);
+            let highest = seen.highest();
+
+            record.cleanup_error = Some("after".to_owned());
+            let after = supervisor::write_receipt_with(
+                &dir,
+                &mut record,
+                Phase::Refused,
+                Some(&extra),
+                &FailAt::new(None),
+            )
+            .unwrap_or_else(|error| panic!("{label}: the write after: {error}"));
+            seen.look(&paths);
+            failures.extend(seen.verdict(label, after.revision, highest));
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

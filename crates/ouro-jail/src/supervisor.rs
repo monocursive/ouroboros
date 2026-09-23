@@ -2656,19 +2656,18 @@ impl Journal {
     }
 }
 
-/// Writes the receipt for `phase`, advances the revision and journals it.
-///
-/// §13.2: the revision starts at 1 and advances on each successful
-/// replacement, so it is incremented after the write, never before it. The
-/// `jail.receipt` event follows the durable write, so it never references a
-/// receipt that does not exist.
 /// Renders the receipt for `phase`, writes it durably and advances the
 /// revision (§13.2).
 ///
 /// Public so that the revision rule is testable where it lives: §13.2 says the
-/// revision "advances on each successful replacement", and the only way to see
-/// that is to replace twice and read what landed. The advance happens after
-/// the durable write, so a failed replacement does not consume a revision.
+/// revision starts at 1 and "advances on each successful replacement", and
+/// the only way to see that is to replace and read what landed. A revision
+/// number is never reused: it is spent once bytes carrying it can become
+/// visible, which is from the canonical rename on, so a failure after that
+/// point (the directory sync, or any step of the extra copy) skips a number
+/// rather than handing the same number to a different receipt. A failure
+/// before it (the temporary file or its sync) exposed nothing and spends
+/// nothing.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
@@ -2677,6 +2676,21 @@ pub fn write_receipt(
     record: &mut AttemptRecord,
     phase: Phase,
     extra_copy: Option<&Path>,
+) -> Result<Receipt, JailError> {
+    write_receipt_with(attempt_dir, record, phase, extra_copy, &state::Fsync)
+}
+
+/// [`write_receipt`] against an explicit durability implementation, the seam
+/// failure injection uses to fail each sync step.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
+pub fn write_receipt_with(
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    extra_copy: Option<&Path>,
+    durable: &dyn state::Durable,
 ) -> Result<Receipt, JailError> {
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
@@ -2688,11 +2702,16 @@ pub fn write_receipt(
             format!("the receipt could not be serialized: {error}"),
         )
     })?;
-    state::replace_atomically(&attempt_dir.receipt_path(), &bytes)?;
-    if let Some(path) = extra_copy {
-        state::replace_atomically(path, &bytes)?;
-    }
+    let canonical = state::TempWrite::create_with(&attempt_dir.receipt_path(), &bytes, durable)?;
+    // J4-D4: the rename below can land and a later step still fail (its
+    // directory sync, or the extra copy), leaving this revision visible under
+    // an error. Spending it here, before the rename, means the next receipt
+    // never carries the same number with different content.
     record.revision += 1;
+    canonical.commit()?;
+    if let Some(path) = extra_copy {
+        state::replace_atomically_with(path, &bytes, durable)?;
+    }
     Ok(receipt)
 }
 
