@@ -3054,6 +3054,9 @@ fn claim_attempt(
             })
         }),
         "boundary": serde_json::Value::Null,
+        // J4 W2-S: N7 — the execution leaf, registered by the platform before
+        // it exists (`state::register_execution_leaf`).
+        "execution_cgroup": serde_json::Value::Null,
         "vendor_state": serde_json::Value::Null,
         "state_cleanup": "not_needed",
     });

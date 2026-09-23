@@ -631,7 +631,10 @@ impl Boundary {
         .flatten()
         .any(|limit| limit.required);
         let mut cgroup_unavailable = None;
-        let cgroup = match ExecutionCgroup::create(&snapshot.limits) {
+        // J4 W2-S: N7 — registered in jail state before `mkdir` and before
+        // anything is placed in it; a failed registration refuses (S5).
+        let created = ExecutionCgroup::create_for_attempt(&snapshot.limits, &plan.attempt_dir)?;
+        let cgroup = match created {
             Ok(leaf) => Some(leaf),
             Err(err) if cgroup_required => {
                 return Err(preparing(

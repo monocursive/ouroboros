@@ -29,7 +29,7 @@ use std::sync::{Arc, OnceLock};
 use super::FILE_MODE;
 
 /// A named place where a record is made durable (R02). The J4 plan numbers
-/// them P1 to P13 in this order.
+/// them P1 to P13 in this order; J4 wave 2 adds P14 to P16.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Site {
     /// P1: the exclusive claim of `jail-state.json` (§7).
@@ -60,13 +60,22 @@ pub enum Site {
     GcResume,
     /// P13: `gc`'s record of a dead attempt's proxy directory (§14.2).
     GcProxyDir,
+    // J4 W2-S begin: P14 to P16
+    /// P14: `gc`'s reconciliation records in jail state (`gc_actions`, S6).
+    GcRecord,
+    /// P15: the execution leaf's name in jail state, before `mkdir` (N7).
+    ExecutionLeaf,
+    /// P16: the execution leaf's device and inode in jail state, right after
+    /// `mkdir` and before anything is placed in it (N7).
+    ExecutionLeafIdentity,
+    // J4 W2-S end
     /// A replacement written through the plain API, outside any site.
     Unnamed,
 }
 
 impl Site {
-    /// Every named site, P1 to P13.
-    pub const ALL: [Site; 13] = [
+    /// Every named site, P1 to P16.
+    pub const ALL: [Site; 16] = [
         Site::Claim,
         Site::Policy,
         Site::LaunchState,
@@ -80,6 +89,9 @@ impl Site {
         Site::CleanupRecord,
         Site::GcResume,
         Site::GcProxyDir,
+        Site::GcRecord,
+        Site::ExecutionLeaf,
+        Site::ExecutionLeafIdentity,
     ];
 
     /// The snake_case name used by [`ABORT_AT_SEAM`] and in test names.
@@ -99,6 +111,9 @@ impl Site {
             Site::CleanupRecord => "cleanup_record",
             Site::GcResume => "gc_resume",
             Site::GcProxyDir => "gc_proxy_dir",
+            Site::GcRecord => "gc_record",
+            Site::ExecutionLeaf => "execution_leaf",
+            Site::ExecutionLeafIdentity => "execution_leaf_identity",
             Site::Unnamed => "unnamed",
         }
     }

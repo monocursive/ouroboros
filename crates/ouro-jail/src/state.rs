@@ -153,6 +153,15 @@ impl AttemptDir {
         }
     }
 
+    // J4 W2-S begin: N7
+    /// The layout of the attempt rooted at `root`, as a platform that was
+    /// handed the attempt directory names it.
+    #[must_use]
+    pub fn from_root(root: PathBuf) -> Self {
+        AttemptDir { root }
+    }
+    // J4 W2-S end
+
     /// The attempt root.
     #[must_use]
     pub fn root(&self) -> &Path {
@@ -1666,6 +1675,43 @@ pub fn record_staged_credentials(
         state["vendor_state"]["credentials"] = serde_json::Value::from(rows);
     })
 }
+
+// J4 W2-S begin: N7
+/// Registers the execution leaf in jail state (§7): `identity` `None` names
+/// it before `mkdir` (P15), `Some((device, inode))` identifies it right
+/// after, before anything is placed in it (P16). `gc` reads the leaf from
+/// here, so a crash anywhere after the name is durable leaves a leaf `gc`
+/// can find (§14.2).
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when jail state cannot be read or
+/// durably replaced, or the path is not UTF-8 (a cgroup path this build
+/// makes always is).
+pub fn register_execution_leaf(
+    attempt_dir: &AttemptDir,
+    path: &Path,
+    identity: Option<(u64, u64)>,
+) -> Result<(), JailError> {
+    let Some(text) = path.to_str() else {
+        return Err(state_parse_failed(format!(
+            "the execution leaf path {} is not UTF-8",
+            path.display()
+        )));
+    };
+    let site = if identity.is_some() {
+        Site::ExecutionLeafIdentity
+    } else {
+        Site::ExecutionLeaf
+    };
+    update_attempt_state(site, attempt_dir, |state| {
+        state["execution_cgroup"] = serde_json::json!({
+            "path": text,
+            "device": identity.map(|(device, _)| device),
+            "inode": identity.map(|(_, inode)| inode),
+        });
+    })
+}
+// J4 W2-S end
 
 /// Records cleanup progress in jail state, atomically and durably.
 ///

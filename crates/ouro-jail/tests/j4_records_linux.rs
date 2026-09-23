@@ -74,7 +74,7 @@ struct Site {
     phases: (Option<&'static str>, Option<&'static str>),
 }
 
-const SITES: [Site; 10] = [
+const SITES: [Site; 12] = [
     Site {
         name: "claim",
         record: "jail-state.json",
@@ -96,6 +96,22 @@ const SITES: [Site; 10] = [
         exec_fails: false,
         phases: (None, None),
     },
+    // J4 W2-S begin: N7, P15 and P16
+    Site {
+        name: "execution_leaf",
+        record: "jail-state.json",
+        launch: false,
+        exec_fails: false,
+        phases: (None, None),
+    },
+    Site {
+        name: "execution_leaf_identity",
+        record: "jail-state.json",
+        launch: false,
+        exec_fails: false,
+        phases: (None, None),
+    },
+    // J4 W2-S end
     Site {
         name: "boundary",
         record: "jail-state.json",
@@ -301,6 +317,28 @@ fn crash(site: &Site, point: Point) -> Vec<String> {
                 ));
             }
         }
+        // J4 W2-S begin: N7
+        "execution_leaf" => {
+            let registered =
+                record("jail-state.json").is_some_and(|state| !state["execution_cgroup"].is_null());
+            if registered != point.published {
+                problems.push(format!(
+                    "{label}: the leaf named={registered}, a crash here leaves {}",
+                    point.published
+                ));
+            }
+        }
+        "execution_leaf_identity" => {
+            let identified = record("jail-state.json")
+                .is_some_and(|state| state["execution_cgroup"]["inode"].is_u64());
+            if identified != point.published {
+                problems.push(format!(
+                    "{label}: the leaf identified={identified}, a crash here leaves {}",
+                    point.published
+                ));
+            }
+        }
+        // J4 W2-S end
         "launch_state" => {
             let registered =
                 record("jail-state.json").is_some_and(|state| !state["vendor_state"].is_null());
@@ -398,6 +436,174 @@ fn j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file() {
     assert!(
         problems.is_empty(),
         "{} problem(s) in {cases} crashes:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+// ===========================================================================
+// J4 wave 2: P14, gc's reconciliation records, crashed at each point
+// ===========================================================================
+
+/// The real `gc --json` over `data`, with `env` added.
+fn gc_run(data: &Path, env: &[(&str, &str)]) -> std::process::Output {
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .args(["-c", "ulimit -c 0 && exec \"$0\" \"$@\""])
+        .arg(harness::jail_path())
+        .args(["gc", "--json"])
+        .env("OURO_DATA_DIR", data)
+        .env("OURO_CONFIG_DIR", data.with_file_name("config"));
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("gc runs")
+}
+
+/// P14 (J4 wave 2): gc records what it did in jail state (S6) through its
+/// own persistence site, crashed at each point of its first record. The
+/// supervisor of a `tool` attempt dies before its `prepared` receipt, so its
+/// empty leaf is gc's to remove and to record (`gc_removed_cgroup`); gc is
+/// aborted at that record. Afterwards jail state parses and shows the record
+/// exactly when the crash came after the rename, the temporary file is left
+/// exactly before it, and the next gc pass finishes with exit 0, keeping
+/// every record.
+fn gc_crash(point: Point) -> Vec<String> {
+    let label = format!("gc_record:{}", point.name);
+    let jail = Jail::with_program("/bin/sh")
+        .expect("harness")
+        .args(["-c", "ulimit -c 0 && exec \"$0\" \"$@\""])
+        .arg(harness::jail_path());
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let data = jail.data_dir();
+    let run = jail
+        .arg("run")
+        .args(["--profile", "tool", "--workspace"])
+        .arg(&workspace)
+        .env(state::ABORT_AT_SEAM, "prepared_receipt:temp_written")
+        .target(["/bin/true"])
+        .run()
+        .expect("the run");
+    let mut problems = Vec::new();
+    if run.signal() != Some(libc::SIGABRT) {
+        problems.push(format!(
+            "{label}: the supervisor was not aborted (exit {:?}): {}",
+            run.code(),
+            run.stderr_text().trim()
+        ));
+        return problems;
+    }
+    let attempts: Vec<PathBuf> = std::fs::read_dir(data.join("attempts"))
+        .map(|listing| listing.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    let [dir] = attempts.as_slice() else {
+        problems.push(format!("{label}: expected one attempt, found {attempts:?}"));
+        return problems;
+    };
+    let leaf = parse(&dir.join("jail-state.json"))
+        .ok()
+        .flatten()
+        .and_then(|state| {
+            state["execution_cgroup"]["path"]
+                .as_str()
+                .map(PathBuf::from)
+        });
+    let Some(leaf) = leaf else {
+        problems.push(format!("{label}: jail state registers no leaf"));
+        return problems;
+    };
+    // The lifetime watcher ends the dead supervisor's tree; wait for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::read_to_string(leaf.join("cgroup.events"))
+        .is_ok_and(|events| events.lines().any(|line| line == "populated 1"))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let crashed = gc_run(&data, &[(state::ABORT_AT_SEAM, label.as_str())]);
+    let signal = {
+        use std::os::unix::process::ExitStatusExt as _;
+        crashed.status.signal()
+    };
+    if signal != Some(libc::SIGABRT) {
+        problems.push(format!(
+            "{label}: gc was not aborted at its record (status {:?}): {}",
+            crashed.status,
+            String::from_utf8_lossy(&crashed.stderr)
+        ));
+    }
+    match parse(&dir.join("jail-state.json")) {
+        Ok(Some(state)) => {
+            let recorded = state["gc_actions"].as_array().is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action["action"] == "gc_removed_cgroup")
+            });
+            if recorded != point.published {
+                problems.push(format!(
+                    "{label}: gc_removed_cgroup recorded={recorded}, a crash here leaves {}",
+                    point.published
+                ));
+            }
+            if state["test_seams"].is_null() {
+                problems.push(format!("{label}: jail state lost the claim's seams"));
+            }
+        }
+        Ok(None) => problems.push(format!("{label}: jail state is gone")),
+        Err(problem) => problems.push(format!("{label}: {problem}")),
+    }
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let attempt = AttemptDir::new(&data, &AttemptId::parse(&name).expect("an attempt id"));
+    let leftover = state::leftover_temp_files(&attempt).expect("the attempt lists");
+    let ours = leftover
+        .iter()
+        .filter(|temp| temp.starts_with(".jail-state.json."))
+        .count();
+    if point.temp_left != (ours == 1) {
+        problems.push(format!(
+            "{label}: leftover temporary files {leftover:?}, a crash here leaves {} of \
+             `.jail-state.json.*.tmp`",
+            u8::from(point.temp_left)
+        ));
+    }
+    // The next pass finishes, and every record is still there.
+    let again = gc_run(&data, &[]);
+    if !again.status.success() || serde_json::from_slice::<Value>(&again.stdout).is_err() {
+        problems.push(format!(
+            "{label}: the next gc did not finish cleanly ({:?}): {}{}",
+            again.status,
+            String::from_utf8_lossy(&again.stdout),
+            String::from_utf8_lossy(&again.stderr)
+        ));
+    }
+    if leaf.exists() {
+        problems.push(format!(
+            "{label}: the leaf {} is still there",
+            leaf.display()
+        ));
+    }
+    for name in ["jail-state.json", "policy.json", "trace.ndjson"] {
+        if !dir.join(name).exists() {
+            problems.push(format!("{label}: gc removed {name}"));
+        }
+    }
+    eprintln!("{label}: leftover {leftover:?}");
+    problems
+}
+
+#[test]
+fn j4_r02_a_crash_at_each_point_of_a_gc_record_leaves_valid_records() {
+    if !live() {
+        return;
+    }
+    let mut problems = Vec::new();
+    for point in POINTS {
+        problems.extend(gc_crash(point));
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
         problems.len(),
         problems.join("\n")
     );

@@ -300,6 +300,18 @@ fn enforced_receipt_with_leaf(dir: &AttemptDir, boot: &str, leaf: &gc_leaf::Leaf
     receipt
 }
 
+/// N7: the execution leaf as the supervisor registers it in jail state: its
+/// path before `mkdir`, then its device and inode (`identified`).
+fn register_leaf(dir: &AttemptDir, leaf: &gc_leaf::Leaf, identified: bool) {
+    let mut state = read_json(&dir.state_path());
+    state["execution_cgroup"] = json!({
+        "path": leaf.path,
+        "device": identified.then_some(leaf.device),
+        "inode": identified.then_some(leaf.inode),
+    });
+    json_file(&dir.state_path(), &state);
+}
+
 mod gc_leaf {
     /// A recorded execution leaf, as the receipt's native details name it.
     pub struct Leaf {
@@ -855,6 +867,14 @@ mod scripted {
             self.log(format!("remove_leaf {}", leaf.inode));
             Ok(())
         }
+        fn probe_named_leaf(&self, path: &Path) -> LeafProbe {
+            self.log(format!("probe_named_leaf {}", path.display()));
+            self.leaf.clone()
+        }
+        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+            self.log(format!("remove_named_leaf {}", path.display()));
+            Ok((30, 5151))
+        }
     }
 
     fn run(fixture: &Fixture, host: &Scripted, dry_run: bool) -> gc::Report {
@@ -880,14 +900,165 @@ mod scripted {
     }
 
     /// A `none` attempt whose supervisor died after release, recorded in
-    /// `boot`, with its leaf in the receipt.
+    /// `boot`, with its leaf registered in jail state (N7) and named in the
+    /// receipt.
     fn orphan(fixture: &Fixture, boot: &str) -> (String, AttemptDir) {
         let id = fresh_id();
         let dir = fixture.root_of(&id);
         free_lock(&dir);
         claim_dead_owner(&dir, boot);
+        register_leaf(&dir, &gc_leaf::sample(), true);
         enforced_receipt_with_leaf(&dir, boot, &gc_leaf::sample());
         (id, dir)
+    }
+
+    // -----------------------------------------------------------------------
+    // N7: the leaf is read from jail state, never from the receipt alone
+    // -----------------------------------------------------------------------
+
+    /// N7 (J4 wave 2). A supervisor that dies after creating its leaf and
+    /// before its `prepared` receipt leaves jail state naming the leaf and
+    /// no receipt at all. gc reads the leaf from jail state, so the
+    /// populated orphan of this boot is terminated, verified and removed.
+    #[test]
+    fn j4_n7_gc_finds_a_leaf_jail_state_registers_without_any_receipt() {
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, HOST_BOOT);
+        register_leaf(&dir, &gc_leaf::sample(), true);
+        assert!(!dir.receipt_path().exists());
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert_eq!(
+            cgroup_calls(&host.calls()),
+            ["probe_leaf 4242", "terminate_leaf 4242", "remove_leaf 4242"],
+            "{entry:?}"
+        );
+        assert_eq!(
+            entry.cgroup.as_deref(),
+            Some("terminated_orphan_and_removed"),
+            "{entry:?}"
+        );
+        assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+    }
+
+    /// N7: the receipt is not a registration. A leaf only a receipt names
+    /// (jail state registers none) is never probed, killed or removed; the
+    /// report says it is not recorded.
+    #[test]
+    fn j4_n7_a_leaf_only_the_receipt_names_is_never_acted_on() {
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, HOST_BOOT);
+        enforced_receipt_with_leaf(&dir, HOST_BOOT, &gc_leaf::sample());
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert_eq!(cgroup_calls(&host.calls()), Vec::<&String>::new());
+        assert!(
+            entry.cgroup.as_deref().is_some_and(
+                |cgroup| cgroup.starts_with("not_recorded") && cgroup.contains("jail state")
+            ),
+            "{entry:?}"
+        );
+    }
+
+    /// N7: a supervisor that died between naming its leaf (P15) and
+    /// recording its identity (P16) placed nothing in it. gc removes such a
+    /// leaf when it is empty, by its name and place alone, and records the
+    /// identity it removed; one that is populated (by something else) or
+    /// cannot be verified is retained, and nothing registered by name only
+    /// is ever killed.
+    #[test]
+    fn j4_n7_a_leaf_named_only_is_removed_when_empty_and_never_killed() {
+        let named = |fixture: &Fixture| {
+            let id = fresh_id();
+            let dir = fixture.root_of(&id);
+            free_lock(&dir);
+            claim_dead_owner(&dir, HOST_BOOT);
+            register_leaf(&dir, &gc_leaf::sample(), false);
+            (id, dir)
+        };
+        let path = gc_leaf::sample().path;
+
+        let fixture = Fixture::new();
+        let (id, dir) = named(&fixture);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: false });
+        let report = run(&fixture, &host, true);
+        assert_eq!(
+            only(&report, &id).cgroup.as_deref(),
+            Some("would_remove"),
+            "{:?}",
+            only(&report, &id)
+        );
+        assert_eq!(
+            cgroup_calls(&host.calls()),
+            [&format!("probe_named_leaf {path}")]
+        );
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert_eq!(entry.cgroup.as_deref(), Some("removed"), "{entry:?}");
+        let actions = read_json(&dir.state_path())["gc_actions"].clone();
+        assert_eq!(actions[0]["action"], "gc_removed_cgroup", "{actions:#}");
+        assert_eq!(actions[0]["registered"], "name_only", "{actions:#}");
+        assert_eq!(actions[0]["execution_cgroup"]["inode"], 5151, "{actions:#}");
+        // The next pass knows it is gone.
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: false });
+        let report = run(&fixture, &host, false);
+        assert_eq!(
+            only(&report, &id).cgroup.as_deref(),
+            Some("removed by gc earlier")
+        );
+        assert_eq!(cgroup_calls(&host.calls()), Vec::<&String>::new());
+
+        for probe in [
+            LeafProbe::Identified { populated: true },
+            LeafProbe::Unverifiable("not cgroup2".to_owned()),
+            LeafProbe::Absent,
+        ] {
+            let fixture = Fixture::new();
+            let (id, dir) = named(&fixture);
+            let host = Scripted::new(Liveness::Gone, probe.clone());
+            let report = run(&fixture, &host, false);
+            let entry = only(&report, &id);
+            assert_eq!(
+                cgroup_calls(&host.calls()),
+                [&format!("probe_named_leaf {path}")],
+                "{probe:?}: only a probe"
+            );
+            assert!(entry.cgroup.is_some(), "{probe:?}: the report says why");
+            assert!(report.incomplete.is_empty(), "{probe:?}");
+            assert!(
+                read_json(&dir.state_path())["gc_actions"].is_null(),
+                "{probe:?}: nothing done, nothing recorded"
+            );
+        }
+    }
+
+    /// N7: jail state and the receipt naming different leaves disagree, and
+    /// records that disagree are retained (§14.2), whichever is right.
+    #[test]
+    fn j4_n7_state_and_receipt_naming_different_leaves_are_retained() {
+        let fixture = Fixture::new();
+        let (id, dir) = orphan(&fixture, HOST_BOOT);
+        let mut other = gc_leaf::sample();
+        other.inode += 1;
+        register_leaf(&dir, &other, true);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert_eq!(cgroup_calls(&host.calls()), Vec::<&String>::new());
+        assert!(
+            entry.cgroup.as_deref().is_some_and(
+                |cgroup| cgroup.starts_with("retained") && cgroup.contains("different")
+            ),
+            "{entry:?}"
+        );
     }
 
     /// §14.2: "After host reboot, the old processes cannot be alive, but any
@@ -1139,4 +1310,32 @@ mod scripted {
         }
         assert!(scratches.iter().all(|scratch| !scratch.exists()));
     }
+}
+
+// ===========================================================================
+// N7: a leaf registered by name only
+// ===========================================================================
+
+/// N7: a supervisor that dies between the leaf's name (P15) and its
+/// identity (P16) leaves a registration with a path and null device and
+/// inode. That is a shape the supervisor writes, not corrupt state: gc
+/// reports and retains what it cannot identify (here, a host without the
+/// mechanism) and exits 0.
+#[test]
+fn j4_n7_a_leaf_registered_by_name_only_is_not_corrupt_state() {
+    let fixture = Fixture::new();
+    let id = fresh_id();
+    let dir = fixture.root_of(&id);
+    free_lock(&dir);
+    claim(&dir, "linux", SIM_ARCH, Some((dead_pid(), HOST_BOOT, 1)));
+    register_leaf(&dir, &gc_leaf::sample(), false);
+    let report = fixture.gc(false).expect("gc scans");
+    let entry = entry(&report, &id);
+    assert!(
+        report.incomplete.is_empty(),
+        "a name-only registration is not a failed state access: {:?} ({})",
+        report.incomplete,
+        entry.reason
+    );
+    assert!(!entry.reason.contains("corrupt"), "{}", entry.reason);
 }

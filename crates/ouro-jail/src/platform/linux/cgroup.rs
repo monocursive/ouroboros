@@ -410,10 +410,82 @@ struct Counters {
     cpu: u64,
 }
 
+// J4 W2-S begin: N7
+/// What a leaf registration hook is told, in order (N7).
+#[derive(Clone, Copy, Debug)]
+pub enum LeafStep<'a> {
+    /// The leaf's path, before `mkdir`: nothing exists at it yet.
+    Named(&'a Path),
+    /// The leaf exists, configured and empty, with the identity pinned at
+    /// creation; nothing has been placed in it.
+    Created {
+        /// The leaf's path.
+        path: &'a Path,
+        /// Its device.
+        device: u64,
+        /// Its inode.
+        inode: u64,
+    },
+}
+
+/// A hook that makes each [`LeafStep`] durable before creation goes on.
+pub type Register<'a> = &'a mut dyn FnMut(LeafStep<'_>) -> io::Result<()>;
+// J4 W2-S end
+
 impl ExecutionCgroup {
     /// Create and configure an empty leaf. Missing preferred controllers are
     /// recorded unapplied; a required controller always makes preparation fail.
     pub fn create(limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
+        Self::create_registered(limits, &mut |_| Ok(()))
+    }
+
+    // J4 W2-S begin: N7
+    /// [`ExecutionCgroup::create`] for an attempt: the leaf is registered in
+    /// the attempt's jail state by name before `mkdir` (P15) and by device
+    /// and inode right after (P16), before anything is placed in it, so a
+    /// supervisor that dies at any point leaves either no leaf or one that
+    /// jail state names for `gc` (§7, §14.2).
+    ///
+    /// The outer `Err` is a registration that failed: a persistence failure
+    /// before exec, which refuses (S5), and no leaf is left behind unless
+    /// its own removal failed (then jail state names it). The inner result
+    /// is the creation's, as [`ExecutionCgroup::create`] reports it.
+    ///
+    /// # Errors
+    /// The failed registration, as `state_write_failed`.
+    pub fn create_for_attempt(
+        limits: &crate::policy::LimitsSnapshot,
+        attempt_root: &Path,
+    ) -> Result<io::Result<Self>, crate::records::JailError> {
+        let attempt = crate::state::AttemptDir::from_root(attempt_root.to_path_buf());
+        let mut unregistered = None;
+        let created = Self::create_registered(limits, &mut |step| {
+            let (path, identity) = match step {
+                LeafStep::Named(path) => (path, None),
+                LeafStep::Created {
+                    path,
+                    device,
+                    inode,
+                } => (path, Some((device, inode))),
+            };
+            crate::state::register_execution_leaf(&attempt, path, identity).map_err(|error| {
+                let failure = io::Error::other(error.message.clone());
+                unregistered = Some(error);
+                failure
+            })
+        });
+        match unregistered {
+            Some(error) => Err(error),
+            None => Ok(created),
+        }
+    }
+
+    /// [`ExecutionCgroup::create`], telling `register` each step first.
+    pub fn create_registered(
+        limits: &crate::policy::LimitsSnapshot,
+        register: Register<'_>,
+    ) -> io::Result<Self> {
+        // J4 W2-S end
         let root = delegated_root(unsafe { libc::getuid() }).ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "no delegated cgroup")
         })?;
@@ -424,12 +496,24 @@ impl ExecutionCgroup {
                 "supervisor is outside the delegated subtree; launch it in a delegated user scope",
             ));
         }
-        Self::create_beneath(&root, limits)
+        Self::create_beneath_registered(&root, limits, register)
     }
 
     /// Low-level delegated-root entry point, also used to exercise controller
     /// absence under an owned, isolated subtree without changing host settings.
     pub fn create_beneath(root: &Path, limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
+        Self::create_beneath_registered(root, limits, &mut |_| Ok(()))
+    }
+
+    /// [`ExecutionCgroup::create_beneath`], telling `register` each step
+    /// first (N7): the name before `mkdir`, the identity before the leaf is
+    /// returned. A failed registration of the identity removes the empty
+    /// leaf again.
+    pub fn create_beneath_registered(
+        root: &Path,
+        limits: &crate::policy::LimitsSnapshot,
+        register: Register<'_>,
+    ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(root)?;
         if !metadata.is_dir() || metadata.uid() != unsafe { libc::getuid() } {
             return Err(io::Error::new(
@@ -450,12 +534,25 @@ impl ExecutionCgroup {
         }
         // J4-G: one spelling of the leaf name, which `gc` checks back.
         let path = root.join(leaf_name(&crate::state::AttemptId::generate()));
+        // J4 W2-S: N7 — named durably before it exists.
+        register(LeafStep::Named(&path))?;
         fs::create_dir(&path)?;
-        let result = Self::open_created(&path, limits);
-        if result.is_err() {
-            let _ = fs::remove_dir(&path);
-        }
-        result
+        let leaf = match Self::open_created(&path, limits) {
+            Ok(leaf) => leaf,
+            Err(error) => {
+                let _ = fs::remove_dir(&path);
+                return Err(error);
+            }
+        };
+        // J4 W2-S: N7 — identified durably before anything is placed in it.
+        // On failure the leaf is dropped, which removes it (it is empty).
+        let (device, inode) = leaf.identity();
+        register(LeafStep::Created {
+            path: &path,
+            device,
+            inode,
+        })?;
+        Ok(leaf)
     }
 
     fn open_created(path: &Path, limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
