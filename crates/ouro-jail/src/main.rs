@@ -467,6 +467,14 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
                 println!("{} recorded {action}", entry.attempt_id);
             }
             // J4-G end
+            // J4 W2-S begin
+            for name in &entry.leftover_temp_files {
+                println!("{} leftover_temp_file {name}", entry.attempt_id);
+            }
+            if let Some(temp_files) = &entry.temp_files {
+                println!("{} temp_files {temp_files}", entry.attempt_id);
+            }
+            // J4 W2-S end
         }
         println!("scanned {}", report.entries.len());
         // J4-G begin: S7, S9
@@ -518,7 +526,9 @@ fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
                 "scratch": entry.scratch,
                 "recorded": entry.recorded,
                 // J4-G end
-                // J4-R: leftover `.tmp` files (slice R) go here.
+                // J4 W2-S: leftover `.tmp` files a crash left (§7)
+                "leftover_temp_files": entry.leftover_temp_files,
+                "temp_files": entry.temp_files,
             }))
             .collect::<Vec<_>>(),
         // J4-G begin: S7 and S9

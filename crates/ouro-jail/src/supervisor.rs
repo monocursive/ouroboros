@@ -170,6 +170,14 @@ pub struct GcEntry {
     /// or `None` when there was none to act on.
     pub proxy_dir: Option<String>,
     // J3-agent end
+    // J4 W2-S begin: leftovers (§7)
+    /// The temporary files a crashed durable replacement left in the
+    /// attempt root, as gc found them under its lease, sorted.
+    pub leftover_temp_files: Vec<String>,
+    /// What gc did with them (`removed <n>`, `would_remove`,
+    /// `retained: <why>`, `failed: <why>`), or `None` when there were none.
+    pub temp_files: Option<String>,
+    // J4 W2-S end
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,6 +1295,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     let wall_deadline = wall_deadline(&plan);
     let mut outcome_error: Option<JailError> = None;
+    // J4 W2-S: R-1 — whether the platform reported an evidence loss while the
+    // loop ran; a class degraded at settlement without one is reported there.
+    let mut platform_loss_reported = false;
     // J4-R: §13.3 — receipts written while the target runs are persisted by
     // the worker while this loop keeps enforcing the wall, signals and
     // evidence; each is acknowledged only once it is durable, in order.
@@ -1348,6 +1359,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 &mut record,
                 phase,
                 args,
+                &journal,
             ) {
                 Ok(write) => in_flight.push_back(write),
                 Err(error) => {
@@ -1381,6 +1393,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     &mut record,
                     Phase::Enforced,
                     args,
+                    &journal,
                 ) {
                     Ok(mut write) => {
                         write.ack = Some(ControlKind::ExecConfirmed);
@@ -1467,7 +1480,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 }
                 running.request_stop(StopReason::WallExpiry);
             }
-            RunEvent::EvidenceLost { reason } => {
+            RunEvent::EvidenceLost {
+                reason,
+                after_target_end,
+            } => {
                 let error = JailError::new(
                     ErrorCode::EvidenceLost,
                     ErrorStage::Running,
@@ -1475,8 +1491,14 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     reason,
                 );
                 record.errors.push(error.to_object());
+                platform_loss_reported = true;
+                // J4 W2-S: R-2 — a loss after the target's own end is
+                // recorded (the error, and exit 1 below) but it is not a stop
+                // the supervisor acted on: the target's end already was the
+                // termination trigger (§9.3), so it never becomes the cause.
                 if plan.resolved.snapshot.observation.evidence
                     == crate::records::EvidenceMode::Strict
+                    && !after_target_end
                 {
                     // J4-D5: the first stop wins (see `WallExpired`).
                     record
@@ -1542,6 +1564,15 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     if let Some(summary) = running.observer_summary() {
         record.observer = summary.to_observer_record();
         record.coverage = summary.to_coverage();
+        // J4 W2-S: R-1 — a loss the platform queued while the tree was being
+        // verified, or found only when its observer stopped, never reached
+        // the loop. Any evidence class degraded at settlement is an
+        // `evidence_lost` error and exit 1, whatever the loss's timing; it
+        // is never a cause, because nothing was stopped for it.
+        if !platform_loss_reported && let Some(error) = settlement_loss(&summary) {
+            record.errors.push(error.to_object());
+            outcome_error.get_or_insert(error);
+        }
     }
     // J3-agent begin: what the helpers did, known now that they stopped
     if let Some(native) = record.lifetime.native.as_mut() {
@@ -1752,6 +1783,56 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     })
 }
 
+// J4 W2-S begin: R-1
+/// The evidence classes: the audit classes and `proxy.net`, whose loss §11.4
+/// handles as evidence loss. (`limits` is the wrapper's own class.)
+const EVIDENCE_CLASSES: [crate::observer::CoverageClass; 5] = [
+    crate::observer::CoverageClass::Exec,
+    crate::observer::CoverageClass::FsWrite,
+    crate::observer::CoverageClass::FsDeny,
+    crate::observer::CoverageClass::Net,
+    crate::observer::CoverageClass::ProxyNet,
+];
+
+/// The `evidence_lost` error for the evidence classes the observer's final
+/// account leaves degraded, or `None` when none is.
+fn settlement_loss(summary: &crate::observer::CoverageSummary) -> Option<JailError> {
+    let mut classes = Vec::new();
+    let mut reasons: Vec<&str> = Vec::new();
+    for class in EVIDENCE_CLASSES {
+        let Some(entry) = summary.classes.get(&class) else {
+            continue;
+        };
+        if entry.status != crate::records::SourceStatus::Degraded {
+            continue;
+        }
+        classes.push(class.as_str());
+        for gap in &entry.gaps {
+            if !reasons.contains(&gap.reason.as_str()) {
+                reasons.push(gap.reason.as_str());
+            }
+        }
+    }
+    if classes.is_empty() {
+        return None;
+    }
+    Some(JailError::new(
+        ErrorCode::EvidenceLost,
+        ErrorStage::Reconciling,
+        Remediation::InspectState,
+        format!(
+            "coverage was lost by settlement in {} ({}); the loss reached no run event",
+            classes.join(", "),
+            if reasons.is_empty() {
+                "no gap named".to_owned()
+            } else {
+                reasons.join(", ")
+            }
+        ),
+    ))
+}
+// J4 W2-S end
+
 fn wall_deadline(plan: &Plan) -> Option<Instant> {
     plan.resolved
         .ceilings
@@ -1785,6 +1866,24 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
         }
         entry.status = SourceStatus::Degraded;
         entry.observed_count = None;
+        let end = Some(crate::platform::elapsed_since_start_ns().to_string());
+        // J4 W2-S: (B) — called before every receipt once a loss is known,
+        // so a class's transport gap is added once and then only extended:
+        // a lost sink stays lost to the end.
+        let is_ours = |gap: &Gap| {
+            gap.reason == trace::TRANSPORT_LOSS_REASON && gap.classes == [name.to_owned()]
+        };
+        if entry.gaps.iter().any(is_ours) {
+            for gap in entry
+                .gaps
+                .iter_mut()
+                .chain(record.observer.gaps.iter_mut())
+                .filter(|gap| is_ours(gap))
+            {
+                gap.end_ns.clone_from(&end);
+            }
+            continue;
+        }
         let gap = Gap {
             classes: vec![name.to_owned()],
             source: entry
@@ -1793,7 +1892,7 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
                 .cloned()
                 .unwrap_or_else(|| "wrapper".to_owned()),
             start_ns: "0".to_owned(),
-            end_ns: Some(crate::platform::elapsed_since_start_ns().to_string()),
+            end_ns: end,
             reason: trace::TRANSPORT_LOSS_REASON.to_owned(),
             lost_count: None,
         };
@@ -2263,7 +2362,12 @@ fn submit_receipt(
     record: &mut AttemptRecord,
     phase: Phase,
     args: &RunArgs,
+    journal: &Journal,
 ) -> Result<InFlight, JailError> {
+    // J4 W2-S: (B) — as in `persist_noted`.
+    if journal.loss.is_some() {
+        degrade_trace_coverage(record);
+    }
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
@@ -2921,6 +3025,25 @@ fn persist(
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
+    let final_note = matches!(phase, Phase::Settled | Phase::Refused);
+    persist_noted(site, attempt_dir, record, phase, args, journal, final_note)
+}
+
+/// [`persist`], with the priority of the receipt's trace note given.
+fn persist_noted(
+    site: state::Site,
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    args: &RunArgs,
+    journal: &mut Journal,
+    final_note: bool,
+) -> Result<Receipt, JailError> {
+    // J4 W2-S: (B) — a trace loss already known is in every receipt written
+    // after it, not only in the one the settlement writes.
+    if journal.loss.is_some() {
+        degrade_trace_coverage(record);
+    }
     let io = state::current_io();
     let receipt = write_receipt_at(
         site,
@@ -2930,11 +3053,7 @@ fn persist(
         args.receipt.as_deref(),
         &*io,
     )?;
-    journal.receipt(
-        phase,
-        &receipt,
-        matches!(phase, Phase::Settled | Phase::Refused),
-    );
+    journal.receipt(phase, &receipt, final_note);
     Ok(receipt)
 }
 
@@ -2949,7 +3068,11 @@ fn persist_terminal(
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
-    let receipt = persist(site, attempt_dir, record, phase, args, journal)?;
+    // J4 W2-S: (A) — the note of the attempt's final receipt is the one the
+    // reserve exists for (§13.3), whatever its phase: an attempt that ends
+    // unsettled keeps `enforced` or `prepared`, and its final note used to be
+    // refused after a loss although the reserve had room.
+    let receipt = persist_noted(site, attempt_dir, record, phase, args, journal, true)?;
     if let Ok(mut sink) = journal.trace.lock() {
         sink.finish();
     }
@@ -3004,6 +3127,9 @@ fn claim_attempt(
             })
         }),
         "boundary": serde_json::Value::Null,
+        // J4 W2-S: N7 — the execution leaf, registered by the platform before
+        // it exists (`state::register_execution_leaf`).
+        "execution_cgroup": serde_json::Value::Null,
         "vendor_state": serde_json::Value::Null,
         "state_cleanup": "not_needed",
     });

@@ -6,7 +6,8 @@
 //! identity" (§9.3). Nothing here signals a pid at all. The owner's pid is
 //! only read (`/proc/<pid>/stat`), and compared by birth time; the only kill
 //! is a write of `cgroup.kill` opened relative to a descriptor of the leaf
-//! directory whose `(device, inode)` the receipt registered.
+//! directory whose `(device, inode)` jail state registered (J4 wave 2, N7;
+//! a leaf registered by name only is never killed, see [`probe_named_leaf`]).
 //!
 //! How a recorded leaf is pinned ([`pin`]):
 //! 1. The path must be a direct child of this user's delegated subtree
@@ -256,7 +257,33 @@ fn pin(leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
 
 /// [`pin`] with the delegated root given, so its refusals can be tested.
 fn pin_under(root: &Path, leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
+    pin_as(root, &leaf.path, Some((leaf.device, leaf.inode)))
+}
+
+// J4 W2-S begin: N7
+/// Pins a leaf jail state registers by name only: every check of [`pin`]
+/// but the recorded identity, which does not exist; the identity pinned is
+/// the one the directory has when it is opened.
+fn pin_named(path: &Path) -> Result<Pinned, LeafProbe> {
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    let Some(root) = cgroup::delegated_root(euid) else {
+        return Err(LeafProbe::Unverifiable(
+            "this user has no delegated cgroup subtree".to_owned(),
+        ));
+    };
+    pin_as(&root, path, None)
+}
+// J4 W2-S end
+
+/// Pins `path` under `root`, as the recorded `identity` when there is one.
+fn pin_as(root: &Path, path: &Path, recorded: Option<(u64, u64)>) -> Result<Pinned, LeafProbe> {
     let unverifiable = |why: String| LeafProbe::Unverifiable(why);
+    let leaf = LeafRecord {
+        path: path.to_path_buf(),
+        device: recorded.map_or(0, |(device, _)| device),
+        inode: recorded.map_or(0, |(_, inode)| inode),
+    };
     if leaf.path.parent() != Some(root) {
         return Err(unverifiable(
             "the recorded leaf is not a direct child of this user's delegated cgroup subtree"
@@ -284,8 +311,7 @@ fn pin_under(root: &Path, leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
         }
         Err(error) => return Err(unverifiable(format!("the delegated subtree: {error}"))),
     }
-    let identity = (leaf.device, leaf.inode);
-    match stat_at(parent.as_raw_fd(), &name) {
+    let looked_up = match stat_at(parent.as_raw_fd(), &name) {
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Err(LeafProbe::Absent),
         Err(error) => return Err(unverifiable(format!("the recorded leaf: {error}"))),
         Ok((_, _, false)) => {
@@ -293,11 +319,15 @@ fn pin_under(root: &Path, leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
                 "the recorded leaf's name is not a directory".to_owned(),
             ));
         }
-        Ok((device, inode, true)) if (device, inode) != identity => {
+        Ok((device, inode, true))
+            if recorded.is_some_and(|identity| identity != (device, inode)) =>
+        {
             return Err(LeafProbe::Replaced);
         }
-        Ok(_) => {}
-    }
+        Ok((device, inode, true)) => (device, inode),
+    };
+    // J4 W2-S: N7 — a name-only registration pins what the lookup found.
+    let identity = recorded.unwrap_or(looked_up);
     let dir = match open_at(
         parent.as_raw_fd(),
         &name,
@@ -477,6 +507,54 @@ pub fn terminate_leaf(leaf: &LeafRecord, budget: Duration) -> Result<(), String>
         std::thread::sleep(POLL);
     }
 }
+
+// J4 W2-S begin: N7
+/// What is at a leaf registered by name only: `Identified` when a cgroup v2
+/// directory with the leaf's name stands directly under this user's
+/// delegated subtree (the recorded name is the only identity there is).
+#[must_use]
+pub fn probe_named_leaf(path: &Path) -> LeafProbe {
+    let pinned = match pin_named(path) {
+        Ok(pinned) => pinned,
+        Err(probe) => return probe,
+    };
+    let leaf = LeafRecord {
+        path: path.to_path_buf(),
+        device: pinned.identity.0,
+        inode: pinned.identity.1,
+    };
+    match holds_this_process(&leaf) {
+        Ok(false) => {}
+        Ok(true) => {
+            return LeafProbe::Unverifiable(
+                "this gc process runs inside the registered leaf".to_owned(),
+            );
+        }
+        Err(error) => return LeafProbe::Unverifiable(error),
+    }
+    match pinned.populated() {
+        Ok(populated) => LeafProbe::Identified { populated },
+        Err(error) => LeafProbe::Unverifiable(error),
+    }
+}
+
+/// Removes a leaf registered by name only, only when it reads empty; the
+/// kernel's `rmdir` refuses a populated cgroup anyway, and nothing here
+/// kills. Returns the identity of the directory removed.
+///
+/// # Errors
+/// Why the leaf was not found, not empty or not removed.
+pub fn remove_named_leaf(path: &Path, entries: &mut usize) -> Result<(u64, u64), String> {
+    let pinned = pin_named(path).map_err(|probe| describe(&probe))?;
+    if pinned.populated()? {
+        return Err(
+            "populated; a cgroup registered by name only is never emptied by gc".to_owned(),
+        );
+    }
+    pinned.remove(entries)?;
+    Ok(pinned.identity)
+}
+// J4 W2-S end
 
 /// Re-pins the leaf, checks it is empty and removes it with its empty child
 /// cgroups, spending at most `entries` directory entries.

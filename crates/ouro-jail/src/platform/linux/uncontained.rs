@@ -485,7 +485,10 @@ impl Uncontained {
 
         // §9.3: the supervisor-owned execution cgroup is required, observation
         // on or off. No fallback to a process-group kill (north star §4.2).
-        let leaf = ExecutionCgroup::create(&snapshot.limits).map_err(|err| {
+        // J4 W2-S: N7 — registered in jail state before `mkdir` and before
+        // anything is placed in it; a failed registration refuses (S5).
+        let created = ExecutionCgroup::create_for_attempt(&snapshot.limits, &plan.attempt_dir)?;
+        let leaf = created.map_err(|err| {
             host_setup(
                 ErrorCode::MissingCapability,
                 format!(
@@ -1124,6 +1127,8 @@ impl Uncontained {
                 self.evidence_reported = true;
                 self.pending.push(RunEvent::EvidenceLost {
                     reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
+                    // J4 W2-S: R-2 — processed after the target's own exit.
+                    after_target_end: self.target_exit_seen,
                 });
             }
             Fact::Finished => self.finished = true,

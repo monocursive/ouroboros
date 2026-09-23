@@ -596,10 +596,13 @@ fn j4_c03_a_stale_owner_pid_never_signals_an_unrelated_process() {
     bystander.assert_untouched("recycled pid");
 }
 
-/// A receipt is the supervisor's record, but in `none` the same uid can
-/// rewrite it. One that names another cgroup of this user (its real path,
-/// device and inode, and a process in it) is still not an execution leaf by
-/// name, so gc never pins it, never kills through it and never removes it.
+/// A receipt and jail state are the supervisor's records, but in `none` the
+/// same uid can rewrite them. Records that name another cgroup of this user
+/// (its real path, device and inode, and a process in it) still do not name
+/// an execution leaf by name, so gc never pins it, never kills through it and
+/// never removes it. (J4 wave 2, N7: gc reads the leaf from jail state, so
+/// both are forged, consistently; a receipt forged alone disagrees with jail
+/// state, and records that disagree are retained.)
 #[test]
 fn j4_c03_a_receipt_naming_another_cgroup_is_never_acted_on() {
     if !live() {
@@ -620,6 +623,21 @@ fn j4_c03_a_receipt_naming_another_cgroup_is_never_acted_on() {
     registration["device"] = json!(meta.dev());
     registration["inode"] = json!(meta.ino());
     write_json(&attempt.join("jail.json"), &receipt);
+
+    // The receipt alone: it disagrees with jail state.
+    let (code, report, stderr) = gc(&orphan.run, &["--dry-run"]);
+    assert_eq!(code, Some(0), "{stderr}\n{report:#}");
+    let cgroup = text(&report, "cgroup");
+    assert!(
+        cgroup.starts_with("retained") && cgroup.contains("different"),
+        "{report:#}"
+    );
+    assert!(bystander.try_wait().unwrap().is_none());
+
+    // Both records, consistently.
+    let mut state = read_json(&attempt.join("jail-state.json"));
+    state["execution_cgroup"] = json!({"path": other, "device": meta.dev(), "inode": meta.ino()});
+    write_json(&attempt.join("jail-state.json"), &state);
 
     for extra in [&["--dry-run"][..], &[][..]] {
         let (code, report, stderr) = gc(&orphan.run, extra);
@@ -739,4 +757,280 @@ fn j4_c03_contained_crash_leaves_an_empty_leaf_that_gc_removes() {
         ["gc_removed_cgroup", "gc_removed_scratch"]
     );
     assert_eq!(std::fs::read(attempt.join("jail.json")).unwrap(), receipt);
+}
+
+// ===========================================================================
+// N7: the execution leaf is registered in jail state before it exists
+// ===========================================================================
+
+/// The execution leaves (`ouro-*.leaf`) directly under this user's delegated
+/// subtree, by name, with their inodes.
+fn leaves(root: &Path) -> Vec<(String, u64)> {
+    let mut found: Vec<(String, u64)> = std::fs::read_dir(root)
+        .map(|listing| {
+            listing
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_str()?.to_owned();
+                    (name.starts_with("ouro-") && name.ends_with(".leaf"))
+                        .then(|| Some((name, entry.metadata().ok()?.ino())))?
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// One `tool` attempt aborted by `OURO_JAIL_TEST_ABORT_AT=<point>` (S9),
+/// exactly as `j4_records_linux` crashes one: no core file, the release
+/// binary, the harness's own private state root.
+fn crashed_tool_run(point: &str) -> Run {
+    let jail = Jail::with_program("/bin/sh")
+        .expect("harness")
+        .args(["-c", "ulimit -c 0 && exec \"$0\" \"$@\""])
+        .arg(harness::jail_path());
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("the workspace");
+    jail.arg("run")
+        .args(["--profile", "tool", "--workspace"])
+        .arg(&workspace)
+        .env(ouro_jail::state::ABORT_AT_SEAM, point)
+        .receipt()
+        .timeout(Duration::from_secs(60))
+        .target(["/bin/true"])
+        .run()
+        .expect("the run")
+}
+
+/// N7 (J4 wave 2). The execution leaf used to be created (and, in the
+/// contained profiles, populated with the blocked backend) before anything
+/// named it outside a receipt, so a supervisor that died between `mkdir` and
+/// its `prepared` receipt left a leaf `gc` could never find. Its name is now
+/// in jail state before `mkdir` (P15) and its device and inode right after
+/// (P16), before anything is placed in it, and `gc` reads the leaf from jail
+/// state. A crash at each of those writes, at the boundary registration (P4)
+/// and at the `prepared` receipt (P5) leaves either no leaf at all or one
+/// that jail state names and that `gc` removes: after the name alone, the
+/// leaf is empty and is removed by name; after the identity, it is the
+/// positively identified leaf (the lifetime watcher ended its tree when the
+/// supervisor died).
+#[test]
+fn j4_n7_a_crash_between_mkdir_and_the_receipt_leaves_a_leaf_gc_removes() {
+    if !common::live() || !live() {
+        return;
+    }
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let root = ouro_jail::platform::linux::cgroup::delegated_root(unsafe { libc::geteuid() })
+        .expect("a delegated subtree (checked by live())");
+    // (abort point, whether a leaf exists once the supervisor is dead,
+    // whether jail state holds its identity or only its name)
+    let cases = [
+        ("execution_leaf:dir_synced", false, false),
+        ("execution_leaf_identity:temp_written", true, false),
+        ("execution_leaf_identity:temp_synced", true, false),
+        ("execution_leaf_identity:dir_synced", true, true),
+        ("boundary:temp_written", true, true),
+        ("prepared_receipt:temp_written", true, true),
+    ];
+    let mut problems = Vec::new();
+    for (point, exists, with_identity) in cases {
+        let before = leaves(&root);
+        let run = crashed_tool_run(point);
+        if run.signal() != Some(libc::SIGABRT) {
+            problems.push(format!(
+                "{point}: the abort point was never reached (exit {:?}): {}",
+                run.code(),
+                run.stderr_text().trim()
+            ));
+            continue;
+        }
+        let appeared: Vec<(String, u64)> = leaves(&root)
+            .into_iter()
+            .filter(|leaf| !before.contains(leaf))
+            .collect();
+        let attempt = attempt_of(&run.data_dir);
+        let state = read_json(&attempt.join("jail-state.json"));
+        let registered = &state["execution_cgroup"];
+        let Some(path) = registered["path"].as_str().map(PathBuf::from) else {
+            problems.push(format!(
+                "{point}: jail state registers no execution leaf ({registered}); leaves that \
+                 appeared during the run: {appeared:?}"
+            ));
+            continue;
+        };
+        let _guard = inode(&path).map(|now| LeafGuard::new(&path, now));
+        if path.parent() != Some(root.as_path()) {
+            problems.push(format!(
+                "{point}: {} is not under {}",
+                path.display(),
+                root.display()
+            ));
+            continue;
+        }
+        let identified = registered["inode"].as_u64();
+        if identified.is_some() != with_identity {
+            problems.push(format!(
+                "{point}: the registration is {registered}, a crash here leaves identity={with_identity}"
+            ));
+        }
+        if inode(&path).is_some() != exists {
+            problems.push(format!(
+                "{point}: leaf present={}, a crash here leaves {exists}",
+                inode(&path).is_some()
+            ));
+            continue;
+        }
+        if let (Some(recorded), Some(now)) = (identified, inode(&path))
+            && recorded != now
+        {
+            problems.push(format!("{point}: registered inode {recorded}, found {now}"));
+        }
+        if exists {
+            wait_for("the dead supervisor's leaf to empty", || !populated(&path));
+        }
+        let (code, report, stderr) = gc(&run, &[]);
+        if code != Some(0) {
+            problems.push(format!("{point}: gc exited {code:?}: {stderr}\n{report:#}"));
+        }
+        if inode(&path).is_some() {
+            problems.push(format!(
+                "{point}: gc left the registered leaf {}: {report:#}",
+                path.display()
+            ));
+        }
+        let actions = gc_actions(&attempt);
+        if exists != actions.iter().any(|action| action == "gc_removed_cgroup") {
+            problems.push(format!("{point}: gc recorded {actions:?}: {report:#}"));
+        }
+        eprintln!(
+            "{point}: cgroup {:?}, recorded {actions:?}",
+            text(&report, "cgroup")
+        );
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// A persistence seam that fails the first write at one site with ENOSPC
+/// and keeps the bytes it was asked to write.
+struct FailAt {
+    site: ouro_jail::state::Site,
+    asked: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl ouro_jail::state::PersistIo for FailAt {
+    fn write(
+        &self,
+        site: ouro_jail::state::Site,
+        file: &mut std::fs::File,
+        bytes: &[u8],
+    ) -> std::io::Result<usize> {
+        if site == self.site {
+            let mut asked = self.asked.lock().unwrap();
+            if asked.is_none() {
+                *asked = Some(bytes.to_vec());
+                return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+            }
+        }
+        std::io::Write::write(file, bytes)
+    }
+}
+
+/// N7, a failed registration (in process, through the persistence seam, on
+/// the `none` boundary, which needs its leaf whatever the policy asks): a
+/// failed name (P15) refuses `state_write_failed` before `mkdir`, so the leaf
+/// it would have made never exists; a failed identity (P16) refuses too and
+/// removes the empty leaf it made, and jail state names it by name only, so
+/// even a failed removal would leave it findable. Nothing is launched.
+#[test]
+fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
+    use ouro_jail::platform::{PlanRequest, PreparedPlan, Sinks};
+    use ouro_jail::policy::{ProfileName, ResolveInputs, ScratchRoot};
+    use ouro_jail::records::{ErrorCode, Os};
+    use ouro_jail::state::Site;
+    if !live() {
+        return;
+    }
+    for site in [Site::ExecutionLeaf, Site::ExecutionLeafIdentity] {
+        let label = site.as_str();
+        let root = common::private_tempdir();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let attempt_id = ouro_jail::state::AttemptId::generate();
+        let attempt = root.path().join("attempt");
+        std::fs::create_dir(&attempt).unwrap();
+        write_json(
+            &attempt.join("jail-state.json"),
+            &json!({
+                "schema": "ouro.jail.state/1",
+                "attempt_id": attempt_id.as_str(),
+                "execution_cgroup": null,
+            }),
+        );
+        let resolved = ouro_jail::policy::resolve(&ResolveInputs {
+            platform: Os::Linux,
+            base_profile: ProfileName::None,
+            policy_name: "none".to_owned(),
+            baseline: ouro_jail::profiles::baseline(ProfileName::None, Os::Linux, &|_| None),
+            workspace: workspace.as_os_str().as_encoded_bytes().to_vec(),
+            scratch: ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: Vec::new(),
+        })
+        .expect("the bare none baseline resolves");
+        let plan = PreparedPlan {
+            attempt_id: attempt_id.as_str().to_owned(),
+            attempt_dir: attempt.clone(),
+            request: PlanRequest {
+                requirements: ouro_jail::capability::requirements(&resolved.snapshot),
+                snapshot: resolved.snapshot,
+                profile: ProfileName::None,
+            },
+            argv: vec![b"/bin/true".to_vec()],
+            workspace,
+            launch: None,
+            proxy: None,
+        };
+        let seam = std::sync::Arc::new(FailAt {
+            site,
+            asked: std::sync::Mutex::new(None),
+        });
+        let deadline = ouro_jail::platform::linux::clock::Deadline::after(Duration::from_secs(10));
+        let result = ouro_jail::state::with_persist_io(seam.clone(), || {
+            ouro_jail::platform::linux::uncontained::prepare(plan, Sinks { trace: None }, deadline)
+        });
+        let Err(error) = result else {
+            panic!("{label}: the boundary was prepared although its leaf was not registered");
+        };
+        assert_eq!(error.code, ErrorCode::StateWriteFailed, "{label}: {error}");
+        let asked: Value =
+            serde_json::from_slice(&seam.asked.lock().unwrap().clone().expect("the write"))
+                .unwrap();
+        let path = PathBuf::from(asked["execution_cgroup"]["path"].as_str().unwrap());
+        assert!(
+            ouro_jail::platform::linux::cgroup::is_leaf_name(path.file_name().unwrap()),
+            "{label}: {}",
+            path.display()
+        );
+        assert_eq!(
+            inode(&path),
+            None,
+            "{label}: {} was left behind",
+            path.display()
+        );
+        let state = read_json(&attempt.join("jail-state.json"));
+        let expected = if site == Site::ExecutionLeaf {
+            Value::Null
+        } else {
+            json!({"path": path, "device": null, "inode": null})
+        };
+        assert_eq!(state["execution_cgroup"], expected, "{label}");
+    }
 }

@@ -1015,7 +1015,7 @@ fn run_case(case: &SiteCase, fault: Fault) -> Vec<String> {
     problems
 }
 
-/// P12 and P13: `gc`'s own writes, after a run that left work for it.
+/// P12, P13 and P14: `gc`'s own writes, after a run that left work for it.
 fn gc_case(site: Site, fault: Fault) -> Vec<String> {
     let label = format!("j4_r02_{}_{}", site.as_str(), fault.name());
     let fixture = Fixture::new();
@@ -1027,11 +1027,32 @@ fn gc_case(site: Site, fault: Fault) -> Vec<String> {
     assert_eq!(run.report.exit_code, 0, "{label}: {:?}", run.report.error);
     let dir = fixture.attempt();
     // Rewind the records to what an interruption leaves for gc to finish: a
-    // cleanup recorded pending (P12), or a registered proxy directory the
-    // supervisor never removed (P13).
+    // cleanup recorded pending (P12), a registered proxy directory the
+    // supervisor never removed (P13), or (J4 wave 2) the temporary file a
+    // crash left, of an owner recorded in another boot, which gc removes and
+    // records in `gc_actions` (P14).
     let mut state: Value =
         serde_json::from_slice(&std::fs::read(dir.join("jail-state.json")).unwrap()).unwrap();
-    if site == Site::GcResume {
+    if site == Site::GcRecord {
+        // Both records name the other boot, or they would disagree.
+        let other_boot = "00000000-0000-4000-8000-00000000b0b0";
+        state["owner"]["boot_id"] = other_boot.into();
+        let mut receipt: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("jail.json")).unwrap()).unwrap();
+        receipt["process"]["identity"]["value"]["boot_id"] = other_boot.into();
+        std::fs::write(
+            dir.join("jail.json"),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        let temp = dir.join(format!(
+            ".jail.json.{}.tmp",
+            state::AttemptId::generate()
+                .as_str()
+                .trim_start_matches("att_")
+        ));
+        std::fs::write(&temp, b"{").unwrap();
+    } else if site == Site::GcResume {
         let mut receipt: Value =
             serde_json::from_slice(&std::fs::read(dir.join("jail.json")).unwrap()).unwrap();
         receipt["state_cleanup"] = "pending".into();
@@ -1096,7 +1117,7 @@ fn j4_r02_every_site_under_every_fault_leaves_valid_records() {
             problems.extend(run_case(&case, fault));
         }
     }
-    for site in [Site::GcResume, Site::GcProxyDir] {
+    for site in [Site::GcResume, Site::GcProxyDir, Site::GcRecord] {
         for fault in Fault::ALL {
             problems.extend(gc_case(site, fault));
         }
@@ -1402,6 +1423,7 @@ fn j4_n4_a_queued_frame_reaches_a_returning_reader_while_the_run_goes_on() {
 fn lost(reason: &str) -> RunEvent {
     RunEvent::EvidenceLost {
         reason: reason.to_owned(),
+        after_target_end: false,
     }
 }
 

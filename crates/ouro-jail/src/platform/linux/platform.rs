@@ -631,7 +631,10 @@ impl Boundary {
         .flatten()
         .any(|limit| limit.required);
         let mut cgroup_unavailable = None;
-        let cgroup = match ExecutionCgroup::create(&snapshot.limits) {
+        // J4 W2-S: N7 — registered in jail state before `mkdir` and before
+        // anything is placed in it; a failed registration refuses (S5).
+        let created = ExecutionCgroup::create_for_attempt(&snapshot.limits, &plan.attempt_dir)?;
+        let cgroup = match created {
             Ok(leaf) => Some(leaf),
             Err(err) if cgroup_required => {
                 return Err(preparing(
@@ -2717,6 +2720,11 @@ impl LinuxRunning {
                 self.evidence_reported = true;
                 self.pending.push(RunEvent::EvidenceLost {
                     reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
+                    // J4 W2-S: R-2 — the target's exit is held back until the
+                    // backend ends too, so a loss in the teardown after it
+                    // (a call the namespace's end interrupted) is queued
+                    // ahead of the exit although it came after it.
+                    after_target_end: self.target_outcome.is_some(),
                 });
             }
             Fact::Finished => self.finished = true,
@@ -2878,7 +2886,14 @@ impl RunningExecution for LinuxRunning {
             // J3-agent begin: mediated connects, helper facts, and a loss of
             // mediation or proxy evidence, which strict evidence stops for
             if let Some(reason) = self.boundary.pump_agent() {
-                self.pending.push(RunEvent::EvidenceLost { reason });
+                // J4 W2-S: R-2 — the target's end as this loop knows it:
+                // the observer's exit, or without one the backend's.
+                let after_target_end = self.target_outcome.is_some()
+                    || (self.boundary.tracer.is_none() && self.bwrap_status.is_some());
+                self.pending.push(RunEvent::EvidenceLost {
+                    reason,
+                    after_target_end,
+                });
             }
             // J3-agent end
             self.pump_status();

@@ -10,6 +10,13 @@
 //! - Loss never changes a protection label: `containment` and
 //!   `child_protection` read the same in every receipt revision of the
 //!   attempt, before and after the loss, in either evidence mode.
+//! - J4 wave 2, R-1: a loss the platform never reported as an event (queued
+//!   during settlement, or found when the observer stopped) is still an
+//!   `evidence_lost` error and exit 1: any evidence class degraded at
+//!   settlement is, whatever the loss's timing.
+//! - J4 wave 2, R-2: a loss after the target's own end is recorded (errors,
+//!   exit 1) but is not a stop and never replaces the natural end as
+//!   `outcome.cause`.
 //!
 //! The platform is simulated and the filesystem is real, so every receipt
 //! revision the supervisor persists can be read back as it is written. The
@@ -71,6 +78,9 @@ struct Script {
     /// A contained boundary (`tool`): a pid namespace verified over the
     /// attempt tree, with an application of the shape the contract requires.
     contained: bool,
+    /// The contained boundary applied the outside proxy (`agent`'s network
+    /// mode), so `proxy.net` is a class of its own.
+    proxy: bool,
 }
 
 struct Simulated(Script);
@@ -163,7 +173,7 @@ impl PreparedExecution for Prepared {
                 mounts: Vec::new(),
             }),
             network: AppliedNetwork {
-                mode: "none".into(),
+                mode: if self.0.proxy { "proxy" } else { "none" }.into(),
                 mechanism: Some("simulation".into()),
                 allowed_hosts: Vec::new(),
             },
@@ -313,6 +323,7 @@ fn degraded_coverage() -> CoverageSummary {
 fn evidence_lost() -> RunEvent {
     RunEvent::EvidenceLost {
         reason: "the closed-set observer lost coverage: entry_abandoned".into(),
+        after_target_end: false,
     }
 }
 
@@ -360,13 +371,28 @@ impl Fixture {
     }
 
     fn run(&self, events: Vec<RunEvent>, flags: &[&str]) -> Outcome {
+        self.run_covered(events, flags, degraded_coverage())
+    }
+
+    /// [`Fixture::run`] with the observer's final account given.
+    fn run_covered(
+        &self,
+        events: Vec<RunEvent>,
+        flags: &[&str],
+        coverage: CoverageSummary,
+    ) -> Outcome {
+        let proxy = coverage
+            .classes
+            .get(&CoverageClass::ProxyNet)
+            .is_some_and(|class| class.status != SourceStatus::Unsupported);
         let script = Script {
             events,
             data: self.data.clone(),
-            coverage: degraded_coverage(),
+            coverage,
             stops: Arc::default(),
             labels: Arc::default(),
             contained: flags.contains(&"tool"),
+            proxy,
         };
         let stops = Arc::clone(&script.stops);
         let labels = Arc::clone(&script.labels);
@@ -724,6 +750,233 @@ fn j4_r04_protection_labels_never_change() {
                     "{profile}/{evidence}: the {phase} receipt changed a label"
                 );
             }
+            assert_coverage_is_honest(&run.receipt);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// J4 wave 2, R-1: a loss found at settlement is reported, whatever its timing
+// ---------------------------------------------------------------------------
+
+/// The account of an observer that saw everything: every audit class active
+/// with its exact count.
+fn clean_coverage() -> CoverageSummary {
+    let mut summary = degraded_coverage();
+    let active = |count| ClassSummary {
+        status: SourceStatus::Active,
+        observed_count: Some(count),
+        gaps: Vec::new(),
+    };
+    summary.sources.audit = SourceStatus::Active;
+    summary.gaps.clear();
+    summary.classes.insert(CoverageClass::FsWrite, active(2));
+    summary.classes.insert(CoverageClass::FsDeny, active(0));
+    summary
+}
+
+fn evidence_lost_count(receipt: &Value) -> usize {
+    error_codes(receipt)
+        .iter()
+        .filter(|code| *code == "evidence_lost")
+        .count()
+}
+
+/// R-1 (slice L measured it live: `j4_r04_a_call_in_flight_at_teardown_is_loss`
+/// exited 0 with `errors: []` under strict evidence). The platform queued no
+/// loss event before the target's end — the loss was found while the tree was
+/// torn down — yet the observer's account at settlement degrades `fs.write`
+/// and `fs.deny`. Any evidence class degraded at settlement is an
+/// `evidence_lost` error and exit 1, in both modes and both profiles. Nothing
+/// stopped the target, so there is no stop and no cause: its own end stays
+/// the outcome.
+#[test]
+fn j4_w2s_r1_a_loss_found_at_settlement_is_an_error_and_exit_1() {
+    for profile in ["none", "tool"] {
+        for evidence in ["strict", "best-effort"] {
+            let label = format!("{profile}/{evidence}");
+            let fixture = Fixture::new();
+            let run = fixture.run(
+                vec![RunEvent::ExecConfirmed, RunEvent::TargetExited { code: 0 }],
+                &["--profile", profile, "--evidence", evidence],
+            );
+            assert_coverage_is_honest(&run.receipt);
+            assert_eq!(
+                evidence_lost_count(&run.receipt),
+                1,
+                "{label}: the loss is one evidence_lost error: {:#}",
+                run.receipt["errors"]
+            );
+            assert_eq!(
+                run.report.exit_code, 1,
+                "{label}: a degraded class at settlement exits 1"
+            );
+            assert_eq!(
+                run.report.error.as_ref().map(|error| error.code),
+                Some(ErrorCode::EvidenceLost),
+                "{label}"
+            );
+            let outcome = &run.receipt["outcome"];
+            assert_eq!(outcome["kind"], "exited", "{label}: {outcome:#}");
+            assert_eq!(outcome["code"], 0, "{label}: {outcome:#}");
+            assert_eq!(
+                outcome["cause"],
+                Value::Null,
+                "{label}: the target ended by itself: {outcome:#}"
+            );
+            assert!(run.stops.is_empty(), "{label}: {:?}", run.stops);
+        }
+    }
+}
+
+/// R-1, the other side: a loss the platform did report during the run is
+/// the one error; finding the same degraded classes at settlement adds no
+/// second one.
+#[test]
+fn j4_w2s_r1_a_reported_loss_is_not_reported_twice_at_settlement() {
+    for evidence in ["strict", "best-effort"] {
+        let fixture = Fixture::new();
+        let run = fixture.run(
+            vec![RunEvent::ExecConfirmed, RunEvent::Poll, evidence_lost()],
+            &["--profile", "tool", "--evidence", evidence],
+        );
+        assert_eq!(
+            evidence_lost_count(&run.receipt),
+            1,
+            "{evidence}: {:#}",
+            run.receipt["errors"]
+        );
+        assert_eq!(run.report.exit_code, 1, "{evidence}");
+    }
+}
+
+/// R-1 covers the proxy's class too: §11.4 handles a lost `proxy.net`
+/// result as evidence loss (strict stops for it in the run loop), so a
+/// `proxy.net` degraded only at settlement — the proxy's last results not
+/// drained — is the same `evidence_lost` error and exit 1.
+#[test]
+fn j4_w2s_r1_a_proxy_loss_found_at_settlement_is_an_error() {
+    let mut coverage = clean_coverage();
+    coverage.sources.proxy = SourceStatus::Degraded;
+    coverage.classes.insert(
+        CoverageClass::ProxyNet,
+        ClassSummary {
+            status: SourceStatus::Degraded,
+            observed_count: None,
+            gaps: vec![Gap {
+                classes: vec!["proxy.net".into()],
+                source: "proxy".into(),
+                start_ns: "0".into(),
+                end_ns: Some("2000".into()),
+                reason: "proxy_drain_incomplete".into(),
+                lost_count: Some(1),
+            }],
+        },
+    );
+    let fixture = Fixture::new();
+    let run = fixture.run_covered(
+        vec![RunEvent::ExecConfirmed, RunEvent::TargetExited { code: 0 }],
+        &["--profile", "tool", "--evidence", "strict"],
+        coverage,
+    );
+    assert_eq!(
+        evidence_lost_count(&run.receipt),
+        1,
+        "{:#}",
+        run.receipt["errors"]
+    );
+    assert!(
+        run.receipt["errors"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("proxy.net")),
+        "{:#}",
+        run.receipt["errors"]
+    );
+    assert_eq!(run.report.exit_code, 1);
+    assert_eq!(run.receipt["outcome"]["cause"], Value::Null);
+}
+
+/// R-1 never invents a loss: every class active at settlement, no error, and
+/// the jail exits with the target's own code.
+#[test]
+fn j4_w2s_r1_full_coverage_at_settlement_is_no_error() {
+    for profile in ["none", "tool"] {
+        let fixture = Fixture::new();
+        let run = fixture.run_covered(
+            vec![RunEvent::ExecConfirmed, RunEvent::TargetExited { code: 0 }],
+            &["--profile", profile, "--evidence", "strict"],
+            clean_coverage(),
+        );
+        assert_eq!(
+            run.receipt["errors"],
+            serde_json::json!([]),
+            "{profile}: {:#}",
+            run.receipt
+        );
+        assert_eq!(run.report.exit_code, 0, "{profile}: {:?}", run.report.error);
+        assert_eq!(run.receipt["coverage"]["fs.write"]["status"], "active");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// J4 wave 2, R-2: a loss after the target's own end is not the cause
+// ---------------------------------------------------------------------------
+
+/// A loss the platform processed after it had seen the target's own end.
+fn evidence_lost_after_end() -> RunEvent {
+    RunEvent::EvidenceLost {
+        reason: "the closed-set observer lost coverage: entry_abandoned".into(),
+        after_target_end: true,
+    }
+}
+
+/// R-2. The contained platform learns the target's exit from the observer
+/// and reports it only once the backend has ended too, so a call abandoned
+/// by the namespace's teardown reaches the supervisor as a loss event before
+/// the exit event, although it happened after it. Under strict evidence that
+/// loss used to become `outcome.cause: evidence_loss` beside `exited 0`. A
+/// loss after the target's end is recorded (one `evidence_lost`, exit 1) but
+/// asks for no stop and does not replace the natural end: the cause stays
+/// null, in both modes.
+#[test]
+fn j4_w2s_r2_a_loss_after_the_target_ended_is_recorded_not_the_cause() {
+    for evidence in ["strict", "best-effort"] {
+        for profile in ["tool", "none"] {
+            let label = format!("{profile}/{evidence}");
+            let fixture = Fixture::new();
+            let run = fixture.run(
+                vec![
+                    RunEvent::ExecConfirmed,
+                    evidence_lost_after_end(),
+                    RunEvent::TargetExited { code: 0 },
+                ],
+                &["--profile", profile, "--evidence", evidence],
+            );
+            let outcome = &run.receipt["outcome"];
+            assert_eq!(
+                outcome["cause"],
+                Value::Null,
+                "{label}: the target's own end is the outcome: {outcome:#}"
+            );
+            assert_eq!(outcome["kind"], "exited", "{label}: {outcome:#}");
+            assert_eq!(outcome["code"], 0, "{label}: {outcome:#}");
+            assert!(
+                run.stops.is_empty(),
+                "{label}: nothing is left to stop: {:?}",
+                run.stops
+            );
+            assert_eq!(
+                evidence_lost_count(&run.receipt),
+                1,
+                "{label}: {:#}",
+                run.receipt["errors"]
+            );
+            assert_eq!(run.report.exit_code, 1, "{label}");
+            assert_eq!(
+                run.report.error.as_ref().map(|error| error.code),
+                Some(ErrorCode::EvidenceLost),
+                "{label}"
+            );
             assert_coverage_is_honest(&run.receipt);
         }
     }
