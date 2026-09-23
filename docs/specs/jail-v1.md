@@ -581,7 +581,9 @@ Apply configuration in this order:
    persistence site), `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
    entry bound, reported in gc's `test_seams`), and
    `OURO_JAIL_TEST_TRACER_INFLIGHT` (1 to 16,384) and
-   `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304), which are ignored
+   `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304; the bound in force,
+   recorded as `observer_plan.queue_bytes_max`, is at least 256 bytes), which
+   are ignored
    unless the value is decimal digits in range and are also named in the
    receipt's `observer_plan.test_seams` with the value applied, or null when
    ignored.
@@ -1411,6 +1413,9 @@ identity, thread and in-flight invocation. Record signed raw return and errno.
 Exec success needs special handling: a successful exec replaces the calling
 image and is not an ordinary successful return to it. Use the confirmed kernel
 exec transition and correlate its entry, including non-leader-thread exec.
+At a non-leader exec, the leader's call in flight can no longer return: it is
+an `entry_abandoned` gap of its classes, never paired with the exec's own
+syscall exit, whether or not the exec's entry was followed.
 Fork/clone/exit hooks used for tracking are internal bookkeeping; they do not
 expand the public syscall audit set.
 Emit one `proc.exit` only after the last live thread in a tracked process exits.
@@ -1429,10 +1434,19 @@ one result; `EINTR` at a signal handler's entry is its result; a thread that
 ends before the decision returned nothing and did nothing, which is neither a
 result nor a gap; a decision the observer cannot establish is a
 `restart_unresolved` gap naming the call's classes. The ptrace observer
-settles a restart code by single-stepping; for `ERESTARTSYS` it reads the
-effect of `SA_RESTART` from the `rax`/`rip` the kernel saved in the handler's
-frame, which a sibling thread rewriting that frame first can misstate for that
-one call, a call with no effect either way. `openat2` requires decoding only
+settles a restart code by single-stepping. A restart decided at a handler's
+entry (for `ERESTARTSYS` read from the `rax`/`rip` saved in the handler's
+frame, which the program can rewrite before the observer reads it or before
+`rt_sigreturn` restores it) is believed only at the re-entry itself, the
+thread's next entry stop at the call's own instruction. Any other entry stop
+first, including a covered call made inside an `SA_RESTART` handler, is a
+`restart_unresolved` gap; the thread's end first is such a gap when the frame
+decided, and neither a result nor a gap when the restart code alone decided
+(`ERESTARTNOINTR`). A program that rewrites the frame and then repeats the same
+call from the same instruction is indistinguishable from the re-entry: the
+repeated call's result is reported and the intervening `EINTR` is not. Under
+strict evidence such a gap stops the attempt, for example a handler that exits
+while a blocking covered call waits to restart. `openat2` requires decoding only
 the supported size/flags of its argument structure; unknown or unreadable input
 is unavailable metadata and, if needed for classification, a gap.
 
@@ -1488,7 +1502,11 @@ classes, handled exactly as tracer loss: strict stops the attempt. The mediator
 records a syscall result only when the kernel accepts its notification reply.
 If the reply fails, no target return is established: emit no result, record a
 `mediation_response_undelivered` gap for both `net` and `fs.deny`, and apply
-the same strict/best-effort loss rule.
+the same strict/best-effort loss rule. A connect whose notification a signal
+withdraws before any mediation worker received it (every worker busy, and a
+handler without `SA_RESTART`) returns `EINTR` and never runs. It is a named
+exclusion: under `agent`, `net` and `fs.deny` count the connects the mediator
+received, and such a connect is neither a result nor a gap.
 
 Each class has exactly the following source and operation assignment:
 
@@ -1529,7 +1547,10 @@ A child's own seccomp filter can outrank the observer's trace stop. Only a
 filter installed with a notification listener can let a call take effect
 without that stop: when the kernel grants a child a listener, record a
 `child_notification_listener` gap in every audit class with a null count and
-no end. A call the child's own filter refuses (errno, trap or kill) before the
+no end. A listener request the in-flight bound cannot follow is recorded the
+same way, and a `clone(CLONE_UNTRACED)` it cannot follow is an
+`untraced_descendant` gap: the refused call's return is the only fact that
+would say whether it did anything. A call the child's own filter refuses (errno, trap or kill) before the
 observer's stop had no effect; it is a named exclusion, neither a result nor a
 gap. A trace stop the observer did not request, identified by trace data that
 is not the observer's, is continued (the call then runs, as under any tracer)
@@ -1554,7 +1575,13 @@ Record actual values in the observer plan: `lifetime.native.details.observer_pla
 names the backend and every bound in force (null with observation off). The
 ptrace observer has no kernel ring or map. Its map exhaustion is the in-flight
 bound: an entry past it is not followed and is an `inflight_exhausted` gap
-naming that call's classes. Its ring loss is the user-space queue: a result
+naming that call's classes (except the listener and untraced-clone requests
+above). `queue_bytes_max` bounds everything the observer holds for its
+consumer, buffered or handed over and not yet taken, except the exempt
+critical facts, and is at least one 256-byte event; the plan also records
+`queue_result_bytes_max` (the budget short of the 64 KiB lifecycle reserve, at
+least 256; below about 64 KiB no result carrying a pathname is admitted) and
+`queue_lifecycle_reserve_bytes`. Its ring loss is the user-space queue: a result
 that cannot be admitted within the one-second bounded wait is dropped into a
 `queue_full` gap naming the dropped results' classes. It steps a tracee to a
 syscall exit only while it holds that tracee's entry, so an unmatched exit
