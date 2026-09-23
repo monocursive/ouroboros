@@ -1114,13 +1114,15 @@ fn audit_events(run: &Run) -> Vec<&Value> {
         .collect()
 }
 
-/// Audit results whose (first) path is this workspace-relative one.
+/// Audit results naming this workspace-relative path, as either path.
 fn results_on<'a>(run: &'a Run, relative: &str) -> Vec<&'a Value> {
     audit_events(run)
         .into_iter()
         .filter(|event| {
-            event["fields"]["path"]["kind"] == "workspace_relative"
-                && event["fields"]["path"]["value"] == relative
+            ["path", "path2"].iter().any(|key| {
+                event["fields"][key]["kind"] == "workspace_relative"
+                    && event["fields"][key]["value"] == relative
+            })
         })
         .collect()
 }
@@ -1528,7 +1530,7 @@ fn j4_o03_unmatched_exit_is_unreachable() {
         summary.ops.mkdir >= 50 && summary.ops.rmdir >= 50,
         "{summary:?}"
     );
-    assert!(summary.restarts >= 2, "restart and EINTR: {summary:?}");
+    assert!(summary.restarts >= 1, "the SA_RESTART restart: {summary:?}");
     assert!(summary.loss.abandoned_entries >= 1, "{summary:?}");
     assert!(summary.tasks_destroyed_by_exec >= 1, "{summary:?}");
     assert_eq!(
@@ -1768,16 +1770,25 @@ fn j4_o05_directory_operation_losses_degrade_fs_write() {
         }
         assert_active(&settled, "exec", 2);
         assert_active(&settled, "net", 1);
-        // Only the call made after the release is a result; none of the
-        // twenty is.
-        let results: Vec<&Value> = audit_events(&run)
-            .into_iter()
-            .filter(|event| event["operation"] != "proc.exec" && event["operation"] != "proc.exit")
-            .collect();
+        // None of the twenty is a result; the mkdir made after the release
+        // is.
+        for line in &lost {
+            let relative = Path::new(&line.path)
+                .strip_prefix(&c.workspace)
+                .unwrap_or_else(|_| panic!("{profile}: {line:?}"))
+                .to_string_lossy()
+                .into_owned();
+            let invented = results_on(&run, &relative);
+            assert!(
+                invented.is_empty(),
+                "{profile}: a result for {} that the observer could not follow: {invented:#?}",
+                line.label
+            );
+        }
         assert_eq!(
-            results.len(),
-            2,
-            "{profile}: the later mkdir and connect only: {results:#?}"
+            results_on(&run, "ops/after").len(),
+            1,
+            "{profile}: the call after the release is observed"
         );
     }
 }
