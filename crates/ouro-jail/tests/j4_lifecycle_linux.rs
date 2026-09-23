@@ -338,7 +338,7 @@ fn j4_a_contained_runs_watcher_holds_its_leafs_kill_file() {
         .spawn()
         .unwrap();
     let prepared = spawned.owner().await_prepared().unwrap();
-    let receipt = spawned.receipt_value().unwrap();
+    let receipt = common::checked_receipt(spawned.receipt_value().unwrap());
     let details = &receipt["lifetime"]["native"]["details"];
     let leaf = PathBuf::from(
         details["execution_cgroup"]["path"]
@@ -392,7 +392,12 @@ fn j4_a_contained_runs_watcher_holds_its_leafs_kill_file() {
         left.is_empty(),
         "processes in the leaf outlived the killed supervisor: {left:?}"
     );
-    let last: Option<Value> = run.receipts().last().cloned();
+    let mut receipts: Vec<Value> = run
+        .receipts()
+        .into_iter()
+        .map(common::checked_receipt)
+        .collect();
+    let last: Option<Value> = receipts.pop();
     assert_eq!(
         last.as_ref().map(|r| r["phase"].clone()),
         Some(Value::from("enforced")),

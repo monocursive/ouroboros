@@ -250,6 +250,8 @@ fn validators() -> &'static BTreeMap<String, Validator> {
     })
 }
 
+/// Schema validation; a receipt also keeps the rules the schema cannot state
+/// (`common::semantic_receipt`).
 fn assert_schema(name: &str, value: &serde_json::Value) {
     let validator = &validators()[name];
     let errors: Vec<String> = validator
@@ -257,6 +259,9 @@ fn assert_schema(name: &str, value: &serde_json::Value) {
         .map(|e| e.to_string())
         .collect();
     assert!(errors.is_empty(), "{name} rejects {value:#}: {errors:?}");
+    if name == "jail-receipt" {
+        common::assert_semantic_receipt(value);
+    }
 }
 
 // ---------------------------------------------------------------------------

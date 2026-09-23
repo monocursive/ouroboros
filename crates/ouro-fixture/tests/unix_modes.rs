@@ -419,11 +419,28 @@ fn an_exchange_with_a_probe_ends_at_eof_not_at_a_hang() {
     // The probe closes at once, so the client sees either EOF on its read or
     // EPIPE on its write, depending on which came first. Both are "no echo,
     // no hang"; neither is a deadline.
+    //
+    // macOS adds one more answer for the same fact: ENOTCONN on the write.
+    // Measured there (2026-09-23, J4 W2-H), a write after the peer's close
+    // has completed is EPIPE 3000 times of 3000, and a write racing the
+    // close is EPIPE, a clean write followed by EOF, or ENOTCONN (4 in
+    // 20000; 38 of 1200 runs of this test under parallel load). So ENOTCONN
+    // is the close landing while the send is in flight; in XNU's source the
+    // AF_UNIX send routine tests "connected" before "cannot send more", so a
+    // disconnect that arrives after the generic send checks passed reads as
+    // ENOTCONN rather than EPIPE. The connect before it succeeded (the
+    // exchange line exists only then), so this too is "no echo, no hang".
+    // Linux answers EPIPE there (a closed stream peer stays the peer), so on
+    // Linux ENOTCONN stays refused.
     let x = last(&lines(&out), "exchange").clone();
     assert_ne!(x["args"]["echoed"], true, "{x}");
     assert_ne!(x["args"]["errno_source"], "fixture_deadline", "{x}");
+    let torn_mid_send = !LINUX && x["args"]["failed_step"] == "write" && x["errno"] == "ENOTCONN";
     assert!(
-        x["args"]["echoed"] == false || x["errno"] == "EPIPE" || x["errno"] == "ECONNRESET",
+        x["args"]["echoed"] == false
+            || x["errno"] == "EPIPE"
+            || x["errno"] == "ECONNRESET"
+            || torn_mid_send,
         "{x}"
     );
     assert_eq!(probe.stop(), 1);

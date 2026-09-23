@@ -139,8 +139,13 @@ fn the_run_exposes_the_receipt_the_trace_and_the_private_state() {
     assert_eq!(prepared["schema"], "ouro.jail.receipt/1");
     assert!(prepared["argv_digest"].is_string());
 
-    assert_eq!(run.trace_events.len(), 1, "{:?}", run.trace_events);
-    assert_eq!(run.trace_events[0]["schema"], "ouro.event/1");
+    // §13.3: the lifecycle note, then the note of the final receipt, whose
+    // phase and digest the guarded accessor has checked against jail.json.
+    let events = run.trace_events();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0]["schema"], "ouro.event/1");
+    assert_eq!(events[1]["operation"], "jail.receipt");
+    assert_eq!(events[1]["fields"]["phase"], "prepared");
 
     assert!(run.data_dir.join("attempts").is_dir());
     assert!(
@@ -392,7 +397,7 @@ fn a_run_without_channels_still_works_and_keeps_its_state_private() {
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
     assert!(marker.exists());
     assert!(run.control_messages.is_empty());
-    assert!(run.trace_events.is_empty());
+    assert!(run.trace_events().is_empty());
 }
 
 #[test]
@@ -443,7 +448,7 @@ fn wait_drains_a_trace_larger_than_pipe_capacity_before_exit() {
     run.assert_channels_complete();
     assert_eq!(run.code(), Some(0));
     assert_eq!(
-        run.trace_events
+        run.trace_events()
             .iter()
             .filter(|event| event.get("padding").is_some())
             .count(),

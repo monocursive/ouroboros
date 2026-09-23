@@ -163,8 +163,9 @@ fn py_out(run: &Run) -> Value {
     serde_json::from_str(line).unwrap()
 }
 
-/// Every receipt and trace event validated against the checked-in schemas;
-/// returns the settled receipt.
+/// Every receipt and trace event validated against the checked-in schemas,
+/// and every receipt against the rules they cannot state
+/// (`common::semantic_receipt`); returns the settled receipt.
 fn settled(run: &Run) -> Value {
     run.assert_channels_complete();
     assert!(
@@ -176,6 +177,7 @@ fn settled(run: &Run) -> Value {
         validators()["jail-receipt"]
             .validate(&receipt)
             .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
+        common::assert_semantic_receipt(&receipt);
     }
     for event in run.trace_events() {
         validators()["jail-event"]
@@ -241,7 +243,7 @@ fn prepared(spawned: &mut Spawned) -> (Value, Value) {
         .owner()
         .await_prepared()
         .expect("a prepared message");
-    let receipt = spawned.receipt_value().expect("a prepared receipt");
+    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
     assert_eq!(receipt["phase"], "prepared");
     (message, receipt)
 }
@@ -938,30 +940,77 @@ fn n03_address_and_host_rules_hold_end_to_end() {
 // N04: bounded, fail-closed
 // ===========================================================================
 
-/// The supervisor's proxy listener, found by its bound name in the
-/// supervisor's `/proc/<pid>/net/unix` and its descriptor table, then taken
-/// with `pidfd_getfd` (the supervisor is this test's child, so Yama permits
-/// it) and shut down: what a dead proxy looks like to every client.
+/// `__SO_ACCEPTCON`, the flag `/proc/net/unix` prints for a listening socket.
+const SO_ACCEPTCON: u32 = 1 << 16;
+
+/// The listening pathname sockets named `proxy.sock` in a `/proc/<pid>/net/unix`
+/// table, in table order, as (socket inode, bound path).
+///
+/// The table is the network namespace's, not the process's: the supervisor
+/// runs in the host's, so every other `agent` run on the host has its own
+/// `proxy.sock` listener in the same table, in an order set by the kernel's
+/// hash of the socket file's inode, not by who bound first.
+fn proxy_listeners(table: &str) -> Vec<(String, String)> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let listening = fields
+                .get(3)
+                .and_then(|flags| u32::from_str_radix(flags, 16).ok())
+                .is_some_and(|flags| flags & SO_ACCEPTCON != 0);
+            (fields.len() >= 8
+                && listening
+                && fields[5] == "01"
+                && fields[7..].join(" ").ends_with("/proxy.sock"))
+            .then(|| (fields[6].to_owned(), fields[7..].join(" ")))
+        })
+        .collect()
+}
+
+/// The (descriptor number, socket inode), in `held` (one process's
+/// `/proc/<pid>/fd`), of the one proxy listener in `table` that this process
+/// holds.
+///
+/// The identity is the socket inode in the holder's own descriptor table, not
+/// the name or the position in the namespace-wide table: a listener of
+/// another run can come first there (J4 W2-H: `n04_proxy_death_*` failed on
+/// the shared host exactly so). None held, or more than one, is an error, not
+/// a guess.
+fn held_proxy_listener(table: &str, held: &BTreeMap<i64, String>) -> Result<(i64, String), String> {
+    let listeners = proxy_listeners(table);
+    let mine: Vec<(i64, &str, &str)> = listeners
+        .iter()
+        .filter_map(|(inode, path)| {
+            let link = format!("socket:[{inode}]");
+            held.iter()
+                .find(|(_, target)| **target == link)
+                .map(|(fd, _)| (*fd, inode.as_str(), path.as_str()))
+        })
+        .collect();
+    match mine.as_slice() {
+        [(fd, inode, _)] => Ok((*fd, (*inode).to_owned())),
+        _ => Err(format!(
+            "expected exactly one proxy.sock listener held by the process, found {mine:?}; \
+             every proxy.sock listener in the namespace: {listeners:?}"
+        )),
+    }
+}
+
+/// The supervisor's proxy listener, found by the socket inodes of the
+/// supervisor's own descriptor table among the listeners of its
+/// `/proc/<pid>/net/unix`, then taken with `pidfd_getfd` (the supervisor is
+/// this test's child, so Yama permits it), checked to be that same socket,
+/// and shut down: what a dead proxy looks like to every client.
 fn kill_proxy_listener(supervisor: u32) {
     let pid = i32::try_from(supervisor).unwrap();
     let table = std::fs::read_to_string(format!("/proc/{pid}/net/unix")).unwrap();
-    let inode = table
-        .lines()
-        .skip(1)
-        .find_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            (fields.len() >= 8 && fields[7].ends_with("/proxy.sock") && fields[5] == "01")
-                .then(|| fields[6].to_owned())
-        })
-        .expect("the proxy listener is bound in the supervisor");
-    let wanted = format!("socket:[{inode}]");
-    let fd = readlinks(i64::from(pid))
-        .into_iter()
-        .find(|(_, link)| *link == wanted)
-        .map(|(fd, _)| fd)
-        .expect("the supervisor holds the proxy listener");
+    let (fd, inode) = held_proxy_listener(&table, &readlinks(i64::from(pid)))
+        .unwrap_or_else(|error| panic!("the supervisor's proxy listener: {error}"));
     // SAFETY: pidfd_open and pidfd_getfd take scalars; both return new
-    // descriptors owned here or -1. shutdown takes a descriptor and a flag.
+    // descriptors owned here or -1. fstat writes one stat the size of the
+    // zeroed buffer passed. shutdown takes a descriptor and a flag.
     unsafe {
         let pidfd = libc::syscall(libc::SYS_pidfd_open, pid, 0);
         assert!(
@@ -974,6 +1023,15 @@ fn kill_proxy_listener(supervisor: u32) {
             copy >= 0,
             "pidfd_getfd: {}",
             std::io::Error::last_os_error()
+        );
+        // The descriptor number was read from /proc a moment ago; the socket
+        // taken must still be the one whose inode was matched.
+        let mut stat: libc::stat = std::mem::zeroed();
+        assert_eq!(libc::fstat(copy as i32, &raw mut stat), 0);
+        assert_eq!(
+            stat.st_ino.to_string(),
+            inode,
+            "descriptor {fd} of the supervisor changed under the rig"
         );
         assert_eq!(libc::shutdown(copy as i32, libc::SHUT_RDWR), 0);
         libc::close(copy as i32);
@@ -1146,6 +1204,150 @@ print(json.dumps({"finished": True, "tries": tries}))
     assert!(reasons.iter().any(|r| r == "proxy_stopped"), "{reasons:?}");
     assert!(lost);
     assert_eq!(helper_notes(&run, "proxy_stopped").len(), 1);
+}
+
+/// The rig's selection on a table where another run's listener is listed
+/// first, as the shared host produced it (J4 W2-H). The rule the rig used to
+/// have, the first listening `proxy.sock` in the namespace-wide table, takes
+/// the foreign socket, which the supervisor does not hold; the held-inode
+/// rule takes the supervisor's, ignores a held socket that is bound but not
+/// listening, and refuses to guess when the process holds none or two.
+#[test]
+fn n04_rig_a_foreign_proxy_listener_listed_first_is_never_taken() {
+    let table = "\
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 11111 /tmp/other/data/attempts/a/proxy/proxy.sock
+0000000000000000: 00000003 00000000 00000000 0001 03 11112 /tmp/other/data/attempts/a/proxy/proxy.sock
+0000000000000000: 00000002 00000000 00000000 0001 01 22220 /tmp/mine/bound/proxy.sock
+0000000000000000: 00000002 00000000 00010000 0001 01 22222 /tmp/mine/data/attempts/b/proxy/proxy.sock
+0000000000000000: 00000002 00000000 00010000 0001 01 33333 /tmp/mine/data/attempts/b/other.sock
+0000000000000000: 00000003 00000000 00000000 0001 03 44444
+";
+    let held: BTreeMap<i64, String> = [
+        (0, "/dev/null"),
+        (5, "socket:[22220]"),
+        (6, "socket:[22222]"),
+        (7, "socket:[33333]"),
+        (8, "pipe:[99999]"),
+    ]
+    .into_iter()
+    .map(|(fd, link)| (fd, link.to_owned()))
+    .collect();
+    let listed = proxy_listeners(table);
+    assert_eq!(
+        listed
+            .iter()
+            .map(|(inode, _)| inode.as_str())
+            .collect::<Vec<_>>(),
+        ["11111", "22222"],
+        "listening proxy.sock sockets only, in table order"
+    );
+    assert!(
+        !held.values().any(|link| *link == "socket:[11111]"),
+        "the first-listed listener is the foreign one"
+    );
+    assert_eq!(
+        held_proxy_listener(table, &held),
+        Ok((6, "22222".to_owned()))
+    );
+    let mut none = held.clone();
+    none.remove(&6);
+    assert!(held_proxy_listener(table, &none).is_err());
+    let mut two = held.clone();
+    two.insert(9, "socket:[11111]".to_owned());
+    assert!(held_proxy_listener(table, &two).is_err());
+}
+
+/// The rig on the live host with the race forced. Attempted: after
+/// `prepared`, this test binds decoy `proxy.sock` listeners in the host's
+/// network namespace, which is the supervisor's, until the first listening
+/// `proxy.sock` in the supervisor's `/proc/<pid>/net/unix` is one the
+/// supervisor does not hold: the state in which the rig's former first-match
+/// rule panicked on the shared host (and, had it not looked the inode up,
+/// would have shut down another run's proxy). Then the rig shuts the proxy
+/// down and the target connects to the proxy socket. Verdict: the rig took
+/// the supervisor's own listener (the connect is refused and the death is
+/// recorded once), and every decoy still accepts a connection.
+#[test]
+fn n04_rig_takes_the_supervisors_listener_when_a_foreign_one_is_listed_first() {
+    if !common::live() {
+        return;
+    }
+    let c = case("agent");
+    let steps = serde_json::json!([[
+        "unix-connect",
+        "/run/ouro/proxy/proxy.sock",
+        "--expect",
+        "ECONNREFUSED"
+    ]]);
+    let argv = c.script("n04-rig", &steps);
+    let mut spawned = c
+        .jail
+        .args(["--evidence", "best-effort"])
+        .gate()
+        .receipt()
+        .target(argv)
+        .spawn()
+        .unwrap();
+    let (message, receipt) = prepared(&mut spawned);
+    let supervisor = i64::from(spawned.pid());
+    let held = readlinks(supervisor);
+    let decoys = common::private_tempdir();
+    let mut bound: Vec<(std::os::unix::net::UnixListener, PathBuf)> = Vec::new();
+    let first_listed = loop {
+        if !bound.is_empty() {
+            let table = std::fs::read_to_string(format!("/proc/{supervisor}/net/unix")).unwrap();
+            let first = proxy_listeners(&table)
+                .into_iter()
+                .next()
+                .expect("at least the decoys are listed");
+            if !held
+                .values()
+                .any(|link| *link == format!("socket:[{}]", first.0))
+            {
+                break first;
+            }
+        }
+        // The kernel lists pathname sockets by a hash of the socket file's
+        // inode, so which decoy comes first is not ours to choose; binding
+        // more, with a spare file every other time so both inode parities
+        // occur on tmpfs, reaches every position within a few hundred.
+        assert!(
+            bound.len() < 1024,
+            "no decoy was listed before the supervisor's listener after 1024"
+        );
+        let dir = decoys.path().join(bound.len().to_string());
+        std::fs::create_dir(&dir).unwrap();
+        if bound.len() % 2 == 1 {
+            std::fs::write(dir.join("spare"), b"").unwrap();
+        }
+        let path = dir.join("proxy.sock");
+        bound.push((std::os::unix::net::UnixListener::bind(&path).unwrap(), path));
+    };
+    eprintln!(
+        "{} decoy(s) bound; first listening proxy.sock listed: {first_listed:?}",
+        bound.len()
+    );
+    kill_proxy_listener(spawned.pid());
+    release(&mut spawned, &message, &receipt);
+    let run = spawned.wait().unwrap();
+    let lines = run.fixture_lines();
+    let connect = ops(&lines, "connect");
+    assert_eq!(
+        connect.last().map(|line| line["errno"].clone()),
+        Some(Value::from("ECONNREFUSED")),
+        "the supervisor's proxy is the one that died: {lines:#?}"
+    );
+    settled(&run);
+    assert_eq!(
+        helper_notes(&run, "proxy_stopped").len(),
+        1,
+        "the death is recorded"
+    );
+    for (_, path) in &bound {
+        std::os::unix::net::UnixStream::connect(path)
+            .unwrap_or_else(|error| panic!("decoy {} was touched: {error}", path.display()));
+    }
 }
 
 /// N04, bridge death. Attempted: the target makes one request through the
@@ -2464,7 +2666,7 @@ fn agent_refuses_naming_the_proxy_it_cannot_establish() {
         .unwrap();
     assert_eq!(run.code(), Some(125), "stderr: {}", run.stderr_text());
     assert!(!marker.exists(), "the target ran");
-    let receipt = run.receipt_phase("refused").expect("a refused receipt");
+    let receipt = common::checked_receipt(run.receipt_phase("refused").expect("a refused receipt"));
     let error = receipt["outcome"]["error"].to_string();
     assert!(
         error.contains("`agent` proxy could not be established"),
@@ -2700,7 +2902,7 @@ fn review_gc_removes_a_crashed_agent_attempts_proxy_directory() {
             .receipt_value()
             .filter(|receipt| receipt["phase"] == "enforced")
         {
-            break receipt;
+            break common::checked_receipt(receipt);
         }
         assert!(std::time::Instant::now() < deadline, "never enforced");
         std::thread::sleep(Duration::from_millis(50));
