@@ -451,6 +451,9 @@ struct Shared {
     last_progress: std::sync::Mutex<std::time::Instant>,
     outstanding: std::sync::atomic::AtomicUsize,
     abandoned: std::sync::atomic::AtomicBool,
+    /// J4 W3, P1 (a): the cancellation flag of the job the worker is running,
+    /// which every step of that job checks before it starts.
+    running: std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 impl Shared {
@@ -458,6 +461,21 @@ impl Shared {
         if let Ok(mut last) = self.last_progress.lock() {
             *last = std::time::Instant::now();
         }
+    }
+
+    /// Whether the job the worker is running was given up on: by its waiter
+    /// (the budget ran out, or it was dropped) or by the persister.
+    fn given_up(&self) -> bool {
+        self.abandoned.load(std::sync::atomic::Ordering::SeqCst)
+            || self.running.lock().map_or(true, |running| {
+                running
+                    .as_ref()
+                    .is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::SeqCst))
+            })
+    }
+
+    fn idle(&self) -> bool {
+        self.outstanding.load(std::sync::atomic::Ordering::SeqCst) == 0
     }
 
     /// When the worker, if it makes no further progress, is stalled.
@@ -481,12 +499,19 @@ impl Shared {
 ///
 /// Its progress budget is a no-progress bound: a job is stalled when the
 /// worker has completed no I/O step for [`PERSIST_BUDGET`] while it is
-/// outstanding. Work a waiter gave up on is skipped if it has not started;
-/// work in progress in the kernel cannot be interrupted and may complete
-/// later, which is why a transition whose persistence stalled is never
-/// acknowledged. Dropping the persister abandons every job not yet started.
+/// outstanding. Work a waiter gave up on is skipped if it has not started,
+/// and stops at its next step boundary if it has (J4 W3, P1 (a)): a
+/// replacement whose file sync stalled and then completed never goes on to
+/// its rename. The one step in progress in the kernel cannot be interrupted
+/// and may still complete later, which is why a transition whose persistence
+/// stalled is never acknowledged, and why the attempt's lease, once handed
+/// to the persister ([`Persister::hold_lease`]), is never released while
+/// such a step may be in flight. Dropping the persister abandons every job.
 pub struct Persister {
     inner: Arc<Inner>,
+    /// The attempt's lease (§7), released only once no persistence work is
+    /// in flight (J4 W3, P1 (b)).
+    lease: Option<super::Lease>,
 }
 
 struct Inner {
@@ -520,13 +545,33 @@ pub enum Progress<T> {
     Stalled(Stalled),
 }
 
-/// A seam that makes every step progress for the worker's budget.
+/// A seam that makes every step progress for the worker's budget, and
+/// starts no step of a job that was given up on.
 struct Progressing {
     inner: SharedIo,
     shared: Arc<Shared>,
 }
 
+/// The error a step of abandoned work returns instead of running. Not
+/// `Interrupted`, which the write loop retries: abandoned work must end.
+fn abandoned_step(site: Site) -> io::Error {
+    io::Error::other(format!(
+        "the {} write was given up on; its remaining steps do not run (§13.3)",
+        site.as_str()
+    ))
+}
+
 impl Progressing {
+    /// J4 W3, P1 (a): the step boundary. A job whose waiter gave up (its
+    /// budget ran out, or the persister was dropped) starts no further step,
+    /// so a replacement abandoned during its file sync never renames.
+    fn admit(&self, site: Site) -> io::Result<()> {
+        if self.shared.given_up() {
+            return Err(abandoned_step(site));
+        }
+        Ok(())
+    }
+
     fn step<T>(&self, result: io::Result<T>) -> io::Result<T> {
         self.shared.progress();
         result
@@ -535,23 +580,32 @@ impl Progressing {
 
 impl PersistIo for Progressing {
     fn create_new(&self, site: Site, path: &Path) -> io::Result<File> {
+        self.admit(site)?;
         self.step(self.inner.create_new(site, path))
     }
     fn write(&self, site: Site, file: &mut File, bytes: &[u8]) -> io::Result<usize> {
+        self.admit(site)?;
         self.step(self.inner.write(site, file, bytes))
     }
     fn sync_file(&self, site: Site, file: &File) -> io::Result<()> {
+        self.admit(site)?;
         self.step(self.inner.sync_file(site, file))
     }
     fn rename(&self, site: Site, from: &Path, to: &Path) -> io::Result<()> {
+        self.admit(site)?;
         self.step(self.inner.rename(site, from, to))
     }
     fn link(&self, site: Site, from: &Path, to: &Path) -> io::Result<()> {
+        self.admit(site)?;
         self.step(self.inner.link(site, from, to))
     }
     fn sync_dir(&self, site: Site, dir: &Path) -> io::Result<()> {
+        self.admit(site)?;
         self.step(self.inner.sync_dir(site, dir))
     }
+    /// Not a step of the work: the removal of the job's own temporary file,
+    /// which never replaced anything. It runs even for abandoned work, so
+    /// giving up leaves no temporary file behind (a crash still can).
     fn remove(&self, site: Site, path: &Path) -> io::Result<()> {
         self.step(self.inner.remove(site, path))
     }
@@ -577,6 +631,7 @@ impl Persister {
             last_progress: std::sync::Mutex::new(std::time::Instant::now()),
             outstanding: std::sync::atomic::AtomicUsize::new(0),
             abandoned: std::sync::atomic::AtomicBool::new(false),
+            running: std::sync::Mutex::new(None),
         });
         let (jobs, queue) = std::sync::mpsc::channel::<Job>();
         let worker_shared = Arc::clone(&shared);
@@ -594,8 +649,14 @@ impl Persister {
                             .abandoned
                             .load(std::sync::atomic::Ordering::SeqCst);
                     if !skip {
+                        if let Ok(mut running) = worker_shared.running.lock() {
+                            *running = Some(Arc::clone(&job.cancelled));
+                        }
                         worker_shared.progress();
                         (job.work)();
+                        if let Ok(mut running) = worker_shared.running.lock() {
+                            *running = None;
+                        }
                     }
                     worker_shared.progress();
                     worker_shared
@@ -608,7 +669,19 @@ impl Persister {
                 jobs: std::sync::Mutex::new(Some(jobs)),
                 shared,
             }),
+            lease: None,
         })
+    }
+
+    /// J4 W3, P1 (b): hands the attempt's lease to the persister, which
+    /// releases it when it is dropped only if no persistence work is in
+    /// flight by then. §7: "The supervisor holds `jail.lock` through
+    /// settlement/cleanup", and a write that may still land is part of that:
+    /// a `gc` that took the lease while the supervisor's own rename was in
+    /// flight could write the next revision, and the late rename then landed
+    /// a different receipt with the same number.
+    pub fn hold_lease(&mut self, lease: super::Lease) {
+        self.lease = Some(lease);
     }
 
     /// Queues `work` on the worker; it runs with the worker's seam installed.
@@ -655,12 +728,31 @@ impl Persister {
 
 impl Drop for Persister {
     fn drop(&mut self) {
-        self.inner
-            .shared
+        let shared = &self.inner.shared;
+        shared
             .abandoned
             .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut jobs) = self.inner.jobs.lock() {
             jobs.take();
+        }
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        // Abandoned now, every job stops at its next step boundary and every
+        // queued one is skipped: while the worker makes progress this takes
+        // at most one step, and a step that makes none for the whole budget
+        // is stalled.
+        while !shared.idle() && !shared.stalled() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if shared.idle() {
+            drop(lease);
+        } else {
+            // A step is stalled in the kernel and may still complete. The
+            // lease is not unlocked: its descriptor stays open, so only the
+            // end of the whole process (its last thread, the stalled one
+            // included) releases it.
+            std::mem::forget(lease);
         }
     }
 }

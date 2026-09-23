@@ -216,3 +216,104 @@ fn j4_r02_an_exclusive_publication_never_replaces_an_existing_file() {
         "no temporary file is left: {leftover:?}"
     );
 }
+
+/// J4 W3, P1 (a), at the persistence worker: work given up on while one of
+/// its writes is in progress starts no further step once that write returns,
+/// even a write the loop would otherwise resume after a short count, and the
+/// job ends (a refusal the write loop retried would spin the worker forever)
+/// with its temporary file removed and the target untouched.
+#[test]
+fn j4_w3_p1a_work_given_up_mid_write_starts_no_further_step() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    use ouro_jail::state::{PersistIo, Persister, RealIo, Site};
+
+    /// The first write blocks until released, then writes half its bytes.
+    struct ShortWrite {
+        release: (Mutex<bool>, Condvar),
+        writes: AtomicUsize,
+        removed: AtomicBool,
+    }
+
+    impl PersistIo for ShortWrite {
+        fn write(
+            &self,
+            site: Site,
+            file: &mut std::fs::File,
+            bytes: &[u8],
+        ) -> std::io::Result<usize> {
+            if self.writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                let (lock, wake) = &self.release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+                return RealIo.write(site, file, &bytes[..bytes.len() / 2]);
+            }
+            RealIo.write(site, file, bytes)
+        }
+        fn remove(&self, site: Site, path: &Path) -> std::io::Result<()> {
+            let result = RealIo.remove(site, path);
+            self.removed.store(true, Ordering::SeqCst);
+            result
+        }
+    }
+
+    let temp = common::private_tempdir();
+    let data = private_dir(temp.path(), "data");
+    let target = data.join("jail.json");
+    state::replace_atomically(&target, b"first").expect("the first write");
+    let seam = Arc::new(ShortWrite {
+        release: (Mutex::new(false), Condvar::new()),
+        writes: AtomicUsize::new(0),
+        removed: AtomicBool::new(false),
+    });
+    let persister =
+        Persister::start_with(seam.clone(), Duration::from_secs(5)).expect("the worker");
+    let job_target = target.clone();
+    let ended = Arc::new(AtomicBool::new(false));
+    let job_ended = Arc::clone(&ended);
+    let pending = persister.submit(move || {
+        let result = state::replace_atomically(&job_target, b"second, and longer");
+        job_ended.store(true, Ordering::SeqCst);
+        result
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    while seam.writes.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < until, "the job never started writing");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The waiter gives up while the write is in the kernel, then it returns.
+    drop(pending);
+    *seam.release.0.lock().unwrap() = true;
+    seam.release.1.notify_all();
+    let until = Instant::now() + Duration::from_secs(5);
+    while !ended.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < until,
+            "the abandoned job never ended ({} writes)",
+            seam.writes.load(Ordering::SeqCst)
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        seam.writes.load(Ordering::SeqCst),
+        1,
+        "a step started after the job was given up on"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"first");
+    assert!(
+        seam.removed.load(Ordering::SeqCst),
+        "the temporary file was removed"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&data)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    drop(persister);
+}

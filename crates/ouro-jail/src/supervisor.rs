@@ -961,7 +961,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // before the lease, so a `jail.lock` found here is not this supervisor's.
     state::check_fresh_attempt(&attempt_dir)?;
     // J3-launch end
-    let Some(_lease) = state::Lease::acquire(&attempt_dir.lock_path())? else {
+    let Some(lease) = state::Lease::acquire(&attempt_dir.lock_path())? else {
         return Err(JailError::new(
             ErrorCode::AttemptExists,
             ErrorStage::Resolving,
@@ -972,7 +972,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // J4-R: §13.3 — from here on every durable write runs on the persistence
     // worker, and this thread waits for each step within its progress
     // budget: a stalled disk ends a wait, it never holds the supervisor.
-    let persister = state::Persister::start().map_err(|error| {
+    let mut persister = state::Persister::start().map_err(|error| {
         JailError::new(
             ErrorCode::StateWriteFailed,
             ErrorStage::Preparing,
@@ -980,6 +980,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             format!("the persistence worker could not be started: {error}"),
         )
     })?;
+    // J4 W3, P1 (b): the lease lives as long as persistence work may: when
+    // the run returns with a write stalled in the kernel, it is not released
+    // (only the end of the whole process frees it), so no `gc` can write the
+    // attempt's records under a rename that may still land.
+    persister.hold_lease(lease);
     let _forwarding = state::install(persister.forwarding());
     // J4-R: S9 — every OURO_JAIL_TEST_* variable in force, read once at the
     // attempt's start and recorded in jail state and in every receipt that

@@ -358,16 +358,40 @@ struct Seen {
 /// A stalled step waits on this until the test releases it.
 type Release = Arc<(Mutex<bool>, std::sync::Condvar)>;
 
-/// A [`PersistIo`] that performs every step for real, fails one step of the
-/// first replacement at one site, stalls one step when asked to, and checks
-/// the records on disk before every step.
+/// The step a stall holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StallAt {
+    FileSync,
+    Rename,
+}
+
+/// What a stalled step does once the test releases it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AfterStall {
+    /// It fails with EIO.
+    Fail,
+    /// It is performed for real and succeeds: what a slow disk does, and the
+    /// one outcome that shows whether abandoned work lands later (J4 W3, P1).
+    Complete,
+}
+
+/// The first `at` step at `site` blocks until the test releases it.
+struct Stall {
+    site: Site,
+    at: StallAt,
+    release: Release,
+    then: AfterStall,
+}
+
+/// A [`PersistIo`] that performs every step for real, fails one step of one
+/// replacement at one site, stalls one step when asked to, and checks the
+/// records on disk before every step.
 struct Faults {
     /// `(site, fault, target name)`: the target filter limits the fault to
     /// replacements of that record (`None`: the first replacement at the
     /// site, whatever its target).
     fault: Option<(Site, Fault, Option<String>)>,
-    /// A site whose first file sync blocks until the test releases it.
-    stall: Option<(Site, Release)>,
+    stall: Option<Stall>,
     watch: Watch,
     state: Mutex<FaultState>,
 }
@@ -467,6 +491,27 @@ impl Faults {
         self
     }
 
+    /// Blocks until released, then does what `stall.then` says.
+    fn hold(&self, site: Site, at: StallAt) -> Option<AfterStall> {
+        let stall = self.stall.as_ref()?;
+        if stall.site != site
+            || stall.at != at
+            || std::mem::replace(&mut self.state.lock().unwrap().stalled_once, true)
+        {
+            return None;
+        }
+        let (lock, wake) = &*stall.release;
+        let mut released = lock.lock().unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        while !*released && Instant::now() < until {
+            released = wake
+                .wait_timeout(released, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+        Some(stall.then)
+    }
+
     /// Checks the records, then decides whether this step of `site` fails.
     fn step(&self, site: Site, step: &str, fault_here: impl Fn(Fault) -> bool) -> bool {
         let mut state = self.state.lock().unwrap();
@@ -531,21 +576,7 @@ impl PersistIo for Faults {
     }
 
     fn sync_file(&self, site: Site, file: &std::fs::File) -> std::io::Result<()> {
-        if let Some((stall_site, release)) = &self.stall
-            && *stall_site == site
-            && !std::mem::replace(&mut self.state.lock().unwrap().stalled_once, true)
-        {
-            let (lock, wake) = &**release;
-            let mut released = lock.lock().unwrap();
-            let until = Instant::now() + Duration::from_secs(30);
-            while !*released && Instant::now() < until {
-                released = wake
-                    .wait_timeout(released, Duration::from_millis(50))
-                    .unwrap()
-                    .0;
-            }
-            // A sync that comes back after the supervisor gave up on it fails,
-            // so nothing it was part of lands later.
+        if self.hold(site, StallAt::FileSync) == Some(AfterStall::Fail) {
             return Err(eio());
         }
         if self.step(site, "file sync", |fault| fault == Fault::FsyncError) {
@@ -555,6 +586,9 @@ impl PersistIo for Faults {
     }
 
     fn rename(&self, site: Site, from: &Path, to: &Path) -> std::io::Result<()> {
+        if self.hold(site, StallAt::Rename) == Some(AfterStall::Fail) {
+            return Err(eio());
+        }
         if self.step(site, "rename", |fault| fault == Fault::RenameError) {
             return Err(eio());
         }
@@ -1218,11 +1252,28 @@ fn j4_n6_a_failed_policy_write_refuses_with_a_refused_receipt() {
 // §13.3: the persistence worker and its 5-second progress budget
 // ---------------------------------------------------------------------------
 
-/// A seam whose first file sync at `site` blocks until released.
+/// A seam whose first file sync at `site` blocks until released and then
+/// completes, as a slow disk does.
 fn stalled(fixture: &Fixture, site: Site) -> (Arc<Faults>, Release) {
+    stalled_at(fixture, site, StallAt::FileSync, AfterStall::Complete)
+}
+
+/// A seam whose first `at` step at `site` blocks until released, then does
+/// `then`.
+fn stalled_at(
+    fixture: &Fixture,
+    site: Site,
+    at: StallAt,
+    then: AfterStall,
+) -> (Arc<Faults>, Release) {
     let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
     let mut faults = Faults::new(fixture.watch());
-    faults.stall = Some((site, Arc::clone(&release)));
+    faults.stall = Some(Stall {
+        site,
+        at,
+        release: Arc::clone(&release),
+        then,
+    });
     (Arc::new(faults), release)
 }
 
@@ -1234,7 +1285,12 @@ fn release(stall: &Release) {
 #[test]
 fn j4_r02_a_stalled_sync_never_delays_the_wall() {
     let fixture = Fixture::new();
-    let (faults, stall) = stalled(&fixture, Site::EnforcedReceipt);
+    let (faults, stall) = stalled_at(
+        &fixture,
+        Site::EnforcedReceipt,
+        StallAt::FileSync,
+        AfterStall::Fail,
+    );
     let sim = Sim::new(Scenario::Timed {
         exit_after: Duration::from_secs(20),
     });
@@ -1563,4 +1619,137 @@ fn j4_s9_every_test_seam_in_force_is_recorded() {
         without["receipt"]["lifetime"]["native"]
     );
     assert!(without["state"].get("test_seams").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// J4 wave 3 (W3-R): the records review's findings P1 to P6
+// ---------------------------------------------------------------------------
+
+/// `jail.json`'s revision, phase and bytes.
+fn jail_json(attempt: &Path) -> (u64, String, Vec<u8>) {
+    let bytes = std::fs::read(attempt.join("jail.json")).expect("jail.json");
+    let value: Value = serde_json::from_slice(&bytes).expect("jail.json parses");
+    (
+        value["revision"].as_u64().unwrap(),
+        value["phase"].as_str().unwrap().to_owned(),
+        bytes,
+    )
+}
+
+/// Waits, at most `within`, until the attempt root holds no temporary file:
+/// a released step's replacement has either landed or been cleaned up.
+/// Returns whether it got there.
+fn temp_files_gone(attempt: &Path, within: Duration) -> bool {
+    let dir = state::AttemptDir::from_root(attempt.to_path_buf());
+    let until = Instant::now() + within;
+    loop {
+        if state::leftover_temp_files(&dir).unwrap().is_empty() {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// P1 (a). §13.3: "On failure or stall, stop the child with cause
+/// `state_write_failed`, keep the transition unacknowledged, leave the
+/// receipt at its last persisted phase, and do not start abandoned work
+/// later." The enforced receipt's file sync stalls past the budget and then
+/// completes, as a slow disk does. The worker used to check whether its
+/// waiter gave up only before a job started, and a whole replacement is one
+/// job, so the rename after the sync landed long after the supervisor had
+/// returned. Abandoned work stops at the next step boundary.
+#[test]
+fn j4_w3_p1a_abandoned_persistence_stops_at_the_next_step() {
+    let fixture = Fixture::new();
+    let (faults, stall) = stalled(&fixture, Site::EnforcedReceipt);
+    let outcome = fixture.run(
+        Sim::new(Scenario::Timed {
+            exit_after: Duration::from_secs(60),
+        }),
+        &["--profile", "tool"],
+        faults.clone(),
+    );
+    assert_eq!(outcome.report.exit_code, 1, "{:?}", outcome.report.error);
+    let attempt = fixture.attempt();
+    let (revision, phase, bytes) = jail_json(&attempt);
+    assert_eq!(phase, "prepared", "the enforced receipt never persisted");
+    release(&stall);
+    // The released sync completes; what the worker does next is either the
+    // abandoned rename (the defect) or the removal of its temporary file.
+    assert!(
+        temp_files_gone(&attempt, Duration::from_secs(10)),
+        "the released replacement neither landed nor cleaned up"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let (later_revision, later_phase, later_bytes) = jail_json(&attempt);
+    assert!(
+        later_bytes == bytes,
+        "abandoned work landed after the supervisor gave up on it and returned: jail.json went \
+         from revision {revision} {phase} to revision {later_revision} {later_phase}"
+    );
+    faults.finish("p1a at the end");
+    let violations = faults.seen(|seen| seen.violations.clone());
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// P1 (b). The terminal receipt's rename stalls past the budget and then
+/// completes. A rename in progress in the kernel cannot be abandoned, so the
+/// lease is what keeps anyone else from writing the attempt's records
+/// meanwhile: it is never released while persistence work is in flight. It
+/// used to be unlocked as the run returned, so a `gc` in that window resumed
+/// the pending vendor-state cleanup and wrote the next revision, and then
+/// the supervisor's late rename landed a different receipt with the same
+/// revision.
+#[test]
+fn j4_w3_p1b_the_lease_is_kept_while_persistence_is_in_flight() {
+    let fixture = Fixture::new();
+    let (faults, stall) = stalled_at(
+        &fixture,
+        Site::TerminalReceipt,
+        StallAt::Rename,
+        AfterStall::Complete,
+    );
+    let outcome = fixture.run(
+        Sim::new(Scenario::Plain),
+        &["--profile", "tool", "--launch", "plain"],
+        faults.clone(),
+    );
+    assert_eq!(outcome.report.exit_code, 1, "{:?}", outcome.report.error);
+    let attempt = fixture.attempt();
+    let probe = state::Lease::probe_existing(&attempt.join("jail.lock")).unwrap();
+    let held = matches!(probe, state::LeaseProbe::Held);
+    drop(probe);
+    let (before, before_phase, before_bytes) = jail_json(&attempt);
+    let gc = fixture.gc(real());
+    let (by_gc, gc_phase, gc_bytes) = jail_json(&attempt);
+    release(&stall);
+    assert!(
+        temp_files_gone(&attempt, Duration::from_secs(10)),
+        "the released rename never finished"
+    );
+    let (landed, landed_phase, landed_bytes) = jail_json(&attempt);
+    assert!(
+        held,
+        "the lease was free while the terminal receipt's rename was still in flight"
+    );
+    assert_eq!(
+        gc_bytes,
+        before_bytes,
+        "gc rewrote the receipt (revision {before} {before_phase} -> {by_gc} {gc_phase}) while \
+         the supervisor's write was in flight: {:?}",
+        gc.entries
+            .iter()
+            .map(|entry| (&entry.action, &entry.reason))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !(landed == by_gc && landed_bytes != gc_bytes),
+        "revision {landed} ({landed_phase}) was used for two different receipts"
+    );
+    faults.finish("p1b at the end");
+    let violations = faults.seen(|seen| seen.violations.clone());
+    assert!(violations.is_empty(), "{violations:#?}");
 }
