@@ -1351,6 +1351,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 &mut record,
                 phase,
                 args,
+                &journal,
             ) {
                 Ok(write) => in_flight.push_back(write),
                 Err(error) => {
@@ -1384,6 +1385,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     &mut record,
                     Phase::Enforced,
                     args,
+                    &journal,
                 ) {
                     Ok(mut write) => {
                         write.ack = Some(ControlKind::ExecConfirmed);
@@ -1856,6 +1858,24 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
         }
         entry.status = SourceStatus::Degraded;
         entry.observed_count = None;
+        let end = Some(crate::platform::elapsed_since_start_ns().to_string());
+        // J4 W2-S: (B) — called before every receipt once a loss is known,
+        // so a class's transport gap is added once and then only extended:
+        // a lost sink stays lost to the end.
+        let is_ours = |gap: &Gap| {
+            gap.reason == trace::TRANSPORT_LOSS_REASON && gap.classes == [name.to_owned()]
+        };
+        if entry.gaps.iter().any(is_ours) {
+            for gap in entry
+                .gaps
+                .iter_mut()
+                .chain(record.observer.gaps.iter_mut())
+                .filter(|gap| is_ours(gap))
+            {
+                gap.end_ns.clone_from(&end);
+            }
+            continue;
+        }
         let gap = Gap {
             classes: vec![name.to_owned()],
             source: entry
@@ -1864,7 +1884,7 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
                 .cloned()
                 .unwrap_or_else(|| "wrapper".to_owned()),
             start_ns: "0".to_owned(),
-            end_ns: Some(crate::platform::elapsed_since_start_ns().to_string()),
+            end_ns: end,
             reason: trace::TRANSPORT_LOSS_REASON.to_owned(),
             lost_count: None,
         };
@@ -2334,7 +2354,12 @@ fn submit_receipt(
     record: &mut AttemptRecord,
     phase: Phase,
     args: &RunArgs,
+    journal: &Journal,
 ) -> Result<InFlight, JailError> {
+    // J4 W2-S: (B) — as in `persist_noted`.
+    if journal.loss.is_some() {
+        degrade_trace_coverage(record);
+    }
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
@@ -2971,6 +2996,25 @@ fn persist(
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
+    let final_note = matches!(phase, Phase::Settled | Phase::Refused);
+    persist_noted(site, attempt_dir, record, phase, args, journal, final_note)
+}
+
+/// [`persist`], with the priority of the receipt's trace note given.
+fn persist_noted(
+    site: state::Site,
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    args: &RunArgs,
+    journal: &mut Journal,
+    final_note: bool,
+) -> Result<Receipt, JailError> {
+    // J4 W2-S: (B) — a trace loss already known is in every receipt written
+    // after it, not only in the one the settlement writes.
+    if journal.loss.is_some() {
+        degrade_trace_coverage(record);
+    }
     let io = state::current_io();
     let receipt = write_receipt_at(
         site,
@@ -2980,11 +3024,7 @@ fn persist(
         args.receipt.as_deref(),
         &*io,
     )?;
-    journal.receipt(
-        phase,
-        &receipt,
-        matches!(phase, Phase::Settled | Phase::Refused),
-    );
+    journal.receipt(phase, &receipt, final_note);
     Ok(receipt)
 }
 
@@ -2999,7 +3039,11 @@ fn persist_terminal(
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
-    let receipt = persist(site, attempt_dir, record, phase, args, journal)?;
+    // J4 W2-S: (A) — the note of the attempt's final receipt is the one the
+    // reserve exists for (§13.3), whatever its phase: an attempt that ends
+    // unsettled keeps `enforced` or `prepared`, and its final note used to be
+    // refused after a loss although the reserve had room.
+    let receipt = persist_noted(site, attempt_dir, record, phase, args, journal, true)?;
     if let Ok(mut sink) = journal.trace.lock() {
         sink.finish();
     }
