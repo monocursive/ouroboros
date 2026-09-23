@@ -849,9 +849,14 @@ fn j4_r03_a_consumer_that_resumes_after_its_deadline_reads_the_gap_note() {
     let _serial = serial();
     let (mut reader, sink) = pipe_sink();
     let trace = shared(sink.with_bounds(1024 * 1024, Duration::from_millis(50)));
-    // Fill the pipe, and then some, while nobody reads.
+    // Fill the pipe, and then some, while nobody reads. By the 300th note
+    // (~90 KB) the pipe, 64 KiB at most, is full and notes wait in the queue.
     let accepted = 400;
-    for _ in 0..accepted {
+    let mut queued_since = 0;
+    for index in 0..accepted {
+        if index == 300 {
+            queued_since = ouro_jail::platform::elapsed_since_start_ns();
+        }
         trace
             .lock()
             .unwrap()
@@ -878,7 +883,16 @@ fn j4_r03_a_consumer_that_resumes_after_its_deadline_reads_the_gap_note() {
     let readback = read_frames(&received);
     assert_eq!(readback.state, TraceState::Complete);
     assert_eq!(readback.frames.len(), accepted + 1);
-    assert!(is_transport_gap(readback.frames.last().unwrap()));
+    let gap = readback.frames.last().unwrap();
+    assert!(is_transport_gap(gap));
+    // The interval opens at the last point everything accepted had left the
+    // queue, before the notes that were still waiting, not at the last note
+    // the sink accepted.
+    let start: u128 = gap["fields"]["start_ns"].as_str().unwrap().parse().unwrap();
+    assert!(
+        start < queued_since,
+        "the gap starts at {start} ns, after notes queued from {queued_since} ns"
+    );
     assert!(
         trace
             .lock()

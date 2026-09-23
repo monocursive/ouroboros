@@ -90,8 +90,11 @@ pub struct TraceWriter {
     local_loss: Option<Loss>,
     /// The attempt this stream belongs to, learned from its first event.
     attempt_id: Option<String>,
-    /// Elapsed time of the last frame the sink accepted: the last point the
-    /// stream is known to be healthy.
+    /// The last time every accepted frame had reached the sink's
+    /// destination: the last point the stream is known to be healthy. For a
+    /// queued sink that is the last time its queue was empty, not the last
+    /// time it accepted a frame, so the interval a loss note opens covers
+    /// every frame still waiting when the loss was found.
     last_healthy_ns: u128,
     /// Whether the note recording the first loss has been attempted.
     gap_noted: bool,
@@ -136,10 +139,14 @@ impl TraceWriter {
             evidence_lost(&reason)
         })?;
         let result = self.sink.write_frame(&frame, priority);
-        if result.is_ok() {
+        self.mark_healthy();
+        result
+    }
+
+    fn mark_healthy(&mut self) {
+        if self.loss().is_none() && self.sink.caught_up() {
             self.last_healthy_ns = crate::platform::elapsed_since_start_ns();
         }
-        result
     }
 
     /// Writes the in-band record of the stream's first loss, once.
@@ -185,6 +192,7 @@ impl TraceSink for TraceWriter {
     }
     fn poll(&mut self) -> Result<(), JailError> {
         let result = self.sink.poll();
+        self.mark_healthy();
         self.note_first_loss();
         result
     }
@@ -196,6 +204,9 @@ impl TraceSink for TraceWriter {
     }
     fn loss(&self) -> Option<&Loss> {
         self.local_loss.as_ref().or_else(|| self.sink.loss())
+    }
+    fn caught_up(&self) -> bool {
+        self.sink.caught_up()
     }
 }
 
@@ -259,6 +270,13 @@ pub trait TraceSink {
 
     /// The loss this sink has recorded, if any.
     fn loss(&self) -> Option<&Loss>;
+
+    /// Whether every frame this sink accepted has reached its destination.
+    /// Synchronous sinks always have; a queued sink has when its queue is
+    /// empty.
+    fn caught_up(&self) -> bool {
+        true
+    }
 }
 
 /// The file operations the local sink needs.
@@ -675,7 +693,7 @@ impl TraceSink for FdSink {
         }
         match (self.state, priority) {
             (FdState::Broken, _) => {
-                return Err(self.lose("the trace fd consumer is gone", 1));
+                return Err(self.lose("the trace fd is broken by an earlier write failure", 1));
             }
             (FdState::Lost, Priority::Normal) => {
                 return Err(self.lose("the trace fd sink is marked lost", 1));
@@ -719,6 +737,10 @@ impl TraceSink for FdSink {
 
     fn loss(&self) -> Option<&Loss> {
         self.loss.as_ref()
+    }
+
+    fn caught_up(&self) -> bool {
+        self.frames.is_empty()
     }
 }
 
