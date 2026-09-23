@@ -157,6 +157,22 @@ fn main() -> std::process::ExitCode {
             "fields": { "kind": "lifecycle", "note": "stand-in prepared" },
         });
         let _ = writeln!(w, "{event}");
+        // jail-v1 §13.3: a complete trace ends on the `jail.receipt` note of
+        // the attempt's final receipt, which for this stand-in is the one
+        // prepared receipt it writes. Named as the real jail names it.
+        if let Ok((phase, digest)) =
+            ouro_fixture::harness::receipt_note_of(receipt_bytes(&receipt).as_bytes())
+        {
+            let note = json!({
+                "schema": "ouro.event/1",
+                "source": "wrapper",
+                "operation": "jail.receipt",
+                "stage": "result",
+                "attempt_id": cli.attempt_id,
+                "fields": { "phase": phase, "receipt_digest": digest },
+            });
+            let _ = writeln!(w, "{note}");
+        }
         let _ = w.flush();
     }
 
@@ -392,11 +408,16 @@ fn check_access(fd: i32, want_write: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The bytes a receipt file of this stand-in holds.
+fn receipt_bytes(value: &Value) -> String {
+    format!("{value}\n")
+}
+
 fn write_json(path: &std::path::Path, value: &Value) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{value}\n"))
+    std::fs::write(path, receipt_bytes(value))
 }
 
 fn fail(message: &str) -> std::process::ExitCode {

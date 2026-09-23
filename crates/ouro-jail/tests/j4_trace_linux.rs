@@ -18,7 +18,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ouro_fixture::harness::{Jail, Run, TraceConsumer, TraceState, read_frames};
+use ouro_fixture::harness::{
+    Jail, Run, TraceConsumer, TraceState, read_frames, receipt_note_of, trace_guard,
+};
 use serde_json::Value;
 
 mod common;
@@ -342,8 +344,11 @@ fn local_trace(run: &Run) -> (PathBuf, ouro_fixture::harness::Readback, u64) {
 }
 
 /// The local trace is a prefix of ordinary frames, then only reserve notes:
-/// the transport gap note first, the final receipt note last.
-fn assert_prefix_then_notes(readback: &ouro_fixture::harness::Readback, what: &str) {
+/// the transport gap note first, the final receipt note last. "Final" is
+/// checked, not assumed: the last note's phase and digest are the ones the
+/// attempt's `jail.json` beside the trace hashes to, so the trace is complete
+/// in the §13.3 sense (the harness's own guard agrees).
+fn assert_prefix_then_notes(path: &Path, readback: &ouro_fixture::harness::Readback, what: &str) {
     assert_eq!(readback.state, TraceState::Complete, "{what}");
     let gap = readback
         .frames
@@ -367,11 +372,15 @@ fn assert_prefix_then_notes(readback: &ouro_fixture::harness::Readback, what: &s
             "{what}: an ordinary frame followed the loss note: {frame}"
         );
     }
+    let receipt = std::fs::read(path.with_file_name("jail.json")).expect("the attempt's receipt");
+    let (phase, digest) = receipt_note_of(&receipt).expect("a receipt with a phase");
+    assert_eq!(phase, "settled", "{what}");
     assert_eq!(
-        readback.last_receipt_note().map(|(phase, _)| phase),
-        Some("settled"),
-        "{what}: the final receipt note used the reserve"
+        readback.last_receipt_note(),
+        Some((phase.as_str(), digest.as_str())),
+        "{what}: the final receipt note used the reserve, and names the final receipt"
     );
+    trace_guard(Some(readback), Some(&receipt)).unwrap_or_else(|error| panic!("{what}: {error}"));
 }
 
 #[test]
@@ -390,9 +399,9 @@ fn j4_r03_local_cap_strict_stops() {
                 && message.contains(&SHRUNK_CAP.to_string())),
         "S9: the receipt names the seam that shrank the cap: {receipt:#}"
     );
-    let (_, readback, size) = local_trace(&run);
+    let (path, readback, size) = local_trace(&run);
     assert!(size <= SHRUNK_CAP, "the cap held: {size} bytes");
-    assert_prefix_then_notes(&readback, "strict local cap");
+    assert_prefix_then_notes(&path, &readback, "strict local cap");
 }
 
 #[test]
@@ -403,13 +412,13 @@ fn j4_r03_local_cap_best_effort_keeps_a_prefix_and_reserve_notes() {
     let (run, _) = case("best-effort", 400, 200)
         .run(|jail| jail.env("OURO_JAIL_TEST_TRACE_CAP", SHRUNK_CAP.to_string()));
     assert_best_effort_continued(&run, "the local cap");
-    let (_, readback, size) = local_trace(&run);
+    let (path, readback, size) = local_trace(&run);
     assert!(size <= SHRUNK_CAP, "the cap held: {size} bytes");
     assert!(
         size > SHRUNK_CAP / 2,
         "the payload half was used before the loss: {size} bytes"
     );
-    assert_prefix_then_notes(&readback, "best-effort local cap");
+    assert_prefix_then_notes(&path, &readback, "best-effort local cap");
     let audit = readback
         .frames
         .iter()
@@ -461,6 +470,63 @@ fn j4_r03_a_local_write_failure_is_loss_and_never_tears_the_trace() {
         );
         assert!(readback.frames.len() > 10, "{evidence}: the prefix is kept");
     }
+}
+
+// ------------------------------------------------------- a slow consumer
+
+/// A consumer that reads slowly but never stops, against the real jail
+/// (until now `TraceConsumer::Slow` had only met a stand-in). Attempted: 200
+/// closed-set events (~600 bytes each, ~120 KiB) read 512 bytes at a time
+/// with a 2 ms pause after each read, about 250 KiB/s, well inside the 4 MiB
+/// queue, and never idle for the 1-second no-progress deadline (§13.3).
+/// Verdict: no evidence loss (exit 0, no `evidence_lost`, `fs.write`
+/// active with every event counted), and the whole trace arrives: the
+/// guarded accessor accepts it, so it ends on the note of the final receipt,
+/// and it carries every one of the 200 events.
+#[test]
+fn j4_r03_a_slow_consumer_within_the_deadline_loses_nothing() {
+    if !live() {
+        return;
+    }
+    let (run, _) = case("strict", 200, 0).run(|jail| {
+        jail.trace_consumer(TraceConsumer::Slow {
+            chunk: 512,
+            pause: Duration::from_millis(2),
+        })
+    });
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let receipt = last_receipt(&run);
+    assert!(
+        evidence_errors(&receipt).is_empty(),
+        "a slow consumer is not a lost one: {receipt:#}"
+    );
+    assert_eq!(field(&receipt, "/coverage/fs.write/status"), "active");
+    let audit: Vec<&Value> = run
+        .trace_events()
+        .iter()
+        .filter(|event| event["source"] == "audit")
+        .collect();
+    let creates = audit
+        .iter()
+        .filter(|event| event["operation"] == "fs.create")
+        .count();
+    assert_eq!(creates, 200, "every event reached the slow consumer");
+    // fs.write is every audit result that is not an exec, an exit, a denial
+    // or a connect (the closed-set table's classes).
+    let fs_write = audit
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event["operation"].as_str(),
+                Some("proc.exec" | "proc.exit" | "fs.deny" | "net.connect")
+            )
+        })
+        .count();
+    assert_eq!(
+        field(&receipt, "/coverage/fs.write/observed_count"),
+        &Value::from(fs_write),
+        "the receipt counts what the trace carries"
+    );
 }
 
 // ---------------------------------------------------- no local duplicate

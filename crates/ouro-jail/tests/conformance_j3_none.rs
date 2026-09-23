@@ -109,8 +109,14 @@ fn validators() -> BTreeMap<String, Validator> {
 
 /// Every receipt and trace event of the run validates against its schema,
 /// and every receipt keeps the rules the schema cannot state
-/// (`common::semantic_receipt`).
+/// (`common::semantic_receipt`). The trace is read through the guarded
+/// accessor, so it must also be complete (§13.3).
 fn validate(run: &Run) {
+    validate_receipts(run);
+    validate_events(run.trace_events());
+}
+
+fn validate_receipts(run: &Run) {
     let validators = validators();
     for receipt in run.receipts() {
         validators["jail-receipt"]
@@ -118,7 +124,11 @@ fn validate(run: &Run) {
             .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
         common::assert_semantic_receipt(&receipt);
     }
-    for event in run.trace_events() {
+}
+
+fn validate_events(events: &[Value]) {
+    let validators = validators();
+    for event in events {
         validators["jail-event"]
             .validate(event)
             .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
@@ -789,7 +799,16 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
             .wait()
             .expect("the harness collects the dead supervisor");
         assert_eq!(run.signal(), Some(libc::SIGKILL));
-        validate(&run);
+        // The trace ends wherever the kill found the supervisor, not on the
+        // note of a final receipt (§13.3), so the guarded accessor rightly
+        // refuses it: its complete frames are validated from the readback.
+        validate_receipts(&run);
+        validate_events(
+            &run.trace_readback
+                .as_ref()
+                .expect("a trace was requested")
+                .frames,
+        );
         let last = last_receipt(&run);
         assert_unprotected(&last);
         assert_eq!(last["phase"], "enforced", "{observe}: {last:#}");

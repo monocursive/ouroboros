@@ -903,6 +903,18 @@ impl Spawned {
                 Err(e) => receipt_errors.push(format!("{}: {e}", p.display())),
             }
         }
+        // The bytes too, for §13.3's completeness rule: a trace ends on the
+        // note of the final receipt, which names it by the digest of its
+        // bytes. Read after exit, so they are the files the values came from.
+        let mut receipt_files = Vec::new();
+        let mut canonical = Vec::new();
+        collect_named(&data_dir, OsStr::new("jail.json"), &mut canonical);
+        canonical.extend(self.receipt.clone());
+        for path in canonical {
+            if let Ok(bytes) = std::fs::read(&path) {
+                receipt_files.push((path, bytes));
+            }
+        }
 
         Ok(Run {
             status,
@@ -918,6 +930,7 @@ impl Spawned {
             channels_timed_out,
             receipts,
             receipt_errors,
+            receipt_files,
             _root: self.root,
         })
     }
@@ -931,7 +944,7 @@ pub struct Run {
     pub control_messages: Vec<Value>,
     /// The complete trace frames, in order, up to the first line that is not
     /// one (see `trace_readback`). Prefer [`Run::trace_events`], which
-    /// refuses a partial transcript.
+    /// refuses a transcript that is not complete in the §13.3 sense.
     pub trace_events: Vec<Value>,
     /// How the recogniser classified the trace bytes, when a trace was asked
     /// for: complete, visibly incomplete (a torn last line) or corrupt.
@@ -949,6 +962,9 @@ pub struct Run {
     pub channels_timed_out: Vec<String>,
     receipts: Vec<Value>,
     receipt_errors: Vec<String>,
+    /// Every receipt file read at `wait`, with its bytes: each `jail.json`
+    /// under the private data directory, then the `--receipt` copy.
+    receipt_files: Vec<(PathBuf, Vec<u8>)>,
     _root: TempDir,
 }
 
@@ -1056,15 +1072,71 @@ impl Run {
         &self.control_messages
     }
 
-    /// The whole trace transcript. Panics on a partial one: a channel that
-    /// never reached EOF, or a trace whose bytes are not complete frames.
+    /// The whole trace transcript. Panics unless it is complete in the
+    /// §13.3 sense: every channel reached EOF, the bytes are complete frames,
+    /// and the last frame is the `jail.receipt` note of the attempt's final
+    /// receipt (see [`trace_guard`] and [`Run::final_receipt`]). A test about
+    /// a trace that is not complete (a loss, a consumer that left) reads
+    /// `trace_readback` or `trace_bytes` instead, and says so.
     #[must_use]
     pub fn trace_events(&self) -> &[Value] {
         self.assert_channels_complete();
-        if let Err(message) = trace_guard(self.trace_readback.as_ref()) {
+        if let Err(message) = trace_guard(self.trace_readback.as_ref(), self.final_receipt()) {
             panic!("{message}");
         }
         &self.trace_events
+    }
+
+    /// The bytes of the receipt a complete trace must end on (§13.3: "the
+    /// `jail.receipt` note of the attempt's final receipt").
+    ///
+    /// That is the canonical `jail.json` of the attempt the trace's last frame
+    /// names, under this run's private data directory: §7 replaces it
+    /// atomically with every receipt, and §13.3 keeps it local always. When
+    /// it is not there (a run pointed at another data directory), the
+    /// `--receipt` copy, which carries the same bytes. A trace with no frames
+    /// names no attempt; then any receipt the run left, so that an empty
+    /// trace next to a receipt is not mistaken for a run that attempted
+    /// nothing.
+    #[must_use]
+    pub fn final_receipt(&self) -> Option<&[u8]> {
+        let file = |path: &Path| {
+            self.receipt_files
+                .iter()
+                .find(|(candidate, _)| candidate == path)
+                .map(|(_, bytes)| bytes.as_slice())
+        };
+        let named = self
+            .trace_readback
+            .as_ref()
+            .and_then(|readback| readback.frames.last())
+            .and_then(|frame| frame.get("attempt_id"))
+            .and_then(Value::as_str);
+        if let Some(attempt) = named
+            && let Some(bytes) = file(
+                &self
+                    .data_dir
+                    .join("attempts")
+                    .join(attempt)
+                    .join("jail.json"),
+            )
+        {
+            return Some(bytes);
+        }
+        if let Some(bytes) = self.receipt_path.as_deref().and_then(file) {
+            return Some(bytes);
+        }
+        if self
+            .trace_readback
+            .as_ref()
+            .is_some_and(|readback| readback.frames.is_empty())
+        {
+            return self
+                .receipt_files
+                .first()
+                .map(|(_, bytes)| bytes.as_slice());
+        }
+        None
     }
 
     /// Every local `trace.ndjson` under the private data directory, with the
@@ -1086,20 +1158,123 @@ impl Run {
     }
 }
 
-/// Whether a trace readback is a complete transcript. `Err` is the message
-/// the caller must panic with.
-pub fn trace_guard(readback: Option<&Readback>) -> Result<(), String> {
-    match readback {
-        Some(readback) if readback.state != TraceState::Complete => Err(format!(
-            "the trace is {:?} at byte {:?}, so the {} frame(s) before that point are a \
-             partial transcript: an absence proves nothing here. Inspect \
-             `trace_readback` directly if that is what the test means to do.",
-            readback.state,
-            readback.bad_offset,
+/// Whether a trace readback is a complete transcript (jail-v1 §13.3), given
+/// the bytes of the attempt's final receipt. `Err` is the message the caller
+/// must panic with.
+///
+/// Syntax first: every line one complete frame. Then §13.3's rule: "A trace
+/// is complete only if its last frame is the `jail.receipt` note of the
+/// attempt's final receipt", so the last frame must be that note, and its
+/// phase and digest must be the ones [`receipt_note_of`] computes from the
+/// final receipt's bytes. A sink that lost evidence keeps a prefix that can
+/// end on a frame boundary; so does one that lost the final note, or a
+/// receipt rewritten after its note. Only this comparison tells them apart
+/// from a whole trace. No trace asked for is `Ok`; so is an empty trace from
+/// a run that left no receipt at all, which attempted nothing to be
+/// incomplete about.
+pub fn trace_guard(
+    readback: Option<&Readback>,
+    final_receipt: Option<&[u8]>,
+) -> Result<(), String> {
+    let Some(readback) = readback else {
+        return Ok(());
+    };
+    let partial = |why: String| {
+        Err(format!(
+            "{why}, so the {} frame(s) read are a partial transcript (jail-v1 §13.3): an \
+             absence proves nothing here. Inspect `trace_readback` directly if that is \
+             what the test means to do.",
             readback.frames.len()
-        )),
-        _ => Ok(()),
+        ))
+    };
+    if readback.state != TraceState::Complete {
+        return partial(format!(
+            "the trace is {:?} at byte {:?}",
+            readback.state, readback.bad_offset
+        ));
     }
+    if readback.frames.is_empty() && final_receipt.is_none() {
+        return Ok(());
+    }
+    let Some((phase, digest)) = readback.last_receipt_note() else {
+        return partial("the trace's last frame is not a `jail.receipt` note".to_owned());
+    };
+    let Some(receipt) = final_receipt else {
+        return partial(format!(
+            "the trace ends on the {phase} note {digest}, but the run left no final receipt \
+             to compare it with"
+        ));
+    };
+    match receipt_note_of(receipt) {
+        Ok((want_phase, want_digest)) if want_phase == phase && want_digest == digest => Ok(()),
+        Ok((want_phase, want_digest)) => partial(format!(
+            "the trace ends on the {phase} note {digest}, but the final receipt is \
+             {want_phase} {want_digest}"
+        )),
+        Err(error) => partial(format!("the final receipt cannot be read: {error}")),
+    }
+}
+
+/// The `(phase, receipt_digest)` a `jail.receipt` note carries for a
+/// receipt file's bytes.
+///
+/// The product names a receipt by `sha256:` and the lowercase hex SHA-256 of
+/// its compact JSON (`serde_json::to_vec`), and writes the same receipt
+/// pretty-printed; the two differ only in whitespace outside strings, which
+/// [`compact_json`] removes. An NDJSON file's last document is its latest
+/// receipt.
+///
+/// # Errors
+/// Why the bytes hold no receipt with a phase.
+pub fn receipt_note_of(bytes: &[u8]) -> Result<(String, String), String> {
+    use sha2::{Digest as _, Sha256};
+    let document: &[u8] = if serde_json::from_slice::<Value>(bytes).is_ok() {
+        bytes
+    } else {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .rfind(|line| !line.iter().all(u8::is_ascii_whitespace))
+            .ok_or("an empty receipt file")?
+    };
+    let value: Value =
+        serde_json::from_slice(document).map_err(|error| format!("not JSON: {error}"))?;
+    let phase = value
+        .get("phase")
+        .and_then(Value::as_str)
+        .ok_or("a receipt without a phase")?
+        .to_owned();
+    let mut digest = String::from("sha256:");
+    for byte in Sha256::digest(compact_json(document)) {
+        digest.push_str(&format!("{byte:02x}"));
+    }
+    Ok((phase, digest))
+}
+
+/// Valid JSON with every whitespace byte outside a string removed: what
+/// `serde_json::to_vec` writes for what `to_vec_pretty` wrote.
+#[must_use]
+pub fn compact_json(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if in_string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+            out.push(byte);
+        } else if !matches!(byte, b' ' | b'\n' | b'\r' | b'\t') {
+            out.push(byte);
+        }
+    }
+    out
 }
 
 fn collect_named(dir: &Path, name: &OsStr, out: &mut Vec<PathBuf>) {
@@ -1439,6 +1614,10 @@ mod tests {
         );
     }
 
+    /// These two are about the consumer's mechanics, over a stand-in that
+    /// writes two frames and no receipt: the frames are read from the
+    /// readback, and the guarded accessor refuses them, because a trace with
+    /// no final receipt note is not complete (§13.3).
     #[test]
     fn a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit() {
         let run = Jail::with_program("/bin/sh")
@@ -1448,7 +1627,12 @@ mod tests {
             .run()
             .expect("the stand-in runs");
         assert_eq!(run.trace_bytes, b"{\"n\":1}\n{\"n\":2}\n");
-        assert_eq!(run.trace_events().len(), 2);
+        let readback = run.trace_readback.as_ref().expect("a trace was requested");
+        assert_eq!(readback.state, TraceState::Complete);
+        assert_eq!(readback.frames.len(), 2);
+        let guarded =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.trace_events().len()));
+        assert!(guarded.is_err(), "no receipt note, no complete trace");
     }
 
     #[test]
@@ -1462,18 +1646,107 @@ mod tests {
             })
             .run()
             .expect("the stand-in runs");
-        assert_eq!(run.trace_events().len(), 2);
+        let readback = run.trace_readback.as_ref().expect("a trace was requested");
+        assert_eq!(readback.state, TraceState::Complete);
+        assert_eq!(readback.frames.len(), 2);
+    }
+
+    /// A pretty-printed receipt and the frame naming it, as the product
+    /// writes them: the note's digest is over the compact form.
+    fn receipt_and_note(phase: &str) -> (Vec<u8>, Vec<u8>) {
+        use sha2::{Digest as _, Sha256};
+        let receipt = serde_json::json!({
+            "schema": "ouro.jail.receipt/1",
+            "attempt_id": "att_1",
+            "phase": phase,
+            "errors": [],
+            "empty": {},
+            "text": "a b\t\"c\" \\ d \u{e9}",
+            "nested": {"list": [1, 2.5, null, true, {"k": "v w"}]},
+        });
+        let pretty = serde_json::to_vec_pretty(&receipt).unwrap();
+        let mut digest = String::from("sha256:");
+        for byte in Sha256::digest(serde_json::to_vec(&receipt).unwrap()) {
+            digest.push_str(&format!("{byte:02x}"));
+        }
+        let note = serde_json::json!({
+            "schema": "ouro.event/1",
+            "attempt_id": "att_1",
+            "source": "wrapper",
+            "operation": "jail.receipt",
+            "fields": {"phase": phase, "receipt_digest": digest},
+        });
+        (pretty, format!("{note}\n").into_bytes())
     }
 
     #[test]
-    fn the_trace_guard_refuses_an_incomplete_or_corrupt_trace_only() {
-        assert!(trace_guard(None).is_ok());
-        assert!(trace_guard(Some(&read_frames(b"{\"n\":1}\n"))).is_ok());
-        let torn = trace_guard(Some(&read_frames(b"{\"n\":1}\n{"))).unwrap_err();
-        assert!(torn.contains("Incomplete"), "{torn}");
-        assert!(torn.contains("partial transcript"), "{torn}");
-        let corrupt = trace_guard(Some(&read_frames(b"{\n{\"n\":1}\n"))).unwrap_err();
-        assert!(corrupt.contains("Corrupt"), "{corrupt}");
+    fn a_pretty_receipt_compacts_to_the_bytes_its_digest_is_over() {
+        let value = serde_json::json!({
+            "a": [], "b": {}, "c": "x y\n\"z\" \\", "d": [1, {"e": " "}], "f": "\u{e9}"
+        });
+        assert_eq!(
+            compact_json(&serde_json::to_vec_pretty(&value).unwrap()),
+            serde_json::to_vec(&value).unwrap()
+        );
+        let (pretty, note) = receipt_and_note("settled");
+        let (phase, digest) = receipt_note_of(&pretty).unwrap();
+        assert_eq!(phase, "settled");
+        assert_eq!(
+            read_frames(&note).last_receipt_note(),
+            Some(("settled", digest.as_str()))
+        );
+        // NDJSON: the last document is the latest receipt.
+        let mut ndjson = b"{\"phase\":\"prepared\"}\n".to_vec();
+        ndjson.extend(compact_json(&pretty));
+        ndjson.push(b'\n');
+        assert_eq!(receipt_note_of(&ndjson).unwrap(), (phase, digest));
+        assert!(receipt_note_of(b"{}").is_err(), "a receipt has a phase");
+    }
+
+    #[test]
+    fn the_trace_guard_accepts_only_a_trace_ending_on_the_final_receipts_note() {
+        let (settled, note) = receipt_and_note("settled");
+        let (enforced, _) = receipt_and_note("enforced");
+        let mut whole = b"{\"n\":1}\n".to_vec();
+        whole.extend_from_slice(&note);
+
+        // No trace asked for; an empty trace from a run that left nothing.
+        assert!(trace_guard(None, None).is_ok());
+        assert!(trace_guard(Some(&read_frames(b"")), None).is_ok());
+        // The whole trace, against the receipt its last note names.
+        assert!(trace_guard(Some(&read_frames(&whole)), Some(&settled)).is_ok());
+
+        let refused = |bytes: &[u8], receipt: Option<&[u8]>, why: &str| {
+            let message = trace_guard(Some(&read_frames(bytes)), receipt).unwrap_err();
+            assert!(message.contains(why), "{why}: {message}");
+            assert!(message.contains("partial transcript"), "{message}");
+        };
+        // Syntax: torn, corrupt.
+        let mut torn = whole.clone();
+        torn.extend_from_slice(b"{\"n\"");
+        refused(&torn, Some(&settled), "Incomplete");
+        refused(b"{\n{\"n\":1}\n", Some(&settled), "Corrupt");
+        // Complete frames that do not end on a receipt note: the prefix a
+        // sink keeps after a loss.
+        refused(b"{\"n\":1}\n", Some(&settled), "not a `jail.receipt` note");
+        refused(b"{\"n\":1}\n", None, "not a `jail.receipt` note");
+        // An empty trace next to a receipt lost everything.
+        refused(b"", Some(&settled), "not a `jail.receipt` note");
+        // A note of another receipt: a receipt rewritten after its note, or
+        // an earlier phase's note last.
+        refused(&whole, Some(&enforced), "but the final receipt is enforced");
+        // Whitespace outside strings is not the receipt's content; inside a
+        // string it is.
+        let mut respaced = settled.clone();
+        respaced.insert(1, b' ');
+        assert!(trace_guard(Some(&read_frames(&whole)), Some(&respaced)).is_ok());
+        let tampered = String::from_utf8(settled.clone())
+            .unwrap()
+            .replace("v w", "v  w")
+            .into_bytes();
+        refused(&whole, Some(&tampered), "but the final receipt is settled");
+        // A note and no receipt to compare it with.
+        refused(&whole, None, "left no final receipt");
     }
 
     #[test]
