@@ -809,6 +809,7 @@ mod scripted {
         pub boot: Option<String>,
         pub owner: Liveness,
         pub leaf: LeafProbe,
+        pub terminate: Result<(), String>,
         pub calls: Mutex<Vec<String>>,
     }
 
@@ -818,6 +819,7 @@ mod scripted {
                 boot: Some(HOST_BOOT.to_owned()),
                 owner,
                 leaf,
+                terminate: Ok(()),
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -847,7 +849,7 @@ mod scripted {
         }
         fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), String> {
             self.log(format!("terminate_leaf {}", leaf.inode));
-            Ok(())
+            self.terminate.clone()
         }
         fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), String> {
             self.log(format!("remove_leaf {}", leaf.inode));
@@ -1002,6 +1004,52 @@ mod scripted {
             "S6: the supervisor's receipt is never rewritten"
         );
         assert_eq!(entry.recorded, actions);
+    }
+
+    /// "Verify emptiness before deleting state" (§14.2): when the kill cannot
+    /// be verified (the leaf stays populated past its budget), the leaf is not
+    /// removed, managed scratch stays, only the intent is recorded, and the
+    /// cleanup is incomplete (§6.4: exit 1).
+    #[test]
+    fn j4_c03_an_unverified_termination_deletes_nothing() {
+        let fixture = Fixture::new();
+        let (id, dir) = orphan(&fixture, HOST_BOOT);
+        let scratch = managed_scratch(&dir, 3);
+        let mut host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
+        host.terminate = Err("still populated 5000 ms after cgroup.kill".to_owned());
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert_eq!(
+            cgroup_calls(&host.calls()),
+            ["probe_leaf 4242", "terminate_leaf 4242"],
+            "nothing is removed after an unverified kill"
+        );
+        assert_eq!(entry.action, "pending", "{}", entry.reason);
+        assert!(
+            entry
+                .cgroup
+                .as_deref()
+                .is_some_and(|cgroup| cgroup.starts_with("failed")),
+            "{:?}",
+            entry.cgroup
+        );
+        assert!(
+            scratch.join("f0").is_file(),
+            "scratch removed after an unverified end"
+        );
+        assert!(report.incomplete.iter().any(|item| item.contains(&id)));
+        let actions: Vec<Value> = read_json(&dir.state_path())["gc_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action["action"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["gc_terminating_orphan"],
+            "the intent, and nothing gc could not verify"
+        );
     }
 
     /// Unverifiable identities are retained (§14.2): an owner whose liveness
