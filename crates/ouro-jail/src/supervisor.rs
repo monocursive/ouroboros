@@ -1814,7 +1814,7 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
                 .unwrap_or_else(|| "wrapper".to_owned()),
             start_ns: "0".to_owned(),
             end_ns: Some(crate::platform::elapsed_since_start_ns().to_string()),
-            reason: "trace_transport_loss".to_owned(),
+            reason: trace::TRANSPORT_LOSS_REASON.to_owned(),
             lost_count: None,
         };
         entry.gaps.push(gap.clone());
@@ -3087,7 +3087,13 @@ fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, J
                 format!("{}: {error}", path.display()),
             )
         })?;
-    Ok(trace::shared(FileSink::new(file)))
+    // S9: the only environment input here is the shrink-only test seam; the
+    // sink names it in every loss it records, so the receipt that reports
+    // the loss also reports the seam.
+    Ok(trace::shared(FileSink::for_attempt(
+        file,
+        std::env::var(trace::TRACE_CAP_SEAM).ok().as_deref(),
+    )))
 }
 
 /// Publishes one control message (§8.2).

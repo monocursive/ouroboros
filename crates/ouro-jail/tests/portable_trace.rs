@@ -723,3 +723,259 @@ fn j4_r03_after_local_payload_exhaustion_only_reserve_notes_follow() {
         .collect();
     assert_eq!(seqs, vec![0, 1, 2, 5]);
 }
+
+// ---------------------------------------------------------------------------
+// R03: the in-band record of a transport loss.
+// ---------------------------------------------------------------------------
+
+fn lifecycle(transition: &str) -> ouro_jail::records::Event {
+    ouro_jail::records::Event::lifecycle_note(
+        "att_j4_trace",
+        0,
+        std::time::SystemTime::now(),
+        0,
+        transition,
+    )
+}
+
+fn receipt_note() -> ouro_jail::records::Event {
+    ouro_jail::records::Event::receipt_note(
+        "att_j4_trace",
+        0,
+        std::time::SystemTime::now(),
+        0,
+        ouro_jail::records::Phase::Settled,
+        "sha256:00",
+    )
+}
+
+fn is_transport_gap(frame: &serde_json::Value) -> bool {
+    frame
+        .pointer("/fields/kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("coverage_gap")
+        && frame
+            .pointer("/fields/reason")
+            .and_then(serde_json::Value::as_str)
+            == Some("trace_transport_loss")
+}
+
+#[test]
+fn j4_r03_a_coverage_gap_note_follows_the_prefix_with_reserve_priority() {
+    use ouro_jail::trace::{FileSink, TraceState, read_frames, shared};
+
+    let file = tempfile::NamedTempFile::new().expect("a temporary file");
+    let trace = shared(FileSink::with_bounds(
+        file.reopen().expect("a handle"),
+        8192,
+        4096,
+    ));
+    let mut accepted = 0;
+    for index in 0..1000 {
+        let written = trace
+            .lock()
+            .unwrap()
+            .write_event(&lifecycle(&format!("step_{index}")), Priority::Normal);
+        if written.is_err() {
+            break;
+        }
+        accepted += 1;
+    }
+    assert!(
+        accepted > 0 && accepted < 1000,
+        "the payload budget is reached"
+    );
+    // More ordinary events after the loss: refused, and no second note.
+    for _ in 0..3 {
+        assert!(
+            trace
+                .lock()
+                .unwrap()
+                .write_event(&lifecycle("late"), Priority::Normal)
+                .is_err()
+        );
+    }
+    trace
+        .lock()
+        .unwrap()
+        .write_event(&receipt_note(), Priority::Reserve)
+        .expect("the final receipt note uses the reserve");
+
+    let readback = read_frames(&std::fs::read(file.path()).unwrap());
+    assert_eq!(readback.state, TraceState::Complete);
+    let frames = &readback.frames;
+    assert_eq!(
+        frames.len(),
+        accepted + 2,
+        "the prefix, one gap note, the receipt note"
+    );
+    let gap = &frames[accepted];
+    assert!(
+        is_transport_gap(gap),
+        "the note right after the prefix: {gap}"
+    );
+    assert_eq!(gap["source"], "wrapper");
+    assert_eq!(gap["fields"]["end_ns"], serde_json::Value::Null);
+    assert_eq!(gap["fields"]["lost_count"], serde_json::Value::Null);
+    assert_eq!(
+        gap["fields"]["classes"],
+        serde_json::json!(["exec", "fs.write", "fs.deny", "net", "proxy.net", "limits"])
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| is_transport_gap(frame))
+            .count(),
+        1,
+        "one note per loss, not one per refused frame"
+    );
+    // One wrapper sequence for events and notes: the refused event and the
+    // three late ones keep their numbers, so the gaps in it are visible too.
+    let seqs: Vec<u64> = frames
+        .iter()
+        .map(|frame| frame["source_seq"].as_u64().unwrap())
+        .collect();
+    let accepted_seq = accepted as u64;
+    let mut expected: Vec<u64> = (1..=accepted_seq).collect();
+    expected.extend([accepted_seq + 2, accepted_seq + 6]);
+    assert_eq!(seqs, expected);
+    assert_eq!(readback.last_receipt_note(), Some(("settled", "sha256:00")));
+}
+
+#[test]
+fn j4_r03_a_consumer_that_resumes_after_its_deadline_reads_the_gap_note() {
+    use ouro_jail::trace::{TraceState, read_frames, shared};
+
+    let _serial = serial();
+    let (mut reader, sink) = pipe_sink();
+    let trace = shared(sink.with_bounds(1024 * 1024, Duration::from_millis(50)));
+    // Fill the pipe, and then some, while nobody reads.
+    let accepted = 400;
+    for _ in 0..accepted {
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&lifecycle("filling"), Priority::Normal)
+            .expect("the queue has room and no deadline has passed");
+    }
+    std::thread::sleep(Duration::from_millis(120));
+    // The supervision loop's poll finds the stall: loss, and the note is
+    // queued in the reserve for a consumer that comes back.
+    assert!(trace.lock().unwrap().poll().is_err());
+    assert!(
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&lifecycle("after"), Priority::Normal)
+            .is_err(),
+        "the sink is marked lost"
+    );
+    let mut received = Vec::new();
+    for _ in 0..1000 {
+        received.extend(read_available(&mut reader));
+        let _ = trace.lock().unwrap().poll();
+        if read_frames(&received)
+            .frames
+            .last()
+            .is_some_and(is_transport_gap)
+        {
+            break;
+        }
+    }
+    let readback = read_frames(&received);
+    assert_eq!(readback.state, TraceState::Complete);
+    assert_eq!(readback.frames.len(), accepted + 1);
+    assert!(is_transport_gap(readback.frames.last().unwrap()));
+}
+
+#[test]
+fn j4_r03_the_trace_cap_seam_can_only_shrink() {
+    use ouro_jail::trace::{LOCAL_CAP, LOCAL_RESERVE, TRACE_CAP_SEAM, local_bounds};
+    assert_eq!(TRACE_CAP_SEAM, "OURO_JAIL_TEST_TRACE_CAP");
+    assert_eq!(local_bounds(None), (LOCAL_CAP, LOCAL_RESERVE));
+    assert_eq!(local_bounds(Some("65536")), (65536, 32768));
+    assert_eq!(local_bounds(Some("4096")), (4096, 2048));
+    assert_eq!(
+        local_bounds(Some(&LOCAL_CAP.to_string())),
+        (LOCAL_CAP, LOCAL_RESERVE)
+    );
+    for ignored in ["", "abc", "-1", "0", "4095", &(LOCAL_CAP + 1).to_string()] {
+        assert_eq!(
+            local_bounds(Some(ignored)),
+            (LOCAL_CAP, LOCAL_RESERVE),
+            "{ignored:?} must not change the bounds"
+        );
+    }
+}
+
+#[test]
+fn j4_r03_a_loss_under_the_cap_seam_names_the_seam() {
+    use ouro_jail::trace::FileSink;
+    let file = tempfile::NamedTempFile::new().expect("a temporary file");
+    let mut shrunk = FileSink::for_attempt(file.reopen().unwrap(), Some("4096"));
+    let error = (0..100)
+        .find_map(|index| {
+            shrunk
+                .write_frame(&sized_frame(index, 150), Priority::Normal)
+                .err()
+        })
+        .expect("a 4096-byte cap is exhausted");
+    for reason in [
+        error.message.as_str(),
+        shrunk.loss().unwrap().reason.as_str(),
+    ] {
+        assert!(
+            reason.contains("OURO_JAIL_TEST_TRACE_CAP") && reason.contains("4096"),
+            "{reason}"
+        );
+    }
+    assert!(
+        std::fs::metadata(file.path()).unwrap().len() <= 2048,
+        "the shrunk payload is half the shrunk cap"
+    );
+
+    let plain = tempfile::NamedTempFile::new().expect("a temporary file");
+    let mut sink = FileSink::for_attempt(plain.reopen().unwrap(), None);
+    let error = sink
+        .write_frame(
+            &vec![b'x'; ouro_jail::trace::EVENT_MAX + 1],
+            Priority::Normal,
+        )
+        .expect_err("oversized");
+    assert!(
+        !error.message.contains("OURO_JAIL_TEST_TRACE_CAP"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn j4_r03_a_consumer_past_its_deadline_gets_no_second_one_at_settlement() {
+    let _serial = serial();
+    let (reader, sink) = pipe_sink();
+    let deadline = Duration::from_millis(300);
+    let mut sink = sink.with_bounds(1024 * 1024, deadline);
+    while sink.queued() == 0 {
+        sink.write_frame(&[b'z'; 4000], Priority::Normal)
+            .expect("filling");
+    }
+    std::thread::sleep(deadline + Duration::from_millis(100));
+    assert!(sink.flush_now().is_err(), "the stall is found");
+    // The final notes are queued for a consumer that might still come back.
+    sink.write_frame(b"{\"note\":\"receipt\"}", Priority::Reserve)
+        .expect("reserve");
+    let queued_frames_lost_before = sink.loss().unwrap().lost_frames.unwrap();
+    let started = std::time::Instant::now();
+    sink.finish();
+    let spent = started.elapsed();
+    assert!(
+        spent < deadline / 2,
+        "settlement waited {spent:?} for a consumer that already ran out its deadline"
+    );
+    assert_eq!(sink.queued(), 0, "undelivered frames are counted, not kept");
+    assert!(
+        sink.loss().unwrap().lost_frames.unwrap() > queued_frames_lost_before,
+        "the frames still queued at settlement are counted as lost"
+    );
+    drop(reader);
+}

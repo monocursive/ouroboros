@@ -73,16 +73,51 @@ fn evidence_lost(reason: &str) -> JailError {
 /// writer, and both producers take it for one frame at a time.
 pub type SharedTrace = Arc<Mutex<TraceWriter>>;
 
+/// The classes a trace stream carries events for, which a transport loss can
+/// therefore affect (§11.4). The writer cannot know which later events a lost
+/// sink will refuse, so its note names them all; the receipt narrows the
+/// statement per class (`degrade_trace_coverage` leaves unsupported classes
+/// alone).
+pub const STREAM_CLASSES: [&str; 6] = ["exec", "fs.write", "fs.deny", "net", "proxy.net", "limits"];
+
+/// The gap reason for a trace transport loss, in the stream and the receipt.
+pub const TRANSPORT_LOSS_REASON: &str = "trace_transport_loss";
+
 /// One sequence allocator and loss state for all producers of a stream.
 pub struct TraceWriter {
     sink: Box<dyn TraceSink + Send>,
     wrapper_seq: u64,
     local_loss: Option<Loss>,
+    /// The attempt this stream belongs to, learned from its first event.
+    attempt_id: Option<String>,
+    /// Elapsed time of the last frame the sink accepted: the last point the
+    /// stream is known to be healthy.
+    last_healthy_ns: u128,
+    /// Whether the note recording the first loss has been attempted.
+    gap_noted: bool,
 }
 
 impl TraceWriter {
     /// Serialize under the stream lock. All wrapper notes share this sequence.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::EvidenceLost`] when the event cannot be delivered.
+    /// The first time the stream loses evidence, a `coverage_gap` note is
+    /// written right after, with reserve priority (§13.1, §13.3).
     pub fn write_event(
+        &mut self,
+        event: &crate::records::Event,
+        priority: Priority,
+    ) -> Result<(), JailError> {
+        if self.attempt_id.is_none() {
+            self.attempt_id = Some(event.attempt_id.clone());
+        }
+        let result = self.write_one(event, priority);
+        self.note_first_loss();
+        result
+    }
+
+    fn write_one(
         &mut self,
         event: &crate::records::Event,
         priority: Priority,
@@ -94,13 +129,53 @@ impl TraceWriter {
         }
         let frame = serde_json::to_vec(&event).map_err(|err| {
             let reason = format!("trace serialization failed: {err}");
-            self.local_loss = Some(Loss {
+            self.local_loss.get_or_insert(Loss {
                 reason: reason.clone(),
                 lost_frames: None,
             });
             evidence_lost(&reason)
         })?;
-        self.write_frame(&frame, priority)
+        let result = self.sink.write_frame(&frame, priority);
+        if result.is_ok() {
+            self.last_healthy_ns = crate::platform::elapsed_since_start_ns();
+        }
+        result
+    }
+
+    /// Writes the in-band record of the stream's first loss, once.
+    ///
+    /// The note is a wrapper `coverage_gap` from the last healthy point with
+    /// no end (the sink stays lost) and an unknown count, since the frames it
+    /// will refuse are not known yet. It uses the reserve, so it still lands
+    /// after the payload budget is gone; a sink that cannot take even that
+    /// counts it as one more lost frame.
+    fn note_first_loss(&mut self) {
+        if self.gap_noted || self.loss().is_none() {
+            return;
+        }
+        let Some(attempt_id) = self.attempt_id.clone() else {
+            return;
+        };
+        self.gap_noted = true;
+        let gap = crate::records::Gap {
+            classes: STREAM_CLASSES
+                .iter()
+                .map(|class| (*class).to_owned())
+                .collect(),
+            source: "wrapper".to_owned(),
+            start_ns: self.last_healthy_ns.to_string(),
+            end_ns: None,
+            reason: TRANSPORT_LOSS_REASON.to_owned(),
+            lost_count: None,
+        };
+        let note = crate::records::Event::coverage_gap_note(
+            &attempt_id,
+            0, // assigned by write_one
+            std::time::SystemTime::now(),
+            crate::platform::elapsed_since_start_ns(),
+            &gap,
+        );
+        let _ = self.write_one(&note, Priority::Reserve);
     }
 }
 
@@ -109,10 +184,15 @@ impl TraceSink for TraceWriter {
         self.sink.write_frame(frame, priority)
     }
     fn poll(&mut self) -> Result<(), JailError> {
-        self.sink.poll()
+        let result = self.sink.poll();
+        self.note_first_loss();
+        result
     }
     fn finish(&mut self) {
         self.sink.finish();
+        // A loss found only by the terminal drain still gets its note; the
+        // next drain (after the final receipt note) delivers or counts it.
+        self.note_first_loss();
     }
     fn loss(&self) -> Option<&Loss> {
         self.local_loss.as_ref().or_else(|| self.sink.loss())
@@ -126,7 +206,33 @@ pub fn shared(sink: impl TraceSink + Send + 'static) -> SharedTrace {
         sink: Box::new(sink),
         wrapper_seq: 0,
         local_loss: None,
+        attempt_id: None,
+        last_healthy_ns: 0,
+        gap_noted: false,
     }))
+}
+
+/// A test seam (S9): a smaller local trace cap, so a live test can exhaust it
+/// without writing 64 MiB. Accepted only as a number of bytes in
+/// `TRACE_CAP_SEAM_MIN..=LOCAL_CAP`; anything else is ignored. It can only
+/// shrink the cap, which can only lose more evidence, which is then reported:
+/// every loss reason of a sink shrunk this way names the seam and its value.
+pub const TRACE_CAP_SEAM: &str = "OURO_JAIL_TEST_TRACE_CAP";
+
+/// The smallest cap [`TRACE_CAP_SEAM`] accepts: room for a few notes.
+pub const TRACE_CAP_SEAM_MIN: u64 = 4096;
+
+/// The local `(cap, reserve)` for this attempt, given the seam's value.
+///
+/// A shrunk cap keeps half of itself as the reserve, up to [`LOCAL_RESERVE`],
+/// so the final gap and receipt notes still fit in a small cap.
+#[must_use]
+pub fn local_bounds(seam: Option<&str>) -> (u64, u64) {
+    seam.and_then(|text| text.parse::<u64>().ok())
+        .filter(|cap| (TRACE_CAP_SEAM_MIN..=LOCAL_CAP).contains(cap))
+        .map_or((LOCAL_CAP, LOCAL_RESERVE), |cap| {
+            (cap, LOCAL_RESERVE.min(cap / 2))
+        })
 }
 
 /// One bounded NDJSON trace sink.
@@ -209,6 +315,8 @@ pub struct FileSink {
     state: FileState,
     loss: Option<Loss>,
     lost_frames: u64,
+    /// Set when [`TRACE_CAP_SEAM`] shrank the cap: every loss says so.
+    seam: Option<String>,
 }
 
 impl FileSink {
@@ -236,7 +344,24 @@ impl FileSink {
             state: FileState::Open,
             loss: None,
             lost_frames: 0,
+            seam: None,
         }
+    }
+
+    /// Opens the attempt's sink with the bounds [`local_bounds`] gives for
+    /// `seam` (the value of [`TRACE_CAP_SEAM`], if any). When the seam
+    /// shrinks the cap, every loss reason names it and its value, so the
+    /// receipt that records the loss also records the seam.
+    #[must_use]
+    pub fn for_attempt(file: File, seam: Option<&str>) -> Self {
+        let (cap, reserve) = local_bounds(seam);
+        let mut sink = Self::with_bounds(file, cap, reserve);
+        if cap != LOCAL_CAP {
+            sink.seam = Some(format!(
+                "the local trace cap was shrunk to {cap} bytes by the test seam {TRACE_CAP_SEAM}"
+            ));
+        }
+        sink
     }
 
     /// Bytes of complete frames written so far.
@@ -248,16 +373,20 @@ impl FileSink {
     /// Records one more lost frame. The first reason is kept: later losses
     /// follow from it, and a later message would hide its cause.
     fn lose(&mut self, reason: &str) -> JailError {
+        let reason = match &self.seam {
+            Some(seam) => format!("{reason} ({seam})"),
+            None => reason.to_owned(),
+        };
         self.lost_frames += 1;
         let first = self
             .loss
             .as_ref()
-            .map_or_else(|| reason.to_owned(), |loss| loss.reason.clone());
+            .map_or_else(|| reason.clone(), |loss| loss.reason.clone());
         self.loss = Some(Loss {
             reason: first,
             lost_frames: Some(self.lost_frames),
         });
-        evidence_lost(reason)
+        evidence_lost(&reason)
     }
 
     /// Latches at least `state`; a sink never reopens.
