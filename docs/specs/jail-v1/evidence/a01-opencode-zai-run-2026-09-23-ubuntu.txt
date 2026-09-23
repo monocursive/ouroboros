@@ -54,3 +54,30 @@ allowed), and the recorded run completed after the same 28-request install. Dire
 the host, with fresh OpenCode directories and a copy of the same credential, 3 of 3
 runs completed in 5-9 s, one of them after the same install, so the stall is not
 OpenCode's alone; its trigger inside the jail is still not established.
+
+=== stall investigation (later the same day, after merging 8a5ab780)
+Signature, from the traces of all 6 stalled attempts against 13 successful ones
+with the same 28 registry tunnels:
+- every stalled run completed OpenCode's full run-time plugin install (about
+  12,720 fs.create, two cleanup bursts) BEFORE its first model request, then made
+  no further closed-set operation, connect or exec until the wall limit; no model
+  request was ever sent;
+- the successful runs sent the model request about 2.3 s in and let the install
+  run in the background; the stalled runs started the install earlier (about
+  1.6 s, before OpenCode had processed its model catalog);
+- the registry tunnels carried identical byte counts in stalled and successful
+  runs: the downloads completed; the stalled client simply never closed them.
+The relay was ruled out separately through the jail: 12 parallel 25-28 MB
+documents, 4 rate-limited readers at 800 KB/s, and readers pausing 2, 12 and 25 s
+mid-body all completed.
+Hunts (jailed, credentialed profile, `reply with the single word ok`):
+- merged build (be6f0c72): 10 runs with observation on and 10 off, then 30 more
+  on: 50 of 50 exited 0 (40 on, 10 off; none alive at 20 s);
+- pre-merge build (dfdec447) rebuilt for comparison: 60 runs, 59 exited 0, 1
+  exited 1 with the known exit-time `entry_abandoned` evidence loss, 0 stalls.
+So the stall did not recur in 110 consecutive runs on either build after 14:32 UTC;
+it is not attributable to 8a5ab780, and its trigger (plausibly the start-up
+ordering above, which the observer's slowdown makes more likely) is not
+established. No fix is claimed. A stall that recurs should be sampled live:
+per-thread state and wait channel of the OpenCode process from the host, and
+OpenCode's own log under the attempt's vendor-state directory.

@@ -53,9 +53,12 @@ credential digest redacted because this repository is public).
 - **Credential hygiene.** Vendor state, with the staged copy, was removed at
   settlement; the key's value is in none of the receipt, trace, jail state,
   policy, receipt copy or OpenCode's output (searched without printing it).
-- **Stall.** The first run with this profile stalled like the others; 3 of 3
-  direct runs with the same credential and fresh directories did not, one
-  after the same package install, so the jail contributes to the stall. Open.
+- **Stall.** The first run with this profile stalled like the others. Every
+  stalled run completed OpenCode's run-time plugin install before its first
+  model request and then went silent; the downloads themselves had completed.
+  It did not recur in 110 later runs on either the merged or the pre-merge
+  build (the run record has the hunts), so no fix is claimed and the trigger
+  stays open.
 
 ## Notes for both runs
 
