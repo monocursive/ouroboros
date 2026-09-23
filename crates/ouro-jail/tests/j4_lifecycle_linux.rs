@@ -73,8 +73,8 @@ fn members(cgroup_dir: &Path) -> Vec<i32> {
         .collect()
 }
 
-/// The watcher's own protocol (fds 3, 4, 5, and 6 for the leaf's
-/// `cgroup.kill`), driven with stand-ins: the leaf holds the backend and a
+/// The watcher's own protocol (fds 3, 4, 5, 6 for the leaf's `cgroup.kill`
+/// and 7 for the release pipe), driven with stand-ins: the leaf holds the backend and a
 /// second process that, like bubblewrap's init in that window, has no
 /// parent-death signal and is not the backend.
 struct Stand {
@@ -83,6 +83,8 @@ struct Stand {
     stranded: Child,
     supervisor: Child,
     watcher: Child,
+    /// The release pipe's write end, as the supervisor holds it.
+    release: Option<OwnedFd>,
 }
 
 impl Stand {
@@ -102,6 +104,7 @@ impl Stand {
         // Only the stand-in supervisor's death matters to the watcher.
         let supervisor = sleeper();
         let (ready_r, ready_w) = exec::pipe().unwrap();
+        let (release_r, release_w) = exec::pipe().unwrap();
         let kill = std::fs::OpenOptions::new()
             .write(true)
             .open(leaf.path().join("cgroup.kill"))
@@ -113,9 +116,10 @@ impl Stand {
             .unwrap();
         fds.add(ready_w, 5).unwrap();
         fds.add(OwnedFd::from(kill), 6).unwrap();
+        fds.add(release_r, 7).unwrap();
         let mut command = Command::new(harness::jail_path());
         command
-            .args(["__watch", "--cgroup-kill-fd", "6"])
+            .args(["__watch", "--release-fd", "7", "--cgroup-kill-fd", "6"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -141,7 +145,18 @@ impl Stand {
             stranded,
             supervisor,
             watcher,
+            release: Some(release_w),
         }
+    }
+
+    /// The supervisor's release: one byte, then the pipe closes.
+    fn release(&mut self) {
+        let fd = self.release.take().expect("not yet released");
+        // SAFETY: a one-byte write from a live byte to an owned pipe.
+        assert_eq!(
+            unsafe { libc::write(fd.as_raw_fd(), [1u8].as_ptr().cast(), 1) },
+            1
+        );
     }
 
     /// (backend ended, stranded ended, watcher ended), then cleanup.
@@ -149,6 +164,7 @@ impl Stand {
         let backend = exited(&mut self.backend, Duration::from_secs(3));
         let stranded = exited(&mut self.stranded, Duration::from_secs(3));
         let watcher = exited(&mut self.watcher, Duration::from_secs(3));
+        drop(self.release.take());
         for child in [
             &mut self.backend,
             &mut self.stranded,
@@ -210,6 +226,90 @@ fn j4_a_supervisor_and_backend_dying_together_still_kill_the_leaf() {
          although the supervisor was dead"
     );
     assert!(watcher_ended, "the watcher exits once it has acted");
+}
+
+/// Bubblewrap's parent-death signal follows the supervisor *thread* that
+/// started it, which can die before the rest of the supervisor: bubblewrap
+/// then ends while the supervisor still looks alive, and a watcher that left
+/// on the backend's end let the leaf outlive the supervisor (measured with an
+/// instrumented watcher on the reference host). The watcher must stay until
+/// the supervisor itself is gone or releases it.
+#[test]
+fn j4_a_backend_that_ends_before_its_supervisor_dies_still_gets_its_leaf_killed() {
+    if !live() {
+        return;
+    }
+    let mut stand = Stand::start();
+    stand.backend.kill().unwrap();
+    stand.backend.wait().unwrap();
+    // Bounded: a watcher that leaves on the backend's end does so at once.
+    // The supervisor's death follows within the watcher's grace, as the rest
+    // of a supervisor dies right after the thread that started bubblewrap.
+    let _ = exited(&mut stand.watcher, Duration::from_millis(100));
+    stand.supervisor.kill().unwrap();
+    stand.supervisor.wait().unwrap();
+    let (_, stranded, _) = stand.outcome();
+    assert!(
+        stranded,
+        "the backend ended first and the watcher left, so the leaf outlived \
+         the supervisor that died after it"
+    );
+}
+
+/// A normal end: the backend ended and the supervisor released the watcher,
+/// which leaves without touching anything still in the leaf.
+#[test]
+fn j4_a_released_watcher_leaves_without_killing() {
+    if !live() {
+        return;
+    }
+    let mut stand = Stand::start();
+    stand.backend.kill().unwrap();
+    stand.backend.wait().unwrap();
+    stand.release();
+    let watcher = exited(&mut stand.watcher, Duration::from_secs(3));
+    let stranded_alive = !exited(&mut stand.stranded, Duration::from_millis(300));
+    let _ = stand.outcome();
+    assert!(watcher, "a released watcher exits");
+    assert!(stranded_alive, "a released watcher killed the leaf");
+}
+
+/// The backend ended, nothing released the watcher, and the supervisor is
+/// still alive after the grace: it owns what is left, so the watcher leaves
+/// without killing (and the observer's wait for its last child ends).
+#[test]
+fn j4_an_unreleased_watcher_leaves_after_its_grace_when_the_supervisor_lives() {
+    if !live() {
+        return;
+    }
+    let mut stand = Stand::start();
+    stand.backend.kill().unwrap();
+    stand.backend.wait().unwrap();
+    let watcher = exited(&mut stand.watcher, Duration::from_secs(3));
+    let stranded_alive = !exited(&mut stand.stranded, Duration::from_millis(100));
+    let _ = stand.outcome();
+    assert!(watcher, "the watcher left once its grace ran out");
+    assert!(
+        stranded_alive,
+        "the watcher killed the leaf of a supervisor that is still alive"
+    );
+}
+
+/// A release pipe closed without its byte means the supervisor is gone (its
+/// descriptors close before its pidfd reports the death): kill.
+#[test]
+fn j4_a_release_pipe_closed_unreleased_kills_the_leaf() {
+    if !live() {
+        return;
+    }
+    let mut stand = Stand::start();
+    drop(stand.release.take());
+    let (_, stranded, watcher) = stand.outcome();
+    assert!(
+        stranded,
+        "end-of-file on the release pipe left the leaf alive"
+    );
+    assert!(watcher, "the watcher exits once it has acted");
 }
 
 /// The product wires it: a contained run's watcher holds that run's leaf's

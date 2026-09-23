@@ -1036,8 +1036,14 @@ bootstrap and an outside watcher holding supervisor/backend pidfds. The bootstra
 cannot exec bubblewrap until the watcher confirms readiness; supervisor death
 makes the watcher kill the execution cgroup (through the leaf's `cgroup.kill`,
 opened by the supervisor after the backend is placed in the leaf) and then
-bubblewrap, even when bubblewrap's own parent-death signal ended it in the same
-instant, and watcher death makes the supervisor stop the boundary. Killing
+bubblewrap, and watcher death makes the supervisor stop the boundary. The
+supervisor releases the watcher, over a private pipe, as soon as it sees the
+backend's end; the pipe's end-of-file, like the supervisor's pidfd, means the
+supervisor is gone. The backend's end without a release starts a short grace
+(500 ms) rather than the watcher's exit, because bubblewrap's parent-death
+signal follows the supervisor thread that started it and can fire while the
+rest of a dying supervisor still looks alive: a supervisor that dies within
+the grace still has its leaf killed, and one that outlives it owns the rest. Killing
 only bubblewrap is not enough: its namespace init arms its own parent-death
 signal late in its startup and, before that, waits on an event only the outer
 process sends, so an outer process killed in that window left the init alive

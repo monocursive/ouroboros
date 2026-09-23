@@ -546,6 +546,14 @@ impl Boundary {
             .as_ref()
             .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
     }
+    /// The watcher stays until released or until this supervisor is gone
+    /// (§9.3). It is released only once the backend has ended, so its end
+    /// still means the backend's end to the verdicts that wait for it.
+    fn release_watcher_after_backend(&mut self) {
+        if self.backend_exited() {
+            self.watcher.release();
+        }
+    }
     fn cgroup_empty(&self) -> bool {
         !self.cgroup_lost
             && self
@@ -1487,6 +1495,7 @@ impl Boundary {
             reap_until(&mut child, deadline);
         }
         while !self.watcher.ended() && !deadline.expired() {
+            self.release_watcher_after_backend();
             sleep_for(WAIT_STEP);
         }
         self.watcher.reap();
@@ -1636,6 +1645,15 @@ impl Boundary {
                 .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
         };
         loop {
+            // As release_watcher_after_backend, by field: `init_dead` holds
+            // a borrow of the init's pidfd.
+            if self
+                .bwrap_fd
+                .as_ref()
+                .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
+            {
+                self.watcher.release();
+            }
             let settled = init_dead() && self.watcher.ended() && self.cgroup_empty();
             if settled || deadline.expired() {
                 break;
@@ -2855,6 +2873,7 @@ impl RunningExecution for LinuxRunning {
             }
             // J3-agent end
             self.pump_status();
+            self.boundary.release_watcher_after_backend();
             self.sample_limits(false);
             self.check_exec_without_tracer();
             self.check_wall();
@@ -2937,6 +2956,9 @@ impl RunningExecution for LinuxRunning {
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
             self.pump_status();
+            // The observer finishes only once every child of this process is
+            // gone, the watcher included.
+            self.boundary.release_watcher_after_backend();
             let tracer_done = self.boundary.tracer.is_none() || self.finished;
             if tracer_done
                 && self.bwrap_status.is_some()
@@ -2971,6 +2993,7 @@ impl RunningExecution for LinuxRunning {
         // J3-agent end
         self.sample_limits(true);
         while !self.boundary.watcher.ended() && !deadline.expired() {
+            self.boundary.release_watcher_after_backend();
             sleep_for(WAIT_STEP);
         }
         self.boundary.watcher.reap();
