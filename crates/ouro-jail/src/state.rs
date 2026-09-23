@@ -793,6 +793,53 @@ impl Lease {
             .mode(FILE_MODE)
             .open(path)
             .map_err(|error| write_failed(path, &error))?;
+        Self::lock(file, path)
+    }
+
+    // J4-D3 begin: `gc` probes a lease without creating its file
+    /// Takes the lease of an attempt that already has a `jail.lock`, without
+    /// blocking and without ever creating one (§14.2: `gc` "takes nonblocking
+    /// attempt locks").
+    ///
+    /// [`Lease::acquire`] creates the file, which is right for the supervisor
+    /// claiming a root and wrong for `gc`: a created `jail.lock` is a
+    /// jail-owned artifact, so [`check_fresh_attempt`] would refuse a reserved,
+    /// never-claimed root forever, and a dry run would have written to disk.
+    /// The file is opened read-only, no-follow and nonblocking, and must be a
+    /// regular file; opening and locking it change nothing on disk.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::UnsafeStatePath`] when the lock file fails its
+    /// checks, and [`ErrorCode::StateWriteFailed`] when it cannot be opened or
+    /// the lock call fails for a reason other than contention.
+    pub fn probe_existing(path: &Path) -> Result<LeaseProbe, JailError> {
+        check_state_file(path)?;
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LeaseProbe::Absent);
+            }
+            Err(error) => return Err(write_failed(path, &error)),
+        };
+        // Checked on the open descriptor, so a file swapped in after
+        // `check_state_file` is refused rather than locked.
+        match file.metadata() {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(unsafe_path(path, "is not a regular file")),
+            Err(error) => return Err(write_failed(path, &error)),
+        }
+        Ok(match Self::lock(file, path)? {
+            Some(lease) => LeaseProbe::Acquired(lease),
+            None => LeaseProbe::Held,
+        })
+    }
+    // J4-D3 end
+
+    fn lock(file: File, path: &Path) -> Result<Option<Lease>, JailError> {
         // SAFETY: `flock` takes a valid open descriptor, which `file` owns for
         // the whole call, and an operation constant. It touches no memory.
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -815,6 +862,20 @@ impl Lease {
         &self.path
     }
 }
+
+// J4-D3 begin
+/// What [`Lease::probe_existing`] found.
+#[derive(Debug)]
+pub enum LeaseProbe {
+    /// There is no `jail.lock`, so there is no lease to take: the supervisor
+    /// creates it before it claims a root. Nothing was created.
+    Absent,
+    /// A live supervisor holds the lease.
+    Held,
+    /// The lease was free and the caller now holds it.
+    Acquired(Lease),
+}
+// J4-D3 end
 
 impl Drop for Lease {
     fn drop(&mut self) {

@@ -828,16 +828,33 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
             ),
             Ok(id) => {
                 let dir = AttemptDir::new(&data_dir, &id);
-                match state::Lease::acquire(&dir.lock_path()) {
-                    Ok(None) => (
+                // J4-D3 begin: probe the lease without creating `jail.lock`;
+                // a created lock would make a reserved root unclaimable
+                // (§7) and a dry run would write to disk (§14.2).
+                match state::Lease::probe_existing(&dir.lock_path()) {
+                    Ok(state::LeaseProbe::Absent) => (
+                        "retained".to_owned(),
+                        match state::check_fresh_attempt(&dir) {
+                            Ok(()) => "no jail.lock and no jail-owned artifact: an unclaimed \
+                                       attempt root, which gc leaves untouched and claimable"
+                                .to_owned(),
+                            Err(error) => format!(
+                                "no jail.lock, so no lease protects this attempt and gc \
+                                 leaves it untouched: {}",
+                                error.message
+                            ),
+                        },
+                    ),
+                    Ok(state::LeaseProbe::Held) => (
                         "retained".to_owned(),
                         "a live supervisor holds the lease".to_owned(),
                     ),
+                    // J4-D3 end
                     // J3-launch begin: §12, §14.2 — resume a pending
                     // vendor-state cleanup the terminal receipt permits.
                     // J3-agent begin: the dead supervisor's proxy directory
                     // goes first; vendor state follows as before
-                    Ok(Some(_lease)) => match gc_proxy_then_resume(
+                    Ok(state::LeaseProbe::Acquired(_lease)) => match gc_proxy_then_resume(
                         &dir,
                         &name,
                         args.dry_run,
