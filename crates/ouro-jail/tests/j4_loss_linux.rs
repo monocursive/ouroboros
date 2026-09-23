@@ -1652,6 +1652,11 @@ fn j4_o03_exhaustion_through_the_product() {
         gap["lost_count"], 20,
         "the twenty directory-entry calls made while the slot was held: {gap:#}"
     );
+    // J4 W3, T2: a call that was not followed could have been a denial too,
+    // so the same gap degrades `fs.deny` (audit.rs `classes_for`); and a
+    // best-effort loss is still a tool error.
+    let deny = assert_degraded(&settled, "fs.deny", "inflight_exhausted");
+    assert_eq!(deny["lost_count"], 20, "the same twenty calls: {deny:#}");
     assert_active(&settled, "net", 1);
     assert_active(&settled, "exec", 2);
     assert_eq!(line(&out, "mkdir").raw, 0, "{out:#?}");
@@ -1659,6 +1664,12 @@ fn j4_o03_exhaustion_through_the_product() {
         results_on(&run, "ops/a").is_empty(),
         "no result for a call the observer could not follow: {:#?}",
         results_on(&run, "ops/a")
+    );
+    assert_eq!(
+        run.code(),
+        Some(1),
+        "best-effort exits 1 for the loss: {}",
+        run.stderr_text()
     );
 
     // Ring loss: a queue budget too small for any result that carries a
@@ -1974,6 +1985,11 @@ fn j4_o05_denied_connect_counts_only_in_fs_deny_agent() {
 /// target runs (prepared) and at the end (settled): the §11.4 defaults with
 /// no seam; exactly the shrunk value, named, with one; and a seam that
 /// would widen a bound is ignored and says so.
+///
+/// J4 W3, T1: the prepared receipt is read for real. The run is gated, the
+/// owner reads the `--receipt` copy when `prepared` arrives (the receipt the
+/// gate owner decides on), and only then releases it; the test used to read
+/// only the settled receipt although it claimed both.
 #[test]
 fn j4_observer_plan_is_recorded() {
     let _serial = serial();
@@ -2008,47 +2024,71 @@ fn j4_observer_plan_is_recorded() {
                 return;
             };
             let argv = c.argv("exit0", &[]);
-            let run = c.jail.target(argv).run().unwrap();
-            let settled = receipt(&run, "settled");
             let label = format!("{profile} {seams:?}");
+            let mut spawned = c.jail.gate().receipt().target(argv).spawn().unwrap();
+            let control = spawned
+                .owner()
+                .await_prepared()
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            let prepared = common::checked_receipt(
+                spawned
+                    .receipt_value()
+                    .expect("the prepared receipt is on disk when `prepared` arrives"),
+            );
+            assert_eq!(prepared["phase"], "prepared", "{label}: {prepared:#}");
+            let attempt_id = control["attempt_id"].as_str().unwrap().to_owned();
+            let policy_digest = prepared["policy"]["digest"].as_str().unwrap().to_owned();
+            spawned
+                .owner()
+                .release(&harness::gate::Release::Valid, &attempt_id, &policy_digest)
+                .unwrap_or_else(|error| panic!("{label}: the release: {error}"));
+            let run = spawned.wait().unwrap();
+            let settled = receipt(&run, "settled");
             assert_eq!(run.code(), Some(0), "{label}: {}", run.stderr_text());
-            let plan = &details(&settled)["observer_plan"];
-            assert_eq!(plan["backend"], "ptrace", "{label}: {plan:#}");
-            assert_eq!(plan["in_flight_max"], inflight, "{label}: {plan:#}");
-            assert_eq!(plan["queue_bytes_max"], queue, "{label}: {plan:#}");
-            assert_eq!(plan["queue_events_max"], 16_384, "{label}: {plan:#}");
-            assert_eq!(plan["path_snapshot_max"], 4096, "{label}: {plan:#}");
-            assert_eq!(plan["event_bytes_max"], 65_536, "{label}: {plan:#}");
-            assert_eq!(
-                plan["kernel_ring_bytes"],
-                Value::Null,
-                "{label}: the ptrace observer has no kernel ring: {plan:#}"
-            );
-            let recorded = plan["test_seams"].as_object().unwrap();
-            assert_eq!(
-                recorded.len(),
-                seams.len(),
-                "{label}: every seam set is named: {plan:#}"
-            );
-            for (name, value) in seams {
-                let applied: u64 = value.parse().unwrap();
-                let widening = !(1..=if name.ends_with("INFLIGHT") {
-                    16_384
-                } else {
-                    4_194_304
-                })
-                    .contains(&applied);
+            for (phase, receipt) in [("prepared", &prepared), ("settled", &settled)] {
+                let label = format!("{label} {phase}");
+                let plan = &details(receipt)["observer_plan"];
+                assert_eq!(plan["backend"], "ptrace", "{label}: {plan:#}");
+                assert_eq!(plan["in_flight_max"], inflight, "{label}: {plan:#}");
+                assert_eq!(plan["queue_bytes_max"], queue, "{label}: {plan:#}");
+                assert_eq!(plan["queue_events_max"], 16_384, "{label}: {plan:#}");
+                assert_eq!(plan["path_snapshot_max"], 4096, "{label}: {plan:#}");
+                assert_eq!(plan["event_bytes_max"], 65_536, "{label}: {plan:#}");
                 assert_eq!(
-                    recorded[*name],
-                    if widening {
-                        Value::Null
-                    } else {
-                        Value::from(applied)
-                    },
-                    "{label}: {plan:#}"
+                    plan["kernel_ring_bytes"],
+                    Value::Null,
+                    "{label}: the ptrace observer has no kernel ring: {plan:#}"
                 );
+                let recorded = plan["test_seams"].as_object().unwrap();
+                assert_eq!(
+                    recorded.len(),
+                    seams.len(),
+                    "{label}: every seam set is named: {plan:#}"
+                );
+                for (name, value) in seams {
+                    let applied: u64 = value.parse().unwrap();
+                    let widening = !(1..=if name.ends_with("INFLIGHT") {
+                        16_384
+                    } else {
+                        4_194_304
+                    })
+                        .contains(&applied);
+                    assert_eq!(
+                        recorded[*name],
+                        if widening {
+                            Value::Null
+                        } else {
+                            Value::from(applied)
+                        },
+                        "{label}: {plan:#}"
+                    );
+                }
             }
-            // Unchanged from the prepared receipt, which the gate owner sees.
+            assert_eq!(
+                details(&prepared)["observer_plan"],
+                details(&settled)["observer_plan"],
+                "{label}: the plan the gate owner saw is the one in force"
+            );
             assert_eq!(
                 settled["coverage"]["exec"]["status"], "active",
                 "{label}: nothing was lost"
