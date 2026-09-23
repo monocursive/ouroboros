@@ -2,8 +2,8 @@
 
 Status: implementation specification, revision 14, 2026-09-23. No implementation
 or backend conformance is claimed by this document. Revision 14 records the
-first J4 fixes to records, observation and supervisor death (§§6.4, 9.2, 9.3,
-11.2, 11.4, 13.2, 14.2; canonicalization.md). Revision 13 opens J4 and
+first J4 fixes to records, observation, supervisor death and the trace (§§6.4,
+9.2, 9.3, 11.2, 11.4, 13.2, 13.3, 14.2; canonicalization.md). Revision 13 opens J4 and
 resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
 the first real agent run required (§§6.2, 10, 12;
 [agent compatibility](jail-v1/agent-compatibility.md)). Revision 11 records what
@@ -1725,12 +1725,25 @@ After the reserve is exhausted, the receipt remains the bounded summary and
 the trace stays visibly incomplete. A local disk-full failure may prevent even
 that summary from persisting; preserve incomplete state and report a tool error.
 
-External writes are nonblocking with a 4 MiB queue and a 1-second no-progress
+External writes are nonblocking with a 4 MiB queue, of which 256 KiB is
+reserved for the final gap and receipt notes, and a 1-second no-progress
 deadline. Broken pipe, partial-record write followed by failure, queue overflow
 or deadline expiry is evidence loss. The writer preserves unwritten offsets;
 it never retries a whole partially written JSON frame as a second event.
 Strict mode stops the tree; best-effort can continue with the sink marked lost.
-A corrupted/truncated last frame must be recognizable at readback.
+After any evidence loss a sink keeps a prefix: it refuses and counts ordinary
+events and accepts only reserve notes. The first loss writes one wrapper
+`coverage_gap` note (`trace_transport_loss`) with reserve priority, starting
+from the last point every accepted frame had been delivered. A local write that
+fails part-way is truncated back to the last frame boundary; if that fails,
+nothing more is written. A consumer that has already exceeded its deadline gets
+no second one at settlement.
+
+A corrupted/truncated last frame must be recognizable at readback. A trace
+whose last line is not one complete JSON object ending in LF is visibly
+incomplete; a line before the last that is not one is corrupt, which no
+conforming writer produces. A trace is complete only if its last frame is the
+`jail.receipt` note of the attempt's final receipt.
 
 Control uses a separate bounded queue with reserved terminal-message capacity;
 trace backpressure cannot delay a stop. Disk sync runs independently of the

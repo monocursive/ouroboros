@@ -165,7 +165,7 @@ it can be tested); per-pid birth identity on audit events (J4).
 |---|---|---|
 | §8.2 said `refused` is sent only before release, while §8.1 counts a failed target exec after release as a pre-exec failure (refused) | `refused` is sent while the target has not executed, including a failed exec after release; after a target exec the terminal message is `settled` or `unsettled` | §§8.1, 8.2; X04 |
 
-## Revision 14 decisions (2026-09-23, J4 record, observer and lifecycle defects)
+## Revision 14 decisions (2026-09-23, J4 record, observer, lifecycle and trace defects)
 
 Found by reading the code; each was reproduced by a failing test before the fix.
 
@@ -180,3 +180,7 @@ Found by reading the code; each was reproduced by a failing test before the fix.
 | The observer's queue checked its count cap before the exemption for critical facts, so a full backlog dropped a target's exit | Exit, untraced-child exit and observer-end facts pass every cap; gaps past a cap merge into one summary per reason | §11.4; O03 (`j4_d6_*`) |
 | Killing `doctor` left probe processes on pid 1: the agent probe's `ouro-jail run` was not tied to `doctor`, and three forked probe children armed no parent-death signal or did not re-check the parent after arming it | Every probe child arms the signal and leaves at once if its parent is already gone | §14.1; `r7_doctor_leaves_no_orphaned_fixture_process` (failed in the J4 conformance run, 3 in 10 alone) |
 | A supervisor killed during bubblewrap's startup made the watcher kill only the outer process, and the namespace init, whose own parent-death signal was not armed yet, stayed alive until `gc` | The watcher holds the execution leaf's `cgroup.kill` and kills the whole leaf, then the backend; a dead supervisor decides even when the backend ended in the same instant (its own `--die-with-parent` fires too) | §9.3; L02 (`j4_lifecycle_linux.rs`: `j4_supervisor_death_kills_everything_in_the_execution_cgroup`, `j4_a_supervisor_and_backend_dying_together_still_kill_the_leaf`, `j4_a_contained_runs_watcher_holds_its_leafs_kill_file`) |
+| A local trace write that failed part-way (disk full, file-size limit) left a torn frame, and later frames were appended after it (N2) | Writes go to explicit offsets; a failed write is truncated back to the last frame boundary, or the sink closes | §13.3; R03 (`j4_r03_a_failed_local_write_never_leaves_a_partial_frame_mid_file`) |
+| The external sink copied its whole queue on each flush, so flush cost grew with the backlog (N3) | Whole frames are queued and written from the front frame's offset | §13.3; R03 (`j4_r03_flush_cost_does_not_grow_with_the_queue`) |
+| After a trace loss, ordinary frames were still accepted after the hole and the loss note could be refused | A lost sink keeps a prefix: only reserve notes follow, and the first loss writes one `coverage_gap` note with reserve priority | §13.3; R03 (`j4_r03_after_*`, `j4_r03_a_coverage_gap_note_*`) |
+| The harness failed a whole run on a torn last trace line, and nothing defined "recognizable" (S8) | `trace::read_frames` classifies a trace as complete, visibly incomplete or corrupt, and the harness uses it | §13.3; R03 (`j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run`) |
