@@ -164,18 +164,37 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             path,
             via,
             mode,
+            dirfd,
             expect,
         } => {
             let mode = parse_mode(&mode)?;
-            Ok(check(rep, mkdir(&path, via, mode), &expect))
+            if dirfd.is_some() && via != MkdirVia::Mkdirat {
+                return Err("--dirfd needs --via mkdirat".to_string());
+            }
+            let dir = open_dirfd(rep, dirfd.as_deref())?;
+            let ok = check(rep, mkdir(&path, via, mode, dir), &expect);
+            close_dirfd(dir);
+            Ok(ok)
         }
         Mode::Rename {
             from,
             to,
             via,
             noreplace,
+            dirfd,
+            dirfd2,
             expect,
-        } => Ok(check(rep, rename(&from, &to, via, noreplace), &expect)),
+        } => {
+            if (dirfd.is_some() || dirfd2.is_some()) && via == RenameVia::Rename {
+                return Err("--dirfd and --dirfd2 need --via renameat or renameat2".to_string());
+            }
+            let dir = open_dirfd(rep, dirfd.as_deref())?;
+            let dir2 = open_dirfd(rep, dirfd2.as_deref())?;
+            let ok = check(rep, rename(&from, &to, via, noreplace, dir, dir2), &expect);
+            close_dirfd(dir);
+            close_dirfd(dir2);
+            Ok(ok)
+        }
         Mode::Unlink { path, via, expect } => Ok(check(rep, unlink(&path, via), &expect)),
         Mode::Rmdir { path, via, expect } => Ok(check(rep, rmdir(&path, via), &expect)),
         Mode::Link {
@@ -374,6 +393,14 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
         Mode::Status => Ok(status(rep)),
         Mode::WriteMmap { path } => Ok(write_mmap(rep, &path)),
         Mode::Thread => Ok(thread(rep)),
+        Mode::Chdir { path } => Ok(chdir(rep, &path)),
+        Mode::RaceMkdir { a, b, count } => race_mkdir(rep, &a, &b, count),
+        Mode::CloneUntraced { path, expect } => Ok(clone_untraced(rep, &path, &expect)),
+        Mode::Clone3 { expect } => {
+            let emitted = finish(OpReport::new("clone3"), raw::clone3_probe());
+            Ok(check(rep, emitted, &expect))
+        }
+        Mode::Identity => Ok(identity(rep)),
         Mode::Exit { code } => {
             // An `exit` step used to discard every earlier failed expectation
             // in a `script`. It cannot report success over one now, and the
@@ -483,7 +510,56 @@ pub(crate) fn open_keep(
     finish(report, attempt)
 }
 
-fn mkdir(path: &OsStr, via: MkdirVia, mode: u32) -> Emitted {
+/// Open DIR read-only as a directory, for a `--dirfd` option, and report
+/// the open as its own line: the descriptor is part of what the next call
+/// names, so a reader must be able to see where it came from. A read-only
+/// open is outside the closed set, so a tracer reports nothing for it.
+fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<c_int>, Usage> {
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    let c = raw::cpath(dir).map_err(|e| format!("--dirfd cannot be a path: {}", e.reason))?;
+    let mut report = OpReport::new("openat");
+    path_value(&mut report.args, "path", dir);
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+    report.set("flags", flags);
+    report.set("dirfd", "AT_FDCWD");
+    report.set("purpose", "dirfd");
+    report.set("mechanism", raw::mechanism());
+    let emitted = finish(report, raw::openat(libc::AT_FDCWD, c.as_ptr(), flags, 0));
+    rep.emit(&emitted.report);
+    if emitted.report.ret < 0 {
+        return Err(format!(
+            "--dirfd {} could not be opened: {:?}",
+            dir.to_string_lossy(),
+            emitted.report.errno
+        ));
+    }
+    Ok(Some(emitted.report.ret as c_int))
+}
+
+fn close_dirfd(fd: Option<c_int>) {
+    if let Some(fd) = fd {
+        close_fd(i64::from(fd));
+    }
+}
+
+/// The directory a path argument is resolved against: a descriptor the
+/// fixture opened, or `AT_FDCWD`.
+fn dirfd_arg(report: &mut OpReport, key: &str, fd: Option<c_int>) -> c_int {
+    match fd {
+        Some(fd) => {
+            report.set(key, fd);
+            fd
+        }
+        None => {
+            report.set(key, "AT_FDCWD");
+            libc::AT_FDCWD
+        }
+    }
+}
+
+fn mkdir(path: &OsStr, via: MkdirVia, mode: u32, dir: Option<c_int>) -> Emitted {
     let name = match via {
         MkdirVia::Mkdir => "mkdir",
         MkdirVia::Mkdirat => "mkdirat",
@@ -505,14 +581,21 @@ fn mkdir(path: &OsStr, via: MkdirVia, mode: u32) -> Emitted {
     let attempt = match via {
         MkdirVia::Mkdir => raw::mkdir(c.as_ptr(), mode),
         MkdirVia::Mkdirat => {
-            report.set("dirfd", "AT_FDCWD");
-            raw::mkdirat(libc::AT_FDCWD, c.as_ptr(), mode)
+            let fd = dirfd_arg(&mut report, "dirfd", dir);
+            raw::mkdirat(fd, c.as_ptr(), mode)
         }
     };
     finish(report, attempt)
 }
 
-fn rename(from: &OsStr, to: &OsStr, via: RenameVia, noreplace: bool) -> Emitted {
+fn rename(
+    from: &OsStr,
+    to: &OsStr,
+    via: RenameVia,
+    noreplace: bool,
+    dir: Option<c_int>,
+    dir2: Option<c_int>,
+) -> Emitted {
     let name = match via {
         RenameVia::Rename => "rename",
         RenameVia::Renameat => "renameat",
@@ -537,22 +620,16 @@ fn rename(from: &OsStr, to: &OsStr, via: RenameVia, noreplace: bool) -> Emitted 
     let attempt = match via {
         RenameVia::Rename => raw::rename(cf.as_ptr(), ct.as_ptr()),
         RenameVia::Renameat => {
-            report.set("dirfd", "AT_FDCWD");
-            report.set("dirfd2", "AT_FDCWD");
-            raw::renameat(libc::AT_FDCWD, cf.as_ptr(), libc::AT_FDCWD, ct.as_ptr())
+            let fd = dirfd_arg(&mut report, "dirfd", dir);
+            let fd2 = dirfd_arg(&mut report, "dirfd2", dir2);
+            raw::renameat(fd, cf.as_ptr(), fd2, ct.as_ptr())
         }
         RenameVia::Renameat2 => {
             let flags = if noreplace { rename_noreplace() } else { 0 };
-            report.set("dirfd", "AT_FDCWD");
-            report.set("dirfd2", "AT_FDCWD");
+            let fd = dirfd_arg(&mut report, "dirfd", dir);
+            let fd2 = dirfd_arg(&mut report, "dirfd2", dir2);
             report.set("flags", flags);
-            raw::renameat2(
-                libc::AT_FDCWD,
-                cf.as_ptr(),
-                libc::AT_FDCWD,
-                ct.as_ptr(),
-                flags,
-            )
+            raw::renameat2(fd, cf.as_ptr(), fd2, ct.as_ptr(), flags)
         }
     };
     finish(report, attempt)
@@ -1354,6 +1431,171 @@ fn thread(rep: &Reporter) -> bool {
             rep.emit(&report);
             false
         }
+    }
+}
+
+fn chdir(rep: &Reporter, path: &OsStr) -> bool {
+    let report = OpReport::new("chdir");
+    let c = match raw::cpath(path) {
+        Ok(c) => c,
+        Err(e) => {
+            let e = refuse_path(report, "path", path, e.reason);
+            rep.emit(&e.report);
+            return false;
+        }
+    };
+    let mut report = report;
+    path_value(&mut report.args, "path", path);
+    report.set("mechanism", raw::mechanism());
+    let emitted = finish(report, raw::chdir(c.as_ptr()));
+    rep.emit(&emitted.report);
+    emitted.satisfies(&Expect::Ok)
+}
+
+/// `mkdir` on a buffer whose name a second thread keeps changing.
+///
+/// The buffer is an array of atomics, so the flipping is defined behaviour
+/// in Rust; the kernel reads it as the plain bytes it is. Because A and B
+/// differ in one byte only, whatever a tracer snapshots at the entry is
+/// literally A or B, and what the kernel then consumes may be the other one.
+fn race_mkdir(rep: &Reporter, a: &OsStr, b: &OsStr, count: u32) -> Result<bool, Usage> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    if ab.len() != bb.len() {
+        return Err("race-mkdir: A and B must have the same length".to_string());
+    }
+    let differing: Vec<usize> = (0..ab.len()).filter(|i| ab[*i] != bb[*i]).collect();
+    let [at] = differing.as_slice() else {
+        return Err("race-mkdir: A and B must differ in exactly one byte".to_string());
+    };
+    let at = *at;
+    if ab.contains(&0) || bb.contains(&0) {
+        return Err("race-mkdir: a path cannot contain NUL".to_string());
+    }
+    let buffer: Arc<Vec<AtomicU8>> = Arc::new(
+        ab.iter()
+            .copied()
+            .chain(std::iter::once(0))
+            .map(AtomicU8::new)
+            .collect(),
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let flipper = {
+        let buffer = Arc::clone(&buffer);
+        let stop = Arc::clone(&stop);
+        let (x, y) = (ab[at], bb[at]);
+        std::thread::spawn(move || {
+            let mut flips = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                buffer[at].store(
+                    if flips.is_multiple_of(2) { y } else { x },
+                    Ordering::Relaxed,
+                );
+                flips += 1;
+            }
+            flips
+        })
+    };
+    let mut all = true;
+    for _ in 0..count {
+        let mut report = OpReport::new("mkdir");
+        path_value(&mut report.args, "path_a", a);
+        path_value(&mut report.args, "path_b", b);
+        report.set("racing", true);
+        report.set("mechanism", raw::mechanism());
+        // `AtomicU8` has the size and alignment of `u8`, so the array is the
+        // NUL-terminated byte string the kernel reads.
+        let ptr = buffer.as_ptr().cast::<c_char>();
+        let emitted = finish(report, raw::mkdir(ptr, 0o700));
+        all &= !emitted.unusable;
+        rep.emit(&emitted.report);
+    }
+    stop.store(true, Ordering::Relaxed);
+    let flips = flipper.join().unwrap_or(0);
+    let mut done = OpReport::new("race-done");
+    done.set("flips", flips);
+    done.result(0, None);
+    rep.emit(&done);
+    Ok(all)
+}
+
+fn clone_untraced(rep: &Reporter, path: &OsStr, expect: &Expect) -> bool {
+    let report = OpReport::new("clone");
+    let c = match raw::cpath(path) {
+        Ok(c) => c,
+        Err(e) => {
+            let e = refuse_path(report, "path", path, e.reason);
+            rep.emit(&e.report);
+            return false;
+        }
+    };
+    let mut report = report;
+    report.set("flags", "CLONE_UNTRACED|SIGCHLD");
+    report.set("mechanism", raw::mechanism());
+    let (attempt, status) = raw::clone_untraced_mkdir(c.as_ptr());
+    let emitted = finish(report, attempt);
+    rep.emit(&emitted.report);
+    if let Some(status) = status {
+        let mut child = OpReport::new("untraced-mkdir");
+        path_value(&mut child.args, "path", path);
+        let exited = libc::WIFEXITED(status);
+        child.set("exited", exited);
+        let code = if exited {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        };
+        if code == 0 {
+            child.result(0, None);
+        } else if code > 0 {
+            child.result(-1, Some(code));
+        } else {
+            child.set("signal", libc::WTERMSIG(status));
+            child.result(-1, None);
+        }
+        rep.emit(&child);
+    }
+    emitted.satisfies(expect)
+}
+
+/// This process as it sees itself: the number `getpid` returns (a namespace
+/// pid inside a pid namespace), its start time and its `NSpid` line.
+fn identity(rep: &Reporter) -> bool {
+    let mut report = OpReport::new("identity");
+    // SAFETY: `getpid` takes no arguments.
+    let pid = unsafe { libc::getpid() };
+    report.set("pid", pid);
+    #[cfg(target_os = "linux")]
+    {
+        let start = std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|raw| {
+                let tail = raw[raw.rfind(')')? + 1..].to_string();
+                tail.split_whitespace().nth(19)?.parse::<u64>().ok()
+            });
+        report.set("start_ticks", start.map_or(Value::Null, Value::from));
+        let nspid = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("NSpid:").map(|v| v.trim().to_string()))
+            });
+        report.set("nspid", nspid.map_or(Value::Null, Value::from));
+        report.result(0, None);
+        rep.emit(&report);
+        true
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        report.set(
+            "unsupported",
+            "start ticks and NSpid are Linux /proc interfaces",
+        );
+        report.result(-1, None);
+        let e = Emitted::unusable(report);
+        rep.emit(&e.report);
+        false
     }
 }
 

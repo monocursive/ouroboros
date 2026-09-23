@@ -137,6 +137,11 @@ pub enum Mode {
         via: MkdirVia,
         #[arg(long, value_name = "OCTAL", default_value = "700")]
         mode: String,
+        /// Resolve PATH against a descriptor for DIR instead of `AT_FDCWD`
+        /// (`--via mkdirat` only). The directory's read-only open is
+        /// reported as its own `openat` line.
+        #[arg(long, value_name = "DIR")]
+        dirfd: Option<OsString>,
         #[arg(long, default_value = "ok")]
         expect: Expect,
     },
@@ -149,6 +154,12 @@ pub enum Mode {
         /// `RENAME_NOREPLACE`; only meaningful with `--via renameat2`.
         #[arg(long)]
         noreplace: bool,
+        /// Resolve FROM against a descriptor for DIR (`renameat`/`renameat2`).
+        #[arg(long, value_name = "DIR")]
+        dirfd: Option<OsString>,
+        /// Resolve TO against a descriptor for DIR (`renameat`/`renameat2`).
+        #[arg(long, value_name = "DIR")]
+        dirfd2: Option<OsString>,
         #[arg(long, default_value = "ok")]
         expect: Expect,
     },
@@ -466,6 +477,42 @@ pub enum Mode {
     WriteMmap { path: OsString },
     /// Spawn one thread, have it run, and join it.
     Thread,
+    /// Change this process's working directory (not a closed-set call; the
+    /// line lets a test rename the directory afterwards and see what a
+    /// relative path is then reported as).
+    Chdir { path: OsString },
+    /// Call `mkdir` COUNT times on one buffer while a second thread flips
+    /// the single byte in which A and B differ, so the name the kernel
+    /// consumes races the name a tracer snapshots. A and B must have the
+    /// same length and differ in exactly one byte, so every snapshot of the
+    /// buffer is literally one of the two. One `mkdir` line per call.
+    RaceMkdir {
+        a: OsString,
+        b: OsString,
+        #[arg(value_name = "COUNT")]
+        count: u32,
+    },
+    /// `clone(CLONE_UNTRACED | SIGCHLD)` (Linux x86_64): the child makes one
+    /// raw `mkdir(PATH)` and exits with its errno (0 on success); the parent
+    /// reports the `clone` result and, when a child ran, an
+    /// `untraced-mkdir` line with the child's result. `--expect` applies
+    /// to the `clone`.
+    CloneUntraced {
+        path: OsString,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// A raw `clone3` with no flags (Linux): a child is created and exits at
+    /// once. `--expect` applies to the `clone3`; a baseline or observer that
+    /// answers `ENOSYS` is what glibc falls back from.
+    Clone3 {
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Report this process's own identity: `getpid()`, its start time
+    /// (field 22 of `/proc/self/stat`, clock ticks since boot) and the
+    /// `NSpid` line of `/proc/self/status` (Linux).
+    Identity,
     /// Report, then exit with CODE.
     Exit { code: i32 },
     /// Report, then raise SIGNAL on self (name without `SIG`, or a number).

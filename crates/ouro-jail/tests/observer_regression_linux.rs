@@ -2559,3 +2559,126 @@ fn r31_an_entry_destroyed_by_an_exec_names_its_operation() {
         }
     }
 }
+
+// ====================================================== J4 N8: dead modes
+
+/// J4 N8, `execveat`: the fixture mode that exercises both results of the
+/// row was defined and never run. A failed `execveat` is a result with its
+/// errno and its pathname; a successful one through `AT_EMPTY_PATH` is the
+/// confirmed transition, carrying the descriptor it resolved against and the
+/// empty pathname it was given — never a path the observer did not see.
+#[test]
+fn j4_n8_execveat_failure_and_success_are_distinct_events() {
+    let _serial = serial();
+    let Some(work) = setup("n8-execveat") else {
+        return;
+    };
+    let helper = work.helper_s();
+    let missing = work.path("absent-program");
+    let mut run = launch(&work, &[&helper, "execveat", "/bin/true", &missing]);
+    let tracer = attach(run.pid, TracerConfig::default());
+    run.release();
+    let reports = run.lines();
+    let observed = collect(tracer, Duration::from_secs(30));
+    let failed = Report::find(&reports, "execveat_fail");
+    assert_eq!(failed.errno, libc::ENOENT, "{reports:?}");
+    assert!(
+        reports.iter().all(|r| r.label != "execveat_ok"),
+        "the second execveat must replace the image: {reports:?}"
+    );
+    let results: Vec<(String, i64, &'static str)> = observed
+        .of_op(ClosedOp::Exec)
+        .into_iter()
+        .filter_map(|e| match e {
+            TracerEvent::Syscall { syscall, ret, .. } => Some((primary(e), *ret, *syscall)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        vec![(missing.clone(), failed.ret(), "execveat")],
+        "one failed-exec result, and nothing for the one that succeeded:\n  {}",
+        observed.describe()
+    );
+    type Transition = (libc::pid_t, Option<(Vec<u8>, bool)>, Option<i32>);
+    let transitions: Vec<Transition> = observed
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            TracerEvent::Exec {
+                pid, path, dirfd, ..
+            } => Some((
+                *pid,
+                path.as_ref().map(|p| (p.bytes.clone(), p.complete)),
+                *dirfd,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(transitions.len(), 2, "{}", observed.describe());
+    let (pid, path, dirfd) = &transitions[1];
+    assert_eq!(*pid, run.pid);
+    assert_eq!(
+        path.as_ref(),
+        Some(&(Vec::new(), true)),
+        "the snapshot is the empty pathname AT_EMPTY_PATH passed, complete"
+    );
+    assert!(
+        dirfd.is_some_and(|fd| fd >= 0),
+        "the transition names the descriptor it resolved against: {dirfd:?}"
+    );
+    assert_eq!(observed.exits(), vec![(run.pid, 0)], "/bin/true exited 0");
+    assert_eq!(
+        observed.summary.loss.total(),
+        0,
+        "{:?}",
+        observed.summary.loss
+    );
+}
+
+/// J4 N8, `vfork` and `posix_spawn`: the mode was defined and never run.
+/// Both children are born through the vfork path (glibc's `posix_spawn`
+/// uses `clone(CLONE_VM|CLONE_VFORK)`, after `clone3` where the kernel and
+/// the filters allow it), exec, and exit. Each is attributed to its own
+/// pid, as the fixture reported it, with its own confirmed exec and exit;
+/// the parent keeps its own.
+#[test]
+fn j4_n8_vfork_and_posix_spawn_children_keep_their_attribution() {
+    let _serial = serial();
+    let Some(work) = setup("n8-vfork") else {
+        return;
+    };
+    let helper = work.helper_s();
+    let mut run = launch(&work, &[&helper, "vfork", "/bin/true"]);
+    let tracer = attach(run.pid, TracerConfig::default());
+    run.release();
+    let reports = run.lines();
+    let observed = collect(tracer, Duration::from_secs(30));
+    let vforked = Report::find(&reports, "vfork_child").raw as libc::pid_t;
+    let spawned = Report::find(&reports, "spawn_child").raw as libc::pid_t;
+    assert!(vforked > 0 && spawned > 0, "{reports:?}");
+    assert_ne!(vforked, spawned);
+    let forks = observed.forks();
+    for child in [vforked, spawned] {
+        assert!(
+            forks.contains(&(run.pid, child)),
+            "child {child} must be tracked from its birth: {forks:?}"
+        );
+    }
+    let mut execs = observed.execs();
+    execs.sort_unstable();
+    let mut want = vec![run.pid, vforked, spawned];
+    want.sort_unstable();
+    assert_eq!(execs, want, "{}", observed.describe());
+    let mut exits = observed.exits();
+    exits.sort_unstable();
+    let mut want: Vec<(libc::pid_t, i32)> = vec![(run.pid, 0), (vforked, 0), (spawned, 0)];
+    want.sort_unstable();
+    assert_eq!(exits, want, "{}", observed.describe());
+    assert_eq!(
+        observed.summary.loss.total(),
+        0,
+        "{:?}",
+        observed.summary.loss
+    );
+}
