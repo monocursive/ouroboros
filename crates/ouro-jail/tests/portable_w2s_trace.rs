@@ -65,6 +65,9 @@ enum Step {
     /// Exhaust the trace payload, then report a poll.
     Fill,
     Poll,
+    /// A poll after a pause long enough for the persistence worker to land
+    /// what it holds, so the loop acknowledges it before the target ends.
+    Pause,
     Exec,
     ExecError,
     Signaled,
@@ -78,9 +81,19 @@ struct Script {
     /// `lost` leaves the attempt unsettled.
     integrity: &'static str,
     data: PathBuf,
-    /// `jail.json` as it was on disk when tree verification began: the
-    /// last receipt written while the target ran.
+    /// `jail.json` as it was on disk when the observer's final account was
+    /// read (after the tree's end and the receipts still in flight, before
+    /// any settlement write): the last receipt written while the target ran.
     before_settlement: Arc<Mutex<Option<Value>>>,
+    // J4 W3 begin: P4
+    /// The observer's final account is an attached audit observer whose
+    /// frames the lost sink refused, as the Linux audit writer reports it:
+    /// `fs.write` degraded with a null count (instead of observation off).
+    observed: bool,
+    /// The trace payload is exhausted while the tree is verified, after the
+    /// run loop's last iteration, as a tracer draining at settlement does.
+    fill_at_settlement: bool,
+    // J4 W3 end
 }
 
 struct Simulated(Script);
@@ -195,6 +208,10 @@ impl RunningExecution for Running {
                 RunEvent::Poll
             }
             Some(Step::Poll) => RunEvent::Poll,
+            Some(Step::Pause) => {
+                std::thread::sleep(Duration::from_millis(300));
+                RunEvent::Poll
+            }
             Some(Step::Exec) => RunEvent::ExecConfirmed,
             Some(Step::ExecError) => RunEvent::ExecError {
                 errno: "ENOENT".into(),
@@ -205,12 +222,9 @@ impl RunningExecution for Running {
     }
     fn request_stop(&mut self, _: StopReason) {}
     fn wait_tree(&mut self, _: Duration) -> TreeObservation {
-        let receipt = std::fs::read_dir(self.script.data.join("attempts"))
-            .ok()
-            .and_then(|mut listing| listing.next())
-            .and_then(|entry| std::fs::read(entry.ok()?.path().join("jail.json")).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        *self.script.before_settlement.lock().unwrap() = receipt;
+        if self.script.fill_at_settlement {
+            exhaust(self.trace.as_ref().expect("a trace sink"));
+        }
         let settled = self.script.integrity == "verified";
         TreeObservation {
             tree_empty: settled.then_some(true),
@@ -220,6 +234,18 @@ impl RunningExecution for Running {
         }
     }
     fn observer_summary(&mut self) -> Option<ouro_jail::observer::CoverageSummary> {
+        // J4 W3: taken here, not when tree verification begins: since P3 the
+        // tree is ended before the receipts still with the persistence worker
+        // are waited for, and the observer's account is read after them.
+        let receipt = std::fs::read_dir(self.script.data.join("attempts"))
+            .ok()
+            .and_then(|mut listing| listing.next())
+            .and_then(|entry| std::fs::read(entry.ok()?.path().join("jail.json")).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        *self.script.before_settlement.lock().unwrap() = receipt;
+        if self.script.observed {
+            return Some(observed_summary());
+        }
         // Observation off: the audit classes unsupported, the wrapper's own
         // `limits` class active with no hit (what the Linux platforms report).
         let mut summary = ouro_jail::observer::CoverageSummary::unobserved();
@@ -243,7 +269,58 @@ struct Outcome {
     trace: ouro_jail::trace::Readback,
 }
 
+/// An attached audit observer's final account after the lost sink refused
+/// one `fs.write` frame: the class degraded with a null count and the audit
+/// source degraded (`audit.rs`, `emit`), the rest active, `limits` active
+/// with no hit.
+fn observed_summary() -> ouro_jail::observer::CoverageSummary {
+    use ouro_jail::observer::{ClassSummary, CoverageClass, CoverageSummary};
+    use ouro_jail::records::{SourceHealth, SourceStatus};
+    let active = |count| ClassSummary {
+        status: SourceStatus::Active,
+        observed_count: Some(count),
+        gaps: Vec::new(),
+    };
+    CoverageSummary {
+        backend: Some("ptrace".into()),
+        set: Some(CoverageSummary::linux_closed_set().into()),
+        attached: true,
+        sources: SourceHealth {
+            wrapper: SourceStatus::Active,
+            audit: SourceStatus::Degraded,
+            proxy: SourceStatus::Unsupported,
+        },
+        gaps: Vec::new(),
+        classes: [
+            (CoverageClass::Exec, active(1)),
+            (
+                CoverageClass::FsWrite,
+                ClassSummary {
+                    status: SourceStatus::Degraded,
+                    observed_count: None,
+                    gaps: Vec::new(),
+                },
+            ),
+            (CoverageClass::FsDeny, active(0)),
+            (CoverageClass::Net, active(0)),
+            (CoverageClass::ProxyNet, ClassSummary::unsupported()),
+            (CoverageClass::Limits, active(0)),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
 fn run(steps: &[Step], integrity: &'static str) -> Outcome {
+    run_script(steps, integrity, false, false)
+}
+
+fn run_script(
+    steps: &[Step],
+    integrity: &'static str,
+    observed: bool,
+    fill_at_settlement: bool,
+) -> Outcome {
     let dir = common::private_tempdir();
     let root = dir.path().canonicalize().unwrap();
     let workspace = root.join("workspace");
@@ -254,6 +331,8 @@ fn run(steps: &[Step], integrity: &'static str) -> Outcome {
         integrity,
         data: data.clone(),
         before_settlement: Arc::default(),
+        observed,
+        fill_at_settlement,
     };
     let before_settlement = Arc::clone(&script.before_settlement);
     let cli::Command::Run(args) = cli::Cli::parse_from([
@@ -320,18 +399,46 @@ fn digests(receipt: &Value) -> [String; 2] {
 }
 
 /// The receipt says what the trace loss took: the wrapper source degraded,
-/// and every class the receipt covers at all (not `unsupported`) degraded
-/// with a null count and a `trace_transport_loss` gap. Returns how many
-/// classes that was.
+/// and every evidence class the receipt covers at all (not `unsupported`)
+/// degraded with a null count and a `trace_transport_loss` gap. Returns how
+/// many classes that was.
+///
+/// J4 W3: `limits` is not one of them. Its count comes from the cgroup
+/// counters, not from the trace (§11.4: no `limit.hit` event in v1), so a
+/// trace loss leaves it as the platform reported it.
 fn assert_trace_loss_recorded(label: &str, receipt: &Value) -> usize {
     assert_eq!(
         receipt["observer"]["sources"]["wrapper"], "degraded",
         "{label}: {:#}",
         receipt["observer"]
     );
+    let limits = &receipt["coverage"]["limits"];
+    assert!(
+        limits["status"] != "degraded"
+            && !limits["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gap| gap["reason"] == TRANSPORT_LOSS_REASON),
+        "{label}: a trace loss degraded `limits`, whose count is not trace-derived: {limits:#}"
+    );
+    assert!(
+        !receipt["observer"]["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["reason"] == TRANSPORT_LOSS_REASON
+                && gap["classes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|class| class == "limits")),
+        "{label}: an observer gap names `limits`: {:#}",
+        receipt["observer"]["gaps"]
+    );
     let mut covered = 0;
     for (class, entry) in receipt["coverage"].as_object().unwrap() {
-        if entry["status"] == "unsupported" {
+        if entry["status"] == "unsupported" || class == "limits" {
             continue;
         }
         covered += 1;
@@ -438,7 +545,95 @@ fn j4_w2s_b_the_enforced_receipt_after_a_trace_loss_records_it_in_coverage() {
     assert_eq!(outcome.receipt["phase"], "settled");
     assert_eq!(
         assert_trace_loss_recorded("settled", &outcome.receipt),
-        1,
-        "`limits` is the one class a run with observation off covers"
+        0,
+        "`limits` is the one class a run with observation off covers, and a trace loss \
+         leaves it alone"
     );
+    assert_eq!(
+        outcome.receipt["coverage"]["limits"]["status"], "active",
+        "{:#}",
+        outcome.receipt["coverage"]["limits"]
+    );
+    assert_eq!(outcome.receipt["coverage"]["limits"]["observed_count"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// J4 W3: P4, and `limits` after a trace loss
+// ---------------------------------------------------------------------------
+
+fn evidence_lost(receipt: &Value) -> Vec<String> {
+    receipt["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|error| error["code"] == "evidence_lost")
+        .map(|error| error["message"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// P4. A trace-sink loss the journal already reported also degrades the
+/// audit classes whose frames the lost sink refused; the settlement check
+/// (R-1) saw only whether the platform had reported a loss and reported the
+/// same loss again ("coverage was lost by settlement ... the loss reached no
+/// run event"): two `evidence_lost` errors for one loss (3 of 3 live). A
+/// journal loss counts as reported, whether the loop took it or it happened
+/// while the tree was verified.
+#[test]
+fn j4_w3_p4_a_trace_loss_is_reported_once() {
+    let _serial = serial();
+    let mut problems = Vec::new();
+    for (label, steps, at_settlement) in [
+        (
+            "the loop took the loss",
+            &[Step::Exec, Step::Fill, Step::Poll, Step::Exited][..],
+            false,
+        ),
+        (
+            // The enforced receipt is acknowledged in the loop, so nothing
+            // the supervisor writes between the tree's end and the check
+            // below notices the loss for it.
+            "the loss came while the tree was verified",
+            &[Step::Exec, Step::Pause, Step::Poll, Step::Exited][..],
+            true,
+        ),
+    ] {
+        let outcome = run_script(steps, "verified", true, at_settlement);
+        let errors = evidence_lost(&outcome.receipt);
+        if errors.len() != 1 || errors[0].contains("coverage was lost by settlement") {
+            problems.push(format!(
+                "{label}: one loss must be one evidence_lost error naming the trace loss: \
+                 {errors:#?}"
+            ));
+        }
+        assert_eq!(
+            outcome.receipt["coverage"]["fs.write"]["status"], "degraded",
+            "{label}"
+        );
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// J4 W3 decision: after a trace transport loss, `limits` keeps what the
+/// platform reported. Its count comes from the cgroup counters (§11.4: no
+/// `limit.hit` event in v1), so no frame of it can have been lost; the audit
+/// classes are degraded as before.
+#[test]
+fn j4_w3_a_trace_loss_leaves_the_limits_class_alone() {
+    let _serial = serial();
+    let outcome = run_script(
+        &[Step::Exec, Step::Fill, Step::Poll, Step::Exited],
+        "verified",
+        true,
+        false,
+    );
+    assert_eq!(outcome.receipt["phase"], "settled");
+    assert_eq!(
+        assert_trace_loss_recorded("settled", &outcome.receipt),
+        4,
+        "the four audit classes"
+    );
+    let limits = &outcome.receipt["coverage"]["limits"];
+    assert_eq!(limits["status"], "active", "{limits:#}");
+    assert_eq!(limits["observed_count"], 0, "{limits:#}");
+    assert_eq!(limits["sources"], serde_json::json!(["wrapper"]));
 }

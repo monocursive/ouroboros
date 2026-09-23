@@ -608,3 +608,53 @@ fn j4_r02_a_crash_at_each_point_of_a_gc_record_leaves_valid_records() {
         problems.join("\n")
     );
 }
+
+/// J4 W3, P6, live: every control message names its receipt by the RFC 8785
+/// canonical digest (§13.1, canonicalization.md), the digest the trace's
+/// receipt note uses and a consumer recomputes from the receipt file alone.
+/// It used to be over the product's compact serialization.
+#[test]
+fn j4_w3_p6_control_messages_name_receipts_by_their_canonical_digest() {
+    if !live() {
+        return;
+    }
+    let jail = Jail::new().expect("a private jail harness");
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let run = jail
+        .arg("run")
+        .args(["--profile", "tool", "--workspace"])
+        .arg(&workspace)
+        .control()
+        .trace()
+        .receipt()
+        .target(["/usr/bin/true"])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+    let messages = run.control_messages();
+    let kinds: Vec<&Value> = messages.iter().map(|message| &message["kind"]).collect();
+    assert_eq!(kinds, ["prepared", "exec_confirmed", "settled"]);
+    let settled = common::checked_receipt(run.receipt_phase("settled").expect("settled"));
+    let (_, canonical) =
+        harness::receipt_note_of(&serde_json::to_vec(&settled).unwrap()).expect("a receipt");
+    assert_eq!(
+        messages[2]["receipt_digest"],
+        Value::from(canonical.clone()),
+        "the terminal message names the final receipt by its canonical digest"
+    );
+    let note = run
+        .trace_events()
+        .iter()
+        .rfind(|event| event["operation"] == "jail.receipt")
+        .expect("a receipt note")
+        .clone();
+    assert_eq!(note["fields"]["receipt_digest"], Value::from(canonical));
+    // The earlier messages name receipts that were replaced since; each is
+    // at least a canonical-form digest, and none repeats another.
+    let digests: std::collections::BTreeSet<&str> = messages
+        .iter()
+        .map(|message| message["receipt_digest"].as_str().unwrap())
+        .collect();
+    assert_eq!(digests.len(), 3, "{messages:#?}");
+}

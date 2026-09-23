@@ -39,7 +39,7 @@ use ouro_jail::platform::{
     PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
     TreeObservation,
 };
-use ouro_jail::records::{JailError, NativeLifetime, Os, Receipt, rfc3339_utc};
+use ouro_jail::records::{JailError, NativeLifetime, Os, rfc3339_utc};
 use ouro_jail::state::{PersistIo, Site};
 use ouro_jail::{cli, state, supervisor};
 use serde_json::Value;
@@ -100,6 +100,12 @@ fn verified_tree() -> TreeObservation {
 
 fn sha256(bytes: &[u8]) -> String {
     ouro_jail::canonical::sha256_prefixed(bytes)
+}
+
+/// `sha256:` over a receipt's RFC 8785 canonical bytes (canonicalization.md):
+/// what §13.1 says a receipt note names, recomputable from `jail.json` alone.
+fn canonical_digest(receipt: &Value) -> String {
+    sha256(&ouro_jail::canonical::to_jcs(receipt).expect("a receipt canonicalizes"))
 }
 
 impl Platform for Sim {
@@ -347,8 +353,11 @@ struct Seen {
     violations: Vec<String>,
     /// `revision -> bytes` of every receipt either copy showed.
     by_revision: BTreeMap<u64, Vec<u8>>,
-    /// The digests (as control messages compute them) of receipts that were
-    /// fully durable: renamed into place and the directory synced.
+    /// The digests of receipts that were fully durable (renamed into place
+    /// and the directory synced), over the RFC 8785 canonical bytes of what
+    /// the file on disk holds: the digest a control message must name
+    /// (§8.2, §13.1), computed from the file alone, never by re-serializing
+    /// through the product's own types (J4 W3, P6).
     durable: Vec<(String, String)>,
     /// Whether the fault fired, and what `jail.json` held at that moment.
     fired: bool,
@@ -358,16 +367,42 @@ struct Seen {
 /// A stalled step waits on this until the test releases it.
 type Release = Arc<(Mutex<bool>, std::sync::Condvar)>;
 
-/// A [`PersistIo`] that performs every step for real, fails one step of the
-/// first replacement at one site, stalls one step when asked to, and checks
-/// the records on disk before every step.
+/// The step a stall holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StallAt {
+    FileSync,
+    Rename,
+}
+
+/// What a stalled step does once the test releases it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AfterStall {
+    /// It fails with EIO.
+    Fail,
+    /// It is performed for real and succeeds: what a slow disk does, and the
+    /// one outcome that shows whether abandoned work lands later (J4 W3, P1).
+    Complete,
+}
+
+/// The first `at` step at `site` blocks until the test releases it.
+struct Stall {
+    site: Site,
+    at: StallAt,
+    release: Release,
+    then: AfterStall,
+}
+
+/// A [`PersistIo`] that performs every step for real, fails one step of one
+/// replacement at one site, stalls one step when asked to, and checks the
+/// records on disk before every step.
 struct Faults {
     /// `(site, fault, target name)`: the target filter limits the fault to
-    /// replacements of that record (`None`: the first replacement at the
-    /// site, whatever its target).
+    /// replacements of that record (`None`: every replacement at the site,
+    /// whatever its target).
     fault: Option<(Site, Fault, Option<String>)>,
-    /// A site whose first file sync blocks until the test releases it.
-    stall: Option<(Site, Release)>,
+    /// Which of the replacements the filter admits fails: 0 is the first.
+    nth: usize,
+    stall: Option<Stall>,
     watch: Watch,
     state: Mutex<FaultState>,
 }
@@ -376,6 +411,11 @@ struct Faults {
 struct FaultState {
     /// The target of the replacement in progress, and its site.
     current: Option<(Site, String)>,
+    /// The ordinal of the replacement in progress among those the fault's
+    /// site and target filter admit, when it is one of them.
+    current_nth: Option<usize>,
+    /// How many replacements the fault's filter has admitted so far.
+    admitted: usize,
     /// A short write happened; the next write of this replacement fails.
     short_pending: bool,
     /// The last rename/link published this target; its directory sync makes
@@ -456,6 +496,7 @@ impl Faults {
     fn new(watch: Watch) -> Faults {
         Faults {
             fault: None,
+            nth: 0,
             stall: None,
             watch,
             state: Mutex::default(),
@@ -465,6 +506,34 @@ impl Faults {
     fn failing(mut self, site: Site, fault: Fault, target: Option<&str>) -> Faults {
         self.fault = Some((site, fault, target.map(str::to_owned)));
         self
+    }
+
+    /// Fails the `nth` replacement the fault's filter admits instead of the
+    /// first.
+    fn at_nth(mut self, nth: usize) -> Faults {
+        self.nth = nth;
+        self
+    }
+
+    /// Blocks until released, then does what `stall.then` says.
+    fn hold(&self, site: Site, at: StallAt) -> Option<AfterStall> {
+        let stall = self.stall.as_ref()?;
+        if stall.site != site
+            || stall.at != at
+            || std::mem::replace(&mut self.state.lock().unwrap().stalled_once, true)
+        {
+            return None;
+        }
+        let (lock, wake) = &*stall.release;
+        let mut released = lock.lock().unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        while !*released && Instant::now() < until {
+            released = wake
+                .wait_timeout(released, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+        Some(stall.then)
     }
 
     /// Checks the records, then decides whether this step of `site` fails.
@@ -482,6 +551,9 @@ impl Faults {
         if let Some(target) = target
             && state.current.as_ref().map(|(_, name)| name) != Some(target)
         {
+            return false;
+        }
+        if state.current_nth != Some(self.nth) {
             return false;
         }
         state.seen.fired = true;
@@ -503,7 +575,16 @@ impl PersistIo for Faults {
     fn create_new(&self, site: Site, path: &Path) -> std::io::Result<std::fs::File> {
         {
             let mut state = self.state.lock().unwrap();
-            state.current = Some((site, target_of(path)));
+            let target = target_of(path);
+            state.current_nth = None;
+            if let Some((fault_site, _, filter)) = &self.fault
+                && *fault_site == site
+                && filter.as_ref().is_none_or(|filter| *filter == target)
+            {
+                state.current_nth = Some(state.admitted);
+                state.admitted += 1;
+            }
+            state.current = Some((site, target));
             state.short_pending = false;
         }
         self.step(site, "create", |_| false);
@@ -531,21 +612,7 @@ impl PersistIo for Faults {
     }
 
     fn sync_file(&self, site: Site, file: &std::fs::File) -> std::io::Result<()> {
-        if let Some((stall_site, release)) = &self.stall
-            && *stall_site == site
-            && !std::mem::replace(&mut self.state.lock().unwrap().stalled_once, true)
-        {
-            let (lock, wake) = &**release;
-            let mut released = lock.lock().unwrap();
-            let until = Instant::now() + Duration::from_secs(30);
-            while !*released && Instant::now() < until {
-                released = wake
-                    .wait_timeout(released, Duration::from_millis(50))
-                    .unwrap()
-                    .0;
-            }
-            // A sync that comes back after the supervisor gave up on it fails,
-            // so nothing it was part of lands later.
+        if self.hold(site, StallAt::FileSync) == Some(AfterStall::Fail) {
             return Err(eio());
         }
         if self.step(site, "file sync", |fault| fault == Fault::FsyncError) {
@@ -555,6 +622,9 @@ impl PersistIo for Faults {
     }
 
     fn rename(&self, site: Site, from: &Path, to: &Path) -> std::io::Result<()> {
+        if self.hold(site, StallAt::Rename) == Some(AfterStall::Fail) {
+            return Err(eio());
+        }
         if self.step(site, "rename", |fault| fault == Fault::RenameError) {
             return Err(eio());
         }
@@ -580,14 +650,11 @@ impl PersistIo for Faults {
         let mut state = self.state.lock().unwrap();
         if state.renamed.take().as_deref() == Some("jail.json")
             && let Ok(bytes) = std::fs::read(dir.join("jail.json"))
-            && let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes)
+            && let Ok(receipt) = serde_json::from_slice::<Value>(&bytes)
         {
-            let digest = sha256(&serde_json::to_vec(&receipt).unwrap());
-            let phase = serde_json::to_value(receipt.phase).unwrap();
-            state
-                .seen
-                .durable
-                .push((digest, phase.as_str().unwrap().to_owned()));
+            let digest = canonical_digest(&receipt);
+            let phase = receipt["phase"].as_str().unwrap_or_default().to_owned();
+            state.seen.durable.push((digest, phase));
         }
         Ok(())
     }
@@ -663,8 +730,12 @@ impl Fixture {
     }
 
     fn context(&self, sim: Sim) -> supervisor::Context {
+        self.context_on(Box::new(sim))
+    }
+
+    fn context_on(&self, platform: Box<dyn Platform>) -> supervisor::Context {
         supervisor::Context {
-            platform: Box::new(sim),
+            platform,
             env_settings: EnvSettings {
                 config_dir: Some(self.config.clone()),
                 data_dir: Some(self.data.clone()),
@@ -694,6 +765,26 @@ impl Fixture {
     fn run_with(
         &self,
         sim: Sim,
+        flags: &[&str],
+        io: Arc<dyn PersistIo + Send + Sync>,
+        control: Control,
+    ) -> Outcome {
+        self.run_full(Box::new(sim), flags, io, control)
+    }
+
+    /// Runs on `platform` with a control pipe drained from the start.
+    fn run_on(
+        &self,
+        platform: Box<dyn Platform>,
+        flags: &[&str],
+        io: Arc<dyn PersistIo + Send + Sync>,
+    ) -> Outcome {
+        self.run_full(platform, flags, io, Control::Drained)
+    }
+
+    fn run_full(
+        &self,
+        platform: Box<dyn Platform>,
         flags: &[&str],
         io: Arc<dyn PersistIo + Send + Sync>,
         control: Control,
@@ -757,7 +848,7 @@ impl Fixture {
                 (lines, pending)
             })
         });
-        let ctx = self.context(sim);
+        let ctx = self.context_on(platform);
         let report = state::with_persist_io(io, || supervisor::run(&ctx, &args));
         let finished_at = Instant::now();
         done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1218,11 +1309,28 @@ fn j4_n6_a_failed_policy_write_refuses_with_a_refused_receipt() {
 // §13.3: the persistence worker and its 5-second progress budget
 // ---------------------------------------------------------------------------
 
-/// A seam whose first file sync at `site` blocks until released.
+/// A seam whose first file sync at `site` blocks until released and then
+/// completes, as a slow disk does.
 fn stalled(fixture: &Fixture, site: Site) -> (Arc<Faults>, Release) {
+    stalled_at(fixture, site, StallAt::FileSync, AfterStall::Complete)
+}
+
+/// A seam whose first `at` step at `site` blocks until released, then does
+/// `then`.
+fn stalled_at(
+    fixture: &Fixture,
+    site: Site,
+    at: StallAt,
+    then: AfterStall,
+) -> (Arc<Faults>, Release) {
     let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
     let mut faults = Faults::new(fixture.watch());
-    faults.stall = Some((site, Arc::clone(&release)));
+    faults.stall = Some(Stall {
+        site,
+        at,
+        release: Arc::clone(&release),
+        then,
+    });
     (Arc::new(faults), release)
 }
 
@@ -1234,7 +1342,12 @@ fn release(stall: &Release) {
 #[test]
 fn j4_r02_a_stalled_sync_never_delays_the_wall() {
     let fixture = Fixture::new();
-    let (faults, stall) = stalled(&fixture, Site::EnforcedReceipt);
+    let (faults, stall) = stalled_at(
+        &fixture,
+        Site::EnforcedReceipt,
+        StallAt::FileSync,
+        AfterStall::Fail,
+    );
     let sim = Sim::new(Scenario::Timed {
         exit_after: Duration::from_secs(20),
     });
@@ -1563,4 +1676,606 @@ fn j4_s9_every_test_seam_in_force_is_recorded() {
         without["receipt"]["lifetime"]["native"]
     );
     assert!(without["state"].get("test_seams").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// J4 wave 3 (W3-R): the records review's findings P1 to P6
+// ---------------------------------------------------------------------------
+
+/// `jail.json`'s revision, phase and bytes.
+fn jail_json(attempt: &Path) -> (u64, String, Vec<u8>) {
+    let bytes = std::fs::read(attempt.join("jail.json")).expect("jail.json");
+    let value: Value = serde_json::from_slice(&bytes).expect("jail.json parses");
+    (
+        value["revision"].as_u64().unwrap(),
+        value["phase"].as_str().unwrap().to_owned(),
+        bytes,
+    )
+}
+
+/// Waits, at most `within`, until the attempt root holds no temporary file:
+/// a released step's replacement has either landed or been cleaned up.
+/// Returns whether it got there.
+fn temp_files_gone(attempt: &Path, within: Duration) -> bool {
+    let dir = state::AttemptDir::from_root(attempt.to_path_buf());
+    let until = Instant::now() + within;
+    loop {
+        if state::leftover_temp_files(&dir).unwrap().is_empty() {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// P1 (a). §13.3: "On failure or stall, stop the child with cause
+/// `state_write_failed`, keep the transition unacknowledged, leave the
+/// receipt at its last persisted phase, and do not start abandoned work
+/// later." The enforced receipt's file sync stalls past the budget and then
+/// completes, as a slow disk does. The worker used to check whether its
+/// waiter gave up only before a job started, and a whole replacement is one
+/// job, so the rename after the sync landed long after the supervisor had
+/// returned. Abandoned work stops at the next step boundary.
+#[test]
+fn j4_w3_p1a_abandoned_persistence_stops_at_the_next_step() {
+    let fixture = Fixture::new();
+    let (faults, stall) = stalled(&fixture, Site::EnforcedReceipt);
+    let outcome = fixture.run(
+        Sim::new(Scenario::Timed {
+            exit_after: Duration::from_secs(60),
+        }),
+        &["--profile", "tool"],
+        faults.clone(),
+    );
+    assert_eq!(outcome.report.exit_code, 1, "{:?}", outcome.report.error);
+    let attempt = fixture.attempt();
+    let (revision, phase, bytes) = jail_json(&attempt);
+    assert_eq!(phase, "prepared", "the enforced receipt never persisted");
+    release(&stall);
+    // The released sync completes; what the worker does next is either the
+    // abandoned rename (the defect) or the removal of its temporary file.
+    assert!(
+        temp_files_gone(&attempt, Duration::from_secs(10)),
+        "the released replacement neither landed nor cleaned up"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let (later_revision, later_phase, later_bytes) = jail_json(&attempt);
+    assert!(
+        later_bytes == bytes,
+        "abandoned work landed after the supervisor gave up on it and returned: jail.json went \
+         from revision {revision} {phase} to revision {later_revision} {later_phase}"
+    );
+    faults.finish("p1a at the end");
+    let violations = faults.seen(|seen| seen.violations.clone());
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// P1 (b). The terminal receipt's rename stalls past the budget and then
+/// completes. A rename in progress in the kernel cannot be abandoned, so the
+/// lease is what keeps anyone else from writing the attempt's records
+/// meanwhile: it is never released while persistence work is in flight. It
+/// used to be unlocked as the run returned, so a `gc` in that window resumed
+/// the pending vendor-state cleanup and wrote the next revision, and then
+/// the supervisor's late rename landed a different receipt with the same
+/// revision.
+#[test]
+fn j4_w3_p1b_the_lease_is_kept_while_persistence_is_in_flight() {
+    let fixture = Fixture::new();
+    let (faults, stall) = stalled_at(
+        &fixture,
+        Site::TerminalReceipt,
+        StallAt::Rename,
+        AfterStall::Complete,
+    );
+    let outcome = fixture.run(
+        Sim::new(Scenario::Plain),
+        &["--profile", "tool", "--launch", "plain"],
+        faults.clone(),
+    );
+    assert_eq!(outcome.report.exit_code, 1, "{:?}", outcome.report.error);
+    let attempt = fixture.attempt();
+    let probe = state::Lease::probe_existing(&attempt.join("jail.lock")).unwrap();
+    let held = matches!(probe, state::LeaseProbe::Held);
+    drop(probe);
+    let (before, before_phase, before_bytes) = jail_json(&attempt);
+    let gc = fixture.gc(real());
+    let (by_gc, gc_phase, gc_bytes) = jail_json(&attempt);
+    release(&stall);
+    assert!(
+        temp_files_gone(&attempt, Duration::from_secs(10)),
+        "the released rename never finished"
+    );
+    let (landed, landed_phase, landed_bytes) = jail_json(&attempt);
+    assert!(
+        held,
+        "the lease was free while the terminal receipt's rename was still in flight"
+    );
+    assert_eq!(
+        gc_bytes,
+        before_bytes,
+        "gc rewrote the receipt (revision {before} {before_phase} -> {by_gc} {gc_phase}) while \
+         the supervisor's write was in flight: {:?}",
+        gc.entries
+            .iter()
+            .map(|entry| (&entry.action, &entry.reason))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !(landed == by_gc && landed_bytes != gc_bytes),
+        "revision {landed} ({landed_phase}) was used for two different receipts"
+    );
+    faults.finish("p1b at the end");
+    let violations = faults.seen(|seen| seen.violations.clone());
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// The simulated platform, binding a proxy socket as the Linux platform does
+/// for a proxy-mode profile (it records the node's identity in the hand-off).
+#[derive(Clone)]
+struct SockSim(Sim);
+
+impl Platform for SockSim {
+    fn owner_identity(&self) -> Option<OwnerIdentity> {
+        self.0.owner_identity()
+    }
+    fn identity(&self) -> PlatformIdentity {
+        self.0.identity()
+    }
+    fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
+        self.0.probe(plan)
+    }
+    fn prepare(
+        &self,
+        plan: PreparedPlan,
+        _: Sinks,
+    ) -> Result<Box<dyn PreparedExecution>, JailError> {
+        let proxy = plan
+            .proxy
+            .as_ref()
+            .expect("a proxy-mode profile has a proxy directory");
+        let _ = proxy.socket.set(state::ProxySocketIdentity {
+            dev: 1,
+            ino: 2,
+            ctime: (3, 4),
+        });
+        Ok(Box::new(SimPrepared(self.0.clone())))
+    }
+}
+
+/// P2. A failed proxy-socket record (P3, `agent`) refused before the
+/// boundary was applied to the record, but the teardown's verified tree was
+/// copied in: a refused receipt with boundary `pending` and a verified tree,
+/// which the receipt schema rejects. The refusal after setup reports the
+/// boundary it tore down (§13.2 row 4).
+#[test]
+fn j4_w3_p2_a_failed_proxy_socket_record_writes_a_valid_refused_receipt() {
+    let fixture = Fixture::new();
+    // The proxy directory's registration and identity come first (0, 1).
+    let faults = Arc::new(
+        Faults::new(fixture.watch())
+            .failing(Site::LaunchState, Fault::Enospc, None)
+            .at_nth(2),
+    );
+    let ctx = supervisor::Context {
+        platform: Box::new(SockSim(Sim::new(Scenario::Plain))),
+        ..fixture.context(Sim::new(Scenario::Plain))
+    };
+    let args = fixture.args(&["--profile".to_owned(), "agent".to_owned()]);
+    let report = state::with_persist_io(faults.clone(), || supervisor::run(&ctx, &args));
+    assert!(
+        faults.seen(|seen| seen.fired),
+        "the socket record never failed"
+    );
+    let state_file: Value =
+        serde_json::from_slice(&std::fs::read(fixture.attempt().join("jail-state.json")).unwrap())
+            .unwrap();
+    assert!(
+        state_file["proxy_dir"]["socket"].is_null(),
+        "the failed write was the socket record: {state_file:#}"
+    );
+    assert_eq!(report.exit_code, 125, "{:?}", report.error);
+    let receipt: Value =
+        serde_json::from_slice(&std::fs::read(fixture.attempt().join("jail.json")).unwrap())
+            .unwrap();
+    if let Err(error) = common::check_receipt(&receipt) {
+        panic!("the refused receipt fails its contract: {error}\n{receipt:#}");
+    }
+    assert_eq!(receipt["phase"], "refused");
+    assert_eq!(receipt["outcome"]["error"]["code"], "state_write_failed");
+    assert_eq!(
+        receipt["lifetime"]["boundary"], "pid_namespace",
+        "the refusal came after setup, and names the boundary it tore down: {:#}",
+        receipt["lifetime"]
+    );
+    assert_eq!(receipt["lifetime"]["tree_empty"], true);
+    faults.finish("p2 at the end");
+    let violations = faults.seen(|seen| seen.violations.clone());
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// P2, the fault matrix extended to every P3 write, not only the first:
+/// vendor state's registration, its identity and the staged credentials
+/// (`--launch`), and the proxy directory's registration, its identity, the
+/// socket node and the removal record (`agent`). Each is failed under every
+/// fault, and the replacement after the last is checked never to happen, so
+/// a P3 write added later is noticed here.
+#[test]
+fn j4_w3_p2_every_launch_state_write_under_every_fault_leaves_valid_records() {
+    // (proxy, the writes before exec, the writes after it)
+    let mut problems = Vec::new();
+    for (proxy, before_exec, after_exec) in [(false, 3, 0), (true, 3, 1)] {
+        let writes = before_exec + after_exec;
+        for nth in 0..=writes {
+            for fault in Fault::ALL {
+                let label = format!(
+                    "j4_w3_launch_state_{}_{nth}_{}",
+                    if proxy { "proxy" } else { "vendor" },
+                    fault.name()
+                );
+                let fixture = Fixture::new();
+                let faults = Arc::new(
+                    Faults::new(fixture.watch())
+                        .failing(Site::LaunchState, fault, None)
+                        .at_nth(nth),
+                );
+                let extra = fixture.extra.display().to_string();
+                let mut flags = vec!["--receipt", extra.as_str()];
+                flags.extend(if proxy {
+                    ["--profile", "agent"]
+                } else {
+                    ["--launch", "plain"]
+                });
+                let sim = Sim::new(Scenario::Plain);
+                let platform: Box<dyn Platform> = if proxy {
+                    Box::new(SockSim(sim.clone()))
+                } else {
+                    Box::new(sim.clone())
+                };
+                let outcome = fixture.run_on(platform, &flags, faults.clone());
+                faults.finish(&format!("{label} at the end"));
+                let (fired, phase_at_fault, violations) = faults.seen(|seen| {
+                    (
+                        seen.fired,
+                        seen.phase_at_fault.clone(),
+                        seen.violations.clone(),
+                    )
+                });
+                if nth == writes {
+                    if fired {
+                        problems.push(format!(
+                            "{label}: a P3 write after the {writes} this test knows"
+                        ));
+                    }
+                    // One fault is enough to show the list is complete.
+                    break;
+                }
+                if !fired {
+                    problems.push(format!("{label}: the fault was never injected"));
+                }
+                problems.extend(violations);
+                let exit_code = if nth < before_exec { 125 } else { 1 };
+                if nth < before_exec && rank(phase_at_fault.as_deref()) > 0 {
+                    problems.push(format!(
+                        "{label}: jail.json was already {phase_at_fault:?} at a write before \
+                         preparation completed"
+                    ));
+                }
+                if outcome.report.exit_code != exit_code {
+                    problems.push(format!(
+                        "{label}: exit code {} (error {:?}), S5 wants {exit_code}",
+                        outcome.report.exit_code,
+                        outcome.report.error.as_ref().map(ToString::to_string),
+                    ));
+                }
+                problems.extend(acknowledged_only_what_persisted(&label, &outcome, &faults));
+                for dir in fixture.watch().attempt_dirs() {
+                    let leftover =
+                        state::leftover_temp_files(&state::AttemptDir::from_root(dir)).unwrap();
+                    if !leftover.is_empty() {
+                        problems.push(format!("{label}: temporary files left: {leftover:?}"));
+                    }
+                }
+                problems.extend(gc_keeps_everything(&label, &fixture, &faults));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// When the simulated target ended and when the supervisor went after the
+/// rest of its tree.
+#[derive(Clone, Default)]
+struct Times {
+    target_exit: Arc<Mutex<Option<Instant>>>,
+    wait_tree: Arc<Mutex<Option<Instant>>>,
+}
+
+#[derive(Clone)]
+struct ExitSim {
+    sim: Sim,
+    times: Times,
+}
+
+impl Platform for ExitSim {
+    fn owner_identity(&self) -> Option<OwnerIdentity> {
+        self.sim.owner_identity()
+    }
+    fn identity(&self) -> PlatformIdentity {
+        self.sim.identity()
+    }
+    fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
+        self.sim.probe(plan)
+    }
+    fn prepare(&self, _: PreparedPlan, _: Sinks) -> Result<Box<dyn PreparedExecution>, JailError> {
+        Ok(Box::new(ExitPrepared(self.clone())))
+    }
+}
+
+struct ExitPrepared(ExitSim);
+
+impl PreparedExecution for ExitPrepared {
+    fn boundary(&self) -> BoundaryIdentity {
+        SimPrepared(self.0.sim.clone()).boundary()
+    }
+    fn applied(&self) -> Option<ouro_jail::records::Applied> {
+        SimPrepared(self.0.sim.clone()).applied()
+    }
+    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+        Ok(Box::new(ExitRunning {
+            times: self.0.times.clone(),
+            step: 0,
+        }))
+    }
+    fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
+        Ok(Teardown {
+            tree: Some(verified_tree()),
+        })
+    }
+}
+
+/// Exec confirmed, then the target exits at once (as `none` reports a short
+/// target), leaving whatever descendants it started for `wait_tree` to end.
+struct ExitRunning {
+    times: Times,
+    step: usize,
+}
+
+impl RunningExecution for ExitRunning {
+    fn wait(&mut self, _: Deadline) -> RunEvent {
+        self.step += 1;
+        if self.step == 1 {
+            return RunEvent::ExecConfirmed;
+        }
+        *self.times.target_exit.lock().unwrap() = Some(Instant::now());
+        RunEvent::TargetExited { code: 0 }
+    }
+    fn request_stop(&mut self, _: StopReason) {}
+    fn wait_tree(&mut self, _: Duration) -> TreeObservation {
+        *self.times.wait_tree.lock().unwrap() = Some(Instant::now());
+        verified_tree()
+    }
+    fn observer_summary(&mut self) -> Option<CoverageSummary> {
+        None
+    }
+}
+
+/// A disk that makes progress, slowly: every step of the enforced receipt
+/// takes a second (never five without progress, so never a stall).
+struct SlowEnforced;
+
+impl SlowEnforced {
+    fn slow(site: Site) {
+        if site == Site::EnforcedReceipt {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+}
+
+impl PersistIo for SlowEnforced {
+    fn create_new(&self, site: Site, path: &Path) -> std::io::Result<std::fs::File> {
+        Self::slow(site);
+        state::RealIo.create_new(site, path)
+    }
+    fn write(&self, site: Site, file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<usize> {
+        Self::slow(site);
+        state::RealIo.write(site, file, bytes)
+    }
+    fn sync_file(&self, site: Site, file: &std::fs::File) -> std::io::Result<()> {
+        Self::slow(site);
+        state::RealIo.sync_file(site, file)
+    }
+    fn rename(&self, site: Site, from: &Path, to: &Path) -> std::io::Result<()> {
+        Self::slow(site);
+        state::RealIo.rename(site, from, to)
+    }
+    fn sync_dir(&self, site: Site, dir: &Path) -> std::io::Result<()> {
+        Self::slow(site);
+        state::RealIo.sync_dir(site, dir)
+    }
+}
+
+/// P3. §8.1 step 8: "Target exit triggers termination of remaining attempt
+/// descendants"; §13.3: "Do not wait forever for a writer while descendants
+/// continue running." The supervisor used to wait for the receipts still with
+/// the persistence worker before it ended the tree, so under `none` a slow
+/// disk kept the target's descendants running for as long as the enforced
+/// receipt took (30 s against a 2 s wall in the review). The tree is ended
+/// first; the receipts are still acknowledged in order before the terminal
+/// message.
+#[test]
+fn j4_w3_p3_the_tree_is_ended_without_waiting_for_persistence() {
+    let fixture = Fixture::new();
+    let times = Times::default();
+    let ctx = supervisor::Context {
+        platform: Box::new(ExitSim {
+            sim: Sim::new(Scenario::Plain),
+            times: times.clone(),
+        }),
+        ..fixture.context(Sim::new(Scenario::Plain))
+    };
+    let (reader, writer) = std::io::pipe().unwrap();
+    let args = fixture.args(&[
+        "--profile".to_owned(),
+        "tool".to_owned(),
+        "--limit".to_owned(),
+        "wall=2s".to_owned(),
+        "--control-fd".to_owned(),
+        writer.into_raw_fd().to_string(),
+    ]);
+    let collector = std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut reader = reader;
+        reader.read_to_string(&mut text).unwrap();
+        text
+    });
+    let report = state::with_persist_io(Arc::new(SlowEnforced), || supervisor::run(&ctx, &args));
+    let frames: Vec<Value> = collector
+        .join()
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let exit = times
+        .target_exit
+        .lock()
+        .unwrap()
+        .expect("the target exited");
+    let tree = times.wait_tree.lock().unwrap().expect("the tree was ended");
+    let delay = tree.saturating_duration_since(exit);
+    assert!(
+        delay < Duration::from_millis(500),
+        "the rest of the tree was left running {delay:?} after the target exited, while the \
+         supervisor waited for a receipt write"
+    );
+    assert_eq!(report.exit_code, 0, "{:?}", report.error);
+    let kinds: Vec<&Value> = frames.iter().map(|frame| &frame["kind"]).collect();
+    assert_eq!(
+        kinds,
+        ["prepared", "exec_confirmed", "settled"],
+        "the enforced receipt is still acknowledged, in order, before the terminal message"
+    );
+}
+
+/// P5. With an earlier error in hand, a failed terminal receipt write was
+/// reported nowhere: not in the receipt (it did not persist), not in the
+/// reported error (the first cause wins), not on stderr. Every error that
+/// cannot reach a durable receipt reaches stderr (`RunReport::unrecorded`,
+/// one line each), and none is printed twice.
+#[test]
+fn j4_w3_p5_an_error_no_receipt_carries_reaches_stderr() {
+    let fixture = Fixture::new();
+    let faults = Arc::new(Faults::new(fixture.watch()).failing(
+        Site::TerminalReceipt,
+        Fault::RenameError,
+        None,
+    ));
+    let outcome = fixture.run(
+        Sim::new(Scenario::Script(vec![
+            RunEvent::ExecConfirmed,
+            lost("the loss"),
+            RunEvent::TargetExited { code: 0 },
+        ])),
+        &["--profile", "tool", "--evidence", "best-effort"],
+        faults.clone(),
+    );
+    assert!(faults.seen(|seen| seen.fired));
+    assert_eq!(outcome.report.exit_code, 1);
+    let (_, phase, bytes) = jail_json(&fixture.attempt());
+    assert_eq!(
+        phase, "enforced",
+        "the receipt stays at its last persisted phase"
+    );
+    let on_disk: Value = serde_json::from_slice(&bytes).unwrap();
+    let reported = outcome.report.error.as_ref().expect("the first cause");
+    assert_eq!(
+        reported.message, "the loss",
+        "the first cause is the reported error"
+    );
+    let unrecorded: Vec<String> = outcome
+        .report
+        .unrecorded
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let everything = format!(
+        "{reported} {:?} {} {unrecorded:?}",
+        outcome.report.trace_error.as_ref().map(ToString::to_string),
+        on_disk["errors"]
+    );
+    assert!(
+        everything.contains("state_write_failed"),
+        "the terminal receipt's persistence failure is in no output: {everything}"
+    );
+    assert_eq!(
+        unrecorded.len(),
+        1,
+        "exactly the terminal failure: the loss is the reported error, printed once: \
+         {unrecorded:#?}"
+    );
+    assert!(
+        unrecorded[0].contains("state_write_failed"),
+        "{unrecorded:#?}"
+    );
+}
+
+/// P6. The control message named a receipt by `sha256` over the product's
+/// compact serialization, while the trace note (62d09d40) and §13.1 use the
+/// RFC 8785 canonical bytes. Both name it by the canonical digest, which a
+/// consumer recomputes from `jail.json` alone.
+#[test]
+fn j4_w3_p6_control_and_trace_name_a_receipt_by_the_same_digest() {
+    let fixture = Fixture::new();
+    let outcome = fixture.run(Sim::new(Scenario::Plain), &["--profile", "tool"], real());
+    assert_eq!(outcome.report.exit_code, 0);
+    let last = outcome.frames.last().expect("a terminal control frame");
+    assert_eq!(last["kind"], "settled");
+    let (_, _, bytes) = jail_json(&fixture.attempt());
+    let canonical = canonical_digest(&serde_json::from_slice(&bytes).unwrap());
+    let trace = std::fs::read_to_string(fixture.attempt().join("trace.ndjson")).unwrap();
+    let note = trace
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .rfind(|event| event["operation"] == "jail.receipt")
+        .expect("a receipt note");
+    assert_eq!(
+        note["fields"]["receipt_digest"],
+        Value::from(canonical.clone())
+    );
+    assert_eq!(
+        last["receipt_digest"],
+        Value::from(canonical),
+        "the control message names the receipt by the canonical digest the trace note uses"
+    );
+}
+
+/// Loss review, finding 5: a seam set twice in the environment was recorded
+/// with its last value, while `getenv` (and so every consumer) applies the
+/// first. The record says what the consumers read.
+#[test]
+fn j4_w3_a_seam_set_twice_is_recorded_with_the_value_getenv_returns() {
+    let recorded = state::test_seams_in([
+        (
+            "OURO_JAIL_TEST_TRACER_INFLIGHT".into(),
+            std::ffi::OsString::from("1"),
+        ),
+        ("PATH".into(), "/usr/bin".into()),
+        (
+            "OURO_JAIL_TEST_TRACER_INFLIGHT".into(),
+            std::ffi::OsString::from("16384"),
+        ),
+    ])
+    .expect("a seam is set");
+    assert_eq!(
+        recorded,
+        serde_json::json!({"OURO_JAIL_TEST_TRACER_INFLIGHT": "1"}),
+        "the first entry is the one getenv returns"
+    );
 }
