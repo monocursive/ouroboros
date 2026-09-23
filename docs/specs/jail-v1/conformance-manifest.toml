@@ -96,13 +96,13 @@ apparmor_userns_restriction = "available"
 # proves its Landlock and seccomp nesting instead.
 nested_user_namespace = "unavailable"
 
-# J3 wave 2 (`agent`), measured live as ouro-ci on 2026-09-22 with this slice's
-# build: `ouro-jail doctor --json` and `doctor --profile agent --json` (ready)
-# inside the delegated scope. Evidence: the J3 agent report's
-# j3-agent-doctor-2026-09-22-ouro-ci.json (proposed for evidence/; each row's
-# `evidence_ref` carries the measured facts) and the live suite
-# crates/ouro-jail/tests/conformance_j3_agent.rs (21 tests: S03, N01-N05, C01,
-# X06 for agent). No host configuration was changed.
+# J3 (`agent`), measured live as ouro-ci on a stock host with no host
+# configuration changed: `ouro-jail doctor --json` inside the delegated scope,
+# evidence/j3-doctor-2026-09-23-ouro-ci.json (each row's `evidence_ref` carries
+# the measured facts), and the live suite in
+# evidence/j3-test-log-2026-09-23-ouro-ci.txt, run
+# 20260923T094510Z-6bb5a34192ac (conformance_j3_agent, 33 tests: S03, N01-N05,
+# C01, X06 for agent). See j3-authority.md.
 
 # An unprivileged child installs the agent's mediation filter with
 # SECCOMP_FILTER_FLAG_NEW_LISTENER and this process takes the listener with

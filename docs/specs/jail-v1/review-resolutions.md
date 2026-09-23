@@ -139,3 +139,14 @@ it can be tested); per-pid birth identity on audit events (J4).
 | `--launch` silently replaced the config-selected profile | Explicit precedence; a base conflict refuses | §6.1 |
 | `bind_ro` digest trusted a read-only mount of a writable filesystem; credential sources could sit inside a child-writable grant | Digest only on immutable filesystems; sources inside writable grants and multiply-linked `bind_ro` sources refuse | §12; C01 |
 | Vendor-state location and its protected-literal coverage were unstated | `/run/ouro/state`; attempt-private roots excluded from `existing_and_root` | §9.1 |
+
+## Revision 11 decisions (2026-09-23, J3 integration)
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| A network namespace does not isolate every socket family the kernel offers | Contained profiles create sockets only in AF_UNIX (per profile), AF_INET and AF_INET6; others fail EAFNOSUPPORT | §9.2; N01 |
+| Every contained target started with SIGPIPE ignored (inherited from the launcher's runtime) | The launcher restores exactly what the jail changed (SIGPIPE, the inherited mask); operator dispositions pass through | §9.2; X06 |
+| The bridge's own connects could be counted as the target's; its death note fired on every teardown; proxy death and mediation-queue loss were not tied to strict evidence | Bridge attributed by pinned identity; death noted only before settlement; proxy death and mediation overflow are evidence loss (strict stops) | §§10, 11.4; N04 |
+| `none` could silently drop a narrowing restriction; unsettled runs without exec were labelled `enforced` | Unapplicable restrictions refuse; such runs stay `prepared` | §§8.1, 9.3; R05, R06 |
+| A crashed attempt's proxy directory was never collected | `gc` removes it through the socket identity recorded at bind | §14.2 |
+| A test-only queue knob and launch-profile reserved names were unstated | Documented | §§6.2, 12 |

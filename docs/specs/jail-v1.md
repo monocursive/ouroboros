@@ -1,7 +1,9 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 10, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 10 names the
+Status: implementation specification, revision 11, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 11 records what
+the J3 implementation and its reviews settled (§§6.2, 8.1, 9.2, 9.3, 10, 11.4,
+12, 14; [J3 authority](jail-v1/j3-authority.md)). Revision 10 names the
 host-peer isolation mechanism for `agent` (§10) and records the decisions the
 J3 reviews forced (§§6.1, 9.1, 10, 12; review-resolutions.md). Revision 9 makes the jail
 work on a stock host: no required host configuration, so `agent` no longer
@@ -539,6 +541,9 @@ Apply configuration in this order:
 3. Operator environment settings from a fixed documented allow-list:
    `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
    `OURO_JAIL_EVIDENCE`. No environment-derived path or host grants.
+   `OURO_JAIL_TEST_MEDIATION_QUEUE` is a test-only knob: it can only shrink
+   the unix-peer mediation record queue (1 to 4096), never widens authority,
+   leaves the policy digest unchanged, and is recorded in the receipt.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 
@@ -959,6 +964,16 @@ The reference conformance toolchain uses glibc. Other runtimes must pass their
 own threading fixture; a runtime that cannot fall back is incompatible, not
 a reason to silently allow `clone3`.
 
+Every contained profile creates sockets only in the AF_UNIX (subject to the
+rules above and the `agent` mediation), AF_INET and AF_INET6 families;
+`socket` and `socketpair` in any other family fail with EAFNOSUPPORT, because
+a network namespace does not isolate every family a kernel offers. The one
+exception is the `agent` launcher's own socket-diagnostic netlink socket,
+opened before the mediation filter, which then refuses every netlink socket.
+Before exec the trusted launcher restores exactly the signal state the jail
+itself changed (SIGPIPE to its default, the inherited signal mask); operator
+dispositions such as an inherited ignored SIGHUP pass through unchanged.
+
 `agent` uses a separate filter that permits the unprivileged sandboxing an
 inner vendor sandbox needs: `no_new_privs`, its own seccomp filters and
 Landlock. These work inside the outer layer on every supported host and are
@@ -1022,6 +1037,13 @@ It mounts no jail, installs no containment filter and inherits the host view.
 It still closes private control fds, strips reserved environment variables and
 uses the same deadline logic. Same-UID interference remains possible, including
 interference with the supervisor's resources; `unprotected` is never upgraded.
+A narrowing that asks `none` for a restriction it cannot apply (read denials,
+read-only grants, protected coverage, network `none`) makes the requirement
+unsatisfiable and the run refuses with remediation `configuration`. The
+supervisor reads membership from `/proc/<pid>/cgroup`, is a child subreaper,
+and checks an exited child's zombie before reaping it; a detected loss adds a
+wrapper note (`fields.kind = lifetime`) and reaches the next receipt, and does
+not by itself stop the attempt. `none` adds no watcher of its own.
 Tree termination describes the verified boundary, not proof that an uncontained
 malicious child could not tamper with that boundary or launch effects elsewhere.
 
@@ -1174,7 +1196,18 @@ For every CONNECT/plain-HTTP request:
 An allowed CONNECT only authorizes a byte tunnel to that destination. The
 proxy does not establish what TLS request or application action followed.
 Fail closed on proxy/bridge death for a contained agent. Emit safe reasons;
-do not log request paths, query strings, headers, tokens or bodies.
+do not log request paths, query strings, headers, tokens or bodies. Proxy death
+is a loss of `proxy.net` evidence: strict stops the attempt, best-effort
+continues degraded. Bridge death loses no evidence: it is recorded once, when
+it happens before settlement, and new connections fail. The bridge is started
+by the trusted launcher before the observer's filter, runs under the `agent`
+baseline and the mediation filter, is not a descendant of the target, and its
+own connects are the jail's plumbing, attributed by its pinned identity (pid
+and start time), not to the target. The mediator admits the authorized proxy by
+its full pinned device and inode. At capacity the bridge answers
+`503 bridge_overload` and closes. A target that signals every process it can
+reach can kill its own bridge; the attempt then loses its own network, which
+fails closed and is recorded.
 
 Initial budgets per attempt: 128 active connections, 32 KiB request headers,
 10-second DNS/connect/header deadline, 1 MiB total bounded relay buffers.
@@ -1303,6 +1336,11 @@ boot/birth identity and namespace mapping.
 
 ### 11.4 Loss and coverage
 
+For `agent`, `connect` results come from the unix-peer mediator, not a ptrace
+stop (`fields.observation = seccomp_user_notification`), and count under the
+same classes below. A mediation-queue overflow is evidence loss for those
+classes, handled exactly as tracer loss: strict stops the attempt.
+
 Each class has exactly the following source and operation assignment:
 
 | Class | Source | Results counted |
@@ -1427,8 +1465,12 @@ proxy variables are recorded by name only. The contained environment starts
 empty and admits PATH, LANG, TERM, TZ, required generated paths and the explicit
 launch environment. Unlisted SSH/cloud/provider environment credentials are
 absent. `none` inherits the host environment except reserved Ouroboros state,
-socket and token names; the receipt lists removed names, never values. This is
-hygiene and does not protect uncontained state.
+socket and token names (every `OURO_*` name); the receipt lists removed names,
+never values. This is hygiene and does not protect uncontained state. A launch
+profile may not bind the contained environment's own names (PATH, LANG, TERM,
+TZ, TMPDIR, HOME), the proxy variables in any case, `LD_*`/`DYLD_*`, or the C
+library's loader and runtime controls (for example `GLIBC_TUNABLES`,
+`GCONV_PATH`, `MALLOC_*`), because they reach the trusted launcher first.
 
 On pre-exec refusal or verified tree death, remove vendor state using anchored
 directory traversal that does not follow symlinks or cross mount boundaries.
@@ -1525,7 +1567,8 @@ or an audited loopback connect with a successful remote API request.
 
 ### 13.2 Receipt lifecycle and shape
 
-Normal phases are `prepared`, `enforced`, `settled`. A separate `refused` phase
+Normal phases are `prepared`, `enforced`, `settled`. A run that ends unsettled
+without a confirmed target exec stays `prepared`. A separate `refused` phase
 records a proved pre-target-exec refusal; this resolves the north star's
 pre-exec receipt case without labelling failed preparation as enforcement.
 
@@ -1669,6 +1712,11 @@ Required Linux probes:
   policy details unavailable.
 - Launch profile credential existence/type/permissions without printing values
   or user-specific paths; experimental/supported status separately.
+- For `agent`, measured by one real run: `seccomp_user_notification`,
+  `agent_proxy_bridge` (an allowed and a denied destination, direct egress
+  refused), `agent_unix_peer_mediation` (a host socket denied, an attempt
+  socket allowed) and `agent_inner_sandbox` (a Landlock and seccomp inner
+  sandbox restricts its child; `nested_user_namespace` reported as measured).
 
 `doctor` does not edit user namespaces policy, install dependencies, enable
 lingering, alter TCC, change capabilities, start a permanent service or prompt
@@ -1678,6 +1726,10 @@ for provider sign-in. `explain` shows these as unmeasured requirements.
 
 `gc --dry-run` enumerates only the registered state root, takes nonblocking
 attempt locks, and reports actions/reasons in the same JSON shape as `gc`.
+Cleanup is bounded per pass (initially 100,000 entries, 128 open directories)
+and resumable; `gc` prints its report even when it exits 1 because a cleanup
+stays pending. It removes a dead attempt's proxy directory only through the
+socket identity recorded at bind, and reports it in a `proxy_dir` field.
 It never discovers deletion targets by searching all of `/tmp`, HOME or cgroupfs.
 Active locks, unverifiable identities or foreign-platform resources are retained.
 

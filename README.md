@@ -23,7 +23,7 @@ uv run docs/specs/managed-teams-v1/validate_policy.py
 This checks document contracts; live backend conformance runs on the
 reference host through the `conformance` workflow.
 
-J0–J2 of Jail v1 are implemented. J0 measured the reference host (an x86_64
+J0–J3 of Jail v1 are implemented, on a stock host with no host configuration. J0 measured the reference host (an x86_64
 VPS on Ubuntu 26.04 LTS; manifests under `docs/specs/jail-v1/evidence/`) and
 the observer privilege model: the ptrace tracer is the working baseline, and
 [eBPF remains unselected](docs/specs/jail-v1/backend-evaluation.md). J1 ships
@@ -34,8 +34,12 @@ prepared/enforced/settled receipts, and the macOS refusal lane. J2 adds
 cgroup-backed PID/memory/CPU ceilings, isolated build inputs, an outside
 parent-death watcher, and measured controller/observer doctor probes.
 [J2's acceptance map and operator setup](docs/specs/jail-v1/j2-authority.md)
-describe the named Linux lane. J3 (proxy, nested agent execution, credentials,
-and explicit `none`) is next. CI is three
+describe the named Linux lane. J3 adds the `agent` profile (an outside HTTP
+proxy as the only network path, host Unix sockets unreachable, unprivileged
+inner sandboxes), data-only launch profiles with credential staging and
+cleanup, and the explicit uncontained `none` profile
+([J3's acceptance map](docs/specs/jail-v1/j3-authority.md)). J4 (evidence and
+recovery) is next. CI is three
 workflows, `contracts`, `rust` and `conformance`
 ([Jail v1 §16](docs/specs/jail-v1.md#16-implementation-order-and-exit-criteria)).
 The specifications link to the previous implementation at commit `f3b2dbfd`,
