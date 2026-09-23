@@ -39,7 +39,7 @@ use ouro_jail::platform::{
     PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
     TreeObservation,
 };
-use ouro_jail::records::{JailError, NativeLifetime, Os, Receipt, rfc3339_utc};
+use ouro_jail::records::{JailError, NativeLifetime, Os, rfc3339_utc};
 use ouro_jail::state::{PersistIo, Site};
 use ouro_jail::{cli, state, supervisor};
 use serde_json::Value;
@@ -100,6 +100,12 @@ fn verified_tree() -> TreeObservation {
 
 fn sha256(bytes: &[u8]) -> String {
     ouro_jail::canonical::sha256_prefixed(bytes)
+}
+
+/// `sha256:` over a receipt's RFC 8785 canonical bytes (canonicalization.md):
+/// what §13.1 says a receipt note names, recomputable from `jail.json` alone.
+fn canonical_digest(receipt: &Value) -> String {
+    sha256(&ouro_jail::canonical::to_jcs(receipt).expect("a receipt canonicalizes"))
 }
 
 impl Platform for Sim {
@@ -347,8 +353,11 @@ struct Seen {
     violations: Vec<String>,
     /// `revision -> bytes` of every receipt either copy showed.
     by_revision: BTreeMap<u64, Vec<u8>>,
-    /// The digests (as control messages compute them) of receipts that were
-    /// fully durable: renamed into place and the directory synced.
+    /// The digests of receipts that were fully durable (renamed into place
+    /// and the directory synced), over the RFC 8785 canonical bytes of what
+    /// the file on disk holds: the digest a control message must name
+    /// (§8.2, §13.1), computed from the file alone, never by re-serializing
+    /// through the product's own types (J4 W3, P6).
     durable: Vec<(String, String)>,
     /// Whether the fault fired, and what `jail.json` held at that moment.
     fired: bool,
@@ -641,14 +650,11 @@ impl PersistIo for Faults {
         let mut state = self.state.lock().unwrap();
         if state.renamed.take().as_deref() == Some("jail.json")
             && let Ok(bytes) = std::fs::read(dir.join("jail.json"))
-            && let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes)
+            && let Ok(receipt) = serde_json::from_slice::<Value>(&bytes)
         {
-            let digest = sha256(&serde_json::to_vec(&receipt).unwrap());
-            let phase = serde_json::to_value(receipt.phase).unwrap();
-            state
-                .seen
-                .durable
-                .push((digest, phase.as_str().unwrap().to_owned()));
+            let digest = canonical_digest(&receipt);
+            let phase = receipt["phase"].as_str().unwrap_or_default().to_owned();
+            state.seen.durable.push((digest, phase));
         }
         Ok(())
     }
@@ -2217,6 +2223,36 @@ fn j4_w3_p5_an_error_no_receipt_carries_reaches_stderr() {
     assert!(
         unrecorded[0].contains("state_write_failed"),
         "{unrecorded:#?}"
+    );
+}
+
+/// P6. The control message named a receipt by `sha256` over the product's
+/// compact serialization, while the trace note (62d09d40) and §13.1 use the
+/// RFC 8785 canonical bytes. Both name it by the canonical digest, which a
+/// consumer recomputes from `jail.json` alone.
+#[test]
+fn j4_w3_p6_control_and_trace_name_a_receipt_by_the_same_digest() {
+    let fixture = Fixture::new();
+    let outcome = fixture.run(Sim::new(Scenario::Plain), &["--profile", "tool"], real());
+    assert_eq!(outcome.report.exit_code, 0);
+    let last = outcome.frames.last().expect("a terminal control frame");
+    assert_eq!(last["kind"], "settled");
+    let (_, _, bytes) = jail_json(&fixture.attempt());
+    let canonical = canonical_digest(&serde_json::from_slice(&bytes).unwrap());
+    let trace = std::fs::read_to_string(fixture.attempt().join("trace.ndjson")).unwrap();
+    let note = trace
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .rfind(|event| event["operation"] == "jail.receipt")
+        .expect("a receipt note");
+    assert_eq!(
+        note["fields"]["receipt_digest"],
+        Value::from(canonical.clone())
+    );
+    assert_eq!(
+        last["receipt_digest"],
+        Value::from(canonical),
+        "the control message names the receipt by the canonical digest the trace note uses"
     );
 }
 

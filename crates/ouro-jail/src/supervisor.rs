@@ -2973,11 +2973,8 @@ impl Journal {
     /// missing note is recorded as trace loss.
     fn receipt(&mut self, phase: Phase, receipt: &Receipt, terminal: bool) {
         self.durable(receipt);
-        let canonical = serde_json::to_value(receipt)
-            .map_err(|error| error.to_string())
-            .and_then(|value| crate::canonical::to_jcs(&value).map_err(|error| error.to_string()));
-        let digest = match canonical {
-            Ok(bytes) => crate::canonical::sha256_prefixed(&bytes),
+        let digest = match receipt_digest(receipt) {
+            Ok(digest) => digest,
             Err(reason) => {
                 if self.loss.is_none() {
                     self.loss = Some(JailError::new(
@@ -3009,6 +3006,17 @@ impl Journal {
             },
         );
     }
+}
+
+/// `sha256:` over the receipt's RFC 8785 canonical bytes (canonicalization.md):
+/// the one name a receipt has, in the trace's receipt notes (§13.1) and in
+/// control messages (§8.2), recomputable from `jail.json` alone. Fails only
+/// for a receipt that cannot be canonicalized (a float, which no receipt
+/// field is).
+fn receipt_digest(receipt: &Receipt) -> Result<String, String> {
+    let value = serde_json::to_value(receipt).map_err(|error| error.to_string())?;
+    let canonical = crate::canonical::to_jcs(&value).map_err(|error| error.to_string())?;
+    Ok(crate::canonical::sha256_prefixed(&canonical))
 }
 
 /// Renders the receipt for `phase`, writes it durably and advances the
@@ -3564,9 +3572,18 @@ fn send_control(
     receipt: &Receipt,
 ) {
     let Some(control) = control else { return };
-    let digest = serde_json::to_vec(receipt)
-        .map(|bytes| crate::canonical::sha256_prefixed(&bytes))
-        .unwrap_or_else(|_| "sha256:".to_owned());
+    // J4 W3, P6: the receipt's one name, the canonical digest its trace note
+    // uses (§13.1). It used to be over the compact serialization, which only
+    // a consumer with the writer's field order could reproduce. A receipt
+    // with no canonical digest gets no message naming an invented one: the
+    // message is counted as undelivered.
+    let digest = match receipt_digest(receipt) {
+        Ok(digest) => digest,
+        Err(_) => {
+            control.dropped += 1;
+            return;
+        }
+    };
     // J4-R: the message states what the acknowledged receipt says, which
     // for a receipt persisted by the worker is not what the record says now.
     let _ = record;
