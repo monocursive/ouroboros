@@ -285,6 +285,15 @@ pub enum GapReason {
     /// observed — not its calls, not its lifetime — so the count is unknown
     /// and the interval has no end.
     UntracedDescendant,
+    /// A covered call's syscall exit carried a kernel restart code, and the
+    /// observer could not establish what the kernel then did with it —
+    /// re-entered it, or returned `EINTR` (J4 O-2). Its one result is
+    /// unknown, so it is a hole naming that call's classes. The observer
+    /// follows the call to the kernel's decision, so this is only for a
+    /// decision it could not read: an unreadable or unrecognised signal
+    /// frame, a continuation through `restart_syscall`, which is outside the
+    /// traced set, or a stop out of the sequence the kernel produces.
+    RestartUnresolved,
 }
 
 impl GapReason {
@@ -311,6 +320,7 @@ impl GapReason {
             GapReason::ForeignAbi => "foreign_abi",
             GapReason::ChildNotificationListener => "child_notification_listener",
             GapReason::UntracedDescendant => "untraced_descendant",
+            GapReason::RestartUnresolved => "restart_unresolved",
         }
     }
 
@@ -541,6 +551,8 @@ pub struct LossCounters {
     pub notification_listeners: u64,
     /// Tasks a tracee created with `CLONE_UNTRACED`, which nothing traces.
     pub untraced_descendants: u64,
+    /// Restart-coded syscall exits whose outcome could not be established.
+    pub restart_unresolved: u64,
 }
 
 impl LossCounters {
@@ -567,6 +579,7 @@ impl LossCounters {
             + self.foreign_abi
             + self.notification_listeners
             + self.untraced_descendants
+            + self.restart_unresolved
     }
 }
 
@@ -612,9 +625,28 @@ pub struct TracerSummary {
     /// Direct children of this process that were still unreaped when the
     /// tracer stopped.
     pub unreaped_children: Vec<pid_t>,
-    /// Syscall exits in the `ERESTARTSYS` family. Not loss and not results:
-    /// the kernel re-enters the call, which then produces its one result.
+    /// Syscall exits with a kernel restart code that the kernel then
+    /// re-entered: seen re-entered at the same instruction, or decided at a
+    /// handler's entry (`ERESTARTNOINTR`, or `ERESTARTSYS` under
+    /// `SA_RESTART`). Not loss and not results: the re-entered call produces
+    /// its one result.
     pub restarts: u64,
+    /// Syscall exits with a kernel restart code that the kernel turned into
+    /// `EINTR` at a handler's entry (J4 O-2). Each is a result, `-EINTR`, and
+    /// is counted in [`TracerSummary::ops`] like any other.
+    pub interrupted: u64,
+    /// Syscall exits with a kernel restart code whose thread ended before
+    /// the kernel decided — a fatal signal, or another thread's `execve`. A
+    /// restart code means the call did nothing, and no result was ever
+    /// returned: not a result and not loss.
+    pub restarts_unfinished: u64,
+    /// Entries whose thread was killed at its seccomp stop before the
+    /// observer resumed it (J4 O-3): the stop could not be read, or the
+    /// resume failed with `ESRCH`, which at an unresumed stop only a
+    /// `SIGKILL` causes. The kernel skips a call when a fatal signal is
+    /// pending after the trace event (`__seccomp_filter`), so the call had
+    /// no effect: not loss.
+    pub killed_at_entry: u64,
     /// Syscalls under another ABI the kernel refused as nonexistent
     /// (`ENOSYS`): stopped and labelled foreign, but with no effect, so not
     /// loss — a tracee cannot manufacture a gap by naming a call no table has.
@@ -1018,6 +1050,7 @@ mod tests {
             GapReason::ForeignAbi,
             GapReason::ChildNotificationListener,
             GapReason::UntracedDescendant,
+            GapReason::RestartUnresolved,
         ];
         let names: std::collections::BTreeSet<&str> = reasons.iter().map(|r| r.as_str()).collect();
         assert_eq!(names.len(), reasons.len());
