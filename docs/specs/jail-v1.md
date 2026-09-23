@@ -1,7 +1,12 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 15, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 15 records J4's
+Status: implementation specification, revision 16, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 16 records J4's
+second wave and its reviews: loss reported whatever its timing, the execution
+leaf registered before it exists, gc's own records and leftovers, syscall
+restarts, the receipt digest's preimage, trace framing and the no-leaf limit
+of supervisor death (§§6.4, 7, 9.3, 11.2, 11.4, 13.1, 13.3, 14.2;
+canonicalization.md). Revision 15 records J4's
 first wave: atomic records and persistence, GC reconciliation, closed-set
 attribution and loss handling (§§6.2, 6.4, 7, 8.2, 9.2, 11.2, 11.3, 11.4, 13.2,
 13.3, 14.2). Revision 14 records the
@@ -712,7 +717,9 @@ preserves the separately observed child outcome in the receipt. Deadline or
 requested termination preserves the observed code/signal and records its cause.
 `outcome.cause` is the first stop reason the supervisor acted on; a later
 deadline, loss or signal is recorded (its limit's `hit`, `errors[]`) but does
-not replace it.
+not replace it. A loss the platform processed after the target's own end is
+recorded (`errors[]`, exit 1) but is not a stop the supervisor acted on: it
+requests no stop and never becomes `outcome.cause`.
 A child exiting 125 is `outcome.kind=exited`, not `refused`. A persistence
 failure (`state_write_failed`) before exec is a refusal (125); after exec it
 is a tool error (1).
@@ -769,12 +776,14 @@ is never visible incomplete. A prior jail claim, live or dead, refuses
 reconciles it rather than spawning again. Test concurrent claims and crashes
 after claim creation. The child cannot inherit the lock.
 Register resource ownership before populating credentials
-or launching helpers. State updates use create-new temporary file, write,
+or launching helpers. The execution cgroup is registered in jail state by name
+before it is created (P15) and by device and inode right after, before anything
+is placed in it (P16); a failed registration refuses. State updates use create-new temporary file, write,
 file sync, atomic rename, and parent-directory sync. A successful rename alone
 is not a durable acknowledgment. Platform code defines and tests its sync
 guarantee. A failed write removes its temporary file; a crash can leave one
 (`.<name>.<id>.tmp`), which never replaced anything. Every durable write names
-its persistence site (review-resolutions revision 15 lists P1 to P13), where
+its persistence site (review-resolutions revisions 15 and 16 list P1 to P16), where
 faults and crashes are injected in tests. Failed/ambiguous persistence before
 exec refuses (125, a refused receipt when one can still be written, and
 `refused` only once that receipt is durable); after exec it stops the tree and
@@ -1548,6 +1557,10 @@ return to fully active for the entire run after a historical gap.
 
 On loss under `strict`, stop the attempt and preserve the gap. Under
 `best-effort`, continue with degraded coverage and explicit lost intervals.
+Loss reporting does not depend on timing: any evidence class (the audit
+classes and `proxy.net`) degraded in the observer's final account is an
+`evidence_lost` error and exit 1 in either mode, even when no run event
+carried it.
 An observer that cannot attach always refuses before exec, regardless of
 evidence mode. `--observe off` emits no audit-source events; wrapper lifecycle
 and optional proxy facts still exist with their own limited meaning.
@@ -1832,6 +1845,10 @@ deadline. Broken pipe, partial-record write followed by failure, queue overflow
 or deadline expiry is evidence loss. The writer preserves unwritten offsets;
 it never retries a whole partially written JSON frame as a second event.
 Strict mode stops the tree; best-effort can continue with the sink marked lost.
+The terminal receipt's note is reserve priority whatever its phase. Once a
+trace loss is known, every later receipt records it: the wrapper source is
+degraded, with one `trace_transport_loss` gap on each covered class, extended
+on later receipts rather than repeated.
 After any evidence loss a sink keeps a prefix: it refuses and counts ordinary
 events and accepts only reserve notes (the gap and receipt notes, and at most
 one lifecycle note per `agent` helper, whose end can explain a stop). An
@@ -1944,7 +1961,19 @@ verifies emptiness within §9.3's 5-second budget, records
 managed scratch (`gc_removed_scratch`). Its reconciliation records go to jail
 state (`gc_actions`) and its report, never to the supervisor's receipt;
 finishing a pending vendor-state cleanup still completes the receipt's
-`state_cleanup`, as J3 specified. A cgroup recorded in another boot is never
+`state_cleanup`, as J3 specified. gc reads the leaf from jail state, where the
+supervisor registers it by name before creating it and by device and inode
+right after, before anything is placed in it; a receipt naming another leaf is
+a disagreement and is retained. A leaf registered by name only is removed when
+empty, identified by its name and place only, and never killed. gc's records
+go to `gc_actions` (persistence site P14). The bound includes each leased
+attempt root's listing and the vendor-state resumption. Pending vendor-state
+cleanup is permitted by a receipt proving tree death or by gc's own
+`gc_terminated_orphan` or `gc_removed_cgroup` record of the registered leaf;
+lost integrity refuses. gc removes a crash's temporary files of the root
+records (`.<jail-state.json|policy.json|jail.json>.<id>.tmp`) only under the
+lease of an attempt whose owner it established dead, and reports them in
+`leftover_temp_files`. A cgroup recorded in another boot is never
 probed or touched. Records that disagree about the boot, lost integrity, and a
 replaced, absent or unverifiable leaf are retained and reported. A corrupt
 state file or receipt is §6.4's failed state access (exit 1).
