@@ -41,6 +41,10 @@ pub mod observed;
 pub mod platform;
 #[cfg(target_os = "linux")]
 pub mod probe;
+// J4-G begin: `gc` reconciliation of a dead supervisor's execution cgroup
+#[cfg(target_os = "linux")]
+pub mod reconcile;
+// J4-G end
 // J3-unixpeer begin: N05 mechanism modules
 #[cfg(target_os = "linux")]
 pub mod sockdiag;

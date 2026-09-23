@@ -755,173 +755,21 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
     })
 }
 
-/// Enumerates the registered state root without deleting anything it cannot
-/// identify (§14.2).
+// J4-G begin: exception G1 — the body of `gc` is `gc::gc` (§14.2, C03)
+/// Enumerates the registered state root and reconciles what a dead
+/// supervisor left, without touching anything it cannot identify (§14.2).
 ///
-/// This slice never terminates an orphan or removes an attempt: it reports what
-/// it found, which is the honest half of GC until the Linux resource identity
-/// checks exist.
+/// The walk, the decisions and the report live in [`crate::gc`]; this keeps
+/// the J3 entry point and its report shape for existing callers.
 ///
 /// # Errors
-/// Returns [`ErrorCode::UnsafeStatePath`] when the state root fails its checks.
+/// Returns [`ErrorCode::UnsafeStatePath`] when the state root or its
+/// `attempts/` directory fails its checks, and
+/// [`ErrorCode::StateWriteFailed`] when `attempts/` cannot be read.
 pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
-    let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
-    // §14.2 enumerates "the registered state root". A root that fails the
-    // §6.2 checks is not this operator's registered state, so `gc` says so
-    // instead of printing a clean scan of a directory anyone can write.
-    match std::fs::symlink_metadata(&data_dir) {
-        Ok(_) => state::check_state_dir(&data_dir)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GcReport {
-                entries: Vec::new(),
-                dry_run: args.dry_run,
-                // J3-launch begin
-                incomplete: Vec::new(),
-                // J3-launch end
-            });
-        }
-        Err(error) => {
-            return Err(JailError::new(
-                ErrorCode::UnsafeStatePath,
-                ErrorStage::Resolving,
-                Remediation::InspectState,
-                format!("{}: {error}", data_dir.display()),
-            ));
-        }
-    }
-    let attempts = data_dir.join("attempts");
-    let mut entries = Vec::new();
-    // J3-launch begin: attempts whose cleanup did not complete (§6.4: `gc`
-    // exits 1 for failed cleanup)
-    let mut incomplete: Vec<String> = Vec::new();
-    // J3-launch end
-    let listing = match std::fs::read_dir(&attempts) {
-        Ok(listing) => listing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GcReport {
-                entries,
-                dry_run: args.dry_run,
-                // J3-launch begin
-                incomplete: Vec::new(),
-                // J3-launch end
-            });
-        }
-        Err(error) => {
-            // §6.4: `gc` uses 1 "for failed cleanup or state access".
-            return Err(JailError::new(
-                ErrorCode::StateWriteFailed,
-                ErrorStage::Resolving,
-                Remediation::InspectState,
-                format!("{}: {error}", attempts.display()),
-            ));
-        }
-    };
-    for entry in listing.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        // J3-agent begin
-        let mut proxy_dir: Option<String> = None;
-        // J3-agent end
-        let (action, reason) = match AttemptId::parse(&name) {
-            Err(_) => (
-                "skipped".to_owned(),
-                "the directory name is not an attempt id".to_owned(),
-            ),
-            Ok(id) => {
-                let dir = AttemptDir::new(&data_dir, &id);
-                // J4-D3 begin: probe the lease without creating `jail.lock`;
-                // a created lock would make a reserved root unclaimable
-                // (§7) and a dry run would write to disk (§14.2).
-                match state::Lease::probe_existing(&dir.lock_path()) {
-                    Ok(state::LeaseProbe::Absent) => (
-                        "retained".to_owned(),
-                        match state::check_fresh_attempt(&dir) {
-                            Ok(()) => "no jail.lock and no jail-owned artifact: an unclaimed \
-                                       attempt root, which gc leaves untouched and claimable"
-                                .to_owned(),
-                            Err(error) => format!(
-                                "no jail.lock, so no lease protects this attempt and gc \
-                                 leaves it untouched: {}",
-                                error.message
-                            ),
-                        },
-                    ),
-                    Ok(state::LeaseProbe::Held) => (
-                        "retained".to_owned(),
-                        "a live supervisor holds the lease".to_owned(),
-                    ),
-                    // J4-D3 end
-                    // J3-launch begin: §12, §14.2 — resume a pending
-                    // vendor-state cleanup the terminal receipt permits.
-                    // J3-agent begin: the dead supervisor's proxy directory
-                    // goes first; vendor state follows as before
-                    Ok(state::LeaseProbe::Acquired(_lease)) => match gc_proxy_then_resume(
-                        &dir,
-                        &name,
-                        args.dry_run,
-                        &mut incomplete,
-                        &mut proxy_dir,
-                    ) {
-                        // J3-agent end
-                        Ok(cleanup::Resume::NothingPending) => (
-                            "retained".to_owned(),
-                            "no vendor-state cleanup is pending; receipts, policy and trace \
-                             are retained"
-                                .to_owned(),
-                        ),
-                        Ok(cleanup::Resume::Completed) => (
-                            "removed_vendor_state".to_owned(),
-                            "the pending vendor-state cleanup completed and the receipt \
-                             records it"
-                                .to_owned(),
-                        ),
-                        Ok(cleanup::Resume::WouldRemove) => (
-                            "would_remove_vendor_state".to_owned(),
-                            "the terminal receipt permits the pending vendor-state cleanup"
-                                .to_owned(),
-                        ),
-                        Ok(cleanup::Resume::Retained(reason)) => (
-                            "retained".to_owned(),
-                            format!("vendor-state cleanup is not permitted: {reason}"),
-                        ),
-                        Ok(cleanup::Resume::StillPending(reason)) => {
-                            incomplete.push(format!("{name} ({reason})"));
-                            (
-                                "pending".to_owned(),
-                                format!("vendor-state cleanup stopped again: {reason}"),
-                            )
-                        }
-                        Err(error) => {
-                            incomplete.push(format!("{name} ({})", error.code.as_str()));
-                            ("skipped".to_owned(), error.message.clone())
-                        }
-                    },
-                    // J3-launch end
-                    Err(error) => ("skipped".to_owned(), error.message.clone()),
-                }
-            }
-        };
-        entries.push(GcEntry {
-            attempt_id: name,
-            action,
-            reason,
-            // J3-agent begin
-            proxy_dir,
-            // J3-agent end
-        });
-    }
-    entries.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
-    // J3-launch begin: §6.4 "1 for failed cleanup or state access"; the
-    // report still reaches the caller, which prints it before exiting 1.
-    incomplete.sort();
-    // J3-launch end
-    Ok(GcReport {
-        entries,
-        dry_run: args.dry_run,
-        // J3-launch begin
-        incomplete,
-        // J3-launch end
-    })
+    crate::gc::gc(ctx, args).map(GcReport::from)
 }
+// J4-G end
 
 fn plan_request(plan: &Plan) -> PlanRequest {
     PlanRequest {
@@ -2442,37 +2290,7 @@ fn refuse_vendor_state(
 }
 // J3-launch end
 
-// J3-agent begin: `gc` of a dead supervisor's proxy directory (§14.2)
-/// Runs [`state::gc_proxy_dir`], says in `proxy_dir` what became of the
-/// directory (one whose read or removal failed is a cleanup that did not
-/// complete, §6.4: `gc` exits 1; one whose identity cannot be proven is
-/// retained and said so, §14.2), then resumes the vendor-state cleanup
-/// exactly as before.
-fn gc_proxy_then_resume(
-    dir: &AttemptDir,
-    name: &str,
-    dry_run: bool,
-    incomplete: &mut Vec<String>,
-    proxy_dir: &mut Option<String>,
-) -> Result<cleanup::Resume, JailError> {
-    *proxy_dir = match state::gc_proxy_dir(dir, dry_run) {
-        Ok(outcome) => {
-            // §6.4, §14.2: an identity gc cannot prove is a skip reported
-            // with its reason; a read or removal that failed is a failed
-            // cleanup.
-            if let state::ProxyDirGc::Failed(reason) = &outcome {
-                incomplete.push(format!("{name} (proxy directory: {reason})"));
-            }
-            outcome.describe()
-        }
-        Err(error) => {
-            incomplete.push(format!("{name} ({})", error.code.as_str()));
-            Some(format!("failed: {}", error.code.as_str()))
-        }
-    };
-    cleanup::resume(dir, dry_run)
-}
-// J3-agent end
+// J4-G: `gc_proxy_then_resume` moved to `gc.rs` with the rest of gc (G1).
 
 // J3-agent begin: the proxy directory (§10)
 /// Registers and creates `<attempt>/proxy/` for a proxy-mode profile and

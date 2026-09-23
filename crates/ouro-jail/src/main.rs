@@ -17,7 +17,7 @@ use ouro_jail::records::{
     self, JailError, PlatformRecord, SCHEMA_CONTROL, SCHEMA_EVENT, SCHEMA_GATE, SCHEMA_NETWORK,
     SCHEMA_POLICY, SCHEMA_POLICY_FILE, SCHEMA_POLICY_SNAPSHOT, SCHEMA_RECEIPT,
 };
-use ouro_jail::supervisor::{self, Context, DoctorReport, ExplainReport, GcReport};
+use ouro_jail::supervisor::{self, Context, DoctorReport, ExplainReport};
 
 fn main() -> ExitCode {
     if let Some(code) = internal_subcommand() {
@@ -431,7 +431,10 @@ fn print_doctor_text(report: &DoctorReport) {
 // ---------------------------------------------------------------------------
 
 fn gc(context: &Context, args: &GcArgs) -> ExitCode {
-    let report = match supervisor::gc(context, args) {
+    // J4-G: the report of `gc::gc`, whose shape adds the reconciliation
+    // fields (owner, cgroup, scratch, recorded), the S7 budget and the S9
+    // seams to J3's.
+    let report = match ouro_jail::gc::gc(context, args) {
         Ok(report) => report,
         // §6.4: `gc` uses 1 for failed cleanup or state access, whatever the
         // underlying code's usual mapping would be.
@@ -450,8 +453,37 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
                 println!("{} proxy_dir {proxy_dir}", entry.attempt_id);
             }
             // J3-agent end
+            // J4-G begin
+            for (key, value) in [
+                ("owner", &entry.owner),
+                ("cgroup", &entry.cgroup),
+                ("scratch", &entry.scratch),
+            ] {
+                if let Some(value) = value {
+                    println!("{} {key} {value}", entry.attempt_id);
+                }
+            }
+            for action in &entry.recorded {
+                println!("{} recorded {action}", entry.attempt_id);
+            }
+            // J4-G end
         }
         println!("scanned {}", report.entries.len());
+        // J4-G begin: S7, S9
+        println!(
+            "entries {} of {}{}",
+            report.budget.charged,
+            report.budget.max_entries,
+            if report.budget.listing_complete {
+                ""
+            } else {
+                " (listing incomplete)"
+            }
+        );
+        for (name, value) in &report.test_seams {
+            println!("test_seam {name}={value}");
+        }
+        // J4-G end
     }
     // J3-launch begin: §6.4 — a cleanup that stopped again exits 1, after the
     // report is printed (J3 review L1).
@@ -466,7 +498,7 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn gc_json(report: &GcReport) -> serde_json::Value {
+fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
     serde_json::json!({
         "component": "ouro-jail",
         "dry_run": report.dry_run,
@@ -480,8 +512,24 @@ fn gc_json(report: &GcReport) -> serde_json::Value {
                 // J3-agent begin
                 "proxy_dir": entry.proxy_dir,
                 // J3-agent end
+                // J4-G begin
+                "owner": entry.owner,
+                "cgroup": entry.cgroup,
+                "scratch": entry.scratch,
+                "recorded": entry.recorded,
+                // J4-G end
+                // J4-R: leftover `.tmp` files (slice R) go here.
             }))
             .collect::<Vec<_>>(),
+        // J4-G begin: S7 and S9
+        "budget": {
+            "max_entries": report.budget.max_entries,
+            "charged": report.budget.charged,
+            "exhausted": report.budget.exhausted,
+            "listing_complete": report.budget.listing_complete,
+        },
+        "test_seams": report.test_seams,
+        // J4-G end
     })
 }
 
