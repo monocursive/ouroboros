@@ -185,7 +185,7 @@ Found by reading the code; each was reproduced by a failing test before the fix.
 | After a trace loss, ordinary frames were still accepted after the hole and the loss note could be refused | A lost sink keeps a prefix: only reserve notes follow, and the first loss writes one `coverage_gap` note with reserve priority | §13.3; R03 (`j4_r03_after_*`, `j4_r03_a_coverage_gap_note_*`) |
 | The harness failed a whole run on a torn last trace line, and nothing defined "recognizable" (S8) | `trace::read_frames` classifies a trace as complete, visibly incomplete or corrupt, and the harness uses it | §13.3; R03 (`j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run`) |
 
-## Revision 15 decisions (2026-09-23, J4 first wave: records, GC, closed set)
+## Revision 15 decisions (2026-09-23, J4 first wave: records, GC, closed set, loss)
 
 Each row was reproduced by a failing test before its fix unless it says otherwise. Persistence sites: P1 claim of `jail-state.json`, P2 `policy.json`, P3 vendor/credential/proxy-directory state, P4 boundary registration, P5 prepared receipt, P6 enforced receipt, P7 integrity-loss receipt, P8 pending receipt, P9 terminal receipt, P10 refused receipt, P11 cleanup record, P12 gc resume (and, for now, gc's reconciliation records), P13 gc's proxy-directory record.
 
@@ -208,4 +208,8 @@ Each row was reproduced by a failing test before its fix unless it says otherwis
 | A successful exec's event did not name its call, and the closed-set table was not published | `fields.syscall` on `proc.exec`; `evidence/closed-set-x86_64.txt` generated from the build and checked against a live receipt's narrowing-filter digest | §11.2; O01 (`j4_o01_every_variant_is_one_event_per_result_{tool,build,none,agent}`, `j4_closed_set_the_published_table_is_the_one_this_build_traces`) |
 | Two fixture modes were never called (N8) and two r6 tests asserted nothing (N9) | The modes run; the tests assert what they are named for | O01, O06 (pass on the base: coverage, not defects) |
 | Nested namespaces (S10) | `none` running the host's bubblewrap, traced one layer down, is the measured limit | §11.3; O02 (`j4_o02_a_nested_pid_namespace_under_none_keeps_host_attribution`) |
+| The observer's bounds in force were not recorded in the receipt | `observer_plan` in native details: backend, in-flight, queue bytes and events, path snapshot and event maxima, `kernel_ring_bytes: null`, test seams | §11.4; O03 (`j4_observer_plan_is_recorded`) |
+| O03 names eBPF losses (map exhaustion, ring loss, unmatched exit) that the ptrace observer does not have (S2) | Map exhaustion is the in-flight bound, ring loss the user-space queue; an unmatched exit is unreachable by construction, proved at the tracer seam; two shrink-only seams drive exhaustion through the product | §§6.2, 11.4; O03, O05 (`j4_o03_*`, `j4_o05_directory_operation_losses_degrade_fs_write`) |
+| Strict/best-effort, first cause, labels and denied-connect counting had no end-to-end tests on the ptrace path | Portable and live tests for each (they pass on the base; mutations turn each red) | R04, O05 (`j4_r04_*`, `j4_o05_*`) |
+| `review_settlement_itself_produces_no_helper_note` failed intermittently with `entry_abandoned` | The test raced its own background child's `execve` against settlement; it now waits until the child is asleep. The teardown loss itself is real: a call in flight when its thread is killed may have had its effect | R04 (`j4_r04_a_call_in_flight_at_teardown_is_loss_{tool,none}`) |
 

@@ -2,8 +2,9 @@
 
 Status: implementation specification, revision 15, 2026-09-23. No implementation
 or backend conformance is claimed by this document. Revision 15 records J4's
-first wave: atomic records and persistence, GC reconciliation, and closed-set
-attribution (§§6.2, 6.4, 7, 8.2, 9.2, 11.2, 11.3, 13.2, 13.3, 14.2). Revision 14 records the
+first wave: atomic records and persistence, GC reconciliation, closed-set
+attribution and loss handling (§§6.2, 6.4, 7, 8.2, 9.2, 11.2, 11.3, 11.4, 13.2,
+13.3, 14.2). Revision 14 records the
 first J4 fixes to records, observation, supervisor death and the trace (§§6.4,
 9.2, 9.3, 11.2, 11.4, 13.2, 13.3, 14.2; canonicalization.md). Revision 13 opens J4 and
 resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
@@ -564,8 +565,13 @@ Apply configuration in this order:
    reserve, and named in every loss it causes), `OURO_JAIL_TEST_ABORT_AT`
    (`<site>:<point>` aborts at one named point, `temp_written`,
    `temp_synced`, `renamed` or `dir_synced`, of the first write at one
-   persistence site) and `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
-   entry bound, reported in gc's `test_seams`).
+   persistence site), `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
+   entry bound, reported in gc's `test_seams`), and
+   `OURO_JAIL_TEST_TRACER_INFLIGHT` (1 to 16,384) and
+   `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304), which are ignored
+   unless the value is decimal digits in range and are also named in the
+   receipt's `observer_plan.test_seams` with the value applied, or null when
+   ignored.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 
@@ -1487,7 +1493,16 @@ maximum. A gap caused by a queue drop names the operation classes of the
 dropped events. An argument the kernel itself rejected (`EFAULT`, or `EINVAL`
 on a structure size) is recorded as unavailable on that result and is not a
 coverage loss: the child cannot stop its own attempt by passing bad pointers.
-Record actual values in the observer plan. Every failed reservation, map
+Record actual values in the observer plan: `lifetime.native.details.observer_plan`
+names the backend and every bound in force (null with observation off). The
+ptrace observer has no kernel ring or map. Its map exhaustion is the in-flight
+bound: an entry past it is not followed and is an `inflight_exhausted` gap
+naming that call's classes. Its ring loss is the user-space queue: a result
+that cannot be admitted within the one-second bounded wait is dropped into a
+`queue_full` gap naming the dropped results' classes. It steps a tracee to a
+syscall exit only while it holds that tracee's entry, so an unmatched exit
+cannot occur; one would be an `unmatched_exit` gap in every class. Its plan
+records `kernel_ring_bytes: null`. Every failed reservation, map
 insertion, pairing failure or oversized event increments an independent loss
 counter. The [BPF ring-buffer contract](https://docs.kernel.org/bpf/ringbuf.html)
 allows reservation failure; a quiet ring is not proof that no event occurred.
