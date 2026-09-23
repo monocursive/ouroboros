@@ -2,10 +2,10 @@
 //! release pipe.
 //!
 //! It is not an enforcement filter. The bubblewrap baseline of jail-v1 §9.2
-//! is installed separately and decides what is allowed; this one only decides
-//! what stops, and it never denies anything. Three kinds of call return
-//! `SECCOMP_RET_TRACE` (with [`NARROWING_TRACE_DATA`] in its data bits),
-//! everything else returns `SECCOMP_RET_ALLOW`:
+//! is installed separately and decides what is allowed; this one decides
+//! what stops, and it refuses exactly one call, `clone3`, with the `ENOSYS` a
+//! kernel without it would give. Four kinds of call return
+//! `SECCOMP_RET_TRACE` (with [`NARROWING_TRACE_DATA`] in its data bits):
 //!
 //! * every number in `linux-closed-v1`, compared only after the architecture
 //!   has been checked, because a number means nothing without it;
@@ -17,12 +17,23 @@
 //!   (J4 D1). A child's own notification listener outranks this filter's
 //!   trace, and a `CONTINUE` reply runs the call with no stop, so the tracer
 //!   must learn that one exists. The flags are a register, which the filter
-//!   reads directly; `tool` and `build` refuse the flag outright (EPERM).
+//!   reads directly; `tool` and `build` refuse the flag outright (EPERM);
+//! * `clone(2)` whose flags carry `CLONE_UNTRACED` (J4 S4). The kernel does
+//!   not attach such a child to the tracer, so the tracer must learn that
+//!   one exists. The contained baselines refuse the flag (EPERM), which
+//!   outranks the trace, so only `none` ever stops on one.
+//!
+//! `clone3` passes its flags in memory, which seccomp cannot read, so the
+//! same question cannot be asked of it: it is refused with `ENOSYS`, as the
+//! contained baselines already refuse it, and glibc falls back to `clone`
+//! (jail-v1 §9.2). Everything else returns `SECCOMP_RET_ALLOW`.
 //!
 //! The filter is also the fail-closed property the supervisor relies on:
 //! `SECCOMP_RET_TRACE` with no tracer attached does not run the syscall, it
 //! fails it with `ENOSYS`. If the observer dies, closed-set operations stop
 //! working rather than proceeding unobserved. `observer_linux.rs` proves it.
+//! The same holds for a descendant created with `CLONE_UNTRACED`: its
+//! closed-set calls fail with `ENOSYS`, because nothing traces it.
 
 use crate::platform::linux::tracer::closed_set::CLOSED_SET;
 use crate::platform::linux::tracer::digest::sha256_hex;
@@ -40,10 +51,18 @@ pub const NARROWING_TRACE_DATA: u16 = 0x4f4a;
 pub const LISTENER_SYSCALL: (&str, u32) = ("seccomp", 317);
 /// `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
 pub const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
+/// `clone(2)` on x86_64: a stop when its flags carry `CLONE_UNTRACED`.
+pub const CLONE_SYSCALL: (&str, u32) = ("clone", 56);
+/// `CLONE_UNTRACED`: the kernel does not attach the new task to a tracer.
+pub const CLONE_UNTRACED: u32 = 0x0080_0000;
+/// `clone3(2)` on x86_64: refused with `ENOSYS`, since its flags are in
+/// memory the filter cannot read.
+pub const CLONE3_SYSCALL: (&str, u32) = ("clone3", 435);
 
 /// Instruction count: architecture check (2), x32 check (2), one comparison
-/// per closed-set number, the listener check (3) and the two returns.
-const FILTER_LEN: usize = CLOSED_SET.len() + 9;
+/// per closed-set number, the listener check (3), the untraced-clone check
+/// (3), the `clone3` check (1) and the three returns.
+const FILTER_LEN: usize = CLOSED_SET.len() + 14;
 
 const ZERO: libc::sock_filter = libc::sock_filter {
     code: 0,
@@ -72,8 +91,11 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 fn build_into(out: &mut [libc::sock_filter; FILTER_LEN]) -> usize {
     let n = CLOSED_SET.len();
     let listener = n + 4;
-    let allow = n + 7;
-    let trace = n + 8;
+    let clone = n + 7;
+    let clone3 = n + 10;
+    let allow = n + 11;
+    let trace = n + 12;
+    let enosys = n + 13;
     // Jump targets are relative to the instruction after the jump, so a jump
     // at `i` reaching `t` uses an offset of `t - i - 1`. Each fits in the u8
     // the cBPF encoding allows as long as the set stays under 240 rows.
@@ -93,17 +115,41 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN]) -> usize {
     }
     // seccomp(2) asking for a notification listener. Its flags are an
     // `unsigned int`, so the low word of the second argument is all of them.
+    // Any other number goes on to the clone check with the number still in
+    // the accumulator.
     out[listener] = jump(
         sys::BPF_JEQ_K,
         LISTENER_SYSCALL.1,
         0,
-        (allow - listener - 1) as u8,
+        (clone - listener - 1) as u8,
     );
     out[listener + 1] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_ARG1_LOW);
     out[listener + 2] = jump(
         sys::BPF_JSET_K,
         SECCOMP_FILTER_FLAG_NEW_LISTENER,
         (trace - listener - 3) as u8,
+        (allow - listener - 3) as u8,
+    );
+    // clone(2) with CLONE_UNTRACED. Every clone flag lives in the low word
+    // of the first argument on x86_64.
+    out[clone] = jump(
+        sys::BPF_JEQ_K,
+        CLONE_SYSCALL.1,
+        0,
+        (clone3 - clone - 1) as u8,
+    );
+    out[clone + 1] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_ARG0_LOW);
+    out[clone + 2] = jump(
+        sys::BPF_JSET_K,
+        CLONE_UNTRACED,
+        (trace - clone - 3) as u8,
+        (allow - clone - 3) as u8,
+    );
+    // clone3(2): its flags are behind a pointer. ENOSYS, and glibc falls back.
+    out[clone3] = jump(
+        sys::BPF_JEQ_K,
+        CLONE3_SYSCALL.1,
+        (enosys - clone3 - 1) as u8,
         0,
     );
     out[allow] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ALLOW);
@@ -111,6 +157,7 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN]) -> usize {
         sys::BPF_RET_K,
         sys::SECCOMP_RET_TRACE | u32::from(NARROWING_TRACE_DATA),
     );
+    out[enosys] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ERRNO | sys::LINUX_ENOSYS);
     FILTER_LEN
 }
 
@@ -342,15 +389,71 @@ mod tests {
         for nr in 0u32..600 {
             let expected = if lookup(u64::from(nr)).is_some() {
                 TRACE
+            } else if nr == CLONE3_SYSCALL.1 {
+                ENOSYS
             } else {
                 sys::SECCOMP_RET_ALLOW
             };
             assert_eq!(
                 interpret(sys::AUDIT_ARCH_X86_64, nr),
                 expected,
-                "syscall {nr} with no listener flag"
+                "syscall {nr} with no listener or untraced flag"
             );
         }
+    }
+
+    const ENOSYS: u32 = sys::SECCOMP_RET_ERRNO | sys::LINUX_ENOSYS;
+
+    /// J4 S4: `clone` stops when its flags carry `CLONE_UNTRACED`, whatever
+    /// else they carry, and runs untouched otherwise — the flags glibc uses
+    /// for threads, `fork` and `posix_spawn` included. `clone3` is refused
+    /// with ENOSYS whatever its (unreadable) arguments, and nothing else is.
+    #[test]
+    fn j4_s4_an_untraced_clone_stops_and_clone3_is_enosys() {
+        const CLONE: u32 = 56;
+        const SIGCHLD: u32 = 17;
+        const THREAD: u32 = 0x003d_0f00;
+        const VFORK: u32 = 0x0000_4100 | SIGCHLD;
+        for flags in [
+            CLONE_UNTRACED,
+            CLONE_UNTRACED | SIGCHLD,
+            CLONE_UNTRACED | THREAD,
+            CLONE_UNTRACED | VFORK,
+            0xffff_ffff,
+        ] {
+            assert_eq!(
+                interpret_full(sys::AUDIT_ARCH_X86_64, CLONE, flags, 0),
+                TRACE,
+                "clone flags {flags:#x} must stop"
+            );
+        }
+        for flags in [0, SIGCHLD, THREAD, VFORK, !CLONE_UNTRACED] {
+            assert_eq!(
+                interpret_full(sys::AUDIT_ARCH_X86_64, CLONE, flags, 0),
+                sys::SECCOMP_RET_ALLOW,
+                "clone flags {flags:#x} carry no CLONE_UNTRACED"
+            );
+        }
+        // The flag in another call's first argument means nothing.
+        for nr in [57u32, 58, 1, 0] {
+            assert_eq!(
+                interpret_full(sys::AUDIT_ARCH_X86_64, nr, CLONE_UNTRACED, 0),
+                sys::SECCOMP_RET_ALLOW,
+                "nr {nr}"
+            );
+        }
+        for (arg0, arg1) in [(0, 0), (0x1000, 88), (u32::MAX, u32::MAX)] {
+            assert_eq!(
+                interpret_full(sys::AUDIT_ARCH_X86_64, CLONE3_SYSCALL.1, arg0, arg1),
+                ENOSYS
+            );
+        }
+        // Another ABI's clone3 number is foreign, not refused: it stops.
+        assert_eq!(interpret(0x4000_0003, CLONE3_SYSCALL.1), TRACE);
+        assert_eq!(
+            (CLONE_SYSCALL.1, CLONE3_SYSCALL.1, CLONE_UNTRACED),
+            (libc::SYS_clone as u32, 435, libc::CLONE_UNTRACED as u32)
+        );
     }
 
     #[test]
@@ -370,17 +473,22 @@ mod tests {
     }
 
     #[test]
-    fn the_program_is_the_expected_shape_and_never_denies() {
+    fn the_program_is_the_expected_shape_and_refuses_only_clone3() {
         let prog = narrowing_filter();
-        assert_eq!(prog.len(), CLOSED_SET.len() + 9);
+        assert_eq!(prog.len(), CLOSED_SET.len() + 14);
         for insn in &prog {
             if insn.code == sys::BPF_RET_K {
                 assert!(
-                    insn.k == sys::SECCOMP_RET_ALLOW || insn.k == TRACE,
-                    "the narrowing filter never denies: {:#x}",
+                    insn.k == sys::SECCOMP_RET_ALLOW || insn.k == TRACE || insn.k == ENOSYS,
+                    "the narrowing filter never denies anything but clone3: {:#x}",
                     insn.k
                 );
             }
+        }
+        // And the one refusal is reached by clone3 alone.
+        for nr in 0u32..1024 {
+            let verdict = interpret(sys::AUDIT_ARCH_X86_64, nr);
+            assert_eq!(verdict == ENOSYS, nr == CLONE3_SYSCALL.1, "nr {nr}");
         }
         assert_eq!(prog[0].code, sys::BPF_LD_W_ABS);
         assert_eq!(

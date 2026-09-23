@@ -136,6 +136,10 @@ struct Case {
     jail: Jail,
     workspace: PathBuf,
     fixture: PathBuf,
+    /// `build` exposes no workspace (§3.1: a package build reads declared
+    /// inputs and writes scratch), so the fixture and its script are
+    /// declared read-only inputs and the operations run under `/tmp`.
+    build: bool,
 }
 
 fn case(profile: Profile, evidence: &str) -> Case {
@@ -162,6 +166,7 @@ fn case(profile: Profile, evidence: &str) -> Case {
         jail: jail.trace().control(),
         workspace,
         fixture,
+        build: profile == Profile::Build,
     }
 }
 
@@ -178,15 +183,50 @@ impl Case {
     fn script(self, name: &str, steps: &Value) -> Run {
         let path = self.workspace.join(format!("{name}.json"));
         std::fs::write(&path, serde_json::to_vec(steps).unwrap()).unwrap();
-        self.jail
-            .target([
-                self.fixture.clone().into_os_string(),
-                OsString::from("script"),
-                path.into_os_string(),
-            ])
-            .run()
-            .expect("the jail runs")
+        let argv = vec![
+            self.fixture.clone().into_os_string(),
+            OsString::from("script"),
+            path.clone().into_os_string(),
+        ];
+        self.run_with_inputs(argv, &[path])
     }
+
+    /// Run `argv`; under `build` the fixture and `inputs` are declared.
+    fn run_with_inputs(self, argv: Vec<OsString>, inputs: &[PathBuf]) -> Run {
+        let mut jail = self.jail;
+        if self.build {
+            jail = jail.arg("--ro").arg(&self.fixture);
+            for input in inputs {
+                jail = jail.arg("--ro").arg(input);
+            }
+        }
+        jail.target(argv).run().expect("the jail runs")
+    }
+
+    /// The directory the operations run in, and the roots §11.3 reports
+    /// paths below it against: `(base, workspace root, scratch root)`.
+    fn base(&self) -> String {
+        if self.build {
+            "/tmp/o01".to_owned()
+        } else {
+            self.workspace.to_str().unwrap().to_owned()
+        }
+    }
+}
+
+/// The receipt's own name for the target: pid and `linux_boot_start` ticks.
+fn target_identity(receipt: &Value) -> (i64, u64) {
+    let process = &receipt["process"];
+    assert_eq!(
+        process["identity"]["kind"], "linux_boot_start",
+        "{process:#}"
+    );
+    let ticks = &process["identity"]["value"]["start_time_ticks"];
+    let ticks = ticks
+        .as_u64()
+        .or_else(|| ticks.as_str().and_then(|t| t.parse().ok()))
+        .unwrap_or_else(|| panic!("no start_time_ticks: {process:#}"));
+    (process["pid"].as_i64().unwrap(), ticks)
 }
 
 /// Every receipt and event validated against the checked-in schemas; the
@@ -341,21 +381,34 @@ fn path_keys(op: &str) -> (Option<&'static str>, Option<&'static str>) {
 }
 
 /// What §11.3 lets an event say about a pathname the fixture passed with
-/// `AT_FDCWD`: workspace-relative below the workspace, unavailable when
-/// relative, a digest anywhere else.
-fn expected_path(arg: &str, workspace: &str) -> Value {
-    if let Some(rest) = arg.strip_prefix(workspace)
-        && (rest.is_empty() || rest.starts_with('/'))
-    {
-        return serde_json::json!({
-            "kind": "workspace_relative",
-            "value": rest.trim_start_matches('/'),
-        });
+/// `AT_FDCWD`: relative to the workspace or the scratch below either,
+/// unavailable when relative, a digest anywhere else.
+fn expected_path(arg: &str, roots: &Roots) -> Value {
+    for (root, kind) in [
+        (Some(roots.workspace.as_str()), "workspace_relative"),
+        (roots.scratch.as_deref(), "scratch_relative"),
+    ] {
+        if let Some(root) = root
+            && let Some(rest) = arg.strip_prefix(root)
+            && (rest.is_empty() || rest.starts_with('/'))
+        {
+            return serde_json::json!({
+                "kind": kind,
+                "value": rest.trim_start_matches('/'),
+            });
+        }
     }
     if !arg.starts_with('/') {
         return serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"});
     }
     serde_json::json!({"kind": "digest"})
+}
+
+/// The two roots a contained attempt reports paths against.
+struct Roots {
+    workspace: String,
+    /// `/tmp` inside a contained profile; `none` uses only the workspace here.
+    scratch: Option<String>,
 }
 
 fn path_matches(event_path: &Value, expected: &Value) -> bool {
@@ -366,7 +419,7 @@ fn path_matches(event_path: &Value, expected: &Value) -> bool {
 }
 
 /// Whether `event` is the one audit result `line` stands for.
-fn matches(line: &Value, event: &Value, workspace: &str) -> bool {
+fn matches(line: &Value, event: &Value, roots: &Roots) -> bool {
     let Some(base) = base_operation(line) else {
         return false;
     };
@@ -413,7 +466,7 @@ fn matches(line: &Value, event: &Value, workspace: &str) -> bool {
             let Some(arg) = line["args"][key].as_str() else {
                 return false;
             };
-            if !path_matches(&event["fields"][field], &expected_path(arg, workspace)) {
+            if !path_matches(&event["fields"][field], &expected_path(arg, roots)) {
                 return false;
             }
         }
@@ -441,9 +494,19 @@ fn errno_value(name: &str) -> i32 {
 /// an easy one, a read-only open that must produce nothing, and two
 /// successful execs whose children exit.
 fn o01_steps(c: &Case) -> Value {
-    let w = |name: &str| c.ws(name);
+    let base = c.base();
+    let w = |name: &str| format!("{base}/{name}");
     let fixture = c.fixture_s();
     serde_json::json!([
+        ["mkdir", base.clone(), "--expect", "any"],
+        [
+            "open",
+            w("denied.txt"),
+            "--create",
+            "--write",
+            "--mode",
+            "000"
+        ],
         ["open", w("o-openat.txt"), "--create", "--write"],
         [
             "open",
@@ -592,10 +655,10 @@ fn o01_matrix(profile: Profile) {
         return;
     }
     let c = case(profile, "strict");
-    let denied = c.workspace.join("denied.txt");
-    std::fs::write(&denied, b"x").unwrap();
-    std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let workspace = c.workspace.to_str().unwrap().to_owned();
+    let roots = Roots {
+        workspace: c.workspace.to_str().unwrap().to_owned(),
+        scratch: (profile != Profile::None).then(|| "/tmp".to_owned()),
+    };
     let steps = o01_steps(&c);
     let run = c.script("o01", &steps);
     let receipt = settled(&run);
@@ -619,6 +682,19 @@ fn o01_matrix(profile: Profile) {
     );
 
     let mut used = vec![false; events.len()];
+    // The target's own exec is not a fixture line: the launcher made it. It
+    // looks exactly like the fixture's own `execve` of the same binary, so
+    // it is set aside first, by the pid the receipt names the target with.
+    let target = target_identity(&receipt).0;
+    let own = events
+        .iter()
+        .position(|e| {
+            e["operation"] == "proc.exec"
+                && e["outcome"]["completion"] == "exec_transition"
+                && e["fields"]["pid"].as_i64() == Some(target)
+        })
+        .unwrap_or_else(|| panic!("{profile:?}: the target's own exec is missing\n{context}"));
+    used[own] = true;
     let mut matched_lines = 0usize;
     let mut excluded = 0usize;
     for line in &lines {
@@ -634,7 +710,7 @@ fn o01_matrix(profile: Profile) {
             continue;
         }
         let found: Vec<usize> = (0..events.len())
-            .filter(|i| !used[*i] && matches(line, events[*i], &workspace))
+            .filter(|i| !used[*i] && matches(line, events[*i], &roots))
             .collect();
         let Some(first) = found.first() else {
             panic!("{profile:?}: no audit result for {line}\n{context}");
@@ -644,8 +720,8 @@ fn o01_matrix(profile: Profile) {
     }
     assert!(excluded >= 1, "{profile:?}: the read-only open was not run");
 
-    // What is left is the target's own exec and the exits of the processes
-    // that execed: the target and the two children that ran `exit 0`.
+    // What is left is the exits of the processes that execed: the target and
+    // the two children that ran `exit 0`.
     let leftover: Vec<&Value> = events
         .iter()
         .zip(&used)
@@ -660,18 +736,17 @@ fn o01_matrix(profile: Profile) {
     let exits = leftover_ops.iter().filter(|op| **op == "proc.exit").count();
     assert_eq!(
         (execs, exits, leftover.len()),
-        (1, 3, 4),
+        (0, 3, 3),
         "{profile:?}: audit results no fixture line accounts for: {leftover_ops:?}\n{context}"
     );
-    let target = receipt["lifetime"]["process"]["pid"].as_i64();
     for event in &leftover {
         assert_eq!(event["outcome"]["ok"], true, "{profile:?}: {event}");
     }
     assert!(
         leftover
             .iter()
-            .any(|e| e["operation"] == "proc.exec" && e["fields"]["pid"].as_i64() == target),
-        "{profile:?}: the target's own exec is missing\n{context}"
+            .any(|e| e["fields"]["pid"].as_i64() == Some(target)),
+        "{profile:?}: the target's own exit is missing\n{context}"
     );
 
     // Class counts are the results per class, and every audit class is
@@ -725,12 +800,8 @@ fn o01_matrix(profile: Profile) {
 
     // Zero counts are zero, not absent: a target that only exits.
     let c = case(profile, "strict");
-    let fixture = c.fixture_s();
-    let run = c
-        .jail
-        .target([fixture.as_str(), "exit", "0"])
-        .run()
-        .expect("the jail runs");
+    let fixture = c.fixture.clone().into_os_string();
+    let run = c.run_with_inputs(vec![fixture, "exit".into(), "0".into()], &[]);
     let receipt = settled(&run);
     let events = audit_results(&run);
     let ops: Vec<&str> = events
@@ -803,12 +874,10 @@ fn assert_births(run: &Run, receipt: &Value, profile: Profile) -> BTreeMap<i64, 
         );
     }
     // The target's birth is the one the receipt records for it.
-    let process = &receipt["lifetime"]["process"];
-    assert_eq!(process["identity"]["kind"], "linux_boot_start");
-    let target = process["pid"].as_i64().unwrap();
+    let (target, ticks) = target_identity(receipt);
     assert_eq!(
         births.get(&target).copied(),
-        process["identity"]["value"]["start_time_ticks"].as_u64(),
+        Some(ticks),
         "{profile:?}: the target's audit birth is not the receipt's\n{context}"
     );
     births
@@ -850,29 +919,42 @@ fn j4_o02_every_audit_event_names_the_birth_of_its_process() {
         assert_eq!(identities.len(), 2, "{profile:?}\n{context}");
         // Each process names itself with the birth the audit gives it: the
         // target and the exec'd child, which in the contained profiles see
-        // themselves under a namespace pid the events never use.
-        let target = receipt["lifetime"]["process"]["pid"].as_i64().unwrap();
-        let mut named: BTreeSet<u64> = BTreeSet::new();
-        for identity in &identities {
-            let ticks = identity["args"]["start_ticks"].as_u64().unwrap();
-            assert!(
-                births.values().any(|b| *b == ticks),
-                "{profile:?}: no audit result carries the birth {ticks} of {identity}\n{context}"
+        // themselves under a namespace pid the events never use. Births are
+        // clock ticks (10 ms here), so two processes may share one; the name
+        // is the pair, and each pair is checked against its own process.
+        let target = target_identity(&receipt).0;
+        let events = audit_results(&run);
+        let by_path = |value: &str| -> i64 {
+            events
+                .iter()
+                .find(|e| e["fields"]["path"]["value"] == value)
+                .and_then(|e| e["fields"]["pid"].as_i64())
+                .unwrap_or_else(|| panic!("{profile:?}: no result for {value}\n{context}"))
+        };
+        let child = by_path("by-child");
+        assert_eq!(by_path("by-target"), target, "{profile:?}");
+        assert_ne!(child, target, "{profile:?}");
+        for (identity, pid) in identities.iter().zip([target, child]) {
+            assert_eq!(
+                births.get(&pid).copied(),
+                identity["args"]["start_ticks"].as_u64(),
+                "{profile:?}: pid {pid} is named with another birth than {identity}\n{context}"
             );
-            named.insert(ticks);
         }
-        assert_eq!(named.len(), 2, "{profile:?}: two processes, two births");
         // The failed-exec child never execs: its one result still names it,
-        // by the pid the fixture reported and a birth after the target's.
-        let failed = lines
+        // with a pid of its own and a birth no earlier than the target's.
+        // (The fixture reports that child's pid as it sees it, which in a
+        // contained profile is a namespace pid; the event carries the host
+        // one, so the two are tied by the call, not by the number.)
+        let failed: Vec<&&Value> = events
             .iter()
-            .find(|l| l["op"] == "execve" && l["errno"] == "ENOENT")
-            .unwrap();
-        let failed_pid = failed["args"]["pid"].as_i64().unwrap();
-        let failed_birth = births.get(&failed_pid).copied().unwrap_or_else(|| {
-            panic!("{profile:?}: the failed exec of {failed_pid} has no result\n{context}")
-        });
-        assert!(failed_birth >= births[&target], "{profile:?}");
+            .filter(|e| e["fields"]["syscall"] == "execve" && e["outcome"]["errno"] == "ENOENT")
+            .collect();
+        assert_eq!(failed.len(), 1, "{profile:?}\n{context}");
+        let failed_pid = failed[0]["fields"]["pid"].as_i64().unwrap();
+        assert!(failed_pid != target && failed_pid != child, "{profile:?}");
+        assert!(births[&failed_pid] >= births[&target], "{profile:?}");
+        assert!(births[&child] >= births[&failed_pid], "{profile:?}");
         // Threads are not processes: every pid named is a thread group this
         // run created (target, the failed-exec child, the exec'd child).
         assert_eq!(births.len(), 3, "{profile:?}: {births:?}\n{context}");
@@ -1037,7 +1119,7 @@ fn j4_o04_an_unrelated_host_process_is_never_observed() {
     assert!(still_running, "the unrelated process must outlive the run");
     let receipt = settled(&run);
     let context = dump(&run);
-    let target = receipt["lifetime"]["process"]["pid"].as_i64().unwrap();
+    let target = target_identity(&receipt).0;
     let digests: Vec<String> = [&a, &b]
         .iter()
         .map(|p| ouro_jail::canonical::sha256_prefixed(p.as_os_str().as_bytes()))
@@ -1528,4 +1610,62 @@ fn j4_clone_untraced_is_a_gap_in_none() {
         "{:#}",
         receipt["outcome"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// §16 closed set: the published table
+// ---------------------------------------------------------------------------
+
+fn published_table_path() -> PathBuf {
+    specs_dir().join("evidence/closed-set-x86_64.txt")
+}
+
+/// §11.2: "The implementation must publish its exact hook/syscall table."
+/// The table is generated from the observer's own rows and by running the
+/// installed program; the checked-in evidence must be exactly it, and the
+/// narrowing-filter digest it publishes must be the one a live receipt of
+/// this build reads back — for a contained profile and for `none`, which
+/// install the same program.
+#[test]
+fn j4_closed_set_the_published_table_is_the_one_this_build_traces() {
+    let generated = ouro_jail::platform::linux::tracer::closed_set_table();
+    let checked_in = std::fs::read_to_string(published_table_path())
+        .unwrap_or_else(|e| panic!("{}: {e}", published_table_path().display()));
+    assert_eq!(
+        generated, checked_in,
+        "the published closed-set table has drifted from what this build traces; \
+         regenerate it with the ignored `bless_the_published_closed_set_table`"
+    );
+    let published = checked_in
+        .lines()
+        .find_map(|line| line.strip_prefix("narrowing filter digest: "))
+        .expect("the table publishes the filter digest")
+        .to_owned();
+    for profile in [Profile::Tool, Profile::None] {
+        if !profile.available() {
+            return;
+        }
+        let c = case(profile, "strict");
+        let fixture = c.fixture.clone().into_os_string();
+        let run = c.run_with_inputs(vec![fixture, "exit".into(), "0".into()], &[]);
+        let receipt = settled(&run);
+        assert_eq!(
+            receipt["lifetime"]["native"]["details"]["narrowing_filter_digest"].as_str(),
+            Some(published.as_str()),
+            "{profile:?}: the receipt reads back another filter"
+        );
+        eprintln!("{profile:?}: receipt narrowing_filter_digest = {published}");
+    }
+}
+
+/// Writes the published table from this build. Run by hand, on Linux,
+/// after a deliberate change to the closed set or the narrowing filter.
+#[test]
+#[ignore = "writes the evidence file; run deliberately"]
+fn bless_the_published_closed_set_table() {
+    std::fs::write(
+        published_table_path(),
+        ouro_jail::platform::linux::tracer::closed_set_table(),
+    )
+    .unwrap();
 }

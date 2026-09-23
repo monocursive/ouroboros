@@ -51,6 +51,7 @@ mod filter;
 mod proc;
 mod session;
 mod sys;
+mod table;
 
 use std::fmt;
 use std::sync::Arc;
@@ -63,10 +64,12 @@ use libc::pid_t;
 
 pub use closed_set::ClosedOp;
 pub use filter::{
-    LISTENER_SYSCALL, NARROWING_TRACE_DATA, SECCOMP_FILTER_FLAG_NEW_LISTENER,
-    install_narrowing_filter, narrowing_filter, narrowing_filter_bytes, narrowing_filter_digest,
+    CLONE_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA,
+    SECCOMP_FILTER_FLAG_NEW_LISTENER, install_narrowing_filter, narrowing_filter,
+    narrowing_filter_bytes, narrowing_filter_digest,
 };
 pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
+pub use table::closed_set_table;
 
 /// Bounds on what the observer will hold, from jail-v1 §11.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +278,13 @@ pub enum GapReason {
     /// call with no trace stop, so from then on any closed-set call may be
     /// unobserved; how many is unknown and the interval has no end.
     ChildNotificationListener,
+    /// A tracee created a task with `clone(CLONE_UNTRACED)` (J4 S4), which
+    /// the kernel does not attach to this tracer. §11.2: an untracked
+    /// descendant is a coverage gap. Its own closed-set calls fail with
+    /// `ENOSYS` (a trace stop with no tracer), but nothing about it is
+    /// observed — not its calls, not its lifetime — so the count is unknown
+    /// and the interval has no end.
+    UntracedDescendant,
 }
 
 impl GapReason {
@@ -300,6 +310,7 @@ impl GapReason {
             GapReason::DeathUnattributed => "death_unattributed",
             GapReason::ForeignAbi => "foreign_abi",
             GapReason::ChildNotificationListener => "child_notification_listener",
+            GapReason::UntracedDescendant => "untraced_descendant",
         }
     }
 
@@ -308,7 +319,10 @@ impl GapReason {
     /// notification listener lives as long as some process holds it.
     #[must_use]
     pub fn is_open_ended(self) -> bool {
-        matches!(self, GapReason::ChildNotificationListener)
+        matches!(
+            self,
+            GapReason::ChildNotificationListener | GapReason::UntracedDescendant
+        )
     }
 }
 
@@ -347,6 +361,14 @@ pub enum TracerEvent {
     /// A confirmed exec transition. Never inferred from a syscall entry.
     Exec {
         pid: pid_t,
+        /// The birth of process `pid`: the start time the kernel recorded for
+        /// its thread-group leader (field 22 of `/proc/<pid>/stat`, clock
+        /// ticks since boot), read when the tracer first took the process
+        /// on. `None` when `/proc` would not say. See [`TracerEvent::Syscall`].
+        start_ticks: Option<u64>,
+        /// The call whose entry this transition was paired with, `execve` or
+        /// `execveat`; `None` when the entry was not witnessed.
+        syscall: Option<&'static str>,
         /// The pathname argument of the `execve`/`execveat` that produced
         /// this transition, snapshotted at its entry. Descendant argv
         /// digests stay null in J1, so this snapshot is the only way to name
@@ -374,6 +396,17 @@ pub enum TracerEvent {
     Syscall {
         /// The thread group, which is the process the consumer attributes to.
         pid: pid_t,
+        /// The birth of process `pid` (§11.3, "internal attribution includes
+        /// boot/birth identity"): the start time of its thread-group leader,
+        /// field 22 of `/proc/<pid>/stat` in clock ticks since boot, read
+        /// when the tracer first took the process on — at its fork event,
+        /// while it was an unreaped tracee whose number the kernel could not
+        /// yet give to anyone else. A non-leader exec keeps it (the kernel
+        /// gives the exec'ing thread the leader's start time). A task that
+        /// later receives the same number is registered afresh, with its own
+        /// birth: nothing is keyed by the number alone across a death. `None`
+        /// when `/proc` would not say.
+        start_ticks: Option<u64>,
         /// The thread that made the call.
         tid: pid_t,
         op: ClosedOp,
@@ -386,6 +419,8 @@ pub enum TracerEvent {
     /// wait status, so the consumer derives code or signal from it.
     Exit {
         pid: pid_t,
+        /// The birth of process `pid`. See [`TracerEvent::Syscall`].
+        start_ticks: Option<u64>,
         status: i32,
         monotonic_ns: u64,
     },
@@ -504,6 +539,8 @@ pub struct LossCounters {
     pub foreign_abi: u64,
     /// Notification listeners a child installed for itself.
     pub notification_listeners: u64,
+    /// Tasks a tracee created with `CLONE_UNTRACED`, which nothing traces.
+    pub untraced_descendants: u64,
 }
 
 impl LossCounters {
@@ -529,6 +566,7 @@ impl LossCounters {
             + self.death_unattributed
             + self.foreign_abi
             + self.notification_listeners
+            + self.untraced_descendants
     }
 }
 
@@ -589,6 +627,9 @@ pub struct TracerSummary {
     /// Notification-listener requests the kernel refused (`EBUSY` under the
     /// `agent` mediation listener, for one): no listener, nothing hidden.
     pub listener_refused: u64,
+    /// `clone(CLONE_UNTRACED)` calls that created no task: no descendant,
+    /// nothing untraced.
+    pub untraced_clone_refused: u64,
     pub loss: LossCounters,
     pub ops: OpCounts,
     /// The tracer thread panicked. Every other field is then unreliable.
@@ -976,6 +1017,7 @@ mod tests {
             GapReason::MediationResponseUndelivered,
             GapReason::ForeignAbi,
             GapReason::ChildNotificationListener,
+            GapReason::UntracedDescendant,
         ];
         let names: std::collections::BTreeSet<&str> = reasons.iter().map(|r| r.as_str()).collect();
         assert_eq!(names.len(), reasons.len());

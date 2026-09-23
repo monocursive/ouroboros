@@ -106,8 +106,14 @@ pub const BPF_RET_K: u16 = 0x06;
 /// Byte offsets into `struct seccomp_data`.
 pub const SECCOMP_DATA_NR: u32 = 0;
 pub const SECCOMP_DATA_ARCH: u32 = 4;
+/// The low word of `args[0]` on a little-endian host.
+pub const SECCOMP_DATA_ARG0_LOW: u32 = 16;
 /// The low word of `args[1]` on a little-endian host.
 pub const SECCOMP_DATA_ARG1_LOW: u32 = 24;
+/// `SECCOMP_RET_ERRNO`, with the errno in the data bits.
+pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+/// Linux `ENOSYS`, spelled out because the filter targets the Linux ABI.
+pub const LINUX_ENOSYS: u32 = 38;
 /// `SECCOMP_RET_DATA`: the low sixteen bits of a verdict, which
 /// `PTRACE_GETEVENTMSG` reports at a `PTRACE_EVENT_SECCOMP` stop.
 pub const SECCOMP_RET_DATA: u32 = 0x0000_ffff;

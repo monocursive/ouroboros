@@ -1434,6 +1434,28 @@ fn o02_a_non_leader_exec_keeps_the_birth_identity() {
         "{:?}",
         observed.summary.loss
     );
+    // J4 O02: the birth the events name is the one the process was attached
+    // with — the kernel gives the exec'ing worker the leader's start time —
+    // on both transitions and on the exit.
+    let attached = observed
+        .events
+        .iter()
+        .find_map(|e| match e {
+            TracerEvent::Attached { start_ticks, .. } => *start_ticks,
+            _ => None,
+        })
+        .expect("the attach names the launcher's birth");
+    let births: Vec<Option<u64>> = observed
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            TracerEvent::Exec { start_ticks, .. } | TracerEvent::Exit { start_ticks, .. } => {
+                Some(*start_ticks)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(births, vec![Some(attached); 3], "{:?}", observed.events);
 }
 
 /// The fail-closed property the supervisor relies on: with the narrowing
