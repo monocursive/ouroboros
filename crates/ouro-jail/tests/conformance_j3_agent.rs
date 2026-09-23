@@ -3196,3 +3196,127 @@ ts = [threading.Thread(target=worker, daemon=True) for _ in range(32)]
         assert_eq!(receipt["lifetime"]["tree_empty"], true, "{observe}");
     }
 }
+
+/// Python: every socket family case below, created or refused (errno name),
+/// and glibc's `localhost` resolution with `AI_ADDRCONFIG`.
+const FAMILIES: &str = r#"
+import errno, json, socket
+out = {}
+def attempt(label, make):
+    try:
+        for s in make():
+            s.close()
+        out[label] = "created"
+    except OSError as e:
+        out[label] = errno.errorcode.get(e.errno, str(e.errno))
+for label, (family, kind, protocol) in {
+    "AF_VSOCK": (40, 1, 0),
+    "AF_ALG": (38, 5, 0),
+    "AF_QIPCRTR": (42, 2, 0),
+    "AF_PACKET": (17, 3, 0),
+    "AF_KEY": (15, 3, 2),
+    "AF_NETLINK_ROUTE": (16, 3, 0),
+    "AF_NETLINK_SOCK_DIAG": (16, 3, 4),
+    "AF_INET": (2, 1, 0),
+    "AF_INET6": (10, 1, 0),
+    "AF_UNIX": (1, 1, 0),
+}.items():
+    attempt(label, lambda: [socket.socket(family, kind, protocol)])
+for label, family in (("pair_AF_VSOCK", 40), ("pair_AF_ALG", 38), ("pair_AF_INET", 2)):
+    attempt(label, lambda: socket.socketpair(family, 1, 0))
+try:
+    out["gai_localhost_addrconfig"] = sorted(set(r[4][0] for r in socket.getaddrinfo(
+        "localhost", 80, 0, socket.SOCK_STREAM, 0, socket.AI_ADDRCONFIG)))
+except OSError as e:
+    out["gai_localhost_addrconfig"] = str(e)
+print(json.dumps(out, sort_keys=True))
+"#;
+
+/// Socket families (integration decision 2). Attempted, directly on the host,
+/// under `none`, and under each contained profile (`tool`, `build`,
+/// `agent`): `socket` in AF_VSOCK, AF_ALG, AF_QIPCRTR, AF_PACKET, AF_KEY,
+/// netlink (route and sock_diag), AF_INET, AF_INET6 and AF_UNIX, and
+/// `socketpair` in AF_VSOCK, AF_ALG and AF_INET. Verdict: `none` gets
+/// exactly what the host gives (untouched); every contained profile gets
+/// EAFNOSUPPORT for every family outside AF_UNIX, AF_INET and AF_INET6 —
+/// including the ones this host creates (vsock, alg, qipcrtr, netlink) and
+/// netlink sock_diag under `agent`, whose launcher alone may open one —
+/// while AF_INET and AF_INET6 are created, AF_UNIX is EPERM under `tool`
+/// and `build` and created under `agent`, the families' own `socketpair`
+/// answers (EOPNOTSUPP) are replaced by EAFNOSUPPORT, and glibc still
+/// resolves `localhost` with AI_ADDRCONFIG (it needs no netlink socket).
+#[test]
+fn review_every_contained_profile_refuses_a_socket_family_outside_the_list() {
+    if !common::live() {
+        return;
+    }
+    let host: Value = {
+        let output = std::process::Command::new("/usr/bin/python3")
+            .args(["-c", FAMILIES])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    // The reference host creates these outside any jail: the refusals
+    // below are the jail's, not the kernel's.
+    for family in ["AF_VSOCK", "AF_ALG", "AF_QIPCRTR", "AF_NETLINK_ROUTE"] {
+        assert_eq!(host[family], "created", "host {family}: {host}");
+    }
+    assert_eq!(
+        host["gai_localhost_addrconfig"],
+        serde_json::json!(["127.0.0.1"])
+    );
+    let c = case("none");
+    let run = c.jail.target(py(FAMILIES, &[])).run().unwrap();
+    assert_eq!(run.code(), Some(0), "none: {}", run.stderr_text());
+    settled(&run);
+    let none = py_out(&run);
+    for (label, value) in host.as_object().unwrap() {
+        assert_eq!(&none[label], value, "none is untouched: {label}");
+    }
+    let outside = [
+        "AF_VSOCK",
+        "AF_ALG",
+        "AF_QIPCRTR",
+        "AF_PACKET",
+        "AF_KEY",
+        "AF_NETLINK_ROUTE",
+        "AF_NETLINK_SOCK_DIAG",
+        "pair_AF_VSOCK",
+        "pair_AF_ALG",
+    ];
+    for profile in ["tool", "build", "agent"] {
+        let c = case(profile);
+        // `build` requires an explicit memory ceiling (§6).
+        let limits: &[&str] = if profile == "build" {
+            &["--limit", "mem=1GiB"]
+        } else {
+            &[]
+        };
+        let run = c.jail.args(limits).target(py(FAMILIES, &[])).run().unwrap();
+        assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
+        settled(&run);
+        let out = py_out(&run);
+        for label in outside {
+            assert_eq!(out[label], "EAFNOSUPPORT", "{profile} {label}: {out}");
+        }
+        for label in ["AF_INET", "AF_INET6"] {
+            assert_eq!(out[label], "created", "{profile} {label}: {out}");
+        }
+        assert_eq!(
+            out["pair_AF_INET"], host["pair_AF_INET"],
+            "{profile}: the kernel's own answer for a listed family"
+        );
+        let unix = if profile == "agent" {
+            "created"
+        } else {
+            "EPERM"
+        };
+        assert_eq!(out["AF_UNIX"], unix, "{profile}: {out}");
+        assert_eq!(
+            out["gai_localhost_addrconfig"],
+            serde_json::json!(["127.0.0.1"]),
+            "{profile}: {out}"
+        );
+    }
+}

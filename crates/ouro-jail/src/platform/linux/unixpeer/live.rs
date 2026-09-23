@@ -57,8 +57,9 @@ impl LauncherSetup {
 }
 // J3-agent end
 
-/// Install the agent mediation filter with a new user-notification listener and
-/// `WAIT_KILLABLE_RECV`, and open a `NETLINK_SOCK_DIAG` socket in this netns.
+/// Open a `NETLINK_SOCK_DIAG` socket in this netns, then install the agent
+/// mediation filter with a new user-notification listener and
+/// `WAIT_KILLABLE_RECV` (the filter refuses netlink sockets from then on).
 ///
 /// Runs in the trusted launcher, inside the attempt's namespaces, while it is
 /// blocked before exec (§3.4 step 2). `WAIT_KILLABLE_RECV` is set so an
@@ -69,8 +70,11 @@ impl LauncherSetup {
 ///
 /// The errno of `prctl`, `seccomp` or `socket`.
 pub fn launcher_setup() -> io::Result<LauncherSetup> {
-    let listener = install_filter(FLAG_NEW_LISTENER | FLAG_WAIT_KILLABLE_RECV)?;
+    // The sock_diag socket first: the mediation filter refuses every netlink
+    // socket once it is installed, so nothing after it (the bridge, the
+    // target) can open one.
     let sockdiag = SockDiag::open()?;
+    let listener = install_filter(FLAG_NEW_LISTENER | FLAG_WAIT_KILLABLE_RECV)?;
     // Extract the netlink fd as an OwnedFd guard alongside its number.
     let sockdiag_no = sockdiag.as_raw_fd();
     // SAFETY: `sockdiag` owns the fd; we borrow its number for the handover and

@@ -29,6 +29,9 @@ pub const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
 pub const LINUX_EPERM: u32 = 1;
 /// Linux `ENOSYS`.
 pub const LINUX_ENOSYS: u32 = 38;
+/// Linux `EAFNOSUPPORT`: what a socket family outside the allow-list gets,
+/// the answer a kernel without that family would give.
+pub const LINUX_EAFNOSUPPORT: u32 = 97;
 
 /// Verdict for a denied syscall.
 #[must_use]
@@ -112,6 +115,17 @@ pub const NR_IOCTL: u32 = 16;
 
 /// `AF_UNIX`, compared against argument 0 of `socket` and `socketpair`.
 pub const AF_UNIX: u32 = 1;
+/// `AF_INET`.
+pub const AF_INET: u32 = 2;
+/// `AF_INET6`.
+pub const AF_INET6: u32 = 10;
+/// `AF_NETLINK`.
+pub const AF_NETLINK: u32 = 16;
+/// `NETLINK_SOCK_DIAG`, compared against argument 2 of `socket`: the one
+/// netlink protocol the `agent` launcher opens (the unix-peer mediation's
+/// identity half), before its mediation filter refuses every netlink socket
+/// for everything that runs after it.
+pub const NETLINK_SOCK_DIAG: u32 = 4;
 /// `TIOCSTI`, compared against argument 1 of `ioctl`.
 pub const TIOCSTI: u32 = 0x5412;
 
@@ -142,7 +156,9 @@ const L_ALLOW: &str = "allow";
 const L_DENY_EPERM: &str = "deny_eperm";
 const L_DENY_ENOSYS: &str = "deny_enosys";
 const L_CLONE_FLAGS: &str = "clone_flags";
-const L_AF_UNIX: &str = "af_unix";
+const L_SOCKET: &str = "socket_family";
+const L_NETLINK: &str = "netlink_protocol";
+const L_DENY_FAMILY: &str = "deny_eafnosupport";
 const L_IOCTL: &str = "ioctl_arg";
 
 /// What distinguishes one contained baseline from another. Every baseline
@@ -157,6 +173,8 @@ struct Shape {
     /// the mediation filter ([`mediation_filter`]), which admits only stream
     /// and seqpacket sockets.
     af_unix_denied: bool,
+    /// The netlink protocols `socket` may open; none for `tool`.
+    netlink_protocols: &'static [u32],
 }
 
 /// Build the `tool` baseline filter.
@@ -174,6 +192,7 @@ pub fn tool_baseline() -> Result<Program, BpfError> {
         deny: DENY_EPERM.to_vec(),
         clone_namespaces_denied: true,
         af_unix_denied: true,
+        netlink_protocols: &[],
     })
 }
 
@@ -196,10 +215,8 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
     if shape.clone_namespaces_denied {
         asm.jeq(NR_CLONE, Some(L_CLONE_FLAGS), None);
     }
-    if shape.af_unix_denied {
-        asm.jeq(NR_SOCKET, Some(L_AF_UNIX), None);
-        asm.jeq(NR_SOCKETPAIR, Some(L_AF_UNIX), None);
-    }
+    asm.jeq(NR_SOCKET, Some(L_SOCKET), None);
+    asm.jeq(NR_SOCKETPAIR, Some(L_SOCKET), None);
     asm.jeq(NR_IOCTL, Some(L_IOCTL), None);
     asm.ja(L_ALLOW);
 
@@ -212,13 +229,30 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
             .ja(L_ALLOW);
     }
 
+    // socket/socketpair: an allow-list of address families. AF_UNIX as the
+    // profile says (tool: EPERM; agent: the mediation filter decides),
+    // AF_INET and AF_INET6 (the network namespace, not this rule, is what
+    // denies egress), and netlink only for the named protocols. Every other
+    // family — vsock, packet, alg, the rest — gets EAFNOSUPPORT: a family
+    // no namespace isolates is not a family the child needs.
+    asm.label(L_SOCKET).ld_w_abs(sd_arg_low(0));
     if shape.af_unix_denied {
-        // socket/socketpair: deny AF_UNIX. Other families stay allowed; the
-        // network namespace, not this rule, is what denies egress.
-        asm.label(L_AF_UNIX)
-            .ld_w_abs(sd_arg_low(0))
-            .jeq(AF_UNIX, Some(L_DENY_EPERM), None)
-            .ja(L_ALLOW);
+        asm.jeq(AF_UNIX, Some(L_DENY_EPERM), None);
+    } else {
+        asm.jeq(AF_UNIX, Some(L_ALLOW), None);
+    }
+    asm.jeq(AF_INET, Some(L_ALLOW), None)
+        .jeq(AF_INET6, Some(L_ALLOW), None);
+    if !shape.netlink_protocols.is_empty() {
+        asm.jeq(AF_NETLINK, Some(L_NETLINK), None);
+    }
+    asm.ja(L_DENY_FAMILY);
+    if !shape.netlink_protocols.is_empty() {
+        asm.label(L_NETLINK).ld_w_abs(sd_arg_low(2));
+        for protocol in shape.netlink_protocols {
+            asm.jeq(*protocol, Some(L_ALLOW), None);
+        }
+        asm.ja(L_DENY_FAMILY);
     }
 
     // ioctl: deny terminal injection.
@@ -230,6 +264,7 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
     asm.label(L_ALLOW).ret(SECCOMP_RET_ALLOW);
     asm.label(L_DENY_EPERM).ret(ret_errno(LINUX_EPERM));
     asm.label(L_DENY_ENOSYS).ret(ret_errno(LINUX_ENOSYS));
+    asm.label(L_DENY_FAMILY).ret(ret_errno(LINUX_EAFNOSUPPORT));
 
     asm.assemble()
 }
@@ -318,10 +353,13 @@ pub const NAMESPACE_SETUP: [(&str, u32); 5] = [
 ///
 /// It is the `tool` baseline without the AF_UNIX denial (the mediation
 /// filter restricts AF_UNIX to stream and seqpacket and mediates every
-/// `connect`) and, in [`AgentVariant::NamespaceInner`] only, without the
-/// namespace-setup denials. Architecture and x32 checks, the host
-/// inspection, kernel, keyring and io_uring denials, `clone3` as `ENOSYS`
-/// and the terminal-injection rule are identical to `tool`.
+/// `connect`), with `NETLINK_SOCK_DIAG` added to the socket families for the
+/// launcher's one socket (the mediation filter, installed right after it,
+/// refuses every netlink socket), and, in [`AgentVariant::NamespaceInner`]
+/// only, without the namespace-setup denials. Architecture and x32 checks,
+/// the host inspection, kernel, keyring and io_uring denials, `clone3` as
+/// `ENOSYS`, the rest of the family allow-list and the terminal-injection
+/// rule are identical to `tool`.
 ///
 /// # Errors
 ///
@@ -340,6 +378,7 @@ pub fn agent_baseline(variant: AgentVariant) -> Result<Program, BpfError> {
         deny,
         clone_namespaces_denied: variant == AgentVariant::UnprivilegedInner,
         af_unix_denied: false,
+        netlink_protocols: &[NETLINK_SOCK_DIAG],
     })
 }
 
@@ -355,7 +394,9 @@ pub const SOCK_SEQPACKET: u32 = 5;
 pub const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
 
 /// The `agent` mediation filter: `connect` notifies the supervisor's
-/// listener, and AF_UNIX sockets are stream or seqpacket only (jail-v1 §10).
+/// listener, AF_UNIX sockets are stream or seqpacket only (jail-v1 §10), and
+/// no netlink socket is created after it (the launcher opened its
+/// `NETLINK_SOCK_DIAG` socket before installing it).
 /// Installed by the trusted launcher with its own notification listener;
 /// see `unixpeer::mediation_program` for the decision it hands the
 /// supervisor.
@@ -369,6 +410,7 @@ pub fn mediation_filter() -> Result<Program, BpfError> {
     const NOTIFY: &str = "notify";
     const DENY: &str = "deny";
     const SOCKET: &str = "socket_family";
+    const DENY_FAMILY: &str = "deny_family";
     let mut asm = Asm::new();
     asm.ld_w_abs(SD_ARCH)
         .jeq(AUDIT_ARCH_X86_64, None, Some(DENY));
@@ -378,11 +420,14 @@ pub fn mediation_filter() -> Result<Program, BpfError> {
         .jeq(NR_SOCKET, Some(SOCKET), None)
         .jeq(NR_SOCKETPAIR, Some(SOCKET), None)
         .ja(ALLOW);
-    // socket/socketpair: a non-AF_UNIX family is the network namespace's
-    // question, not this filter's; AF_UNIX must be stream or seqpacket, with
+    // socket/socketpair: the baseline's family allow-list decides every
+    // family but two. Netlink is refused outright: the baseline admits
+    // NETLINK_SOCK_DIAG only for the launcher's socket, opened before this
+    // filter. AF_UNIX must be stream or seqpacket, with
     // SOCK_CLOEXEC/SOCK_NONBLOCK masked off before the comparison.
     asm.label(SOCKET)
         .ld_w_abs(sd_arg_low(0))
+        .jeq(AF_NETLINK, Some(DENY_FAMILY), None)
         .jeq(AF_UNIX, None, Some(ALLOW))
         .ld_w_abs(sd_arg_low(1))
         .and_k(SOCK_TYPE_MASK)
@@ -392,6 +437,7 @@ pub fn mediation_filter() -> Result<Program, BpfError> {
     asm.label(ALLOW).ret(SECCOMP_RET_ALLOW);
     asm.label(NOTIFY).ret(SECCOMP_RET_USER_NOTIF);
     asm.label(DENY).ret(ret_errno(LINUX_EPERM));
+    asm.label(DENY_FAMILY).ret(ret_errno(LINUX_EAFNOSUPPORT));
     asm.assemble()
 }
 
@@ -461,9 +507,21 @@ syscall                nr     action
     for name in UNPRIVILEGED_SETUP {
         let _ = writeln!(out, "{name:<30} ALLOW   (unprivileged inner sandbox)");
     }
-    out.push_str(
-        "socket, socketpair             ALLOW   (AF_UNIX restricted by the mediation filter)
-",
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} ALLOW when args[0] in {{{AF_UNIX} (AF_UNIX, restricted by the mediation filter), {AF_INET} (AF_INET), {AF_INET6} (AF_INET6)}}",
+        "socket, socketpair",
+        format!("{NR_SOCKET},{NR_SOCKETPAIR}")
+    );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} ALLOW when args[0] == {AF_NETLINK} (AF_NETLINK) and args[2] == {NETLINK_SOCK_DIAG} (NETLINK_SOCK_DIAG; the launcher's, refused after it by the mediation filter)",
+        "", ""
+    );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} EAFNOSUPPORT for every other family",
+        "", ""
     );
     out.push_str(
         "
@@ -488,6 +546,10 @@ mediation filter (installed by the launcher with its own listener)
     let _ = writeln!(
         out,
         "socket, socketpair     AF_UNIX: ALLOW only (type & 0x{SOCK_TYPE_MASK:x}) in {{STREAM, SEQPACKET}}, else EPERM"
+    );
+    let _ = writeln!(
+        out,
+        "socket, socketpair     AF_NETLINK: EAFNOSUPPORT (any protocol)"
     );
     if let Ok(prog) = mediation_filter() {
         let _ = writeln!(out, "instructions: {}", prog.len());
@@ -528,16 +590,12 @@ pub fn tool_baseline_table() -> String {
         "{:<22} {:<6} EPERM when args[0] & 0x{CLONE_NS_MASK:08x} != 0",
         "clone", NR_CLONE
     );
-    let _ = writeln!(
-        out,
-        "{:<22} {:<6} EPERM when args[0] == {AF_UNIX} (AF_UNIX)",
-        "socket", NR_SOCKET
-    );
-    let _ = writeln!(
-        out,
-        "{:<22} {:<6} EPERM when args[0] == {AF_UNIX} (AF_UNIX)",
-        "socketpair", NR_SOCKETPAIR
-    );
+    for (name, nr) in [("socket", NR_SOCKET), ("socketpair", NR_SOCKETPAIR)] {
+        let _ = writeln!(
+            out,
+            "{name:<22} {nr:<6} EPERM when args[0] == {AF_UNIX} (AF_UNIX); ALLOW when args[0] in {{{AF_INET} (AF_INET), {AF_INET6} (AF_INET6)}}; else EAFNOSUPPORT"
+        );
+    }
     let _ = writeln!(
         out,
         "{:<22} {:<6} EPERM when args[1] == 0x{TIOCSTI:04x} (TIOCSTI)",
@@ -687,13 +745,14 @@ mod tests {
     }
 
     #[test]
-    fn the_three_verdicts_are_the_last_three_instructions() {
+    fn the_four_verdicts_are_the_last_four_instructions() {
         let prog = tool_baseline().unwrap();
         let insns = prog.insns();
         let n = insns.len();
-        assert_eq!(insns[n - 3].k, SECCOMP_RET_ALLOW);
-        assert_eq!(insns[n - 2].k, ret_errno(LINUX_EPERM));
-        assert_eq!(insns[n - 1].k, ret_errno(LINUX_ENOSYS));
+        assert_eq!(insns[n - 4].k, SECCOMP_RET_ALLOW);
+        assert_eq!(insns[n - 3].k, ret_errno(LINUX_EPERM));
+        assert_eq!(insns[n - 2].k, ret_errno(LINUX_ENOSYS));
+        assert_eq!(insns[n - 1].k, ret_errno(LINUX_EAFNOSUPPORT));
     }
 
     #[test]
@@ -755,9 +814,14 @@ mod tests {
 
     // -- J3 agent: the agent baseline and the mediation filter ------------
 
+    /// [`run3`] with a zero third argument.
+    fn run(prog: &Program, arch: u32, nr: u32, args: [u32; 2]) -> u32 {
+        run3(prog, arch, nr, [args[0], args[1], 0])
+    }
+
     /// A classic-BPF interpreter over the fields these filters read, so the
     /// tests check the jump arithmetic rather than restating it.
-    fn run(prog: &Program, arch: u32, nr: u32, args: [u32; 2]) -> u32 {
+    fn run3(prog: &Program, arch: u32, nr: u32, args: [u32; 3]) -> u32 {
         use super::super::bpf::{
             CODE_ALU_AND_K, CODE_JA, CODE_JEQ_K, CODE_JSET_K, CODE_LD_W_ABS, CODE_RET_K,
         };
@@ -773,6 +837,7 @@ mod tests {
                         SD_NR => nr,
                         k if k == sd_arg_low(0) => args[0],
                         k if k == sd_arg_low(1) => args[1],
+                        k if k == sd_arg_low(2) => args[2],
                         other => panic!("the filter read an unexpected offset {other}"),
                     };
                     pc += 1;
@@ -798,6 +863,13 @@ mod tests {
 
     const EPERM: u32 = SECCOMP_RET_ERRNO | LINUX_EPERM;
     const ENOSYS: u32 = SECCOMP_RET_ERRNO | LINUX_ENOSYS;
+    const EAFNOSUPPORT: u32 = SECCOMP_RET_ERRNO | LINUX_EAFNOSUPPORT;
+    /// Families outside every allow-list, the ones the reference host
+    /// supports among them: AF_PACKET 17, AF_ALG 38, AF_VSOCK 40,
+    /// AF_QIPCRTR 42; then AF_KEY 15, AF_BRIDGE 7, AF_TIPC 30, AF_XDP 44,
+    /// AF_UNSPEC 0, one past the last (46) and a negative int.
+    const OUTSIDE: [u32; 11] = [17, 38, 40, 42, 15, 7, 30, 44, 0, 46, 0xffff_ffff];
+    const NETLINK_ROUTE: u32 = 0;
     const X86: u32 = AUDIT_ARCH_X86_64;
     /// Non-native ABIs the reference host accepts or could: i386, aarch64,
     /// 32-bit arm, garbage.
@@ -976,10 +1048,100 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_contained_baseline_admits_only_the_listed_socket_families() {
+        let tool = tool_baseline().unwrap();
+        let agents = [
+            agent_baseline(AgentVariant::UnprivilegedInner).unwrap(),
+            agent_baseline(AgentVariant::NamespaceInner).unwrap(),
+        ];
+        let m = mediation_filter().unwrap();
+        for nr in [NR_SOCKET, NR_SOCKETPAIR] {
+            for family in OUTSIDE {
+                for ty in [SOCK_STREAM, 2, 3, 5] {
+                    assert_eq!(
+                        run3(&tool, X86, nr, [family, ty, 0]),
+                        EAFNOSUPPORT,
+                        "tool {nr}/{family:#x}/{ty}"
+                    );
+                    for agent in &agents {
+                        assert_eq!(
+                            run3(agent, X86, nr, [family, ty, 0]),
+                            EAFNOSUPPORT,
+                            "agent {nr}/{family:#x}/{ty}"
+                        );
+                    }
+                }
+            }
+            for family in [AF_INET, AF_INET6] {
+                for ty in [SOCK_STREAM, 2, 3] {
+                    assert_eq!(run3(&tool, X86, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                    for agent in &agents {
+                        assert_eq!(run3(agent, X86, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                    }
+                    assert_eq!(run3(&m, X86, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                }
+            }
+            // AF_UNIX: tool refuses it (EPERM, as J2 verified); agent leaves
+            // it to the mediation filter.
+            assert_eq!(run3(&tool, X86, nr, [AF_UNIX, SOCK_STREAM, 0]), EPERM);
+            for agent in &agents {
+                assert_eq!(
+                    run3(agent, X86, nr, [AF_UNIX, SOCK_STREAM, 0]),
+                    SECCOMP_RET_ALLOW
+                );
+            }
+            // Netlink: never for tool; for agent the baseline admits exactly
+            // NETLINK_SOCK_DIAG (the launcher's), and the mediation filter,
+            // installed after the launcher opened it, refuses every protocol.
+            for protocol in [NETLINK_ROUTE, NETLINK_SOCK_DIAG, 9, 15, 0xffff_ffff] {
+                assert_eq!(
+                    run3(&tool, X86, nr, [AF_NETLINK, 3, protocol]),
+                    EAFNOSUPPORT,
+                    "tool netlink {protocol}"
+                );
+                let expected = if protocol == NETLINK_SOCK_DIAG {
+                    SECCOMP_RET_ALLOW
+                } else {
+                    EAFNOSUPPORT
+                };
+                for agent in &agents {
+                    assert_eq!(
+                        run3(agent, X86, nr, [AF_NETLINK, 3, protocol]),
+                        expected,
+                        "agent netlink {protocol}"
+                    );
+                }
+                assert_eq!(
+                    run3(&m, X86, nr, [AF_NETLINK, 3, protocol]),
+                    EAFNOSUPPORT,
+                    "mediation netlink {protocol}"
+                );
+            }
+            // The mediation filter leaves every other family to the baseline.
+            for family in OUTSIDE {
+                assert_eq!(run3(&m, X86, nr, [family, 1, 0]), SECCOMP_RET_ALLOW);
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn the_spelled_out_errnos_match_this_kernel() {
         assert_eq!(LINUX_EPERM, u32::try_from(libc::EPERM).unwrap());
         assert_eq!(LINUX_ENOSYS, u32::try_from(libc::ENOSYS).unwrap());
+        assert_eq!(
+            LINUX_EAFNOSUPPORT,
+            u32::try_from(libc::EAFNOSUPPORT).unwrap()
+        );
+        for (ours, theirs) in [
+            (AF_UNIX, libc::AF_UNIX),
+            (AF_INET, libc::AF_INET),
+            (AF_INET6, libc::AF_INET6),
+            (AF_NETLINK, libc::AF_NETLINK),
+            (NETLINK_SOCK_DIAG, libc::NETLINK_SOCK_DIAG),
+        ] {
+            assert_eq!(ours, u32::try_from(theirs).unwrap());
+        }
     }
 }

@@ -259,6 +259,9 @@ int main(int argc, char **argv) {
     int ia32_ok = (ip == getpid());
 
     /* read the filter file into a sock_filter array */
+    /* The sock_diag socket before the filter, as the real launcher opens it:
+       the mediation filter refuses every netlink socket once installed. */
+    int diag = socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
     FILE *f = fopen(filter_file,"rb");
     if (!f) { dprintf(coord,"FATAL open filter"); return 1; }
     static struct sock_filter prog[256];
@@ -268,7 +271,6 @@ int main(int argc, char **argv) {
     long listener = syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
         SECCOMP_FILTER_FLAG_NEW_LISTENER|SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, &fp);
     if (listener < 0) { dprintf(coord,"FATAL seccomp %d", errno); return 1; }
-    int diag = socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
 
     dprintf(coord,"HELLO %ld %d %d %d", listener, diag, tcp_port, ia32_ok);
 
