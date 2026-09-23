@@ -17,6 +17,9 @@ pub mod credentials;
 // J3-none begin: reserved environment names (§12)
 pub mod environment;
 // J3-none end
+// J4-G begin: `gc` reconciliation (§14.2, C03)
+pub mod gc;
+// J4-G end
 // J3-launch begin: data-only launch profiles
 pub mod launch_profile;
 // J3-launch end

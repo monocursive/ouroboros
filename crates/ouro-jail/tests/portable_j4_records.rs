@@ -517,13 +517,15 @@ mod d3 {
         let held = state::Lease::acquire(&reserved.lock_path())
             .unwrap()
             .expect("the lease is free");
+        // Claimed, so gc probes the lease (J4-G never locks an unclaimed
+        // root, whose message would also mention a live supervisor).
+        std::fs::write(reserved.state_path(), b"{}").unwrap();
         for dry_run in [true, false] {
             let report = fixture.gc(dry_run);
             assert_eq!(report.entries[0].action, "retained");
-            assert!(
-                report.entries[0].reason.contains("live supervisor"),
-                "{}",
-                report.entries[0].reason
+            assert_eq!(
+                report.entries[0].reason, "a live supervisor holds the lease",
+                "the held-lease branch, not the unclaimed one"
             );
             assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
         }

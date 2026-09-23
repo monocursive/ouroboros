@@ -331,7 +331,17 @@ pub fn remove_leaf(attempt: &LeafAttempt) -> io::Result<()> {
 ///
 /// Any failure reading `cgroup.events`.
 pub fn populated(dir: &Path) -> io::Result<bool> {
-    let raw = fs::read_to_string(dir.join("cgroup.events"))?;
+    parse_populated(&fs::read_to_string(dir.join("cgroup.events"))?)
+}
+
+// J4-G begin: shared by `gc` reconciliation (jail-v1 §14.2)
+/// The `populated` line of a `cgroup.events` file's contents.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidData`] when the line is missing or is neither 0
+/// nor 1: an unreadable population is never taken for an empty one.
+pub fn parse_populated(raw: &str) -> io::Result<bool> {
     for line in raw.lines() {
         if let Some(value) = line.strip_prefix("populated ") {
             return match value.trim() {
@@ -349,6 +359,30 @@ pub fn populated(dir: &Path) -> io::Result<bool> {
         "no populated line in cgroup.events",
     ))
 }
+
+/// The first component of an execution leaf's name.
+pub const LEAF_PREFIX: &str = "ouro-";
+/// The last component of an execution leaf's name.
+pub const LEAF_SUFFIX: &str = ".leaf";
+
+/// The name [`ExecutionCgroup::create`] gives a leaf: `ouro-<id>.leaf`, with
+/// a fresh random attempt-id-shaped token (not the attempt's own id).
+#[must_use]
+pub fn leaf_name(token: &crate::state::AttemptId) -> String {
+    format!("{LEAF_PREFIX}{}{LEAF_SUFFIX}", token.as_str())
+}
+
+/// Whether `name` has exactly the shape [`leaf_name`] produces. `gc` acts
+/// only on a recorded leaf whose name has it: a registration naming any other
+/// directory under the delegated subtree is not an execution leaf.
+#[must_use]
+pub fn is_leaf_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_prefix(LEAF_PREFIX))
+        .and_then(|rest| rest.strip_suffix(LEAF_SUFFIX))
+        .is_some_and(|token| crate::state::AttemptId::parse(token).is_ok())
+}
+// J4-G end
 
 /// A unique, pinned execution leaf. No controller is enabled or disabled by a
 /// run: delegation is operator configuration, never a side effect of doctor.
@@ -414,10 +448,8 @@ impl ExecutionCgroup {
         if unsafe { filesystem.assume_init() }.f_type != libc::CGROUP2_SUPER_MAGIC {
             return Err(io::Error::other("execution root is not cgroup v2"));
         }
-        let path = root.join(format!(
-            "ouro-{}.leaf",
-            crate::state::AttemptId::generate().as_str()
-        ));
+        // J4-G: one spelling of the leaf name, which `gc` checks back.
+        let path = root.join(leaf_name(&crate::state::AttemptId::generate()));
         fs::create_dir(&path)?;
         let result = Self::open_created(&path, limits);
         if result.is_err() {
@@ -849,6 +881,46 @@ mod tests {
         assert!(!within(leaf, ""), "an empty boundary contains nothing");
         assert!(!within(leaf, "/"), "the root is not a registered boundary");
     }
+
+    // J4-G begin
+    #[test]
+    fn only_the_created_leaf_shape_is_a_leaf_name() {
+        use std::ffi::OsStr;
+        let token = crate::state::AttemptId::generate();
+        let name = leaf_name(&token);
+        assert!(is_leaf_name(OsStr::new(&name)));
+        for other in [
+            "ouro-att_x.leaf",
+            "ouro-j3none-replace-1-0",
+            "user@1001.service",
+            "app.slice",
+            &format!("{name}.evil"),
+            &format!("x{name}"),
+            &name.replace(".leaf", ""),
+            &name.to_uppercase(),
+            "",
+        ] {
+            assert!(!is_leaf_name(OsStr::new(other)), "{other}");
+        }
+        use std::os::unix::ffi::OsStrExt as _;
+        assert!(!is_leaf_name(OsStr::from_bytes(b"ouro-\xff.leaf")));
+    }
+
+    #[test]
+    fn population_is_read_from_its_own_line_only() {
+        assert!(parse_populated("populated 1\nfrozen 0\n").unwrap());
+        assert!(!parse_populated("frozen 0\npopulated 0\n").unwrap());
+        for bad in [
+            "",
+            "frozen 1\n",
+            "populated 2\n",
+            "populated\n",
+            "populated x\n",
+        ] {
+            assert!(parse_populated(bad).is_err(), "{bad:?}");
+        }
+    }
+    // J4-G end
 
     #[test]
     fn a_leaf_outside_the_cgroup_root_has_no_relative_path() {

@@ -2410,6 +2410,14 @@ fn l1_gc_prints_its_report_even_when_a_cleanup_stays_pending() {
     };
     let report = fixture.run(sim, &["--launch", "plain"]);
     assert_eq!(receipt_json(&report)["state_cleanup"], "pending");
+    // J4-G (§14.2 "foreign-platform resources are retained"): the binary's
+    // gc runs on this host's platform, so the simulated claim is made this
+    // host's before it asks the binary to resume the cleanup.
+    let state_path = attempt_dir(&report).join("jail-state.json");
+    let mut state = jail_state(&report);
+    state["os"] = serde_json::json!(std::env::consts::OS);
+    state["arch"] = serde_json::json!(std::env::consts::ARCH);
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     let output = jail_binary(&fixture, &["gc", "--json"]);
     assert_eq!(
         output.status.code(),
