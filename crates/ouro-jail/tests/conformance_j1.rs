@@ -142,7 +142,7 @@ fn receipts_of(run: &Run, validators: &BTreeMap<String, Validator>) -> Receipts 
         by_phase.insert(phase, receipt);
     }
     let mut phases_seen = Vec::new();
-    for event in &run.trace_events {
+    for event in run.trace_events() {
         event_schema
             .validate(event)
             .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
@@ -182,7 +182,7 @@ impl Receipts {
 
 /// The audit events of the run, in order.
 fn audit_events(run: &Run) -> Vec<&Value> {
-    run.trace_events
+    run.trace_events()
         .iter()
         .filter(|event| event.get("source").and_then(Value::as_str) == Some("audit"))
         .collect()
@@ -878,7 +878,7 @@ fn o03_an_unreadable_argument_is_not_a_hole_in_coverage() {
         );
     }
     assert!(
-        !run.trace_events.iter().any(|event| {
+        !run.trace_events().iter().any(|event| {
             event.pointer("/fields/kind").and_then(Value::as_str) == Some("coverage_gap")
         }),
         "a coverage gap was written for a call that lost no result"

@@ -68,7 +68,7 @@ fn fixture_lines(run: &Run) -> Vec<Value> {
 }
 
 fn audit_events(run: &Run) -> Vec<&Value> {
-    run.trace_events
+    run.trace_events()
         .iter()
         .filter(|event| event.get("source").and_then(Value::as_str) == Some("audit"))
         .collect()
@@ -1108,7 +1108,7 @@ fn r4_receipt_revisions_advance_and_phases_carry_their_tuples() {
         .run()
         .expect("run");
     let mut by_phase: Vec<(String, u64)> = Vec::new();
-    for event in &run.trace_events {
+    for event in run.trace_events() {
         if event.get("operation").and_then(Value::as_str) == Some("jail.receipt") {
             let phase = event
                 .pointer("/fields/phase")
@@ -2231,7 +2231,7 @@ fn r6_path_reporting_by_class() {
             serde_json::to_string(event.get("fields").unwrap_or(&Value::Null)).unwrap()
         );
     }
-    let raw = serde_json::to_string(&run.trace_events).unwrap();
+    let raw = serde_json::to_string(run.trace_events()).unwrap();
     assert!(
         !raw.contains(workspace.to_str().unwrap()),
         "a raw host path appears in the trace"
