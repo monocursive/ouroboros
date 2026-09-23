@@ -642,7 +642,12 @@ pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailErr
         }
     }
     if result.status != StateCleanup::Complete {
-        state::record_cleanup(attempt_dir, StateCleanup::Pending, result.reason.as_deref())?;
+        state::record_cleanup_at(
+            state::Site::GcResume,
+            attempt_dir,
+            StateCleanup::Pending,
+            result.reason.as_deref(),
+        )?;
         return Ok(Resume::StillPending(
             result.reason.unwrap_or_else(|| "unknown".to_owned()),
         ));
@@ -660,9 +665,14 @@ pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailErr
                 format!("the receipt could not be serialized: {error}"),
             )
         })?;
-        state::replace_atomically(&attempt_dir.receipt_path(), &bytes)?;
+        state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)?;
     }
-    state::record_cleanup(attempt_dir, StateCleanup::Complete, None)?;
+    state::record_cleanup_at(
+        state::Site::GcResume,
+        attempt_dir,
+        StateCleanup::Complete,
+        None,
+    )?;
     Ok(Resume::Completed)
 }
 

@@ -1311,6 +1311,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // last point at which nothing has been created, and every exit after it
     // goes through `abort`.
     let prepared_receipt = match persist(
+        state::Site::PreparedReceipt,
         &attempt_dir,
         &mut record,
         Phase::Prepared,
@@ -1425,7 +1426,14 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             } else {
                 Phase::Prepared
             };
-            if let Err(error) = persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+            if let Err(error) = persist(
+                state::Site::IntegrityReceipt,
+                &attempt_dir,
+                &mut record,
+                phase,
+                args,
+                &mut journal,
+            ) {
                 // As for the exec confirmation: persistence that fails after
                 // release stops the tree (§7).
                 record.errors.push(error.to_object());
@@ -1450,6 +1458,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 record.exec_observed = true;
                 journal.lifecycle("exec_confirmed");
                 match persist(
+                    state::Site::EnforcedReceipt,
                     &attempt_dir,
                     &mut record,
                     Phase::Enforced,
@@ -1645,7 +1654,14 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         if settled {
             record.state_cleanup = StateCleanup::Pending;
             record.cleanup_error = None;
-            match persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+            match persist(
+                state::Site::PendingReceipt,
+                &attempt_dir,
+                &mut record,
+                phase,
+                args,
+                &mut journal,
+            ) {
                 Ok(_) => {
                     let vendor =
                         cleanup::remove_vendor_state(&attempt_dir, cleanup::Limits::DEFAULT);
@@ -1717,7 +1733,14 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     if journal.loss.is_some() {
         degrade_trace_coverage(&mut record);
     }
-    let receipt = match persist_terminal(&attempt_dir, &mut record, phase, args, &mut journal) {
+    let receipt = match persist_terminal(
+        state::Site::TerminalReceipt,
+        &attempt_dir,
+        &mut record,
+        phase,
+        args,
+        &mut journal,
+    ) {
         Ok(receipt) => receipt,
         Err(error) => {
             return Ok(RunReport {
@@ -2182,7 +2205,14 @@ fn refuse(
     // J3-agent begin: the proxy stopped with the boundary's teardown
     remove_proxy_directory(attempt_dir, record);
     // J3-agent end
-    let receipt = persist_terminal(attempt_dir, record, Phase::Refused, args, journal);
+    let receipt = persist_terminal(
+        state::Site::RefusedReceipt,
+        attempt_dir,
+        record,
+        Phase::Refused,
+        args,
+        journal,
+    );
     match receipt {
         Ok(receipt) => {
             send_control(
@@ -2431,7 +2461,14 @@ fn refuse_vendor_state(
     }
     record.state_cleanup = StateCleanup::Pending;
     record.cleanup_error = None;
-    if let Err(error) = persist(attempt_dir, record, Phase::Refused, args, journal) {
+    if let Err(error) = persist(
+        state::Site::PendingReceipt,
+        attempt_dir,
+        record,
+        Phase::Refused,
+        args,
+        journal,
+    ) {
         record.errors.push(error.to_object());
         record.cleanup_error = Some("state_write_failed".to_owned());
         return;
@@ -2684,11 +2721,19 @@ pub fn write_receipt(
     phase: Phase,
     extra_copy: Option<&Path>,
 ) -> Result<Receipt, JailError> {
-    write_receipt_with(attempt_dir, record, phase, extra_copy, &state::Fsync)
+    let io = state::current_io();
+    write_receipt_at(
+        state::Site::Unnamed,
+        attempt_dir,
+        record,
+        phase,
+        extra_copy,
+        &*io,
+    )
 }
 
-/// [`write_receipt`] against an explicit durability implementation, the seam
-/// failure injection uses to fail each sync step.
+/// [`write_receipt`] against an explicit persistence seam, the seam failure
+/// injection uses to fail each step.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
@@ -2697,7 +2742,29 @@ pub fn write_receipt_with(
     record: &mut AttemptRecord,
     phase: Phase,
     extra_copy: Option<&Path>,
-    durable: &dyn state::Durable,
+    io: &dyn state::PersistIo,
+) -> Result<Receipt, JailError> {
+    write_receipt_at(
+        state::Site::Unnamed,
+        attempt_dir,
+        record,
+        phase,
+        extra_copy,
+        io,
+    )
+}
+
+/// [`write_receipt_with`] at a named persistence site (R02).
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
+pub fn write_receipt_at(
+    site: state::Site,
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    extra_copy: Option<&Path>,
+    io: &dyn state::PersistIo,
 ) -> Result<Receipt, JailError> {
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
@@ -2709,7 +2776,7 @@ pub fn write_receipt_with(
             format!("the receipt could not be serialized: {error}"),
         )
     })?;
-    let canonical = state::TempWrite::create_with(&attempt_dir.receipt_path(), &bytes, durable)?;
+    let canonical = state::TempWrite::create_at(site, &attempt_dir.receipt_path(), &bytes, io)?;
     // J4-D4: the rename below can land and a later step still fail (its
     // directory sync, or the extra copy), leaving this revision visible under
     // an error. Spending it here, before the rename, means the next receipt
@@ -2717,19 +2784,28 @@ pub fn write_receipt_with(
     record.revision += 1;
     canonical.commit()?;
     if let Some(path) = extra_copy {
-        state::replace_atomically_with(path, &bytes, durable)?;
+        state::TempWrite::create_at(site, path, &bytes, io)?.commit()?;
     }
     Ok(receipt)
 }
 
 fn persist(
+    site: state::Site,
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
     phase: Phase,
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
-    let receipt = write_receipt(attempt_dir, record, phase, args.receipt.as_deref())?;
+    let io = state::current_io();
+    let receipt = write_receipt_at(
+        site,
+        attempt_dir,
+        record,
+        phase,
+        args.receipt.as_deref(),
+        &*io,
+    )?;
     journal.receipt(
         phase,
         &receipt,
@@ -2742,20 +2818,29 @@ fn persist(
 /// that drain requires one durable correction, without another trace write
 /// that could recursively fail and invalidate the correction.
 fn persist_terminal(
+    site: state::Site,
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
     phase: Phase,
     args: &RunArgs,
     journal: &mut Journal,
 ) -> Result<Receipt, JailError> {
-    let receipt = persist(attempt_dir, record, phase, args, journal)?;
+    let receipt = persist(site, attempt_dir, record, phase, args, journal)?;
     if let Ok(mut sink) = journal.trace.lock() {
         sink.finish();
     }
     if let Some(error) = journal.take_new_loss() {
         record.errors.push(error.to_object());
         degrade_trace_coverage(record);
-        return write_receipt(attempt_dir, record, phase, args.receipt.as_deref());
+        let io = state::current_io();
+        return write_receipt_at(
+            site,
+            attempt_dir,
+            record,
+            phase,
+            args.receipt.as_deref(),
+            &*io,
+        );
     }
     Ok(receipt)
 }
@@ -2765,7 +2850,6 @@ fn claim_attempt(
     attempt_id: &AttemptId,
     ctx: &Context,
 ) -> Result<(), JailError> {
-    use std::os::unix::fs::OpenOptionsExt as _;
     let identity = ctx.platform.identity();
     let owner = ctx.platform.owner_identity();
     if identity.os == crate::records::Os::Linux && owner.is_none() {
@@ -2801,12 +2885,9 @@ fn claim_attempt(
     let path = attempt_dir.state_path();
     // §7: claim the root with exclusive creation while holding the lock. A
     // previous jail claim, live or dead, refuses rather than spawning again.
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(state::FILE_MODE)
-        .open(&path)
-    {
+    let io = state::current_io();
+    let site = state::Site::Claim;
+    let mut file = match io.create_new(site, &path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(JailError::new(
@@ -2826,14 +2907,32 @@ fn claim_attempt(
         }
     };
     let bytes = serde_json::to_vec_pretty(&state).unwrap_or_default();
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
+    let mut written = 0;
+    let mut result = Ok(());
+    while written < bytes.len() {
+        match io.write(site, &mut file, &bytes[written..]) {
+            Ok(0) => {
+                result = Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "the write made no progress",
+                ));
+                break;
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        }
+    }
+    result
+        .and_then(|()| io.sync_file(site, &file))
         .and_then(|()| {
             // §7: a claim the directory does not remember is a claim a power
             // loss can erase; every other state write syncs the parent, and
             // the exclusive create deserves the same guarantee.
-            std::fs::File::open(path.parent().unwrap_or(Path::new(".")))
-                .and_then(|dir| dir.sync_all())
+            io.sync_dir(site, path.parent().unwrap_or(Path::new(".")))
         })
         .map_err(|error| {
             JailError::new(
@@ -2883,7 +2982,7 @@ fn register_boundary_in_state(
             format!("the attempt state could not be serialized: {error}"),
         )
     })?;
-    state::replace_atomically(&path, &bytes)
+    state::replace_atomically_at(state::Site::Boundary, &path, &bytes)
 }
 
 fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailError> {
@@ -2902,7 +3001,7 @@ fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailEr
             format!("the policy envelope could not be serialized: {error}"),
         )
     })?;
-    state::replace_atomically(&attempt_dir.policy_path(), &bytes)
+    state::replace_atomically_at(state::Site::Policy, &attempt_dir.policy_path(), &bytes)
 }
 
 // ---------------------------------------------------------------------------

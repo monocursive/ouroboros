@@ -11,7 +11,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Read as _;
-use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -596,48 +595,51 @@ pub fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, std::io::Er
     Ok(Some(bytes))
 }
 
-/// The two durability primitives §7 names, as a seam.
-///
-/// "A successful rename alone is not a durable acknowledgment", so both calls
-/// have to happen and a test has to be able to see that they did. A trait is
-/// the only way to observe an `fsync` from outside the kernel.
-pub trait Durable {
-    /// Flushes the file's own data and metadata.
-    ///
-    /// # Errors
-    /// Returns the underlying `fsync` failure.
-    fn sync_file(&self, file: &File) -> std::io::Result<()>;
+// J4-R begin: the persistence seam (§7, §13.2, §13.3; R02)
+pub mod persist;
 
-    /// Flushes the directory entry created by the rename.
-    ///
-    /// # Errors
-    /// Returns the underlying open or `fsync` failure.
-    fn sync_dir(&self, path: &Path) -> std::io::Result<()>;
-}
+pub use persist::{
+    ABORT_AT_SEAM, CrashPoint, Durable, Fsync, Installed, PersistIo, RealIo, SharedIo, Site,
+    crash_point, current_io, install, test_seams, with_persist_io,
+};
 
-/// The real durability implementation.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Fsync;
-
-impl Durable for Fsync {
-    fn sync_file(&self, file: &File) -> std::io::Result<()> {
-        file.sync_all()
+/// Writes every byte through the seam, one `write` at a time: a short write
+/// is resumed at its offset, and an error after it is the write's error.
+fn write_fully(
+    io: &dyn PersistIo,
+    site: Site,
+    file: &mut File,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        match io.write(site, file, &bytes[written..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "the write made no progress",
+                ));
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
     }
-
-    fn sync_dir(&self, path: &Path) -> std::io::Result<()> {
-        File::open(path).and_then(|handle| handle.sync_all())
-    }
+    Ok(())
 }
 
 /// A pending durable replacement: written and synced, not yet renamed.
 ///
 /// Dropping it without [`TempWrite::commit`] leaves the target file exactly as
-/// it was, which is the "either the old or the new file" property of R02.
+/// it was, which is the "either the old or the new file" property of R02, and
+/// removes the temporary file. A crash leaves the temporary file behind;
+/// [`leftover_temp_files`] names what it left.
 pub struct TempWrite<'a> {
     temp: PathBuf,
     target: PathBuf,
+    site: Site,
     committed: bool,
-    durable: &'a dyn Durable,
+    io: &'a dyn PersistIo,
 }
 
 impl std::fmt::Debug for TempWrite<'_> {
@@ -645,6 +647,7 @@ impl std::fmt::Debug for TempWrite<'_> {
         f.debug_struct("TempWrite")
             .field("temp", &self.temp)
             .field("target", &self.target)
+            .field("site", &self.site)
             .field("committed", &self.committed)
             .finish_non_exhaustive()
     }
@@ -657,12 +660,21 @@ impl TempWrite<'static> {
     /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be created,
     /// written or synced.
     pub fn create(target: &Path, bytes: &[u8]) -> Result<Self, JailError> {
-        Self::create_with(target, bytes, &Fsync)
+        Self::create_with(target, bytes, &RealIo)
     }
 }
 
+/// What an exclusive publication found (§7's claim).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Published {
+    /// The complete file now exists under the target name.
+    Created,
+    /// The target already existed; nothing was published.
+    Exists,
+}
+
 impl<'a> TempWrite<'a> {
-    /// [`TempWrite::create`] against an explicit durability implementation.
+    /// [`TempWrite::create`] against an explicit seam, outside any named site.
     ///
     /// # Errors
     /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be created,
@@ -670,7 +682,24 @@ impl<'a> TempWrite<'a> {
     pub fn create_with(
         target: &Path,
         bytes: &[u8],
-        durable: &'a dyn Durable,
+        io: &'a dyn PersistIo,
+    ) -> Result<Self, JailError> {
+        Self::create_at(Site::Unnamed, target, bytes, io)
+    }
+
+    /// Creates the temporary file for a replacement at `site`.
+    ///
+    /// The temporary file is removed on any failure here, so a failed write
+    /// never leaves a partial file behind except when the process dies.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be created,
+    /// written or synced.
+    pub fn create_at(
+        site: Site,
+        target: &Path,
+        bytes: &[u8],
+        io: &'a dyn PersistIo,
     ) -> Result<Self, JailError> {
         let directory = target.parent().ok_or_else(|| {
             write_failed(
@@ -685,29 +714,35 @@ impl<'a> TempWrite<'a> {
         // The id is unique per attempt and per process, so two live supervisors
         // never race on the same temporary name.
         let temp = directory.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(FILE_MODE)
-            .open(&temp)
+        let mut file = io
+            .create_new(site, &temp)
             .map_err(|error| write_failed(&temp, &error))?;
-        file.write_all(bytes)
-            .map_err(|error| write_failed(&temp, &error))?;
-        durable
-            .sync_file(&file)
-            .map_err(|error| write_failed(&temp, &error))?;
-        Ok(TempWrite {
+        let pending = TempWrite {
             temp,
             target: target.to_path_buf(),
+            site,
             committed: false,
-            durable,
-        })
+            io,
+        };
+        write_fully(io, site, &mut file, bytes)
+            .map_err(|error| write_failed(&pending.temp, &error))?;
+        crash_point(site, CrashPoint::TempWritten);
+        io.sync_file(site, &file)
+            .map_err(|error| write_failed(&pending.temp, &error))?;
+        crash_point(site, CrashPoint::TempSynced);
+        Ok(pending)
     }
 
     /// The temporary file's path, for tests that inspect the failure window.
     #[must_use]
     pub fn temp_path(&self) -> &Path {
         &self.temp
+    }
+
+    fn directory(&self) -> &Path {
+        self.target
+            .parent()
+            .expect("create_at() already established a parent")
     }
 
     /// Renames the temporary file over the target and syncs the directory.
@@ -717,17 +752,48 @@ impl<'a> TempWrite<'a> {
     /// sync fails; a rename that is not followed by a successful directory sync
     /// is reported rather than acknowledged.
     pub fn commit(mut self) -> Result<(), JailError> {
-        std::fs::rename(&self.temp, &self.target)
+        self.io
+            .rename(self.site, &self.temp, &self.target)
             .map_err(|error| write_failed(&self.target, &error))?;
         self.committed = true;
-        let directory = self
-            .target
-            .parent()
-            .expect("create() already established a parent");
-        self.durable
-            .sync_dir(directory)
-            .map_err(|error| write_failed(directory, &error))?;
+        crash_point(self.site, CrashPoint::Renamed);
+        let directory = self.directory().to_path_buf();
+        self.io
+            .sync_dir(self.site, &directory)
+            .map_err(|error| write_failed(&directory, &error))?;
+        crash_point(self.site, CrashPoint::DirSynced);
         Ok(())
+    }
+
+    /// Publishes the complete file under the target name only if nothing is
+    /// there yet (§7: "Claim it with exclusive creation"), then syncs the
+    /// directory.
+    ///
+    /// A `link` is both exclusive and atomic: the name appears with every
+    /// byte already written and synced, so no reader, and no crash, can ever
+    /// see a partial claim. The temporary name is then only a second link to
+    /// the same file and is removed; one a crash leaves is harmless.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::StateWriteFailed`] when the link fails for a
+    /// reason other than an existing target, or the directory sync fails.
+    pub fn publish_new(mut self) -> Result<Published, JailError> {
+        match self.io.link(self.site, &self.temp, &self.target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(Published::Exists);
+            }
+            Err(error) => return Err(write_failed(&self.target, &error)),
+        }
+        self.committed = true;
+        crash_point(self.site, CrashPoint::Renamed);
+        let _ = self.io.remove(self.site, &self.temp);
+        let directory = self.directory().to_path_buf();
+        self.io
+            .sync_dir(self.site, &directory)
+            .map_err(|error| write_failed(&directory, &error))?;
+        crash_point(self.site, CrashPoint::DirSynced);
+        Ok(Published::Created)
     }
 }
 
@@ -736,30 +802,72 @@ impl Drop for TempWrite<'_> {
         if !self.committed {
             // Best effort: the target is intact either way, and a leftover
             // temporary file is visible state rather than a silent overwrite.
-            let _ = std::fs::remove_file(&self.temp);
+            let _ = self.io.remove(self.site, &self.temp);
         }
     }
 }
 
-/// Replaces `target` durably (§7).
+/// Replaces `target` durably (§7) through this thread's seam.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when any step fails.
 pub fn replace_atomically(target: &Path, bytes: &[u8]) -> Result<(), JailError> {
-    replace_atomically_with(target, bytes, &Fsync)
+    replace_atomically_at(Site::Unnamed, target, bytes)
 }
 
-/// [`replace_atomically`] against an explicit durability implementation.
+/// [`replace_atomically`] at a named site, through this thread's seam.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when any step fails.
+pub fn replace_atomically_at(site: Site, target: &Path, bytes: &[u8]) -> Result<(), JailError> {
+    let io = current_io();
+    TempWrite::create_at(site, target, bytes, &*io)?.commit()
+}
+
+/// [`replace_atomically`] against an explicit seam.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when any step fails.
 pub fn replace_atomically_with(
     target: &Path,
     bytes: &[u8],
-    durable: &dyn Durable,
+    io: &dyn PersistIo,
 ) -> Result<(), JailError> {
-    TempWrite::create_with(target, bytes, durable)?.commit()
+    TempWrite::create_with(target, bytes, io)?.commit()
 }
+
+/// Creates `target` with `bytes` only if it does not exist, never exposing a
+/// partial file (§7's claim), through this thread's seam.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when any step fails.
+pub fn create_exclusively_at(
+    site: Site,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<Published, JailError> {
+    let io = current_io();
+    TempWrite::create_at(site, target, bytes, &*io)?.publish_new()
+}
+
+/// The temporary files a crash left beside this attempt's records: names of
+/// the form `.<record>.<uuid>.tmp` directly in the attempt root. They never
+/// replaced anything (the prior file is intact), and nothing reads them.
+///
+/// # Errors
+/// Returns the listing failure.
+pub fn leftover_temp_files(attempt_dir: &AttemptDir) -> std::io::Result<Vec<String>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(attempt_dir.root())? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && name.ends_with(".tmp") {
+            found.push(name);
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+// J4-R end
 
 /// An exclusive advisory lease on `jail.lock` (§7).
 ///
@@ -962,6 +1070,7 @@ pub fn read_attempt_state(attempt_dir: &AttemptDir) -> Result<serde_json::Value,
 /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be read,
 /// parsed or durably replaced.
 pub fn update_attempt_state(
+    site: Site,
     attempt_dir: &AttemptDir,
     change: impl FnOnce(&mut serde_json::Value),
 ) -> Result<(), JailError> {
@@ -971,7 +1080,7 @@ pub fn update_attempt_state(
     }
     change(&mut state);
     let bytes = serde_json::to_vec_pretty(&state).map_err(state_parse_failed)?;
-    replace_atomically(&attempt_dir.state_path(), &bytes)
+    replace_atomically_at(site, &attempt_dir.state_path(), &bytes)
 }
 
 fn cleanup_word(status: StateCleanup) -> &'static str {
@@ -1058,7 +1167,7 @@ pub fn open_attempt_dir(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailE
 /// creation fails, and [`ErrorCode::UnsafeStatePath`] when the attempt
 /// directory fails its checks or `vendor-state` already exists.
 pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailError> {
-    update_attempt_state(attempt_dir, |state| {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
         state["vendor_state"] = serde_json::json!({
             "name": VENDOR_STATE_NAME,
             "registered_at": crate::records::rfc3339_utc(std::time::SystemTime::now()),
@@ -1101,7 +1210,7 @@ pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, Ja
     let stat = vendor
         .stat()
         .map_err(|error| write_failed(&attempt_dir.vendor_state_path(), &error))?;
-    update_attempt_state(attempt_dir, |state| {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
         state["vendor_state"]["dev"] = serde_json::Value::from(stat.dev.to_string());
         state["vendor_state"]["ino"] = serde_json::Value::from(stat.ino.to_string());
     })?;
@@ -1114,7 +1223,7 @@ pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, Ja
 /// Withdraws a vendor-state registration whose directory this attempt did not
 /// create: jail state no longer names it, so nothing will ever clean it.
 fn withdraw_vendor_registration(attempt_dir: &AttemptDir) -> Result<(), JailError> {
-    update_attempt_state(attempt_dir, |state| {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
         state["vendor_state"] = serde_json::Value::Null;
         state["vendor_state_withdrawn"] =
             serde_json::Value::from("the directory was not created by this attempt");
@@ -1163,7 +1272,7 @@ pub fn create_proxy_dir_observed(
     attempt_dir: &AttemptDir,
     between: &mut dyn FnMut(&AttemptDir),
 ) -> Result<anchored::Dir, JailError> {
-    update_attempt_state(attempt_dir, |state| {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
         state["proxy_dir"] = serde_json::json!({
             "name": PROXY_DIR_NAME,
             "registered_at": crate::records::rfc3339_utc(std::time::SystemTime::now()),
@@ -1180,7 +1289,7 @@ pub fn create_proxy_dir_observed(
         Ok(proxy) => proxy,
         Err(error) => {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                update_attempt_state(attempt_dir, |state| {
+                update_attempt_state(Site::LaunchState, attempt_dir, |state| {
                     state["proxy_dir"] = serde_json::Value::Null;
                     state["proxy_dir_withdrawn"] =
                         serde_json::Value::from("the directory was not created by this attempt");
@@ -1196,7 +1305,7 @@ pub fn create_proxy_dir_observed(
     let stat = proxy
         .stat()
         .map_err(|error| write_failed(&attempt_dir.proxy_dir_path(), &error))?;
-    update_attempt_state(attempt_dir, |state| {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
         state["proxy_dir"]["dev"] = serde_json::Value::from(stat.dev.to_string());
         state["proxy_dir"]["ino"] = serde_json::Value::from(stat.ino.to_string());
     })?;
@@ -1241,7 +1350,7 @@ pub fn record_proxy_socket(
     attempt_dir: &AttemptDir,
     socket: &ProxySocketIdentity,
 ) -> Result<(), JailError> {
-    update_attempt_state(attempt_dir, |state| {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
         state["proxy_dir"]["socket"] = serde_json::json!({
             "dev": socket.dev.to_string(),
             "ino": socket.ino.to_string(),
@@ -1318,7 +1427,7 @@ pub fn gc_proxy_dir(attempt_dir: &AttemptDir, dry_run: bool) -> Result<ProxyDirG
     });
     let outcome = gc_removal(attempt_dir, registered, socket, dry_run);
     if !dry_run {
-        update_attempt_state(attempt_dir, |state| match &outcome {
+        update_attempt_state(Site::GcProxyDir, attempt_dir, |state| match &outcome {
             ProxyDirGc::Removed => {
                 state["proxy_dir"]["removed"] = serde_json::Value::from(true);
                 state["proxy_dir"]["removed_by"] = serde_json::Value::from("gc");
@@ -1437,7 +1546,7 @@ pub fn remove_proxy_dir(attempt_dir: &AttemptDir) -> Result<ProxyDirRemoval, Jai
     };
     let registered = number("dev").zip(number("ino"));
     let outcome = removal(attempt_dir, registered);
-    update_attempt_state(attempt_dir, |state| match outcome {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| match outcome {
         ProxyDirRemoval::Removed => {
             state["proxy_dir"]["removed"] = serde_json::Value::from(true);
         }
@@ -1550,7 +1659,7 @@ pub fn record_staged_credentials(
             })
         })
         .collect();
-    update_attempt_state(attempt_dir, |state| {
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
         state["vendor_state"]["credentials"] = serde_json::Value::from(rows);
     })
 }
@@ -1564,7 +1673,20 @@ pub fn record_cleanup(
     status: StateCleanup,
     reason: Option<&str>,
 ) -> Result<(), JailError> {
-    update_attempt_state(attempt_dir, |state| {
+    record_cleanup_at(Site::CleanupRecord, attempt_dir, status, reason)
+}
+
+/// [`record_cleanup`] at a named site (`gc` resuming a cleanup is its own).
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when the state write fails.
+pub fn record_cleanup_at(
+    site: Site,
+    attempt_dir: &AttemptDir,
+    status: StateCleanup,
+    reason: Option<&str>,
+) -> Result<(), JailError> {
+    update_attempt_state(site, attempt_dir, |state| {
         state["state_cleanup"] = serde_json::Value::from(cleanup_word(status));
         state["cleanup_reason"] = reason.map_or(serde_json::Value::Null, serde_json::Value::from);
     })
@@ -1837,7 +1959,7 @@ mod tests {
     fn gc_retains_a_proxy_directory_whose_identity_was_never_recorded() {
         let (_dir, attempt) = claimed_attempt();
         drop(create_proxy_dir(&attempt).unwrap());
-        update_attempt_state(&attempt, |state| {
+        update_attempt_state(Site::Unnamed, &attempt, |state| {
             state["proxy_dir"]["dev"] = serde_json::Value::Null;
             state["proxy_dir"]["ino"] = serde_json::Value::Null;
         })
