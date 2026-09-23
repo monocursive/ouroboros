@@ -155,7 +155,8 @@ pub fn closed_set_table() -> String {
     let _ = writeln!(
         out,
         "{seccomp:<12} {nr:<4} {:<7} when a1 & 0x{SECCOMP_FILTER_FLAG_NEW_LISTENER:08x} (SECCOMP_FILTER_FLAG_NEW_LISTENER); \
-         a granted listener is a child_notification_listener gap, a refused one nothing\n\
+         a granted listener is a child_notification_listener gap, a refused one nothing; \
+         one the in-flight bound cannot follow is that gap too\n\
          {seccomp:<12} {nr:<4} {:<7} otherwise",
         name(verdict(x86, nr, 1, SECCOMP_FILTER_FLAG_NEW_LISTENER)),
         name(verdict(x86, nr, 1, 0)),
@@ -164,7 +165,8 @@ pub fn closed_set_table() -> String {
     let _ = writeln!(
         out,
         "{clone:<12} {nr:<4} {:<7} when a0 & 0x{CLONE_UNTRACED:08x} (CLONE_UNTRACED); \
-         a created task is an untraced_descendant gap, a failed call nothing\n\
+         a created task is an untraced_descendant gap, a failed call nothing; \
+         one the in-flight bound cannot follow is that gap too\n\
          {clone:<12} {nr:<4} {:<7} otherwise (fork, vfork, threads: followed by ptrace events)",
         name(verdict(x86, nr, CLONE_UNTRACED | 17, 0)),
         name(verdict(x86, nr, 0x003d_0f00, 0)),
@@ -221,7 +223,11 @@ pub fn closed_set_table() -> String {
          agent        the same baseline refusals, io_uring included, except the listener,\n\
          \x20            which the jail's own mediation listener makes fail with EBUSY;\n\
          \x20            connect is mediated (USER_NOTIF outranks TRACE) and its result\n\
-         \x20            carries fields.observation = seccomp_user_notification\n\
+         \x20            carries fields.observation = seccomp_user_notification; net and\n\
+         \x20            fs.deny count the connects the mediator received: one whose\n\
+         \x20            notification a signal withdrew before any worker received it\n\
+         \x20            (all busy; a handler without SA_RESTART) returns EINTR, never\n\
+         \x20            ran, and is a named exclusion, neither a result nor a gap\n\
          none         no baseline: every stop above can happen, and io_uring is allowed\n\
          \x20            and unobserved (above)\n",
     );
@@ -243,6 +249,17 @@ pub fn closed_set_table() -> String {
          \x20 result; EINTR at a handler's entry is the result; a death is neither a\n\
          \x20 result nor a loss (the call did nothing); anything else is a\n\
          \x20 restart_unresolved gap of the call's classes.\n\
+         - A restart decided at a handler's entry is believed only at the re-entry\n\
+         \x20 itself, because the handler's frame, which rt_sigreturn restores, is the\n\
+         \x20 program's to rewrite. Until then the thread runs; its next entry stop at\n\
+         \x20 the call's own instruction is the re-entry, any other entry stop first is\n\
+         \x20 a restart_unresolved gap (so a covered call made inside an SA_RESTART\n\
+         \x20 handler costs one), and its end first is a restart_unresolved gap when\n\
+         \x20 the frame decided (ERESTARTSYS) and nothing when the code alone did\n\
+         \x20 (ERESTARTNOINTR). A kill at the re-entry is counted once.\n\
+         - A non-leader exec destroys the leader: whatever the leader had in flight\n\
+         \x20 is an entry_abandoned gap of its classes, never paired with the exec's\n\
+         \x20 own syscall exit, whether or not the exec's entry could be followed.\n\
          - A tracee killed at its entry stop before the observer resumed it made no\n\
          \x20 call (the kernel skips it): neither a result nor a loss. Killed at its exit\n\
          \x20 stop before the return was read, the call ran: entry_abandoned of its own\n\
@@ -271,6 +288,17 @@ mod tests {
         }
         for name in ["seccomp", "clone ", "clone3", "x32", "EBUSY", "0x4f4a"] {
             assert!(table.contains(name), "{name}");
+        }
+        // J4 W3: the rules the loss and tracer reviews added, and the
+        // agent's named exclusion, are stated.
+        for text in [
+            "one the in-flight bound cannot follow is that gap too",
+            "fs.deny count the connects the mediator received",
+            "is a named exclusion, neither a result nor a gap",
+            "believed only at the re-entry",
+            "never paired with the exec's",
+        ] {
+            assert!(table.contains(text), "{text}");
         }
         // io_uring: refused by every contained baseline, allowed and
         // unobserved under `none` — stated, not left to inference.

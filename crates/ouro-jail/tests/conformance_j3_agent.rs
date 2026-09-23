@@ -3613,3 +3613,249 @@ fn review_every_contained_profile_refuses_a_socket_family_outside_the_list() {
         );
     }
 }
+
+/// A C target for the characterization below, built at test time with the
+/// host's gcc (as the observer suites build theirs).
+const EINTR_CONNECT_C: &str = r##"
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+static void report(const char *label, long r, int err) {
+    printf("%s\t%ld\t%d\n", label, r, err);
+    fflush(stdout);
+}
+
+struct cj { int port; long r; int e; pid_t tid; };
+
+static void *conn_thread(void *arg) {
+    struct cj *c = arg;
+    struct sockaddr_in a;
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    __atomic_store_n(&c->tid, (pid_t) syscall(SYS_gettid), __ATOMIC_RELEASE);
+    if (s < 0) { c->r = -2; c->e = errno; return NULL; }
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(c->port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    c->r = connect(s, (struct sockaddr *) &a, sizeof a);
+    c->e = c->r < 0 ? errno : 0;
+    return NULL;
+}
+
+static void on_usr1(int sig) { (void) sig; }
+
+static int listener(int backlog, int *port) {
+    struct sockaddr_in a;
+    socklen_t al = sizeof a;
+    int l = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (l < 0 || bind(l, (struct sockaddr *) &a, sizeof a) || listen(l, backlog)) return -1;
+    getsockname(l, (struct sockaddr *) &a, &al);
+    *port = ntohs(a.sin_port);
+    return l;
+}
+
+/* A loopback listener whose accept queue is full: four connects to it each
+   hold one of the mediator's four workers for its connect deadline. A fifth
+   connect, to a second listener with room, is then still queued as a
+   notification no worker has received, and a handler installed without
+   SA_RESTART interrupts it. Every connect's result is reported, then
+   whether anything ever reached the second listener. */
+int main(void) {
+    struct sigaction sa;
+    struct cj first, slow[4], quick;
+    pthread_t t;
+    pthread_t ts[4];
+    int full_port, open_port, full, open_l, i, got;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_usr1;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR1, &sa, NULL);
+    full = listener(0, &full_port);
+    open_l = listener(16, &open_port);
+    if (full < 0 || open_l < 0) { report("listen", -1, errno); return 3; }
+    /* Never block in the final accept: nothing is expected to arrive. */
+    if (fcntl(open_l, F_SETFL, O_NONBLOCK)) { report("nonblock", -1, errno); return 3; }
+    memset(&first, 0, sizeof first);
+    first.port = full_port;
+    pthread_create(&t, NULL, conn_thread, &first);
+    pthread_join(t, NULL);
+    report("connect_first", first.r, first.e);
+    for (i = 0; i < 4; i++) {
+        memset(&slow[i], 0, sizeof slow[i]);
+        slow[i].port = full_port;
+        pthread_create(&ts[i], NULL, conn_thread, &slow[i]);
+    }
+    /* Time for every worker to receive a slow connect; each then holds it
+       for its 2 s connect deadline, so the signal below (1.2 s in) lands
+       while all four are still busy, with margin on a loaded host. */
+    usleep(700000);
+    memset(&quick, 0, sizeof quick);
+    quick.port = open_port;
+    pthread_create(&t, NULL, conn_thread, &quick);
+    while (!__atomic_load_n(&quick.tid, __ATOMIC_ACQUIRE)) sched_yield();
+    usleep(500000);
+    pthread_kill(t, SIGUSR1);
+    pthread_join(t, NULL);
+    report("connect_quick", quick.r, quick.e);
+    for (i = 0; i < 4; i++) {
+        pthread_join(ts[i], NULL);
+        report("connect_slow", slow[i].r, slow[i].e);
+    }
+    /* Every worker is free again: a notification still queued would have
+       been served by now. */
+    usleep(500000);
+    got = accept4(open_l, NULL, NULL, SOCK_CLOEXEC);
+    report("quick_arrived", got >= 0, got < 0 ? errno : 0);
+    return 0;
+}
+"##;
+
+/// The characterization target, built once; `None` (after `skip_or_fail`)
+/// when this host has no gcc.
+fn eintr_connect_target() -> Option<&'static PathBuf> {
+    static BUILT: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    let built = BUILT.get_or_init(|| {
+        if !Path::new("/usr/bin/gcc").exists() {
+            return Err("/usr/bin/gcc is not installed".to_owned());
+        }
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("agent-eintr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let source = dir.join("eintr-connect.c");
+        std::fs::write(&source, EINTR_CONNECT_C).map_err(|e| e.to_string())?;
+        let binary = dir.join("eintr-connect");
+        let out = std::process::Command::new("/usr/bin/gcc")
+            .args(["-O1", "-Wall", "-pthread", "-B/usr/bin", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .output()
+            .map_err(|e| format!("run gcc: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("gcc: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(binary)
+    });
+    match built {
+        Ok(path) => Some(path),
+        Err(error) => {
+            harness::skip_or_fail(&format!("the eintr-connect target: {error}"));
+            None
+        }
+    }
+}
+
+/// J4 W3 (loss review finding 2), a characterization and a named exclusion.
+/// Under `agent` a `connect` is a seccomp user notification the mediator
+/// performs. While all four mediation workers are busy, a further connect
+/// waits as a notification no worker has received; a handler installed
+/// without `SA_RESTART` interrupts that wait, the kernel withdraws the
+/// notification, and the program sees `EINTR` for a connect that never ran.
+/// Under `tool` and `none` the same program's interrupted connect is a
+/// counted result (O-2); here the mediator never learns of it.
+///
+/// Pinned: the program gets `EINTR`; nothing ever reaches the connect's
+/// destination (no effect); the mediator records a result for each of the
+/// five connects it received and none for the sixth; no gap; `net` and
+/// `fs.deny` stay active with exact counts, and a strict attempt exits 0.
+/// This is the named exclusion: under `agent`, `net` and `fs.deny` count the
+/// connects the mediator received.
+#[test]
+fn j4_w3_an_agent_connect_withdrawn_before_the_mediator_received_it_is_excluded() {
+    if !common::live() {
+        return;
+    }
+    let Some(target) = eintr_connect_target() else {
+        return;
+    };
+    let c = case("agent");
+    let binary = c.workspace.join("bin/eintr-connect");
+    std::fs::copy(target, &binary).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = c
+        .jail
+        .args(["--evidence", "strict"])
+        .timeout(Duration::from_secs(60))
+        .target(vec![binary.into_os_string()])
+        .run()
+        .unwrap();
+    let stdout = run.stdout_text();
+    let report: Vec<(String, i64, i32)> = stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            Some((
+                fields.next()?.to_owned(),
+                fields.next()?.parse().ok()?,
+                fields.next()?.parse().ok()?,
+            ))
+        })
+        .collect();
+    let find = |label: &str| {
+        report
+            .iter()
+            .find(|(l, _, _)| l == label)
+            .unwrap_or_else(|| panic!("no {label} in {stdout:?}"))
+            .clone()
+    };
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let receipt = settled(&run);
+    assert_eq!(find("connect_first").1, 0, "{stdout}");
+    let quick = find("connect_quick");
+    assert_eq!(
+        (quick.1, quick.2),
+        (-1, libc::EINTR),
+        "the queued connect was interrupted: {stdout}"
+    );
+    assert_eq!(
+        find("quick_arrived").1,
+        0,
+        "the interrupted connect had no effect: {stdout}"
+    );
+    let slow: Vec<&(String, i64, i32)> = report
+        .iter()
+        .filter(|(l, _, _)| l == "connect_slow")
+        .collect();
+    assert_eq!(slow.len(), 4, "{stdout}");
+    let results = mediated(&run);
+    assert_eq!(
+        results.len(),
+        5,
+        "one result per connect the mediator received, none for the withdrawn one: {results:#?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|event| event["outcome"]["errno"] != "EINTR"),
+        "{results:#?}"
+    );
+    let mut counted = 0;
+    for class in ["net", "fs.deny"] {
+        let entry = &receipt["coverage"][class];
+        assert_eq!(entry["status"], "active", "{class}: {entry:#}");
+        assert!(
+            entry["gaps"].as_array().unwrap().is_empty(),
+            "{class}: an excluded connect is not a gap: {entry:#}"
+        );
+        counted += entry["observed_count"].as_u64().unwrap();
+    }
+    assert_eq!(counted, 5, "{:#}", receipt["coverage"]);
+    assert!(
+        receipt["errors"].as_array().unwrap().is_empty(),
+        "{:#}",
+        receipt["errors"]
+    );
+}
