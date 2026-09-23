@@ -130,8 +130,20 @@ impl Drop for LeafGuard {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
-        let _ = std::fs::remove_dir(&self.path);
+        remove_cgroup_tree(&self.path);
     }
+}
+
+/// Removes an empty cgroup and the empty cgroups under it, deepest first.
+fn remove_cgroup_tree(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                remove_cgroup_tree(&entry.path());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(dir);
 }
 
 /// Reads a pid a fixture published with an atomic rename.
@@ -160,6 +172,13 @@ struct Orphan {
 
 impl Orphan {
     fn new() -> Orphan {
+        Orphan::nested(0)
+    }
+
+    /// An orphan whose descendant first makes `depth` nested cgroups inside
+    /// its own leaf and moves itself into the deepest: what any same-uid
+    /// process in a `none` leaf may do (no controller is enabled in it).
+    fn nested(depth: usize) -> Orphan {
         let jail = Jail::new().expect("a private harness");
         let workspace = jail.root().join("workspace");
         std::fs::create_dir(&workspace).expect("the workspace");
@@ -173,6 +192,11 @@ impl Orphan {
              null = os.open('/dev/null', os.O_RDWR)\n\
              for fd in (0, 1, 2): os.dup2(null, fd)\n\
              if os.fork() == 0:\n\
+             \x20   path = '/sys/fs/cgroup' + open('/proc/self/cgroup').read().split('::', 1)[1].strip()\n\
+             \x20   for level in range({depth}):\n\
+             \x20       path = path + '/n%d' % level\n\
+             \x20       os.mkdir(path)\n\
+             \x20   if {depth}: open(path + '/cgroup.procs', 'w').write('0')\n\
              \x20   publish({descendant:?})\n\
              \x20   time.sleep(120)\n\
              \x20   os._exit(0)\n\
@@ -181,6 +205,7 @@ impl Orphan {
              time.sleep(120)\n",
             descendant = descendant_file.to_str().unwrap(),
             target = target_file.to_str().unwrap(),
+            depth = depth,
         );
         let mut spawned = jail
             .arg("run")
@@ -203,7 +228,12 @@ impl Orphan {
         let descendant = identity::pidfd_open(descendant_pid).expect("the live descendant");
         let in_leaf = members(&leaf);
         assert!(in_leaf.contains(&target_pid), "{in_leaf:?}");
-        assert!(in_leaf.contains(&descendant_pid), "{in_leaf:?}");
+        let mut innermost = leaf.clone();
+        for level in 0..depth {
+            innermost.push(format!("n{level}"));
+        }
+        let inner = members(&innermost);
+        assert!(inner.contains(&descendant_pid), "{inner:?}");
         spawned
             .kill()
             .expect("the harness kills its own supervisor");
@@ -564,6 +594,78 @@ fn j4_c03_a_stale_owner_pid_never_signals_an_unrelated_process() {
     wait_for("the orphan's end", || orphan.orphan_dead());
     assert_eq!(inode(&orphan.leaf), None);
     bystander.assert_untouched("recycled pid");
+}
+
+/// A receipt is the supervisor's record, but in `none` the same uid can
+/// rewrite it. One that names another cgroup of this user (its real path,
+/// device and inode, and a process in it) is still not an execution leaf by
+/// name, so gc never pins it, never kills through it and never removes it.
+#[test]
+fn j4_c03_a_receipt_naming_another_cgroup_is_never_acted_on() {
+    if !live() {
+        return;
+    }
+    let orphan = Orphan::new();
+    let attempt = orphan.attempt();
+    let root = orphan.leaf.parent().unwrap().to_path_buf();
+    let other = root.join(format!("ouro-j4gc-bystander-{}", std::process::id()));
+    std::fs::create_dir(&other).unwrap();
+    let _other_guard = LeafGuard::new(&other, inode(&other).unwrap());
+    let mut bystander = Command::new("sleep").arg("120").spawn().unwrap();
+    std::fs::write(other.join("cgroup.procs"), bystander.id().to_string()).unwrap();
+    let meta = std::fs::metadata(&other).unwrap();
+    let mut receipt = read_json(&attempt.join("jail.json"));
+    let registration = &mut receipt["lifetime"]["native"]["details"]["execution_cgroup"];
+    registration["path"] = json!(other);
+    registration["device"] = json!(meta.dev());
+    registration["inode"] = json!(meta.ino());
+    write_json(&attempt.join("jail.json"), &receipt);
+
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let (code, report, stderr) = gc(&orphan.run, extra);
+        assert_eq!(code, Some(0), "{extra:?}: {stderr}\n{report:#}");
+        let cgroup = text(&report, "cgroup");
+        assert!(
+            cgroup.starts_with("retained") && cgroup.contains("leaf's name"),
+            "{extra:?}: {report:#}"
+        );
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "gc killed through a forged record"
+        );
+        assert_eq!(inode(&other), Some(meta.ino()));
+        assert!(gc_actions(&attempt).is_empty());
+    }
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+}
+
+/// A same-uid process in a `none` leaf may make cgroups inside it. The kill
+/// and the population check are recursive, so the nested descendant is
+/// ended too, and the leaf is removed only after its emptied child cgroups
+/// (the kernel refuses `rmdir` of a cgroup with children).
+#[test]
+fn j4_c03_child_cgroups_inside_an_orphan_leaf_are_ended_and_removed() {
+    if !live() {
+        return;
+    }
+    let orphan = Orphan::nested(2);
+    let attempt = orphan.attempt();
+    assert!(orphan.leaf.join("n0").join("n1").is_dir());
+    let (code, report, stderr) = gc(&orphan.run, &[]);
+    assert_eq!(code, Some(0), "{stderr}\n{report:#}");
+    assert_eq!(
+        text(&report, "cgroup"),
+        "terminated_orphan_and_removed",
+        "{report:#}"
+    );
+    wait_for("the nested orphan's end", || orphan.orphan_dead());
+    assert_eq!(
+        inode(&orphan.leaf),
+        None,
+        "the leaf and its children are removed"
+    );
+    assert_eq!(gc_actions(&attempt).len(), 3);
 }
 
 // ===========================================================================

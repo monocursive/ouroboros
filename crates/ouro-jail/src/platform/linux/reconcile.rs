@@ -549,22 +549,21 @@ mod tests {
             device: 0,
             inode: 0,
         };
-        // Not under the root, nested below it, or not a leaf name: refused
-        // before anything is opened.
-        for path in [
-            Path::new("/sys/fs/cgroup").join(&name),
-            root.path().join("nested").join(&name),
-            root.path().join("ouro-j3none-replace-1-0"),
-            root.path().join("user@1001.service"),
+        // Not under the root, nested below it, or not a leaf name: refused,
+        // for that reason, before anything is opened.
+        for (path, why) in [
+            (Path::new("/sys/fs/cgroup").join(&name), "direct child"),
+            (root.path().join("nested").join(&name), "direct child"),
+            (root.path().join("ouro-j3none-replace-1-0"), "leaf's name"),
+            (root.path().join("user@1001.service"), "leaf's name"),
         ] {
-            assert!(
-                matches!(
-                    pin_under(root.path(), &leaf(path.clone())),
-                    Err(LeafProbe::Unverifiable(_))
-                ),
-                "{}",
-                path.display()
-            );
+            match pin_under(root.path(), &leaf(path.clone())) {
+                Err(LeafProbe::Unverifiable(reason)) => {
+                    assert!(reason.contains(why), "{}: {reason}", path.display());
+                }
+                Err(other) => panic!("{}: {other:?}", path.display()),
+                Ok(_) => panic!("{} was pinned", path.display()),
+            }
         }
         // Right place and name, but not cgroup v2: refused, even though it
         // exists and is a directory.
