@@ -2202,6 +2202,84 @@ mod w3 {
         }
     }
 
+    /// G4's other half: only an attempt with nothing left is finished. A leaf
+    /// gc could not verify (it may be verifiable later: a gc run outside the
+    /// delegated scope), an owner whose liveness is unknown, pending vendor
+    /// state the records do not permit removing yet, retained managed
+    /// scratch, or a temporary file gc does not remove keeps the attempt
+    /// visited and reported; a dry run records nothing.
+    /// The retained leaf is acted on as soon as a later pass can verify it.
+    #[test]
+    fn j4_w3_g4_an_attempt_with_something_left_is_never_finished() {
+        use super::scripted::Scripted;
+        let finished = |dir: &AttemptDir| {
+            actions(dir)
+                .iter()
+                .any(|action| action["action"] == "gc_finished")
+        };
+        // A leaf gc cannot verify yet.
+        let fixture = Fixture::new();
+        let (id, dir, _) = dead_with_own_leaf(&fixture);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Unverifiable("no scope".into()));
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(!finished(&dir), "an unverifiable leaf: {:?}", actions(&dir));
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
+        let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert_eq!(
+            only(&report, &id).cgroup.as_deref(),
+            Some("terminated_orphan_and_removed"),
+            "{:?}",
+            only(&report, &id)
+        );
+        // An owner whose liveness is unknown.
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, HOST_BOOT);
+        let host = Scripted::new(Liveness::Unknown("no /proc".into()), LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(!finished(&dir), "an unknown owner: {:?}", actions(&dir));
+        // Vendor state the records do not permit removing yet.
+        let fixture = Fixture::new();
+        let (_, dir, leaf) = dead_with_own_leaf(&fixture);
+        enforced_receipt_with_leaf(&dir, HOST_BOOT, &leaf);
+        let vendor = vendor_state_pending(&dir);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(vendor.exists());
+        assert!(!finished(&dir), "pending vendor state: {:?}", actions(&dir));
+        // Managed scratch kept because nothing verifies the tree's end (the
+        // leaf is gone, and gc never saw it empty): reported every pass.
+        let fixture = Fixture::new();
+        let (_, dir, _) = dead_with_own_leaf(&fixture);
+        let scratch = managed_scratch(&dir, 1);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(scratch.exists());
+        assert!(!finished(&dir), "retained scratch: {:?}", actions(&dir));
+        // A temporary file gc does not remove.
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, OTHER_BOOT);
+        private_file(&dir.root().join(".planted.tmp"), b"x");
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(
+            !finished(&dir),
+            "a planted temporary file: {:?}",
+            actions(&dir)
+        );
+        std::fs::remove_file(dir.root().join(".planted.tmp")).unwrap();
+        // A dry run records nothing; the real pass then finishes it.
+        gc::gc_with(&fixture.context(), &gc_args(true), &host, Options::DEFAULT).unwrap();
+        assert!(!finished(&dir), "a dry run: {:?}", actions(&dir));
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(finished(&dir), "nothing left: {:?}", actions(&dir));
+    }
+
     // -----------------------------------------------------------------------
     // G5: a record gc repeats is kept once, with a count
     // -----------------------------------------------------------------------
