@@ -46,18 +46,31 @@ everything else   ALLOW
 
 excluded by name (§11.2): read, write, mmap, ftruncate and every other
 descriptor-based mutation, io_uring, payloads and file contents; a read-only
-open is outside the set (no event, not a loss)
+open is outside the set (no event, not a loss, and never an in-flight slot)
+
+io_uring (§9.2), never observed: the observer's verdict, and the contained
+baselines' (tool, build and agent share the refusal)
+
+io_uring_setup     425  ALLOW   tool, build, agent: EPERM (baseline)
+io_uring_enter     426  ALLOW   tool, build, agent: EPERM (baseline)
+io_uring_register  427  ALLOW   tool, build, agent: EPERM (baseline)
+under none nothing refuses them: a ring is set up and entered, and what it
+submits (IORING_OP_OPENAT, IORING_OP_CONNECT, IORING_OP_RENAMEAT, ...) is
+executed by the kernel inside io_uring_enter or by its io-wq workers, never
+through the syscall table, so no stop happens: neither a result nor a gap
 
 per profile
 tool, build  the baseline answers other ABIs, x32, a notification listener and
              clone(CLONE_UNTRACED) with EPERM and clone3 with ENOSYS; ERRNO
              outranks TRACE, so none of these ever stops here; AF_UNIX sockets
-             are refused, so connect is AF_INET or AF_INET6
-agent        the same baseline refusals except the listener, which the jail's
-             own mediation listener makes fail with EBUSY; connect is mediated
-             (USER_NOTIF outranks TRACE) and its result carries
-             fields.observation = seccomp_user_notification
-none         no baseline: every stop above can happen
+             are refused, so connect is AF_INET or AF_INET6; io_uring is
+             refused (EPERM)
+agent        the same baseline refusals, io_uring included, except the listener,
+             which the jail's own mediation listener makes fail with EBUSY;
+             connect is mediated (USER_NOTIF outranks TRACE) and its result
+             carries fields.observation = seccomp_user_notification
+none         no baseline: every stop above can happen, and io_uring is allowed
+             and unobserved (above)
 
 notes
 - The trace data is 0x4f4a. A stop on a number this filter never traces, with
@@ -70,6 +83,16 @@ notes
   stops it hides a call that had no effect: a named exclusion, not a gap.
 - With no tracer attached, every TRACE verdict fails the call with ENOSYS: the
   observer's death, and a CLONE_UNTRACED descendant, fail closed.
+- A return carrying a kernel restart code (ERESTARTSYS, ERESTARTNOINTR,
+  ERESTARTNOHAND, ERESTART_RESTARTBLOCK) is not a result: the thread is
+  single-stepped to the kernel's decision. A re-entry of the call is its one
+  result; EINTR at a handler's entry is the result; a death is neither a
+  result nor a loss (the call did nothing); anything else is a
+  restart_unresolved gap of the call's classes.
+- A tracee killed at its entry stop before the observer resumed it made no
+  call (the kernel skips it): neither a result nor a loss. Killed at its exit
+  stop before the return was read, the call ran: entry_abandoned of its own
+  classes.
 
 narrowing filter instructions: 36
 narrowing filter digest: sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66

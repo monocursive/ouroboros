@@ -17,6 +17,10 @@ use super::filter::{
     SECCOMP_FILTER_FLAG_NEW_LISTENER, narrowing_filter, narrowing_filter_digest,
 };
 use super::sys;
+use crate::platform::linux::seccomp::{DENY_EPERM, NAMESPACE_SETUP};
+
+/// The three io_uring entry points (jail-v1 §9.2), by name.
+const IO_URING: [&str; 3] = ["io_uring_setup", "io_uring_enter", "io_uring_register"];
 
 /// What the program returns for one `(arch, nr, arg0, arg1)`, by running it.
 fn verdict(arch: u32, nr: u32, arg0: u32, arg1: u32) -> u32 {
@@ -175,19 +179,51 @@ pub fn closed_set_table() -> String {
     out.push_str(
         "\nexcluded by name (§11.2): read, write, mmap, ftruncate and every other\n\
          descriptor-based mutation, io_uring, payloads and file contents; a read-only\n\
-         open is outside the set (no event, not a loss)\n",
+         open is outside the set (no event, not a loss, and never an in-flight slot)\n",
+    );
+    out.push_str(
+        "\nio_uring (§9.2), never observed: the observer's verdict, and the contained\n\
+         baselines' (tool, build and agent share the refusal)\n\n",
+    );
+    for call in IO_URING {
+        let nr = DENY_EPERM
+            .iter()
+            .find(|(name, _)| *name == call)
+            .map(|(_, nr)| *nr);
+        // Every contained baseline denies DENY_EPERM; the agent's namespace
+        // variant lifts only NAMESPACE_SETUP from it.
+        let refused = nr.is_some() && !NAMESPACE_SETUP.iter().any(|(name, _)| *name == call);
+        let _ = writeln!(
+            out,
+            "{call:<18} {:<4} {:<7} tool, build, agent: {}",
+            nr.map_or_else(|| "?".to_owned(), |nr| nr.to_string()),
+            nr.map_or_else(|| "?".to_owned(), |nr| name(verdict(x86, nr, 0, 0))),
+            if refused {
+                "EPERM (baseline)"
+            } else {
+                "NOT REFUSED"
+            },
+        );
+    }
+    out.push_str(
+        "under none nothing refuses them: a ring is set up and entered, and what it\n\
+         submits (IORING_OP_OPENAT, IORING_OP_CONNECT, IORING_OP_RENAMEAT, ...) is\n\
+         executed by the kernel inside io_uring_enter or by its io-wq workers, never\n\
+         through the syscall table, so no stop happens: neither a result nor a gap\n",
     );
     out.push_str(
         "\nper profile\n\
          tool, build  the baseline answers other ABIs, x32, a notification listener and\n\
          \x20            clone(CLONE_UNTRACED) with EPERM and clone3 with ENOSYS; ERRNO\n\
          \x20            outranks TRACE, so none of these ever stops here; AF_UNIX sockets\n\
-         \x20            are refused, so connect is AF_INET or AF_INET6\n\
-         agent        the same baseline refusals except the listener, which the jail's\n\
-         \x20            own mediation listener makes fail with EBUSY; connect is mediated\n\
-         \x20            (USER_NOTIF outranks TRACE) and its result carries\n\
-         \x20            fields.observation = seccomp_user_notification\n\
-         none         no baseline: every stop above can happen\n",
+         \x20            are refused, so connect is AF_INET or AF_INET6; io_uring is\n\
+         \x20            refused (EPERM)\n\
+         agent        the same baseline refusals, io_uring included, except the listener,\n\
+         \x20            which the jail's own mediation listener makes fail with EBUSY;\n\
+         \x20            connect is mediated (USER_NOTIF outranks TRACE) and its result\n\
+         \x20            carries fields.observation = seccomp_user_notification\n\
+         none         no baseline: every stop above can happen, and io_uring is allowed\n\
+         \x20            and unobserved (above)\n",
     );
     out.push_str(
         "\nnotes\n\
@@ -200,7 +236,17 @@ pub fn closed_set_table() -> String {
          - A child's own filter that refuses a call (errno, trap, kill) before this one\n\
          \x20 stops it hides a call that had no effect: a named exclusion, not a gap.\n\
          - With no tracer attached, every TRACE verdict fails the call with ENOSYS: the\n\
-         \x20 observer's death, and a CLONE_UNTRACED descendant, fail closed.\n",
+         \x20 observer's death, and a CLONE_UNTRACED descendant, fail closed.\n\
+         - A return carrying a kernel restart code (ERESTARTSYS, ERESTARTNOINTR,\n\
+         \x20 ERESTARTNOHAND, ERESTART_RESTARTBLOCK) is not a result: the thread is\n\
+         \x20 single-stepped to the kernel's decision. A re-entry of the call is its one\n\
+         \x20 result; EINTR at a handler's entry is the result; a death is neither a\n\
+         \x20 result nor a loss (the call did nothing); anything else is a\n\
+         \x20 restart_unresolved gap of the call's classes.\n\
+         - A tracee killed at its entry stop before the observer resumed it made no\n\
+         \x20 call (the kernel skips it): neither a result nor a loss. Killed at its exit\n\
+         \x20 stop before the return was read, the call ran: entry_abandoned of its own\n\
+         \x20 classes.\n",
     );
     let prog = narrowing_filter();
     let _ = writeln!(out, "\nnarrowing filter instructions: {}", prog.len());
@@ -226,6 +272,19 @@ mod tests {
         for name in ["seccomp", "clone ", "clone3", "x32", "EBUSY", "0x4f4a"] {
             assert!(table.contains(name), "{name}");
         }
+        // io_uring: refused by every contained baseline, allowed and
+        // unobserved under `none` — stated, not left to inference.
+        for call in IO_URING {
+            let nr = DENY_EPERM
+                .iter()
+                .find(|(name, _)| *name == call)
+                .map(|(_, nr)| *nr)
+                .unwrap_or_else(|| panic!("{call} is not in the contained baseline"));
+            let row = format!("{call:<18} {nr:<4} ALLOW   tool, build, agent: EPERM (baseline)");
+            assert!(table.contains(&row), "{row}");
+        }
+        assert!(table.contains("under none nothing refuses them"));
+        assert!(!table.contains("NOT REFUSED"));
         assert!(table.contains(&narrowing_filter_digest()));
         assert!(table.contains("rows: 22"));
     }
