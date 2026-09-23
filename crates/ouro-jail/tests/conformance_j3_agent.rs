@@ -2801,14 +2801,36 @@ fn review_settlement_itself_produces_no_helper_note() {
             quiet(&run, &format!("sleep, observe {observe}, round {round}"));
         }
     }
+    // J4: the target exits only once its background child is asleep in
+    // `sleep` itself (`/proc/<pid>/syscall` names clock_nanosleep or
+    // nanosleep), so no closed-set call of the child's is in flight when the
+    // namespace's teardown kills it. Without that gate the kill could catch
+    // the child inside one of its `execve` attempts along PATH: a real
+    // `entry_abandoned` loss (whether the image was established is unknown)
+    // that strict evidence reports with exit 1 — a timing race in this check,
+    // not the settlement quietness it is about (§15: synchronise on protocol
+    // events, not timing). `j4_loss_linux` covers that loss on purpose.
     let c = case("agent");
     let run = c
         .jail
-        .target(["/bin/sh", "-c", "sleep 30 & exit 0"])
+        .target([
+            "/bin/sh",
+            "-c",
+            "sleep 30 & \
+             while :; do \
+               read -r nr rest < /proc/$!/syscall 2>/dev/null; \
+               case \"$nr\" in 230|35) exit 0;; esac; \
+             done",
+        ])
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    settled(&run);
+    let receipt = settled(&run);
+    assert_eq!(
+        receipt["coverage"]["exec"]["status"], "active",
+        "the child's exec was complete when it was killed: {:#}",
+        receipt["coverage"]
+    );
     quiet(&run, "a background child");
     let c = case("agent");
     let run = c

@@ -53,7 +53,7 @@ use super::fs as jfs;
 use super::identity;
 use super::probe::{self, ProbeResult, ProbeStatus};
 use super::seccomp;
-use super::tracer::{Tracer, TracerConfig, TracerEvent, TracerSummary};
+use super::tracer::{Tracer, TracerEvent, TracerSummary};
 
 /// Descriptor the seccomp program is handed to bubblewrap on.
 const SECCOMP_FD: RawFd = 10;
@@ -521,6 +521,9 @@ struct Boundary {
     applied: Applied,
     backend_version: String,
     observe_on: bool,
+    /// The §11.4 bounds the observer runs with, decided once; `None` with
+    /// observation off.
+    observer_plan: Option<super::observed::ObserverPlan>,
     ns_ids: identity::NsIds,
     cgroup: Option<ExecutionCgroup>,
     cgroup_lost: bool,
@@ -1053,6 +1056,7 @@ impl Boundary {
             },
             backend_version: String::new(),
             observe_on,
+            observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
             ns_ids: identity::NsIds::default(),
             cgroup,
             cgroup_lost: false,
@@ -1104,15 +1108,13 @@ impl Boundary {
                 format!("target cgroup placement failed: {err}"),
             ));
         }
-        if observe_on {
+        if let Some(plan) = boundary.observer_plan.as_ref() {
             // §13.1: gap intervals count from supervisor start on the same
-            // CLOCK_BOOTTIME base as every other monotonic_ns.
+            // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
+            // bounds are the plan's, which the receipt records.
             match Tracer::attach(
                 boundary.launcher.pid,
-                TracerConfig {
-                    epoch_boottime_ns: clock::mark_supervisor_start(),
-                    ..TracerConfig::default()
-                },
+                plan.tracer_config(clock::mark_supervisor_start()),
             ) {
                 Ok(tracer) => boundary.tracer = Some(tracer),
                 Err(err) => {
@@ -1770,6 +1772,13 @@ impl Boundary {
             } else {
                 Value::Null
             },
+        );
+        // §11.4: "Record actual values in the observer plan."
+        details.insert(
+            "observer_plan".to_owned(),
+            self.observer_plan
+                .as_ref()
+                .map_or(Value::Null, super::observed::ObserverPlan::details),
         );
         // J3-agent begin: the filter count read back, and the agent network
         details.insert(
