@@ -1,0 +1,29 @@
+# EXPERIMENTAL launch profile (jail-v1 §12, north star §4.5).
+#
+# Example data only: `ouro-jail` never reads this directory. An operator who
+# wants it copies it to `<config-dir>/launch/claude.toml` (mode 0600) and
+# checks every path and host against their own installation. It stays
+# experimental until a real run records the Claude Code version and the exact
+# files and hosts it needed (§12, acceptance row A01); nothing here has been
+# recorded yet.
+#
+# Sources are the north star's initial inputs: file credentials and settings
+# from the node's Claude config directory (`~/.claude`). There is no Keychain
+# extraction; a macOS Keychain credential is a separate, unscheduled problem.
+
+name = "claude"
+jail = "agent"
+state_var = "CLAUDE_CONFIG_DIR"
+
+[credentials.credentials]
+source = "~/.claude/.credentials.json"
+dest = ".credentials.json"
+mode = "copy_rw"
+
+[credentials.settings]
+source = "~/.claude/settings.json"
+dest = "settings.json"
+mode = "bind_ro"
+
+[network]
+allow = ["api.anthropic.com:443"]

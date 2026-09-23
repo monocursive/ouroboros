@@ -90,7 +90,40 @@ apparmor_userns_restriction = "available"
 # bubblewrap all fail with EPERM. Evidence:
 # evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt measurements 1, 2, 3 and
 # 5 (all exit 1) with the profile text quoted verbatim; backend-evaluation.md
-# §1.1 rows for nested namespaces and nested bubblewrap. This stays
-# unavailable until an operator applies the sysctl or an AppArmor decision;
-# the agent profile (S03) needs it, `tool` does not.
+# §1.1 rows for nested namespaces and nested bubblewrap. The jail requires no
+# host configuration (jail-v1 revision 9), so this host stays stock and this
+# row stays unavailable: `agent` runs without nested user namespaces, and S03
+# proves its Landlock and seccomp nesting instead.
 nested_user_namespace = "unavailable"
+
+# J3 (`agent`), measured live as ouro-ci on a stock host with no host
+# configuration changed: `ouro-jail doctor --json` inside the delegated scope,
+# evidence/j3-doctor-2026-09-23-ouro-ci.json (each row's `evidence_ref` carries
+# the measured facts), and the live suite in
+# evidence/j3-test-log-2026-09-23-ouro-ci.txt, run
+# 20260923T094510Z-6bb5a34192ac (conformance_j3_agent, 33 tests: S03, N01-N05,
+# C01, X06 for agent). See j3-authority.md.
+
+# An unprivileged child installs the agent's mediation filter with
+# SECCOMP_FILTER_FLAG_NEW_LISTENER and this process takes the listener with
+# pidfd_getfd (Yama scope 1 permits a descendant). Same mechanism as
+# evidence/unixpeer-spike-2026-09-22-ouro-ci.txt steps 1-2.
+seccomp_user_notification = "available"
+
+# One real `ouro-jail run --profile agent`: through 127.0.0.1:3128 an allowed
+# loopback origin (numeric grant) answers 200 and the proxy records
+# allow/relayed; an ungranted port answers 403 (deny/host_not_allowed) and its
+# listener sees no connection; direct TCP egress is ENETUNREACH.
+agent_proxy_bridge = "available"
+
+# In the same run: a host-bound pathname socket in the workspace is refused
+# EACCES by the mediator and never sees a connection; a socket the child binds
+# in scratch is reached.
+agent_unix_peer_mediation = "available"
+
+# In the same run: a Landlock (ABI 8) + seccomp inner sandbox starts inside
+# `agent` and denies a write and a read outside its grant (EACCES) and mkdir
+# (EPERM); remount, umount, setns and unshare fail EPERM; direct egress fails
+# ENETUNREACH. The namespace form stays unavailable (nested_user_namespace
+# above), which `agent` records and does not refuse for.
+agent_inner_sandbox = "available"

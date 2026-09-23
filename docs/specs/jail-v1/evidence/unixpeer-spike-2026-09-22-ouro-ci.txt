@@ -1,0 +1,87 @@
+collected_at: 2026-09-22T18:28:29Z as ouro-ci on vps-450b3fe8, kernel 7.0.0-31-generic, ptrace_scope=1, apparmor_restrict_unprivileged_userns=1
+spike: crates-free standalone binary (rustc 1.98.1, libc 0.2.189); one bwrap 0.11.1 layer; no nesting; no host configuration changed
+mechanism under test: contract j3 §3.4 (seccomp user-notification mediation of AF_UNIX connect for the `agent` profile)
+
+=== 0 host constraint that shaped the harness ===
+An UNCONFINED process on this host may create a user namespace (unshare(CLONE_NEWUSER)=0, uid becomes 65534) but holds NO capabilities in it: writing /proc/self/uid_map fails EPERM and a following unshare(CLONE_NEWNET|CLONE_NEWNS) fails EPERM. Reproduced in clean C, not only Rust. This is the same apparmor_restrict_unprivileged_userns=1 policy that denies nesting. Consequence: the mediation cannot be spiked with a self-made namespace; it must run under one real bwrap layer, which is the AppArmor-authorized userns path (`bwrap//&unpriv_bwrap`). The spike therefore launches the trusted launcher inside `bwrap --unshare-user --unshare-net --unshare-ipc --unshare-pid --unshare-uts`, which is exactly the outer boundary the `agent` profile uses.
+
+=== 1 step 1 of §3.4: the agent filter (connect -> USER_NOTIF; AF_UNIX socket type allow-list) ===
+notif_sizes (SECCOMP_GET_NOTIF_SIZES): seccomp_notif=80  seccomp_notif_resp=24  seccomp_data=64
+socket(AF_UNIX, SOCK_DGRAM)      => EPERM   (filter refuses; datagram peer can be named in sendmsg msg_name, unreadable by seccomp)
+socket(AF_UNIX, SOCK_RAW)        => EPERM   (AF_UNIX SOCK_RAW behaves as datagram; refused by the STREAM/SEQPACKET allow-list)
+socket(AF_UNIX, SOCK_STREAM)     => OK      (allowed)
+socketpair(AF_UNIX, SOCK_DGRAM)  => EPERM   (refused)
+The type field is masked with SOCK_TYPE_MASK (0xf) before comparison so SOCK_CLOEXEC/SOCK_NONBLOCK bits do not defeat it. The allow-list is STREAM(1) and SEQPACKET(5); everything else AF_UNIX is denied. Non-AF_UNIX socket() is allowed (the netns, not this filter, bounds egress).
+
+=== 2 step 2 of §3.4: NEW_LISTENER install + handover of listener and NETLINK_SOCK_DIAG via pidfd_getfd ===
+The launcher, blocked inside bwrap, installs the filter with SECCOMP_FILTER_FLAG_NEW_LISTENER and opens a NETLINK_SOCK_DIAG socket in the attempt's netns.
+handover: listener + sock_diag fds taken via pidfd_getfd  (supervisor discovers the launcher as the `/spike launcher` descendant of bwrap's reported child-pid, opens a pidfd, and pidfd_getfd's both fds; Yama scope 1 permits it because the launcher is a same-uid descendant). An SCM_RIGHTS fallback over the coord socket is also provided; it was not needed. The sock_diag socket remains bound to the netns it was created in even when used from the supervisor.
+
+=== 3 step 3 of §3.4: per-connect mediation (path resolution in the child's view, O_PATH pin, UDIAG_SHOW_VFS check, pinned-fd connect) ===
+Each line is the connecting task's observed connect() result and the mediator's decision.
+attempt pathname listener  (/attempt/attempt.sock, bound in attempt netns)   => ALLOW  connect_result=OK    [mediator: pinned-fd connect, sock_diag VFS match in attempt netns]
+host pathname pre-existing (/shared/host.sock, host netns, bound before launch) => DENY   connect_result=EACCES [mediator: no attempt-netns listener for that node]
+host pathname late-created (/shared/host-late.sock, host netns, bound after launch, seen through the bound dir) => DENY connect_result=EACCES
+host hardlink alias       (/shared/host-hardlink.sock, same inode as host.sock) => DENY  connect_result=EACCES
+host bind-mount alias     (/shared2/host.sock, second bind of the host dir)      => DENY  connect_result=EACCES
+attempt abstract          (\0ouro-attempt-abstract, bound in attempt netns)      => ALLOW connect_result=OK   [mediator connects the duplicate; abstract is netns-scoped]
+host abstract             (\0ouro-host-abstract, bound in host netns)            => DENY  connect_result=ECONNREFUSED [not present in the attempt netns; the duplicate cannot reach it]
+seqpacket attempt         (/attempt/attempt_seq.sock, SEQPACKET)                 => ALLOW connect_result=OK
+loopback TCP (listener up in attempt netns)                                      => ALLOW connect_result=OK   [non-AF_UNIX: mediator connects the duplicate]
+loopback TCP (no listener)                                                       => connect_result=ECONNREFUSED
+SCM_RIGHTS same-attempt   (connect attempt sock, then sendmsg SCM_RIGHTS)         => connect=OK scm_send=ok    [same-attempt IPC allowed; a host peer is never reachable, so SCM_RIGHTS to a host peer has no channel to exist on]
+Path resolution uses openat2 against /proc/<pid>/root (absolute) or /proc/<pid>/cwd (relative) with RESOLVE_IN_ROOT|RESOLVE_NO_MAGICLINKS (never escaping the child's view), pins the node O_PATH, requires S_ISSOCK, then connects the DUPLICATE through /proc/self/fd/<pinned>. The connect never uses the child's own path string.
+
+=== 3a VFS-identity encoding (sock_diag UDIAG_SHOW_VFS vs statx) — answer to spike question 1 ===
+The UNIX_DIAG_VFS attribute is (udiag_vfs_ino: u32, udiag_vfs_dev: u32). udiag_vfs_dev is the KERNEL-internal dev_t (MAJOR<<20 | MINOR), NOT the userspace st_dev, and udiag_vfs_ino is only 32 bits wide.
+  fs               statx st_ino   statx st_dev   kernel_dev   sock_diag_vfs (ino, kdev)   ino_fits_u32
+  ext4 (workspace) 2545391        2049           8388609      (2545391, 8388609)          true
+  attempt dir      2545391        2049           8388609      (2545391, 8388609)          true
+  tmpfs /tmp       2923316        44             44           (2923316, 44)               true
+  tmpfs /run/user  185            54             54           (185, 54)                   true
+Match rule used and proposed for the module: compare (st_ino as u32, MAJOR(st_dev)<<20 | MINOR(st_dev)) against the UNIX_DIAG_VFS tuple, AND require st_ino <= u32::MAX. Refusal condition: any node whose st_ino exceeds u32::MAX is DENIED (the sock_diag width cannot represent it, so identity cannot be proven). ext4 and tmpfs(inode64) inodes observed here fit u32, but tmpfs with inode64 and xfs/btrfs can issue inodes >= 2^32, so the refusal is load-bearing and must be a live test with an oversize inode when one can be forced.
+
+=== 4 §3.4 step 4: interplay with the ptrace observer's SECCOMP_RET_TRACE narrowing filter — answer to spike question (interplay) ===
+A second filter returning SECCOMP_RET_TRACE (0x7ff00000) for connect was installed on top of the outer USER_NOTIF (0x7fc00000) filter; a connect was then made with a mediator listener present and no tracer attached.
+  added_trace_filter=ok  connect_result=OK
+Because the kernel takes the numerically-lowest action across all filters, USER_NOTIF (0x7fc00000) outranks SECCOMP_RET_TRACE (0x7ff00000). The connect was mediated (OK), not turned into a ptrace seccomp-trap. Therefore a mediated connect is NEVER a ptrace stop, and the observer does not see it. Consequence for wave 2: the mediator must deliver each decision to a sink so the connect evidence is emitted honestly from the mediator, not the tracer.
+
+=== 5 answers to the remaining spike questions ===
+Q2 SO_PEERCRED / connecting task's identity: the connect is performed by the supervisor on the duplicated socket, so the listener's SO_PEERCRED reflects the SUPERVISOR (uid 1001, and pid 0 as seen from inside the child's pid namespace), not the child. This is a fidelity limit to record in the receipt; it does not weaken N05 (the boundary is which listener exists in the attempt netns, plus the node identity). Measured indirectly: same-attempt connects succeed and SCM_RIGHTS works; the peer-credential value is the supervisor's.
+
+Q3 (HIGHEST PRIORITY) a supervisor-performed connect escapes the connecting task's own LSM context:
+  control (native, no mediation): Landlock ABI 8, deny-all-TCP-connect, direct connect => EACCES   (Landlock net enforcement is real on this kernel)
+  inner Landlock deny-all-TCP-connect + MEDIATED connect (mediator connects the duplicate) => mediated_connect_result=OK   *** BYPASS ***
+  inner Landlock SCOPE_ABSTRACT_UNIX_SOCKET + MEDIATED connect to an abstract name => mediated_connect_result=OK   *** BYPASS ***
+  inner Landlock fs read-only-/usr + mediated AF_UNIX connect => connect_result=OK   (fs domain does not gate unix connect; path resolution unaffected — the supervisor is outside that domain, confirmed)
+  So for a NON-AF_UNIX socket, and for abstract AF_UNIX, the mediator performing the connect itself defeats an inner Landlock net/scope restriction. This breaks S03 for those directions. Measured options:
+    Option A (current §3.4 text: mediator connects the duplicate for non-AF_UNIX): BYPASS as above.
+    Option B (respond SECCOMP_USER_NOTIF_FLAG_CONTINUE for non-AF_UNIX so the KERNEL runs the child's own connect under the child's LSM):
+        P2.1 CONTINUE tcp under inner Landlock-deny-TCP => connect_result=EACCES   (the inner Landlock IS now enforced; bypass closed)
+        BUT CONTINUE re-executes connect(fd, uaddr, ualen) from the child's registers AFTER the decision, so a sibling thread can swap the fd (dup2) or the uaddr bytes in the post-decision window; the contract forbids CONTINUE for a security decision for exactly this TOCTOU. So Option B trades the LSM bypass for an fd-swap risk and cannot be used for the AF_UNIX N05 decision.
+    Recommended resolution to bring to the integrator (not chosen here): the unix-peer mediator's job is ONLY the AF_UNIX pathname/abstract boundary (N05). For a NON-AF_UNIX socket it should NOT connect on the child's behalf at all, because TCP/UDP egress is already contained by the netns + proxy (N01); the mediator connecting the duplicate cannot escape the netns (the socket's netns is fixed at creation) but DOES defeat an inner Landlock TCP rule. Narrowing options, to be decided in the spec revision:
+      (i) for non-AF_UNIX return CONTINUE only when the socket family cannot name an AF_UNIX peer (the fd's SO_DOMAIN is read from the duplicate, immune to the child's uaddr edits; but the fd NUMBER can still be swapped before the kernel re-runs — so CONTINUE remains unsafe); or
+      (ii) deny non-AF_UNIX connect at the mediator with a documented errno and let the netns/proxy be the only TCP path (an inner Landlock TCP rule then composes because the child's own connect never runs through the mediator); or
+      (iii) keep mediator-connect but document that inner LSM net rules do not compose through it and require the agent's inner sandbox to rely on the netns/proxy for egress, not Landlock-net.
+  No option is chosen in the spike; each is reported with its measurement.
+
+Q4 WAIT_KILLABLE_RECV and a signal during mediation:
+  killable=false: SIGUSR1 (caught, SA_RESTART off) delivered while the task is blocked in the notify wait => connect_result=EINTR; notifications serviced for this connect = 1 (no restart). The connect fails closed (EINTR), it does not proceed unmediated.
+  killable=true (SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV): same signal => connect_result=OK; 1 notification, no restart. A non-fatal signal does not disturb the mediated connect; only a fatal signal would.
+  Recommendation: install with WAIT_KILLABLE_RECV so ordinary signals do not turn every mediated connect into an EINTR.
+
+Q5 listener lifetime vs inner NEW_LISTENER (EBUSY), and fail-closed:
+  inner_new_listener: an inner sandbox trying to install its own SECCOMP_FILTER_FLAG_NEW_LISTENER filter while the outer mediation listener is held => EBUSY (a task may hold only one notification listener). Recorded limit: a bundled agent whose inner sandbox needs its own seccomp user-notifier cannot get one under this mediation.
+  inner ERRNO filter stacks: an inner filter returning SECCOMP_RET_ERRNO for mkdir stacks fine (inner_mkdir=EPERM) and connect is still mediated (connect_result=OK) because USER_NOTIF outranks the inner ALLOW for connect.
+  fail-closed: closing the mediator listener (all references) makes a subsequent connect fail with ENOSYS (USER_NOTIF with no listener), never proceed unmediated. The supervisor must keep the listener open for the whole run; the mediation thread was made poll-based so it can be stopped without a reference leak (the SCM_RIGHTS fallback fds must be dropped when pidfd_getfd succeeds, or they keep the listener alive).
+
+Q (dead task / pid reuse): a notification whose task is killed while blocked:
+  mediator: id_valid_after_kill=false, notif_send=ENOENT; launcher: the forked connecting child is child_signaled=9.
+  So the SECCOMP_IOCTL_NOTIF_ID_VALID recheck goes false and NOTIF_SEND returns ENOENT once the task dies — the TOCTOU guard the design requires. The mediator re-validates the id after each read and before acting, and again before returning the verdict; a dead/reused task cannot make it act on a stale notification.
+
+=== 6 cost (spike question: per-connect cost) ===
+Per mediated connect, full DENY decision path (pidfd_open + pidfd_getfd + process_vm_readv of the sockaddr + openat2 pin + fstat + a NETLINK_SOCK_DIAG UDIAG_SHOW_VFS dump + notif_send), 3000 iterations, mediator on its own thread: 68.7-81.4 us per connect (three runs: 68.7, 73.9, 81.4). This is the connecting task's observed round-trip. It is comparable to two ptrace stops (~22 us each measured for the observer). connect is not on any hot path for agent workloads, so this is acceptable; the sock_diag dump dominates and could be cached per attempt if needed.
+
+=== 7 verdict ===
+Steps 1-3 of §3.4 PROVE OUT for the N05 boundary: host pathname sockets (pre-existing, late-created, hardlink alias, bind-mount alias) are all DENIED; attempt-bound pathname and abstract sockets are ALLOWED; host abstract is unreachable; AF_UNIX SOCK_DGRAM/RAW creation is refused; same-attempt IPC and SCM_RIGHTS work. Step 4 (USER_NOTIF outranks TRACE) is confirmed. The mediator's TOCTOU guard (id re-validation), fail-closed behaviour, EBUSY on inner NEW_LISTENER, and signal handling are all as required.
+ONE finding that is NOT silently designed around: a supervisor-performed connect for a NON-AF_UNIX socket (and for abstract AF_UNIX) escapes the connecting task's inner Landlock net/scope restriction (Q3). The N05 pathname boundary is unaffected (it never runs the child's connect and always checks node identity + attempt-netns listener). The integrator must choose among the measured options in §5/Q3 before the `agent` inner-sandbox story relies on inner Landlock-net; the module below implements the AF_UNIX boundary and, for non-AF_UNIX, is written so the decision (mediator-connect vs deny vs continue) is a single policy point to be set per that choice.

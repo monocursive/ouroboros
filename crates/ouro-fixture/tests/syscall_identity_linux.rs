@@ -322,3 +322,173 @@ fn a_refused_path_produces_no_syscall_at_all() {
     );
     assert!(!target.exists());
 }
+
+/// The socket-level and inner-sandbox syscalls the J3 modes name.
+const TRACED_J3: &str = "socket,socketpair,bind,listen,accept4,connect,sendto,sendmsg,recvmsg,\
+                         prctl,landlock_create_ruleset,landlock_add_rule,landlock_restrict_self,\
+                         seccomp,execve";
+
+/// Run the fixture under strace with the J3 set; return the exit code and
+/// the trace text.
+fn traced_j3(log: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let status = Command::new("strace")
+        .arg("-f")
+        .arg("-e")
+        .arg(format!("trace={TRACED_J3}"))
+        .arg("-o")
+        .arg(log)
+        .arg(harness::fixture_path())
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("strace must run");
+    let trace = std::fs::read_to_string(log).expect("strace must have written its log");
+    (status.code(), trace)
+}
+
+#[test]
+fn the_socket_modes_reach_the_kernel_as_the_syscalls_their_lines_name() {
+    if !strace_available() {
+        harness::skip_or_fail("strace is not installed on this host");
+        return;
+    }
+    let dir = TempDir::new("ouro-fixture-identity").unwrap();
+    let log = dir.path().join("trace");
+    let sock = dir.path().join("echo.sock").display().to_string();
+    let fixture = harness::fixture_path().display().to_string();
+
+    // Listener and a spawned client: both processes are traced (-f).
+    let (code, trace) = traced_j3(
+        &log,
+        &[
+            "unix-listen",
+            &sock,
+            "--accept",
+            "1",
+            "--",
+            &fixture,
+            "unix-connect",
+            &sock,
+            "--exchange",
+        ],
+    );
+    assert_eq!(code, Some(0), "trace:\n{trace}");
+    assert!(
+        called(&trace, "socket", "AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC"),
+        "{trace}"
+    );
+    assert!(called(&trace, "bind", &sock), "{trace}");
+    assert!(called(&trace, "listen", ""), "{trace}");
+    assert!(called(&trace, "accept4", "SOCK_CLOEXEC"), "{trace}");
+    assert!(called(&trace, "connect", &sock), "{trace}");
+
+    // SCM_RIGHTS: the descriptor rides in a control message.
+    let sock = dir.path().join("scm.sock").display().to_string();
+    let passed = dir.path().join("passed").display().to_string();
+    std::fs::write(&passed, b"x").unwrap();
+    let (code, trace) = traced_j3(
+        &log,
+        &[
+            "scm-recv", &sock, "--", &fixture, "scm-send", &sock, &passed,
+        ],
+    );
+    assert_eq!(code, Some(0), "trace:\n{trace}");
+    assert!(called(&trace, "sendmsg", "SCM_RIGHTS"), "{trace}");
+    assert!(called(&trace, "recvmsg", "SCM_RIGHTS"), "{trace}");
+
+    // Unconnected UDP names its destination in `sendto` itself.
+    let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = peer.local_addr().unwrap().port();
+    let (code, trace) = traced_j3(
+        &log,
+        &["udp-sendto", &format!("127.0.0.1:{port}"), "--bytes", "5"],
+    );
+    assert_eq!(code, Some(0), "trace:\n{trace}");
+    assert!(
+        called(&trace, "sendto", &format!("sin_port=htons({port})")),
+        "{trace}"
+    );
+    assert!(
+        !called(&trace, "connect", ""),
+        "unconnected means no connect:\n{trace}"
+    );
+
+    let (code, trace) = traced_j3(&log, &["unix-socketpair-dgram"]);
+    assert_eq!(code, Some(0), "trace:\n{trace}");
+    assert!(
+        called(&trace, "socketpair", "AF_UNIX, SOCK_DGRAM, 0"),
+        "{trace}"
+    );
+}
+
+#[test]
+fn a_refused_socket_address_produces_no_syscall_at_all() {
+    if !strace_available() {
+        harness::skip_or_fail("strace is not installed on this host");
+        return;
+    }
+    let dir = TempDir::new("ouro-fixture-identity").unwrap();
+    let log = dir.path().join("trace");
+    let long = dir.path().join("s".repeat(200)).display().to_string();
+    let (code, trace) = traced_j3(&log, &["unix-connect", &long]);
+    assert_eq!(code, Some(3), "the refusal must fail the run");
+    for name in ["socket", "connect"] {
+        assert!(!called(&trace, name, ""), "{name} ran; trace:\n{trace}");
+    }
+}
+
+#[test]
+fn sandbox_exec_installs_each_layer_before_the_exec() {
+    if !strace_available() {
+        harness::skip_or_fail("strace is not installed on this host");
+        return;
+    }
+    let dir = TempDir::new("ouro-fixture-identity").unwrap();
+    let log = dir.path().join("trace");
+    let fixture = harness::fixture_path().display().to_string();
+    let (code, trace) = traced_j3(
+        &log,
+        &[
+            "sandbox-exec",
+            "--landlock-ro",
+            "/",
+            "--landlock-rw",
+            &dir.path().display().to_string(),
+            "--seccomp-errno",
+            "mkdirat",
+            "--",
+            &fixture,
+            "exit",
+            "0",
+        ],
+    );
+    assert_eq!(code, Some(0), "trace:\n{trace}");
+    let order: Vec<&str> = [
+        "prctl(PR_SET_NO_NEW_PRIVS, 1",
+        "landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)",
+        "landlock_create_ruleset({handled_access_fs=",
+        "landlock_add_rule(",
+        "landlock_restrict_self(",
+        "seccomp(SECCOMP_SET_MODE_FILTER",
+    ]
+    .into_iter()
+    .collect();
+    let mut at = 0usize;
+    for needle in &order {
+        let found = trace[at..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` missing or out of order; trace:\n{trace}"));
+        at += found + needle.len();
+    }
+    // The exec of the command comes after every layer (the first execve is
+    // strace starting the fixture itself).
+    assert!(
+        trace[at..].contains("execve("),
+        "no exec after the layers:\n{trace}"
+    );
+    assert!(
+        trace.contains("parent_fd="),
+        "the packed path_beneath attribute decoded with its descriptor:\n{trace}"
+    );
+}

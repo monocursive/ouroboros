@@ -33,6 +33,10 @@ use crate::policy::{
     ScratchRoot,
 };
 use crate::profiles;
+// J3-launch begin: launch profiles, staging and cleanup
+use crate::launch_profile;
+use crate::records::StateCleanup;
+// J3-launch end
 use crate::records::{
     Applied, AppliedLimit, AppliedNetwork, AttemptRecord, Containment, ControlKind, ControlMessage,
     ErrorCode, ErrorStage, GateExpectation, JailError, JailRecord, Lifetime, Outcome, OutcomeKind,
@@ -107,7 +111,37 @@ pub struct DoctorReport {
     pub platform: PlatformRecord,
     /// Whether every requirement is satisfied.
     pub ready: bool,
+    // J3-launch begin: `doctor --launch` (§14.1)
+    /// The launch profile's own readiness, when `--launch` was given.
+    pub launch: Option<LaunchReadiness>,
+    // J3-launch end
 }
+
+// J3-launch begin: `doctor --launch` (§14.1)
+/// What `doctor --launch NAME` established about a launch profile.
+///
+/// §14.1: "Launch profile credential existence/type/permissions without
+/// printing values or user-specific paths; experimental/supported status
+/// separately." Each credential is named by the profile's own id, mode and
+/// destination; the support status is reported apart from the host probes.
+pub struct LaunchReadiness {
+    /// The launch profile name.
+    pub name: String,
+    /// `experimental` or `supported`.
+    pub support: &'static str,
+    /// Why the profile has that status.
+    pub support_reason: &'static str,
+    /// One check per declared credential, in id order.
+    pub credentials: Vec<crate::credentials::CredentialCheck>,
+}
+
+/// Every launch profile is `experimental` until a real run of that agent is
+/// recorded (§12, A01). This build records none and keeps no registry of
+/// supported profiles, so it never claims `supported`.
+pub const LAUNCH_SUPPORT: &str = "experimental";
+/// Why [`LAUNCH_SUPPORT`] is what it is.
+pub const LAUNCH_SUPPORT_REASON: &str = "no_recorded_run";
+// J3-launch end
 
 /// What `gc` found.
 pub struct GcReport {
@@ -115,6 +149,11 @@ pub struct GcReport {
     pub entries: Vec<GcEntry>,
     /// Whether this was a dry run.
     pub dry_run: bool,
+    // J3-launch begin: cleanups that did not complete (§6.4: exit 1)
+    /// Attempts whose vendor-state cleanup ran and stopped again, with the
+    /// reason; non-empty means `gc` exits 1 after printing its report.
+    pub incomplete: Vec<String>,
+    // J3-launch end
 }
 
 /// One attempt `gc` looked at.
@@ -125,6 +164,12 @@ pub struct GcEntry {
     pub action: String,
     /// Why.
     pub reason: String,
+    // J3-agent begin: the attempt's proxy directory (§10, §14.2)
+    /// What became of a crashed or settled attempt's proxy directory:
+    /// `removed`, `would_remove`, `retained: <reason>`, `failed: <reason>`,
+    /// or `None` when there was none to act on.
+    pub proxy_dir: Option<String>,
+    // J3-agent end
 }
 
 // ---------------------------------------------------------------------------
@@ -164,24 +209,25 @@ fn os_bytes(path: &Path) -> Vec<u8> {
 /// The order is the specification's: built-in profile and operator config or
 /// selected operator profile, then the environment allow-list, then explicit
 /// CLI grants and limits, then the workspace-root `ouro.toml`, which may only
-/// narrow. Launch profiles are J3 and refuse here.
+/// narrow. A launch profile (`--launch NAME`) is the §6.2 step-2 layer.
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for a usage or syntax problem and
 /// [`ErrorCode::PolicyWidening`] with the exact key path for a narrowing file
 /// that adds authority.
 pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError> {
-    if args.launch.is_some() {
-        return Err(JailError::new(
-            ErrorCode::UnsupportedPlatform,
-            ErrorStage::Resolving,
-            Remediation::Unsupported,
-            "launch profiles are not implemented in this slice".to_owned(),
-        )
-        .with_key_path("--launch"));
-    }
-
     let config_dir = state::config_dir(&ctx.env_settings, ctx.home.as_deref())?;
+    // J3-launch begin: §6.2 step 2 — the operator launch profile, read once
+    // through a no-follow walk; its content is what the snapshot records.
+    let launch = match &args.launch {
+        Some(name) => Some(launch_profile::load(
+            &config_dir,
+            name,
+            ctx.home.as_deref(),
+        )?),
+        None => None,
+    };
+    // J3-launch end
     let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
     let workspace = canonical_root(&ctx.cwd, args.workspace.as_deref(), "--workspace")?;
     if !workspace.is_dir() {
@@ -225,7 +271,16 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             .with_key_path("jail.profile"));
         }
         (None, Some(configured)) => configured.to_owned(),
-        (None, None) => "tool".to_owned(),
+        // J3-launch begin: §6.1 "Default profile: `tool`, or the launch
+        // profile's `jail` when `--launch` is set." Precedence: `--profile`,
+        // then the operator's configured profile, then the launch default,
+        // then `tool`; a configured profile that disagrees with the launch
+        // default refuses below instead of being replaced (J3 review M3).
+        (None, None) => launch.as_ref().map_or_else(
+            || "tool".to_owned(),
+            |launch| launch.jail.as_str().to_owned(),
+        ),
+        // J3-launch end
     };
 
     let mut layers: Vec<Layer> = Vec::new();
@@ -283,6 +338,30 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             (base, name)
         }
     };
+    // J3-launch begin: §6.1 — the selected base must permit the launch
+    // profile's credentials and network, and `none` never runs one. A
+    // configured profile is never silently replaced by a launch default, and
+    // never silently replaces one either: when they name different bases the
+    // operator chooses with `--profile`.
+    if let Some(launch) = &launch {
+        if args.profile.is_none()
+            && let Some(configured) = operator_jail.profile.as_deref()
+            && launch.jail != profile
+        {
+            return Err(usage(
+                "jail.profile",
+                format!(
+                    "config.toml selects `{configured}` (base `{}`), but launch profile `{}` \
+                     defaults to `{}`; pass `--profile` to choose one",
+                    profile.as_str(),
+                    launch.name,
+                    launch.jail.as_str()
+                ),
+            ));
+        }
+        launch_profile::check_jail_permits(profile, launch)?;
+    }
+    // J3-launch end
 
     // The operator's own `[jail]` table is a trusted layer: it may grant.
     if operator.jail.is_some() {
@@ -303,6 +382,13 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             delta,
         });
     }
+
+    // J3-launch begin: 2. The launch profile's allowed hosts, an operator
+    // grant, before the environment, CLI and project layers.
+    if let Some(layer) = launch.as_ref().and_then(launch_profile::network_layer) {
+        layers.push(layer);
+    }
+    // J3-launch end
 
     // 3. The environment allow-list.
     if ctx.env_settings.observe.is_some() || ctx.env_settings.evidence.is_some() {
@@ -424,6 +510,13 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         layers,
     };
     let resolved = policy::resolve(&inputs)?;
+    // J3-launch begin: the launch environment, vendor state and `launch`
+    // field group, then the digest and requirements over the result.
+    let resolved = match &launch {
+        Some(launch) => launch_profile::apply(resolved, launch)?,
+        None => resolved,
+    };
+    // J3-launch end
 
     // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
     // absent so that this refuses rather than inventing one.
@@ -434,6 +527,34 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         ));
     }
 
+    // J3-launch begin: §12 "A launch profile path inside any child-writable
+    // grant refuses", and north star §4.5 refuses one inside the workspace.
+    if let Some(launch) = &launch {
+        launch_profile::check_outside_writable(
+            launch,
+            &launch_forbidden_roots(&resolved, &workspace),
+        )?;
+        // The same rule for every credential source, by identity (M2 of the
+        // J3 review): the child must not be able to change what it is given.
+        // A source that cannot be walked now is left to staging and doctor,
+        // which report it by reason.
+        let forbidden = forbidden_identities(&resolved, &workspace);
+        for credential in &launch.credentials {
+            if let Ok(chain) = crate::credentials::source_chain(credential.source.as_bytes())
+                && chain.iter().any(|identity| forbidden.contains(identity))
+            {
+                return Err(usage(
+                    &format!("launch.credentials.{}.source", credential.id),
+                    format!(
+                        "credential `{}` lies inside a grant the child can write",
+                        credential.id
+                    ),
+                ));
+            }
+        }
+    }
+    // J3-launch end
+
     Ok(Plan {
         resolved,
         profile,
@@ -442,6 +563,38 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         data_dir,
     })
 }
+
+// J3-launch begin: the roots a launch profile may not lie beneath
+/// The workspace, an explicit scratch and every writable host grant.
+fn launch_forbidden_roots(resolved: &Resolved, workspace: &Path) -> Vec<PathBuf> {
+    let snapshot = &resolved.snapshot;
+    let scratch = match &snapshot.roots.scratch {
+        ScratchRoot::Host { path } => {
+            Some(PathBuf::from(OsString::from_vec(path.as_bytes().to_vec())))
+        }
+        ScratchRoot::Managed => None,
+    };
+    let mut roots = vec![workspace.to_path_buf()];
+    roots.extend(scratch.clone());
+    for reference in &snapshot.filesystem.read_write {
+        let suffix = std::ffi::OsStr::from_bytes(reference.path.as_bytes());
+        let base = match reference.root {
+            crate::policy::RootToken::Host => Some(PathBuf::from("/")),
+            crate::policy::RootToken::Workspace => Some(workspace.to_path_buf()),
+            crate::policy::RootToken::Scratch => scratch.clone(),
+            crate::policy::RootToken::VendorState => None,
+        };
+        if let Some(base) = base {
+            roots.push(if suffix.is_empty() {
+                base
+            } else {
+                base.join(suffix)
+            });
+        }
+    }
+    roots
+}
+// J3-launch end
 
 fn absolutize(cwd: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -571,11 +724,38 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         .requirements
         .iter()
         .all(|requirement| satisfied(requirement, &capabilities));
+    // J3-launch begin: §14.1 launch readiness; a missing or unsafe source
+    // makes the plan unavailable (north star §4.5: it refuses the launch).
+    let launch = args.launch.as_ref().map(|name| LaunchReadiness {
+        name: name.clone(),
+        support: LAUNCH_SUPPORT,
+        support_reason: LAUNCH_SUPPORT_REASON,
+        credentials: plan
+            .resolved
+            .snapshot
+            .launch
+            .as_ref()
+            .map(|launch| {
+                crate::credentials::inspect(
+                    launch,
+                    &forbidden_identities(&plan.resolved, &plan.workspace),
+                )
+            })
+            .unwrap_or_default(),
+    });
+    let ready = ready
+        && launch
+            .as_ref()
+            .is_none_or(|launch| launch.credentials.iter().all(|check| check.available));
+    // J3-launch end
     Ok(DoctorReport {
         requirements: plan.resolved.requirements,
         capabilities,
         platform: platform_record(ctx),
         ready,
+        // J3-launch begin
+        launch,
+        // J3-launch end
     })
 }
 
@@ -599,6 +779,9 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
             return Ok(GcReport {
                 entries: Vec::new(),
                 dry_run: args.dry_run,
+                // J3-launch begin
+                incomplete: Vec::new(),
+                // J3-launch end
             });
         }
         Err(error) => {
@@ -612,12 +795,19 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
     }
     let attempts = data_dir.join("attempts");
     let mut entries = Vec::new();
+    // J3-launch begin: attempts whose cleanup did not complete (§6.4: `gc`
+    // exits 1 for failed cleanup)
+    let mut incomplete: Vec<String> = Vec::new();
+    // J3-launch end
     let listing = match std::fs::read_dir(&attempts) {
         Ok(listing) => listing,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(GcReport {
                 entries,
                 dry_run: args.dry_run,
+                // J3-launch begin
+                incomplete: Vec::new(),
+                // J3-launch end
             });
         }
         Err(error) => {
@@ -632,6 +822,9 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
     };
     for entry in listing.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        // J3-agent begin
+        let mut proxy_dir: Option<String> = None;
+        // J3-agent end
         let (action, reason) = match AttemptId::parse(&name) {
             Err(_) => (
                 "skipped".to_owned(),
@@ -644,12 +837,52 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
                         "retained".to_owned(),
                         "a live supervisor holds the lease".to_owned(),
                     ),
-                    Ok(Some(_lease)) => (
-                        "retained".to_owned(),
-                        "this slice removes no attempt resource; receipts, policy and \
-                         trace are retained"
-                            .to_owned(),
-                    ),
+                    // J3-launch begin: §12, §14.2 — resume a pending
+                    // vendor-state cleanup the terminal receipt permits.
+                    // J3-agent begin: the dead supervisor's proxy directory
+                    // goes first; vendor state follows as before
+                    Ok(Some(_lease)) => match gc_proxy_then_resume(
+                        &dir,
+                        &name,
+                        args.dry_run,
+                        &mut incomplete,
+                        &mut proxy_dir,
+                    ) {
+                        // J3-agent end
+                        Ok(cleanup::Resume::NothingPending) => (
+                            "retained".to_owned(),
+                            "no vendor-state cleanup is pending; receipts, policy and trace \
+                             are retained"
+                                .to_owned(),
+                        ),
+                        Ok(cleanup::Resume::Completed) => (
+                            "removed_vendor_state".to_owned(),
+                            "the pending vendor-state cleanup completed and the receipt \
+                             records it"
+                                .to_owned(),
+                        ),
+                        Ok(cleanup::Resume::WouldRemove) => (
+                            "would_remove_vendor_state".to_owned(),
+                            "the terminal receipt permits the pending vendor-state cleanup"
+                                .to_owned(),
+                        ),
+                        Ok(cleanup::Resume::Retained(reason)) => (
+                            "retained".to_owned(),
+                            format!("vendor-state cleanup is not permitted: {reason}"),
+                        ),
+                        Ok(cleanup::Resume::StillPending(reason)) => {
+                            incomplete.push(format!("{name} ({reason})"));
+                            (
+                                "pending".to_owned(),
+                                format!("vendor-state cleanup stopped again: {reason}"),
+                            )
+                        }
+                        Err(error) => {
+                            incomplete.push(format!("{name} ({})", error.code.as_str()));
+                            ("skipped".to_owned(), error.message.clone())
+                        }
+                    },
+                    // J3-launch end
                     Err(error) => ("skipped".to_owned(), error.message.clone()),
                 }
             }
@@ -658,12 +891,22 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
             attempt_id: name,
             action,
             reason,
+            // J3-agent begin
+            proxy_dir,
+            // J3-agent end
         });
     }
     entries.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
+    // J3-launch begin: §6.4 "1 for failed cleanup or state access"; the
+    // report still reaches the caller, which prints it before exiting 1.
+    incomplete.sort();
+    // J3-launch end
     Ok(GcReport {
         entries,
         dry_run: args.dry_run,
+        // J3-launch begin
+        incomplete,
+        // J3-launch end
     })
 }
 
@@ -717,6 +960,18 @@ fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Op
         } else {
             Remediation::HostSetup
         };
+        // J3-none begin: a restriction `none` cannot apply is the policy's to drop
+        let (message, remediation) = if reason == crate::capability::REASON_NOT_APPLIED_BY_NONE {
+            (
+                format!(
+                    "the uncontained profile cannot apply `{requirement}`; a contained profile can"
+                ),
+                Remediation::Configuration,
+            )
+        } else {
+            (message, remediation)
+        };
+        // J3-none end
         return Some(JailError::new(
             code,
             ErrorStage::Probing,
@@ -829,6 +1084,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
     let attempt_dir = AttemptDir::new(&plan.data_dir, &attempt_id);
     attempt_dir.create(&plan.data_dir)?;
+    // J3-launch begin: §7 — an existing attempt root must hold no jail-owned
+    // artifact at all, not only no `jail-state.json` (J3 review H2). Checked
+    // before the lease, so a `jail.lock` found here is not this supervisor's.
+    state::check_fresh_attempt(&attempt_dir)?;
+    // J3-launch end
     let Some(_lease) = state::Lease::acquire(&attempt_dir.lock_path())? else {
         return Err(JailError::new(
             ErrorCode::AttemptExists,
@@ -914,6 +1174,52 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         ));
     }
 
+    // J3-launch begin: §8.1 step 2 and §12 — register vendor state before
+    // creating it, then stage credentials into it, before any boundary.
+    if let Err(error) = budget
+        .check(ErrorStage::Preparing)
+        .and(interrupted(signals.as_ref(), ErrorStage::Preparing))
+    {
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
+    let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record, budget.deadline) {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            return Ok(refuse(
+                &attempt_dir,
+                &mut record,
+                &error,
+                args,
+                control.as_mut(),
+                &mut journal,
+            ));
+        }
+    };
+    // J3-launch end
+    // J3-agent begin: §10 — the proxy directory is registered before it is
+    // created, outside every shared root, for a proxy-mode profile only.
+    let proxy_handoff = match prepare_proxy_dir(&attempt_dir, &plan) {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            return Ok(refuse(
+                &attempt_dir,
+                &mut record,
+                &error,
+                args,
+                control.as_mut(),
+                &mut journal,
+            ));
+        }
+    };
+    // J3-agent end
+
     // Steps 3 to 5: create the boundary and the blocked launcher.
     let prepared = match ctx.platform.prepare(
         PreparedPlan {
@@ -922,6 +1228,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             request,
             argv,
             workspace: plan.workspace.clone(),
+            // J3-launch begin: the staged objects, bound by descriptor
+            launch: launch_handoff,
+            // J3-launch end
+            // J3-agent begin: the registered proxy directory
+            proxy: proxy_handoff.clone(),
+            // J3-agent end
         },
         Sinks {
             trace: Some(Arc::clone(&trace)),
@@ -940,6 +1252,25 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     };
 
+    // J3-agent begin: the proxy socket node the platform bound, recorded so
+    // `gc` can remove exactly it after a crash (§14.2)
+    if let Some(socket) = proxy_handoff
+        .as_ref()
+        .and_then(|handoff| handoff.socket.get())
+        && let Err(error) = state::record_proxy_socket(&attempt_dir, socket)
+    {
+        let teardown = prepared.abort();
+        record_teardown(&mut record, &teardown);
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
+    // J3-agent end
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
     // §7: the state file names the registered execution boundary once it
@@ -1023,9 +1354,17 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     }
 
     // Step 7: execute the exact target argv through the blocked launcher.
-    let mut running = match prepared.release() {
+    // J3-launch begin: a failed release reports its teardown, so the refused
+    // receipt carries the verified tree (§13.2 row 4) and vendor state can be
+    // removed rather than retained.
+    let mut running = match prepared.release_reporting_teardown() {
         Ok(running) => running,
-        Err(error) => {
+        Err(failure) => {
+            let crate::platform::ReleaseFailure { error, teardown } = *failure;
+            if let Some(teardown) = teardown {
+                record_teardown(&mut record, &Ok(teardown));
+            }
+            // J3-launch end
             return Ok(refuse(
                 &attempt_dir,
                 &mut record,
@@ -1063,6 +1402,29 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 .get_or_insert("operator_signal".to_owned());
             running.request_stop(StopReason::OperatorSignal);
         }
+        // J3-none begin: a detected integrity loss reaches the receipt now, not only at the end
+        if record.lifetime.integrity != "lost" && running.integrity_lost() {
+            record.lifetime.integrity = "lost".to_owned();
+            record.lifetime.tree_empty = None;
+            record.lifetime.verified_at = None;
+            let phase = if record.exec_observed {
+                Phase::Enforced
+            } else {
+                Phase::Prepared
+            };
+            if let Err(error) = persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+                // As for the exec confirmation: persistence that fails after
+                // release stops the tree (§7).
+                record.errors.push(error.to_object());
+                record
+                    .outcome
+                    .cause
+                    .get_or_insert("state_write_failed".to_owned());
+                outcome_error.get_or_insert(error);
+                running.request_stop(StopReason::EvidenceLoss);
+            }
+        }
+        // J3-none end
         match running.wait(crate::platform::Deadline { at: wall_deadline }) {
             RunEvent::Poll => continue,
             RunEvent::ExecConfirmed => {
@@ -1125,6 +1487,15 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 // the attempt reached release and the kernel answered, which
                 // is a different fact from a refusal before anything ran.
                 record.outcome = Outcome::exec_error(&errno);
+                // J3-launch begin: §13.2 row 4 — "true / timestamp only after
+                // teardown verification": every contained attempt verifies the
+                // teardown of a failed exec, so the refused receipt says what
+                // it established and vendor state can be removed.
+                if plan.profile.is_contained() {
+                    let tree = running.wait_tree(TREE_BUDGET);
+                    record_tree(&mut record, &tree);
+                }
+                // J3-launch end
                 let error = JailError::new(
                     ErrorCode::ExecFailed,
                     ErrorStage::Released,
@@ -1213,36 +1584,104 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         record.observer = summary.to_observer_record();
         record.coverage = summary.to_coverage();
     }
+    // J3-agent begin: what the helpers did, known now that they stopped
+    if let Some(native) = record.lifetime.native.as_mut() {
+        native.details.extend(running.final_native_details());
+    }
+    // J3-agent end
     record.lifetime.tree_empty = tree.tree_empty;
     record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
     record.lifetime.verification_scope = Some(tree.verification_scope);
-    record.lifetime.integrity = tree.integrity;
+    // J3-none begin: the last nonsettled phase without a confirmed exec is prepared (§8.1)
+    let prepared_integrity = std::mem::replace(&mut record.lifetime.integrity, tree.integrity);
+    // J3-none end
 
     let settled = tree.tree_empty == Some(true) && record.lifetime.integrity == "verified";
     // §13.2: "If tree death itself is unknown, retain the last nonsettled phase
     // and update its outcome/coverage/error as unknown."
+    // J3-none begin: `enforced` is the phase after a confirmed target exec (§8.1)
     let phase = if settled {
         Phase::Settled
-    } else {
+    } else if record.exec_observed {
         Phase::Enforced
+    } else {
+        // Without a confirmed exec the last nonsettled phase is `prepared`.
+        // Its integrity stays the prepared one unless a loss was detected:
+        // an unknown tree end does not unmake the verified boundary.
+        if record.lifetime.integrity == "pending" {
+            record.lifetime.integrity = prepared_integrity;
+        }
+        Phase::Prepared
     };
+    // J3-none end
     // §14.2: default managed scratch is removed only after verified tree
     // death. Until then the child could still be writing to it, and after an
     // unverified one something may still be holding it, so it is retained and
     // the receipt says the cleanup did not complete.
-    if settled {
+    // J3-launch begin: §8.1 step 9 and §12 — with vendor state, persist the
+    // settled receipt as `pending` first, then clean, then record the result;
+    // an unverified tree retains vendor state.
+    if matches!(state::vendor_registration(&attempt_dir), Ok(Some(_))) {
+        if settled {
+            record.state_cleanup = StateCleanup::Pending;
+            record.cleanup_error = None;
+            match persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+                Ok(_) => {
+                    let vendor =
+                        cleanup::remove_vendor_state(&attempt_dir, cleanup::Limits::DEFAULT);
+                    let scratch = remove_managed_scratch(&attempt_dir, &plan);
+                    match (vendor.status, scratch) {
+                        (
+                            StateCleanup::Complete,
+                            StateCleanup::Complete | StateCleanup::NotNeeded,
+                        ) => {
+                            record.state_cleanup = StateCleanup::Complete;
+                        }
+                        (StateCleanup::Complete, _) => {
+                            record.state_cleanup = StateCleanup::Pending;
+                            record.cleanup_error = Some("scratch_removal_failed".to_owned());
+                        }
+                        (status, _) => {
+                            record.state_cleanup = status;
+                            record.cleanup_error = vendor.reason;
+                        }
+                    }
+                }
+                Err(error) => {
+                    // No durable settled receipt, so nothing would permit a
+                    // later `gc` to finish a removal started now.
+                    record.errors.push(error.to_object());
+                    record.cleanup_error = Some("state_write_failed".to_owned());
+                }
+            }
+        } else {
+            retain_vendor_state(&attempt_dir, &mut record);
+        }
+    } else if settled {
         record.state_cleanup = remove_managed_scratch(&attempt_dir, &plan);
     }
+    // J3-launch end
+    // J3-none begin: a detected integrity loss is not a budget overrun (§9.3)
+    let tree_message = if record.lifetime.integrity == "lost" {
+        "the lifetime boundary's integrity was lost (a membership escape, a replaced \
+         identity or a failed verification was detected), so tree death is unknown"
+    } else {
+        "tree death could not be verified within its budget"
+    };
     let tree_error = (!settled).then(|| {
         let error = JailError::new(
             ErrorCode::TreeUnknown,
             ErrorStage::Reconciling,
             Remediation::InspectState,
-            "tree death could not be verified within its budget".to_owned(),
+            tree_message.to_owned(),
         );
         record.errors.push(error.to_object());
         error
     });
+    // J3-none end
+    // J3-agent begin: the proxy stopped inside `wait_tree`
+    remove_proxy_directory(&attempt_dir, &mut record);
+    // J3-agent end
     // §13.3 terminal drain, before the settled receipt is written: whatever
     // the external trace consumer has not accepted within the no-progress
     // deadline is recorded as evidence loss, and that loss belongs in the
@@ -1374,16 +1813,30 @@ fn remove_managed_scratch(attempt_dir: &AttemptDir, plan: &Plan) -> crate::recor
         return cleanup::not_needed();
     }
     let mut complete = true;
+    // J3-launch begin: `not_needed` when nothing was created (the `none`
+    // profile makes no managed scratch); `complete` only for a removal.
+    let mut created = false;
+    // J3-launch end
     for path in [
         attempt_dir.root().join("scratch"),
         attempt_dir.root().join("placeholders"),
     ] {
+        // J3-launch begin
+        if std::fs::symlink_metadata(&path).is_ok() {
+            created = true;
+        }
+        // J3-launch end
         match std::fs::remove_dir_all(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => complete = false,
         }
     }
+    // J3-launch begin
+    if !created {
+        return cleanup::not_needed();
+    }
+    // J3-launch end
     if complete {
         StateCleanup::Complete
     } else {
@@ -1703,6 +2156,12 @@ fn refuse(
     record.errors.push(error.to_object());
     record.exec_observed = false;
     journal.lifecycle("refused");
+    // J3-launch begin: §12 vendor state on a pre-exec refusal
+    refuse_vendor_state(attempt_dir, record, args, journal);
+    // J3-launch end
+    // J3-agent begin: the proxy stopped with the boundary's teardown
+    remove_proxy_directory(attempt_dir, record);
+    // J3-agent end
     let receipt = persist_terminal(attempt_dir, record, Phase::Refused, args, journal);
     match receipt {
         Ok(receipt) => {
@@ -1782,6 +2241,281 @@ pub fn requested_limits(plan: &Plan) -> Vec<AppliedLimit> {
     }
     out
 }
+
+// J3-launch begin: vendor state and credential staging (§7, §8.1, §12)
+
+/// Registers and creates vendor state, stages credentials into it, records
+/// their private provenance and returns the hand-off for the platform.
+///
+/// `record.credentials` carries every successfully staged input, including
+/// those staged before a refusal (§12). From the moment vendor state is
+/// registered, the receipt's cleanup status is `pending`.
+fn prepare_launch(
+    attempt_dir: &AttemptDir,
+    plan: &Plan,
+    record: &mut AttemptRecord,
+    deadline: Instant,
+) -> Result<Option<crate::credentials::LaunchHandoff>, JailError> {
+    let snapshot = &plan.resolved.snapshot;
+    if snapshot.roots.vendor_state.is_none() {
+        if snapshot
+            .launch
+            .as_ref()
+            .is_some_and(|launch| !launch.credentials.is_empty())
+        {
+            return Err(JailError::new(
+                ErrorCode::InternalError,
+                ErrorStage::Preparing,
+                Remediation::InspectState,
+                "the snapshot declares credentials but no vendor state to stage them in".to_owned(),
+            ));
+        }
+        return Ok(None);
+    }
+    let Some(launch) = snapshot.launch.as_ref() else {
+        return Err(JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            "the snapshot has managed vendor state but no launch field group".to_owned(),
+        ));
+    };
+    record.state_cleanup = StateCleanup::Pending;
+    let vendor = state::create_vendor_state(attempt_dir)?;
+    // §12 and the §8.2 preparation budget: staging runs in a worker bounded
+    // by what is left of it, and no source may lie in a child-writable grant.
+    let forbidden = forbidden_identities(&plan.resolved, &plan.workspace);
+    let mut staged =
+        match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, deadline) {
+            Ok(staged) => staged,
+            Err(refusal) => {
+                // Both the receipt rows and the private provenance of every
+                // input staged before the refusal are kept (§12).
+                record.credentials = refusal.records();
+                state::record_staged_credentials(
+                    attempt_dir,
+                    &private_provenance(&refusal.staged),
+                )?;
+                return Err(refusal.error);
+            }
+        };
+    record.credentials = staged
+        .iter()
+        .map(|credential| credential.record.clone())
+        .collect();
+    state::record_staged_credentials(attempt_dir, &private_provenance(&staged))?;
+    crate::credentials::LaunchHandoff::new(
+        attempt_dir.vendor_state_path(),
+        vendor.into_fd(),
+        &mut staged,
+    )
+    .map(Some)
+    .map_err(|error| {
+        JailError::new(
+            ErrorCode::StateWriteFailed,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            format!("vendor state could not be handed to the platform: {error}"),
+        )
+    })
+}
+
+/// The private provenance of staged credentials: identities, never paths.
+fn private_provenance(
+    staged: &[crate::credentials::StagedCredential],
+) -> Vec<state::PrivateCredential> {
+    staged
+        .iter()
+        .map(|credential| state::PrivateCredential {
+            id: credential.record.id.clone(),
+            mode: credential.record.mode.clone(),
+            source_dev: credential.source.dev,
+            source_ino: credential.source.ino,
+            source_size: credential.source.size,
+        })
+        .collect()
+}
+
+/// The `(dev, ino)` of every child-writable grant a credential source may not
+/// lie in: the workspace, an explicit scratch and every writable host grant.
+/// These are trusted operator roots, resolved as such; one that does not
+/// exist cannot contain a source.
+fn forbidden_identities(resolved: &Resolved, workspace: &Path) -> Vec<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    launch_forbidden_roots(resolved, workspace)
+        .iter()
+        .filter_map(|root| std::fs::metadata(root).ok())
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+        .collect()
+}
+
+/// Copies a tree observation into the receipt's lifetime group.
+fn record_tree(record: &mut AttemptRecord, tree: &crate::platform::TreeObservation) {
+    record.lifetime.tree_empty = tree.tree_empty;
+    record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
+    record.lifetime.verification_scope = Some(tree.verification_scope.clone());
+    record.lifetime.integrity.clone_from(&tree.integrity);
+}
+
+/// Whether the receipt's lifetime facts permit removing vendor state (§12):
+/// no boundary was ever created, or its teardown verified the tree empty.
+/// Lost integrity never permits it.
+fn cleanup_reason_to_wait(record: &AttemptRecord) -> Option<&'static str> {
+    if record.lifetime.integrity == "lost" {
+        return Some(cleanup::REASON_INTEGRITY_LOST);
+    }
+    if record.lifetime.boundary == "pending" || record.lifetime.tree_empty == Some(true) {
+        return None;
+    }
+    Some(cleanup::REASON_TREE_UNVERIFIED)
+}
+
+/// Retains registered vendor state, recording why (§12: "Attempts with
+/// unproved live trees retain state").
+fn retain_vendor_state(attempt_dir: &AttemptDir, record: &mut AttemptRecord) {
+    let reason = cleanup_reason_to_wait(record).unwrap_or(cleanup::REASON_TREE_UNVERIFIED);
+    record.state_cleanup = StateCleanup::Pending;
+    record.cleanup_error = Some(reason.to_owned());
+    let _ = state::record_cleanup(attempt_dir, StateCleanup::Pending, Some(reason));
+}
+
+/// Vendor state on a refusal: removed when the refusal proves no tree can be
+/// using it, retained otherwise. The refused receipt is first persisted as
+/// `pending`, so a crash during the removal leaves a receipt `gc` can finish.
+fn refuse_vendor_state(
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    args: &RunArgs,
+    journal: &mut Journal,
+) {
+    match state::vendor_registration(attempt_dir) {
+        Ok(None) => {
+            record.state_cleanup = StateCleanup::NotNeeded;
+            return;
+        }
+        Ok(Some(_)) => {}
+        Err(error) => {
+            record.state_cleanup = StateCleanup::Pending;
+            record.cleanup_error = Some(format!("state_unreadable: {}", error.code.as_str()));
+            return;
+        }
+    }
+    if cleanup_reason_to_wait(record).is_some() {
+        retain_vendor_state(attempt_dir, record);
+        return;
+    }
+    record.state_cleanup = StateCleanup::Pending;
+    record.cleanup_error = None;
+    if let Err(error) = persist(attempt_dir, record, Phase::Refused, args, journal) {
+        record.errors.push(error.to_object());
+        record.cleanup_error = Some("state_write_failed".to_owned());
+        return;
+    }
+    let result = cleanup::remove_vendor_state(attempt_dir, cleanup::Limits::DEFAULT);
+    record.state_cleanup = result.status;
+    record.cleanup_error = result.reason;
+}
+// J3-launch end
+
+// J3-agent begin: `gc` of a dead supervisor's proxy directory (§14.2)
+/// Runs [`state::gc_proxy_dir`], says in `proxy_dir` what became of the
+/// directory (one whose read or removal failed is a cleanup that did not
+/// complete, §6.4: `gc` exits 1; one whose identity cannot be proven is
+/// retained and said so, §14.2), then resumes the vendor-state cleanup
+/// exactly as before.
+fn gc_proxy_then_resume(
+    dir: &AttemptDir,
+    name: &str,
+    dry_run: bool,
+    incomplete: &mut Vec<String>,
+    proxy_dir: &mut Option<String>,
+) -> Result<cleanup::Resume, JailError> {
+    *proxy_dir = match state::gc_proxy_dir(dir, dry_run) {
+        Ok(outcome) => {
+            // §6.4, §14.2: an identity gc cannot prove is a skip reported
+            // with its reason; a read or removal that failed is a failed
+            // cleanup.
+            if let state::ProxyDirGc::Failed(reason) = &outcome {
+                incomplete.push(format!("{name} (proxy directory: {reason})"));
+            }
+            outcome.describe()
+        }
+        Err(error) => {
+            incomplete.push(format!("{name} ({})", error.code.as_str()));
+            Some(format!("failed: {}", error.code.as_str()))
+        }
+    };
+    cleanup::resume(dir, dry_run)
+}
+// J3-agent end
+
+// J3-agent begin: the proxy directory (§10)
+/// Registers and creates `<attempt>/proxy/` for a proxy-mode profile and
+/// returns the hand-off the platform binds the proxy socket in.
+fn prepare_proxy_dir(
+    attempt_dir: &AttemptDir,
+    plan: &Plan,
+) -> Result<Option<crate::platform::ProxyDirHandoff>, JailError> {
+    if plan.resolved.snapshot.network.mode != NetworkMode::Proxy.as_str() {
+        return Ok(None);
+    }
+    let dir = state::create_proxy_dir(attempt_dir)?;
+    let identity = dir
+        .stat()
+        .map_err(|error| {
+            JailError::new(
+                ErrorCode::StateWriteFailed,
+                ErrorStage::Preparing,
+                Remediation::InspectState,
+                format!("the proxy directory could not be inspected: {error}"),
+            )
+        })?
+        .identity();
+    Ok(Some(crate::platform::ProxyDirHandoff {
+        host_path: attempt_dir.proxy_dir_path(),
+        fd: Arc::new(dir.into_fd()),
+        identity,
+        socket: Arc::new(std::sync::OnceLock::new()),
+    }))
+}
+
+/// Removes the proxy directory once the platform stopped the proxy. A
+/// directory that cannot be removed is retained and said so in jail state
+/// and in the receipt's errors; it never changes the outcome.
+fn remove_proxy_directory(attempt_dir: &AttemptDir, record: &mut AttemptRecord) {
+    match state::remove_proxy_dir(attempt_dir) {
+        Ok(state::ProxyDirRemoval::Retained(reason)) => {
+            record.errors.push(
+                JailError::new(
+                    ErrorCode::StateWriteFailed,
+                    ErrorStage::Reconciling,
+                    Remediation::InspectState,
+                    format!("the proxy directory was retained: {reason}"),
+                )
+                .to_object(),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => record.errors.push(error.to_object()),
+    }
+}
+// J3-agent end
+
+// J3-agent begin: an inherited ignored disposition is the operator's
+/// Whether `signal` is ignored in this process as inherited. Only Linux runs
+/// a target, so only Linux has a disposition to pass through.
+fn signals_inherited_ignored(signal: libc::c_int) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::linux::sys::signal_ignored(signal)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = signal;
+        false
+    }
+}
+// J3-agent end
 
 /// The wrapper source's own event stream for this attempt (§13.1).
 ///
@@ -2575,6 +3309,15 @@ pub mod signals {
         std::mem::forget(write);
 
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            // J3-agent begin: a signal the operator's environment ignores
+            // (`nohup`, a background job of a non-interactive shell) stays
+            // ignored: the supervisor honours it, and the ignored disposition
+            // reaches the target across every exec. Catching it would reset
+            // it to the default in every child.
+            if super::signals_inherited_ignored(signal) {
+                continue;
+            }
+            // J3-agent end
             // SAFETY: `sigaction` is given a zeroed, fully initialized action
             // whose handler is an `extern "C"` function with the right
             // signature, and a null old-action pointer.

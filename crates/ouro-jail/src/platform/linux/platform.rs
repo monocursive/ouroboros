@@ -68,6 +68,11 @@ const ARGS_FD: RawFd = 14;
 /// First fixed descriptor number used for pinned protected binds
 /// (`--ro-bind-fd`); the fixed channel descriptors live below it.
 const PINNED_FD_BASE: RawFd = 20;
+// J3-launch begin: the vendor-state directory's descriptor in bubblewrap
+/// Descriptor the vendor-state directory is handed to bubblewrap on
+/// (`--bind-fd`). The `bind_ro` credential views follow the pinned binds.
+const VENDOR_STATE_FD: RawFd = 16;
+// J3-launch end
 
 /// Preparation budget (§8.2).
 const PREPARE_BUDGET: Duration = Duration::from_secs(30);
@@ -77,6 +82,10 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const SETTLE_GRACE: Duration = Duration::from_millis(500);
 /// Longest single block inside `wait`, so every source is re-checked often.
 const WAIT_STEP: Duration = Duration::from_millis(10);
+// J3-agent begin
+/// The most a stop gives the proxy to drain its last results (§10).
+const AGENT_STOP_BUDGET: Duration = Duration::from_secs(2);
+// J3-agent end
 /// How often the execution cgroup's counters are read while the target runs;
 /// they are always read once more before an outcome is classified.
 const LIMIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
@@ -189,11 +198,34 @@ fn inputs_for(
             "network-namespace",
             CapabilityScope::Tree,
         )),
+        // J3-agent begin: the agent network rests on the empty network
+        // namespace and the unix-peer mediation's kernel mechanism; the proxy
+        // and the bridge are this implementation's own, and preparation
+        // refuses naming either one it cannot establish (§10).
+        REQ_NETWORK_PROXY => Some((
+            &[
+                "bwrap_present",
+                "network_namespace",
+                "seccomp_user_notification",
+            ],
+            "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
+            CapabilityScope::Tree,
+        )),
+        // J3-agent end
         REQ_EXECUTION_CGROUP => Some((
             &["cgroup_delegated_leaf"],
             "cgroup-v2-delegated",
             CapabilityScope::Tree,
         )),
+        // J3-launch begin: credential staging is anchored copies into vendor
+        // state plus read-only descriptor binds, which rest on the backend and
+        // on its read-only bind holding.
+        crate::capability::REQ_CREDENTIAL_STAGING => Some((
+            &["bwrap_present", "mount_readonly_bind"],
+            "anchored-copy+bubblewrap-bind-fd",
+            CapabilityScope::Tree,
+        )),
+        // J3-launch end
         _ => None,
     }
 }
@@ -205,7 +237,7 @@ fn probes_for(requirement: &str) -> &'static [&'static str] {
         return inputs_for(REQ_FILESYSTEM_CONTAINMENT).map_or(&[], |(probes, _, _)| probes);
     }
     match requirement {
-        "limit:wall" | REQ_NETWORK_PROXY => &[],
+        "limit:wall" => &[],
         "limit:pids" => &["cgroup_pids"],
         "limit:mem" => &["cgroup_memory"],
         "limit:cpu" => &["cgroup_cpu"],
@@ -233,17 +265,6 @@ fn capability_for(requirement: &str, results: &[ProbeResult], measured_at: &str)
             reason_code: Some("ok".to_owned()),
             measured_at: Some(measured_at.to_owned()),
             evidence_ref: Some("supervisor".to_owned()),
-        };
-    }
-    if requirement == REQ_NETWORK_PROXY {
-        return Capability {
-            name: requirement.to_owned(),
-            status: CapabilityStatus::Unsupported,
-            scope: CapabilityScope::Tree,
-            mechanism: None,
-            reason_code: Some("proxy_not_implemented".to_owned()),
-            measured_at: None,
-            evidence_ref: None,
         };
     }
     if requirement.starts_with("limit:") && requirement != "limit:wall" {
@@ -316,6 +337,13 @@ impl LinuxPlatform {
             .collect();
         let measured_at = rfc3339_utc(SystemTime::now());
 
+        // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
+        // Shadows the fn for this call only; the closure falls back to it.
+        let capability_for = |requirement: &str, results: &[ProbeResult], measured_at: &str| {
+            super::uncontained::capability_for(plan.profile, requirement, results, measured_at)
+                .unwrap_or_else(|| capability_for(requirement, results, measured_at))
+        };
+        // J3-none end
         let mut out: Vec<Capability> = plan
             .requirements
             .iter()
@@ -359,6 +387,13 @@ impl Platform for LinuxPlatform {
         // A run measures what its plan asks about: every probe is a real
         // sandbox, fork or ptrace session, and the leaf and observer probes
         // are not free. `doctor` runs them all through `probe_all`.
+        // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
+        // Shadows the fn for this call only; the closure falls back to it.
+        let probes_for = |requirement: &str| {
+            super::uncontained::probes_for(plan.profile, requirement)
+                .unwrap_or_else(|| probes_for(requirement))
+        };
+        // J3-none end
         let wanted: std::collections::BTreeSet<&str> = plan
             .requirements
             .iter()
@@ -377,6 +412,11 @@ impl Platform for LinuxPlatform {
         sinks: Sinks,
     ) -> Result<Box<dyn PreparedExecution>, JailError> {
         let deadline = clock::Deadline::after(PREPARE_BUDGET);
+        // J3-none begin: the uncontained profile has its own registered boundary (§9.3)
+        if plan.request.snapshot.profile == ProfileName::None {
+            return super::uncontained::prepare(plan, sinks, deadline);
+        }
+        // J3-none end
         let prepared = Boundary::create(&self.bwrap, plan, sinks, deadline)?;
         Ok(Box::new(LinuxPrepared { boundary: prepared }))
     }
@@ -487,6 +527,16 @@ struct Boundary {
     /// Why no execution cgroup exists, when preferred ceilings run unenforced.
     cgroup_unavailable: Option<String>,
     watcher: super::watch::Watcher,
+    // J3-agent begin: the agent network, and the filter count read back
+    /// The proxy, mediator and bridge of an `agent` attempt.
+    agent: Option<super::agent::AgentNet>,
+    /// Set before this boundary kills anything: what dies after it did not
+    /// die on its own.
+    killing: std::sync::atomic::AtomicBool,
+    /// `Seccomp_filters` of the blocked launcher, read back and checked
+    /// against what this boundary installs.
+    seccomp_filters: Option<u32>,
+    // J3-agent end
 }
 impl Boundary {
     /// Whether the backend's pidfd reports its exit, independent of whether
@@ -525,14 +575,6 @@ impl Boundary {
                     "this slice refuses a privileged or setuid supervisor: real uid {ruid}, \
                      effective uid {euid} (jail-v1 §5.2)"
                 ),
-            ));
-        }
-        if snapshot.profile == ProfileName::Agent {
-            return Err(error(
-                ErrorCode::NestingFailed,
-                ErrorStage::Preparing,
-                Remediation::HostSetup,
-                "the `agent` profile needs a nested sandbox, which this host denies".to_owned(),
             ));
         }
         if !snapshot.profile.is_contained() {
@@ -637,6 +679,55 @@ impl Boundary {
         }
         bplan.bwrap = bwrap_path.to_path_buf();
         bplan.env = environment_for(&snapshot, &plan.workspace)?;
+        // J3-agent begin: §10 — the proxy socket in its registered directory,
+        // bound read-only by descriptor, and the proxy variables.
+        let mut agent = if snapshot.profile == ProfileName::Agent {
+            let Some(handoff) = plan.proxy.as_ref() else {
+                return Err(preparing(
+                    ErrorCode::MissingCapability,
+                    "the `agent` proxy could not be established: no proxy directory was prepared",
+                ));
+            };
+            let agent = super::agent::AgentNet::prepare(
+                &plan.attempt_id,
+                sinks.trace.clone(),
+                &snapshot,
+                handoff,
+                &exe,
+                bwrap_path,
+            )?;
+            bplan.proxy_dir = Some(agent.dir_path().to_path_buf());
+            bplan.proxy_dir_fd = Some(super::agent::PROXY_DIR_FD);
+            for (name, value) in super::bridge::proxy_environment() {
+                bplan
+                    .env
+                    .push((OsString::from(name), OsString::from(value)));
+            }
+            Some(agent)
+        } else {
+            None
+        };
+        // J3-agent end
+        // J3-launch begin: the staged vendor state and bind_ro sources, bound
+        // by the descriptors staging examined (§9.1, §12).
+        let staged = staged_mounts(&snapshot, plan.launch.as_ref())?;
+        if staged.vendor.is_some() {
+            bplan.vendor_state = plan
+                .launch
+                .as_ref()
+                .and_then(|handoff| handoff.vendor_state.as_ref())
+                .map(|vendor| vendor.host_path.clone());
+            bplan.vendor_state_fd = Some(VENDOR_STATE_FD);
+        }
+        bplan.credential_binds = staged
+            .credentials
+            .iter()
+            .map(|(_, destination)| bwrap::CredentialBind {
+                fd: None,
+                destination: destination.clone(),
+            })
+            .collect();
+        // J3-launch end
 
         // Operator grants are enforced, not merely recorded (I02, north-star
         // §4.2): read-only grants become additional ro-binds at their
@@ -690,8 +781,21 @@ impl Boundary {
             &name_refs,
             snapshot.filesystem.protected_coverage,
         )?;
+        // J3-launch begin: credential views take the slots after the pins
+        let credential_base = PINNED_FD_BASE + pinned_fds.len() as RawFd;
+        for (index, view) in bplan.credential_binds.iter_mut().enumerate() {
+            view.fd = Some(credential_base + index as RawFd);
+        }
+        // J3-launch end
 
-        let filter = seccomp::tool_baseline().map_err(|err| {
+        // J3-agent begin: `agent` loads its own baseline, in the variant the
+        // measured nested-namespace capability selected (§9.2)
+        let filter = match agent.as_ref() {
+            Some(agent) => seccomp::agent_baseline(agent.variant()),
+            None => seccomp::tool_baseline(),
+        }
+        // J3-agent end
+        .map_err(|err| {
             preparing(
                 ErrorCode::BackendUnavailable,
                 format!("the syscall filter could not be built: {err}"),
@@ -704,7 +808,22 @@ impl Boundary {
             .iter()
             .map(|bytes| OsString::from_vec(bytes.clone()))
             .collect();
-        bplan.inner = bwrap::inner_launch_command(RELEASE_FD, ERROR_FD, observe_on, &target);
+        // J3-agent begin: the agent launcher mediates and starts the bridge
+        bplan.inner = bwrap::inner_launch_command_with(
+            RELEASE_FD,
+            ERROR_FD,
+            observe_on,
+            agent.is_some().then_some((
+                super::agent::LISTENER_FD,
+                super::agent::SOCKDIAG_FD,
+                super::agent::BRIDGE_REPORT_FD,
+            )),
+            // bubblewrap unblocks SIGCHLD in its child: the launcher puts
+            // back the mask this supervisor inherited.
+            Some(super::launch::blocked_mask()),
+            &target,
+        );
+        // J3-agent end
         bplan.seccomp_fd = Some(SECCOMP_FD);
         bplan.json_status_fd = Some(STATUS_FD);
         bplan.args_fd = Some(ARGS_FD);
@@ -740,7 +859,11 @@ impl Boundary {
             )
         })?;
 
-        let mut fds = FdMap::with_target_limit(PINNED_FD_BASE + pinned_fds.len() as RawFd);
+        // J3-launch begin: room for the credential views after the pins
+        let mut fds = FdMap::with_target_limit(
+            PINNED_FD_BASE + pinned_fds.len() as RawFd + staged.credentials.len() as RawFd,
+        );
+        // J3-launch end
         let io = |err: std::io::Error| {
             preparing(
                 ErrorCode::BackendUnavailable,
@@ -760,6 +883,26 @@ impl Boundary {
         for (copy, target) in pinned_fds {
             fds.add(copy, target).map_err(io)?;
         }
+        // J3-launch begin: hand the staged descriptors to bubblewrap
+        if let Some(vendor) = staged.vendor {
+            fds.add(vendor, VENDOR_STATE_FD).map_err(io)?;
+        }
+        // J3-agent begin: the proxy directory, bound read-only by descriptor
+        if let Some(agent) = agent.as_ref() {
+            fds.add(agent.dir_fd().map_err(io)?, super::agent::PROXY_DIR_FD)
+                .map_err(io)?;
+        }
+        // J3-agent end
+        for ((source, _), view) in staged.credentials.into_iter().zip(&bplan.credential_binds) {
+            let Some(target) = view.fd else {
+                return Err(preparing(
+                    ErrorCode::InternalError,
+                    "a credential view has no descriptor slot",
+                ));
+            };
+            fds.add(source, target).map_err(io)?;
+        }
+        // J3-launch end
         // jail-v1 §2 I07 (every wait bounded): the `--args` payload can exceed
         // the pipe's capacity, so it must be written while the reader exists.
         // bwrap is spawned below first and blocks reading ARGS_FD; writing
@@ -894,7 +1037,21 @@ impl Boundary {
             cgroup_lost: false,
             cgroup_unavailable,
             watcher,
+            // J3-agent begin
+            agent: agent.take(),
+            killing: std::sync::atomic::AtomicBool::new(false),
+            seccomp_filters: None,
+            // J3-agent end
         };
+        // J3-agent begin: the proxy starts only now that the backend exists,
+        // so the descriptor limit it raises never reaches the child.
+        if let Some(agent) = boundary.agent.as_mut()
+            && let Err(err) = agent.start_proxy()
+        {
+            boundary.teardown();
+            return Err(err);
+        }
+        // J3-agent end
         if let Some(reason) = boundary.cgroup_unavailable.clone() {
             for (key, ceiling) in [
                 ("pids", &boundary.snapshot.limits.pids),
@@ -1004,20 +1161,16 @@ impl Boundary {
                 return Err(prepare_timeout("the inside launcher never appeared"));
             }
             if self.exited() {
-                return Err(preparing(
-                    ErrorCode::BackendUnavailable,
-                    format!(
-                        "bubblewrap exited before the launcher blocked: {}",
-                        self.diagnostic().trim()
-                    ),
-                ));
+                return Err(self.launcher_setup_failure());
             }
             nap();
         };
 
         // Wait until it is actually blocked in read(2), which is what the
         // observer's attach contract requires. `/proc/<pid>/syscall` names the
-        // call it is in, so this is a read-back and not an assumption.
+        // call it is in, so this is a read-back and not an assumption. The
+        // agent launcher's only other wait before release (for its bridge's
+        // intermediate child) is `wait4`, never a read.
         loop {
             if current_syscall(launcher) == Some(libc::SYS_read) {
                 break;
@@ -1026,6 +1179,9 @@ impl Boundary {
                 return Err(prepare_timeout(
                     "the inside launcher did not block on its release pipe",
                 ));
+            }
+            if self.exited() {
+                return Err(self.launcher_setup_failure());
             }
             nap();
         }
@@ -1108,6 +1264,21 @@ impl Boundary {
                 format!("the syscall filter is not in force: Seccomp {seccomp_mode}"),
             ));
         }
+        // J3-agent begin: the J2 gap — `Seccomp: 2` says a filter is in
+        // force, not that every filter this boundary installs is: a missing
+        // narrowing or mediation filter leaves the mode at 2. The count is
+        // read back and must be exactly the number installed.
+        let expected =
+            super::agent::expected_launcher_filters(self.agent.is_some(), self.observe_on);
+        self.seccomp_filters = Some(
+            super::agent::verify_filter_count(&status_field("Seccomp_filters"), expected).map_err(
+                |mut error| {
+                    error.message = format!("the launcher: {}", error.message);
+                    error
+                },
+            )?,
+        );
+        // J3-agent end
         let nspid = super::tracer::nspid(launcher).unwrap_or_default();
         if nspid.len() < 2 {
             return Err(preparing(
@@ -1116,6 +1287,34 @@ impl Boundary {
             ));
         }
 
+        // J3-agent begin: while the launcher is blocked, take its mediation
+        // listener and sock_diag socket, start the mediator, and read back
+        // the bridge it started (§10). Either one missing refuses, naming it.
+        if let Some(agent) = self.agent.as_mut() {
+            let Some(launcher_fd) = self.launcher_fd.as_ref() else {
+                return Err(preparing(
+                    ErrorCode::MissingCapability,
+                    "the `agent` unix-peer mediation could not be established: the launcher \
+                     has no pidfd",
+                ));
+            };
+            agent.take_mediation(std::os::fd::AsFd::as_fd(launcher_fd))?;
+            let bridge = agent.discover_bridge(self.init_pid, self.ns_ids, &deadline)?;
+            if let Some(leaf) = self.cgroup.as_ref() {
+                // Charged to the attempt (§9.3): the bridge is in the leaf.
+                leaf.verify_member(bridge).map_err(|err| {
+                    preparing(
+                        ErrorCode::MissingCapability,
+                        format!(
+                            "the `agent` bridge could not be established: it is not in the \
+                             attempt's cgroup: {err}"
+                        ),
+                    )
+                })?;
+            }
+        }
+        // J3-agent end
+
         self.backend_version = bwrap::bwrap_version(bwrap_path)
             .map(|version| version.raw)
             .unwrap_or_default();
@@ -1123,6 +1322,38 @@ impl Boundary {
         self.applied = self.read_applied(launcher, filter_digest, scan);
         Ok(())
     }
+
+    // J3-agent begin: why the launcher ended before it blocked
+    /// The refusal for a backend that ended before the launcher blocked.
+    /// The agent launcher's own setup failures carry their exit status and
+    /// errno, so the refusal names the mechanism that could not be
+    /// established instead of a generic backend failure.
+    fn launcher_setup_failure(&mut self) -> JailError {
+        self.status.pump();
+        let mut errno_bytes = Vec::new();
+        let mut buffer = [0u8; 16];
+        loop {
+            // SAFETY: the buffer is live and the length matches; the
+            // descriptor is owned and non-blocking.
+            let n = unsafe {
+                libc::read(
+                    self.error.as_raw_fd(),
+                    buffer.as_mut_ptr().cast::<libc::c_void>(),
+                    buffer.len(),
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            errno_bytes.extend_from_slice(&buffer[..usize::try_from(n).unwrap_or(0)]);
+        }
+        launcher_failure(
+            self.status.parsed().exit_code,
+            &errno_bytes,
+            self.diagnostic().trim(),
+        )
+    }
+    // J3-agent end
 
     /// The `applied` group, read back from the boundary that exists.
     fn read_applied(
@@ -1185,15 +1416,24 @@ impl Boundary {
                 protected_coverage: scan_coverage(scan),
                 mounts,
             }),
-            network: AppliedNetwork {
-                mode: "none".to_owned(),
-                mechanism: Some("network-namespace".to_owned()),
-                allowed_hosts: Vec::new(),
-            },
+            // J3-agent begin: the agent network and its two stacked filters
+            network: self.agent.as_ref().map_or_else(
+                || AppliedNetwork {
+                    mode: "none".to_owned(),
+                    mechanism: Some("network-namespace".to_owned()),
+                    allowed_hosts: Vec::new(),
+                },
+                super::agent::AgentNet::applied_network,
+            ),
             syscalls: Some(AppliedSyscalls {
-                mechanism: "seccomp-bpf".to_owned(),
+                mechanism: if self.agent.is_some() {
+                    "seccomp-bpf+seccomp-user-notification".to_owned()
+                } else {
+                    "seccomp-bpf".to_owned()
+                },
                 digest: filter_digest.to_owned(),
             }),
+            // J3-agent end
             limits,
             environment_names,
             removed_environment_names: Vec::new(),
@@ -1238,7 +1478,44 @@ impl Boundary {
         }
         self.watcher.reap();
         self.remove_placeholders();
+        // J3-agent begin
+        self.stop_agent(deadline.remaining());
+        // J3-agent end
     }
+
+    // J3-agent begin: the agent network ends after the tree it served
+    /// Stops the proxy and the mediator, draining what they last reported.
+    /// Called once the tree is dead or given up on: until then the proxy and
+    /// the mediator are part of the boundary the child relies on.
+    fn stop_agent(&mut self, budget: Duration) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.stop(
+                &mut self.audit,
+                self.observe_on,
+                budget.min(AGENT_STOP_BUDGET),
+            );
+        }
+    }
+
+    /// Mediated connects and helper facts, while the target runs; the
+    /// reason of a new evidence loss, when there is one.
+    fn pump_agent(&mut self) -> Option<String> {
+        let (init_pid, init_fd, killing) = (self.init_pid, self.init_fd.as_ref(), &self.killing);
+        // Asked only once the bridge is seen dead: the boundary was up after
+        // the bridge died, so the bridge did not die with it. A namespace
+        // init sets PF_EXITING before it kills its namespace, and this
+        // supervisor sets `killing` before it kills anything.
+        let boundary_up = || {
+            super::agent::boundary_up(
+                killing.load(std::sync::atomic::Ordering::SeqCst),
+                &|| init_fd.is_none_or(|fd| super::watch::readable(fd.as_raw_fd())),
+                &|| identity::exiting(init_pid),
+            )
+        };
+        let agent = self.agent.as_mut()?;
+        agent.pump(&mut self.audit, self.observe_on, &boundary_up)
+    }
+    // J3-agent end
 
     /// Kills the namespace init and the backend through their descriptors.
     ///
@@ -1249,6 +1526,8 @@ impl Boundary {
     /// init makes the kernel kill the namespace; the backend outside it goes
     /// too.
     fn kill_boundary(&self) {
+        self.killing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(leaf) = &self.cgroup {
             let _ = leaf.kill();
         }
@@ -1270,70 +1549,12 @@ impl Boundary {
         let Some(tracer) = self.tracer.take() else {
             return;
         };
-        let summary = tracer.finish_within_draining(budget, |event| match event {
-            TracerEvent::Exec {
-                pid, path, dirfd, ..
-            } => self.audit.record_exec(pid, path.as_ref(), dirfd),
-            TracerEvent::Syscall {
-                pid,
-                tid,
-                op,
-                syscall,
-                args,
-                ret,
-                ..
-            } => self.audit.record_syscall(pid, tid, op, syscall, &args, ret),
-            TracerEvent::Exit { pid, status, .. } => self.audit.record_exit(pid, status),
-            TracerEvent::Gap {
-                reason,
-                ops,
-                from_ns,
-                to_ns,
-                count,
-            } => self.audit.record_gap(reason, ops, from_ns, to_ns, count),
-            _ => {}
-        });
-        if summary.loss.abandoned_tracees > 0
-            && !self
-                .audit
-                .gaps()
-                .iter()
-                .any(|gap| gap.reason == super::tracer::GapReason::TraceesAbandoned.as_str())
-        {
-            self.audit.record_gap(
-                super::tracer::GapReason::TraceesAbandoned,
-                super::tracer::OpSet::ALL,
-                0,
-                0,
-                Some(summary.loss.abandoned_tracees),
-            );
-        }
-        if !summary.unreaped_children.is_empty()
-            && !self
-                .audit
-                .gaps()
-                .iter()
-                .any(|gap| gap.reason == super::tracer::GapReason::UnreapedChildren.as_str())
-        {
-            self.audit.record_gap(
-                super::tracer::GapReason::UnreapedChildren,
-                super::tracer::OpSet::EMPTY,
-                0,
-                0,
-                u64::try_from(summary.unreaped_children.len()).ok(),
-            );
-        }
-        if summary.loss.lifecycle_dropped > 0
-            || (summary.loss.total() > 0 && !self.audit.has_gaps())
-        {
-            self.audit.record_gap(
-                super::tracer::GapReason::QueueFull,
-                super::tracer::OpSet::ALL,
-                0,
-                crate::platform::elapsed_since_start_ns() as u64,
-                None,
-            );
-        }
+        let target = super::observed::Target {
+            launcher: self.launcher.pid,
+            images: &self.target_images,
+        };
+        // Late facts change nothing here: the run loop has already ended.
+        let summary = super::observed::stop(tracer, budget, &mut self.audit, &target, |_| {});
         self.tracer_summary = Some(summary);
     }
 
@@ -1355,13 +1576,138 @@ impl Boundary {
         }
     }
 
+    // J3-launch begin: a verified teardown for a boundary whose target never
+    // ran (abort, failed release; §13.2 row 4)
+    /// Kills the boundary and reports whether its death was verified.
+    ///
+    /// Verified means exactly what settlement requires, without the target:
+    /// the namespace init's pidfd reports its death (PID-namespace semantics:
+    /// every other member, the blocked launcher included, died first); the
+    /// backend (this supervisor's child) and the outside watcher are dead and
+    /// reaped; the execution cgroup, when one exists, was observed
+    /// unpopulated and its identity was never lost; and the observer, when
+    /// attached, finished without abandoning a tracee or losing a child's
+    /// status. Everything is polled within one tree budget; whatever is still
+    /// unknown at its end leaves the tree `pending` and `tree_empty` null.
+    /// "The trusted launcher died" is not on the list: it is implied by the
+    /// init's death and proves nothing without it.
+    fn verified_teardown(&mut self) -> TreeObservation {
+        let deadline = clock::Deadline::after(TREE_BUDGET);
+        self.kill_boundary();
+        // The observer is stopped first, so after this nothing but this
+        // thread waits for children; its account is kept for the verdict.
+        self.stop_observer(deadline.remaining());
+        // J3-agent begin: the target never ran; nothing is left to serve
+        self.stop_agent(deadline.remaining());
+        // J3-agent end
+        let backend_reaped = match self.child.take() {
+            Some(mut child) => {
+                reap_until(&mut child, deadline);
+                match child.try_wait() {
+                    Ok(Some(_)) => true,
+                    // The tracer's `waitpid(-1)` reaped it before it was
+                    // stopped. Nothing else in this process waits, so an
+                    // exited backend whose status is gone was reaped here.
+                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => self
+                        .bwrap_fd
+                        .as_ref()
+                        .is_some_and(|fd| super::watch::readable(fd.as_raw_fd())),
+                    _ => false,
+                }
+            }
+            None => false,
+        };
+        let init_dead = || {
+            self.init_fd
+                .as_ref()
+                .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
+        };
+        loop {
+            let settled = init_dead() && self.watcher.ended() && self.cgroup_empty();
+            if settled || deadline.expired() {
+                break;
+            }
+            sleep_for(WAIT_STEP);
+        }
+        self.watcher.reap();
+        let watcher_reaped = self.watcher.ended();
+        // The observer's own account, with one difference from settlement:
+        // its "unreaped children" are this supervisor's own children (the
+        // backend and the watcher) that were still exiting when it stopped.
+        // Here they were reaped above, by this thread, so that loss has a
+        // route after all. Any other unreaped child, an abandoned tracee or
+        // a panicked observer still refuses the verdict.
+        let verified = abort_verdict(&AbortInputs {
+            backend_reaped,
+            watcher_reaped,
+            init_dead: init_dead(),
+            cgroup_empty: self.cgroup_empty(),
+            abandoned_tracees: self
+                .tracer_summary
+                .as_ref()
+                .map_or(0, |summary| summary.loss.abandoned_tracees),
+            observer_panicked: self
+                .tracer_summary
+                .as_ref()
+                .is_some_and(|summary| summary.thread_panicked),
+            unreaped_children: self
+                .tracer_summary
+                .as_ref()
+                .map(|summary| summary.unreaped_children.clone())
+                .unwrap_or_default(),
+            backend_pid: self.bwrap_pid,
+            watcher_pid: i32::try_from(self.watcher.pid()).unwrap_or(-1),
+        });
+        // Placeholders go only once the tree is known dead, and on this
+        // verdict rather than the settlement-time one, whose observer check
+        // would count the children reaped above as lost.
+        if verified && self.placeholder_outcomes.is_empty() {
+            self.placeholder_outcomes = self
+                .placeholders
+                .iter()
+                .map(Placeholder::remove_if_unchanged)
+                .collect();
+        }
+        if verified {
+            TreeObservation {
+                tree_empty: Some(true),
+                verified_at: Some(SystemTime::now()),
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: "verified".to_owned(),
+            }
+        } else {
+            TreeObservation {
+                tree_empty: None,
+                verified_at: None,
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: if self.cgroup_lost { "lost" } else { "pending" }.to_owned(),
+            }
+        }
+    }
+    // J3-launch end
+
     fn boundary_identity(&self) -> BoundaryIdentity {
         let mut details = Map::new();
         details.insert("watcher_pid".to_owned(), Value::from(self.watcher.pid()));
         details.insert(
             "execution_cgroup".to_owned(),
             match &self.cgroup {
-                Some(leaf) => leaf.registration(self.bwrap_pid, self.init_pid),
+                // J3-agent begin: the bridge is a helper charged to the leaf
+                Some(leaf) => {
+                    let mut registration = leaf.registration(self.bwrap_pid, self.init_pid);
+                    if let Some(bridge) = self
+                        .agent
+                        .as_ref()
+                        .and_then(super::agent::AgentNet::bridge_pid)
+                        && let Some(helpers) = registration
+                            .get_mut("charged_helpers")
+                            .and_then(Value::as_array_mut)
+                    {
+                        helpers.push(serde_json::json!({"role": "bridge", "pid": bridge}));
+                    }
+                    registration
+                }
+                // J3-agent end
                 None => serde_json::json!({
                     "unavailable": self
                         .cgroup_unavailable
@@ -1394,6 +1740,25 @@ impl Boundary {
                 Value::Null
             },
         );
+        // J3-agent begin: the filter count read back, and the agent network
+        details.insert(
+            "seccomp_filters".to_owned(),
+            self.seccomp_filters.map_or(Value::Null, |count| {
+                serde_json::json!({
+                    "expected": super::agent::expected_launcher_filters(
+                        self.agent.is_some(),
+                        self.observe_on,
+                    ),
+                    "observed": count,
+                })
+            }),
+        );
+        if let Some(agent) = self.agent.as_ref() {
+            let (agent_details, helpers) = agent.details();
+            details.insert("agent".to_owned(), agent_details);
+            details.insert("helpers".to_owned(), helpers);
+        }
+        // J3-agent end
         for (key, value) in [
             ("pid_namespace", self.ns_ids.pid),
             ("mnt_namespace", self.ns_ids.mnt),
@@ -1453,6 +1818,37 @@ fn nap() {
     // SAFETY: `ts` is a live timespec and the second argument may be null.
     unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
+
+// J3-agent begin: naming the mechanism a launcher could not establish
+/// The refusal for a launcher that ended before it blocked, from its exit
+/// status (as bubblewrap reported it) and the errno it wrote: the agent
+/// launcher's mediation and bridge failures name themselves; anything else
+/// is the backend's.
+fn launcher_failure(exit_code: Option<i32>, errno_bytes: &[u8], diagnostic: &str) -> JailError {
+    let errno = super::launch::decode_error_report(errno_bytes)
+        .map_or("no errno reported", super::sys::errno_name);
+    match exit_code {
+        Some(super::launch::EXIT_MEDIATION_FAILED) => preparing(
+            ErrorCode::MissingCapability,
+            format!(
+                "the `agent` unix-peer mediation could not be established: the launcher could \
+                 not install the mediation filter with its listener or open sock_diag ({errno})"
+            ),
+        ),
+        Some(super::launch::EXIT_BRIDGE_FAILED) => preparing(
+            ErrorCode::MissingCapability,
+            format!(
+                "the `agent` bridge could not be established: the launcher could not start it \
+                 ({errno})"
+            ),
+        ),
+        _ => preparing(
+            ErrorCode::BackendUnavailable,
+            format!("bubblewrap exited before the launcher blocked: {diagnostic}"),
+        ),
+    }
+}
+// J3-agent end
 
 fn current_syscall(pid: libc::pid_t) -> Option<libc::c_long> {
     let raw = std::fs::read_to_string(format!("/proc/{pid}/syscall")).ok()?;
@@ -1622,6 +2018,12 @@ fn validate_stdio(state_root: &Path) -> Result<(), JailError> {
 /// covered everything that existed and says `none` instead of overstating.
 /// A segment created later, deeper in the tree, is outside the claim either
 /// way (north-star §4.4).
+// J3-launch begin: vendor state is not a scanned root
+/// The claim covers the scanned writable roots (the workspace, scratch and
+/// operator `--rw` grants). Vendor state is attempt-private, removed at
+/// settlement and never scanned, so it is outside the claim: a protected name
+/// the child creates there protects nothing and is claimed by nothing.
+// J3-launch end
 fn scan_coverage(scan: &jfs::ProtectedScan) -> String {
     let within_bounds = scan.entries_seen <= jfs::ScanLimits::DEFAULT.max_entries
         && scan.max_depth_seen <= jfs::ScanLimits::DEFAULT.max_depth;
@@ -1736,14 +2138,9 @@ fn resolve_path_ref(reference: &PathRef, workspace: &Path) -> Result<OsString, J
         RootToken::Workspace => workspace.to_path_buf(),
         RootToken::Scratch => PathBuf::from(bwrap::SCRATCH_INSIDE_PATH),
         RootToken::Host => PathBuf::from("/"),
-        RootToken::VendorState => {
-            return Err(error(
-                ErrorCode::CredentialUnavailable,
-                ErrorStage::Preparing,
-                Remediation::Unsupported,
-                "vendor state is a launch-profile feature this slice does not implement".to_owned(),
-            ));
-        }
+        // J3-launch begin: vendor state as the child sees it
+        RootToken::VendorState => PathBuf::from(bwrap::VENDOR_STATE_INSIDE_PATH),
+        // J3-launch end
     };
     let suffix = reference.path.as_bytes();
     if suffix.is_empty() {
@@ -1765,14 +2162,133 @@ fn host_path_of(
         RootToken::Workspace => Ok(join_suffix(workspace, reference)),
         RootToken::Scratch => Ok(join_suffix(scratch, reference)),
         RootToken::Host => Ok(join_suffix(Path::new("/"), reference)),
+        // J3-launch begin: vendor state has no host path a grant may bind; it
+        // is bound only by the descriptor the supervisor created it with.
         RootToken::VendorState => Err(error(
-            ErrorCode::CredentialUnavailable,
+            ErrorCode::InvalidConfig,
             ErrorStage::Preparing,
-            Remediation::Unsupported,
-            "vendor state is a launch-profile feature this slice does not implement".to_owned(),
+            Remediation::Configuration,
+            "vendor state is bound by descriptor, never as a path grant".to_owned(),
         )),
+        // J3-launch end
     }
 }
+
+// J3-launch begin: checking and duplicating the staged hand-off
+/// The staged objects bubblewrap binds by descriptor.
+struct StagedMounts {
+    /// A duplicate of the vendor-state directory descriptor.
+    vendor: Option<OwnedFd>,
+    /// Each `bind_ro` source descriptor and its in-sandbox destination.
+    credentials: Vec<(OwnedFd, PathBuf)>,
+}
+
+/// Checks the supervisor's hand-off against the policy and duplicates it.
+///
+/// The policy is the authority: vendor state is bound exactly when the
+/// snapshot has a managed vendor-state root, and exactly the snapshot's
+/// `bind_ro` declarations are bound, each by a descriptor whose object is
+/// still the regular file staging identified. Anything else refuses; nothing
+/// is ever bound by path. `tool` and `build` never bind a credential (§6.1).
+fn staged_mounts(
+    snapshot: &PolicySnapshot,
+    handoff: Option<&crate::credentials::LaunchHandoff>,
+) -> Result<StagedMounts, JailError> {
+    use crate::state::anchored::{Kind, fstat};
+    use std::os::fd::AsFd as _;
+    let refuse = |message: &str| {
+        error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            message.to_owned(),
+        )
+    };
+    let declared: Vec<&crate::policy::CredentialDecl> = snapshot
+        .launch
+        .iter()
+        .flat_map(|launch| launch.credentials.iter())
+        .collect();
+    if !declared.is_empty() && snapshot.profile != ProfileName::Agent {
+        return Err(refuse(
+            "only the `agent` profile stages launch credentials (jail-v1 §6.1)",
+        ));
+    }
+    let wants_vendor = snapshot.roots.vendor_state.is_some();
+    let Some(handoff) = handoff else {
+        if wants_vendor || !declared.is_empty() {
+            return Err(refuse(
+                "the policy has managed vendor state or credentials but nothing was staged",
+            ));
+        }
+        return Ok(StagedMounts {
+            vendor: None,
+            credentials: Vec::new(),
+        });
+    };
+    let vendor = match (&handoff.vendor_state, wants_vendor) {
+        (Some(vendor), true) => vendor,
+        (None, false) if handoff.binds.is_empty() => {
+            return Ok(StagedMounts {
+                vendor: None,
+                credentials: Vec::new(),
+            });
+        }
+        _ => {
+            return Err(refuse(
+                "the staged vendor state does not match the policy's vendor-state root",
+            ));
+        }
+    };
+    let stat = fstat(vendor.fd.as_fd()).map_err(|err| refuse(&err.to_string()))?;
+    if stat.kind != Kind::Directory || stat.identity() != vendor.identity {
+        return Err(refuse(
+            "the staged vendor-state descriptor is not the registered directory",
+        ));
+    }
+    let binds: Vec<&&crate::policy::CredentialDecl> = declared
+        .iter()
+        .filter(|declaration| declaration.mode == crate::credentials::MODE_BIND_RO)
+        .collect();
+    if binds.len() != handoff.binds.len() {
+        return Err(refuse(
+            "the staged read-only credentials do not match the policy's declarations",
+        ));
+    }
+    let mut credentials = Vec::with_capacity(binds.len());
+    for handle in &handoff.binds {
+        if !binds
+            .iter()
+            .any(|declaration| declaration.id == handle.id && declaration.dest == handle.dest)
+        {
+            return Err(refuse(
+                "a staged read-only credential is not one the policy declares",
+            ));
+        }
+        let source = fstat(handle.fd.as_fd()).map_err(|err| refuse(&err.to_string()))?;
+        if source.kind != Kind::Regular || source.identity() != handle.identity {
+            return Err(refuse(
+                "a staged read-only credential descriptor is not the object staging examined",
+            ));
+        }
+        let destination = Path::new(bwrap::VENDOR_STATE_INSIDE_PATH)
+            .join(OsStr::from_bytes(handle.dest.as_bytes()));
+        let duplicate = handle
+            .fd
+            .try_clone()
+            .map_err(|err| refuse(&err.to_string()))?;
+        credentials.push((duplicate, destination));
+    }
+    let vendor = vendor
+        .fd
+        .try_clone()
+        .map_err(|err| refuse(&err.to_string()))?;
+    Ok(StagedMounts {
+        vendor: Some(vendor),
+        credentials,
+    })
+}
+// J3-launch end
 
 type MountPreparation = (
     jfs::ProtectedScan,
@@ -1952,6 +2468,17 @@ impl PreparedExecution for LinuxPrepared {
     }
 
     fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+        // J3-launch begin: one implementation, which also reports teardown
+        self.release_reporting_teardown()
+            .map_err(|failure| failure.error)
+        // J3-launch end
+    }
+
+    // J3-launch begin: a failed release runs the verified teardown and says
+    // what it established, instead of tearing down without a verdict.
+    fn release_reporting_teardown(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<crate::platform::ReleaseFailure>> {
         let mut boundary = self.boundary;
         if boundary.watcher.ended()
             || boundary
@@ -1959,25 +2486,36 @@ impl PreparedExecution for LinuxPrepared {
                 .as_ref()
                 .is_some_and(|leaf| leaf.verify().is_err())
         {
-            boundary.teardown();
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                "lifetime resources were lost before release",
-            ));
+            let tree = boundary.verified_teardown();
+            return Err(Box::new(crate::platform::ReleaseFailure {
+                error: preparing(
+                    ErrorCode::BackendUnavailable,
+                    "lifetime resources were lost before release",
+                ),
+                teardown: Some(Teardown { tree: Some(tree) }),
+            }));
         }
         let Some(release) = boundary.release.take() else {
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                "the release pipe is already closed",
-            ));
+            let tree = boundary.verified_teardown();
+            return Err(Box::new(crate::platform::ReleaseFailure {
+                error: preparing(
+                    ErrorCode::BackendUnavailable,
+                    "the release pipe is already closed",
+                ),
+                teardown: Some(Teardown { tree: Some(tree) }),
+            }));
         };
         if let Err(err) = write_all(release.as_raw_fd(), &[1]) {
-            boundary.teardown();
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the release byte could not be written: {err}"),
-            ));
+            let tree = boundary.verified_teardown();
+            return Err(Box::new(crate::platform::ReleaseFailure {
+                error: preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("the release byte could not be written: {err}"),
+                ),
+                teardown: Some(Teardown { tree: Some(tree) }),
+            }));
         }
+        // J3-launch end
         // Closing it makes a second release impossible (X03).
         drop(release);
         let wall = boundary
@@ -2007,29 +2545,13 @@ impl PreparedExecution for LinuxPrepared {
 
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
         let mut boundary = self.boundary;
-        boundary.teardown();
-        // The target never ran, but the boundary existed, and whether its
-        // teardown was observed to complete is still a measured fact.
-        let verified = boundary.observer_verified_the_tree()
-            && !init_alive(boundary.init_pid)
-            && boundary.cgroup_empty();
+        // J3-launch begin: the target never ran, but the boundary existed, and
+        // whether its teardown completed is a measured fact, established by
+        // the same facts settlement requires (see `verified_teardown`).
         Ok(Teardown {
-            tree: Some(if verified {
-                TreeObservation {
-                    tree_empty: Some(true),
-                    verified_at: Some(SystemTime::now()),
-                    verification_scope: "attempt_tree".to_owned(),
-                    integrity: "verified".to_owned(),
-                }
-            } else {
-                TreeObservation {
-                    tree_empty: None,
-                    verified_at: None,
-                    verification_scope: "attempt_tree".to_owned(),
-                    integrity: "pending".to_owned(),
-                }
-            }),
+            tree: Some(boundary.verified_teardown()),
         })
+        // J3-launch end
     }
 }
 
@@ -2110,25 +2632,6 @@ impl LinuxRunning {
         }
     }
 
-    /// Whether an observed exec transition is the launcher executing the
-    /// program the operator named.
-    ///
-    /// A transition with no pathname is one whose entry the observer did not
-    /// witness. A transition whose pathname is not one the launcher would have
-    /// tried is some other image: the launcher resolves `PATH` itself and
-    /// finishes with `execve`, so the set is small, known and derived from the
-    /// same inputs on both sides. Neither confirms the target ran.
-    fn image_is_the_target(&self, path: Option<&super::tracer::PathSnapshot>) -> bool {
-        let Some(path) = path else { return false };
-        if !path.complete {
-            return false;
-        }
-        self.boundary
-            .target_images
-            .iter()
-            .any(|candidate| candidate.as_slice() == path.bytes.as_slice())
-    }
-
     /// Drains the tracer channel into audit events and run events.
     ///
     /// `block` is how long to wait for the first event. Every event taken from
@@ -2138,101 +2641,36 @@ impl LinuxRunning {
         let Some(tracer) = self.boundary.tracer.as_ref() else {
             return;
         };
-        let launcher = self.boundary.launcher.pid;
-        let mut events = Vec::new();
-        if !block.is_zero()
-            && let Ok(event) = tracer.events().recv_timeout(block)
-        {
-            events.push(event);
-        }
-        for _ in 0..256 {
-            match tracer.events().try_recv() {
-                Ok(event) => events.push(event),
-                Err(_) => break,
-            }
-        }
-        for event in events {
-            self.handle_tracer_event(&event, launcher);
+        for event in super::observed::drain(tracer, block) {
+            self.handle_tracer_event(&event);
         }
     }
 
-    fn handle_tracer_event(&mut self, event: &TracerEvent, launcher: libc::pid_t) {
-        match event {
-            TracerEvent::Exec {
-                pid, path, dirfd, ..
-            } => {
-                self.boundary.audit.record_exec(*pid, path.as_ref(), *dirfd);
-                // A transition with no pathname is one whose entry the
-                // observer did not witness, which is what seizing a process
-                // that is already inside its own `execve` produces. The
-                // launcher is seized while blocked in `read(2)`, so its
-                // target exec is witnessed and carries a path; requiring one
-                // here means a transition we cannot attribute never becomes
-                // exec confirmation.
-                if *pid == launcher
-                    && !self.exec_confirmed
-                    && self.image_is_the_target(path.as_ref())
-                {
-                    self.exec_confirmed = true;
-                    self.pending.push(RunEvent::ExecConfirmed);
-                }
+    fn handle_tracer_event(&mut self, event: &TracerEvent) {
+        use super::observed::Fact;
+        let target = super::observed::Target {
+            launcher: self.boundary.launcher.pid,
+            images: &self.boundary.target_images,
+        };
+        match super::observed::record(&mut self.boundary.audit, &target, event) {
+            Fact::TargetExec if !self.exec_confirmed => {
+                self.exec_confirmed = true;
+                self.pending.push(RunEvent::ExecConfirmed);
             }
-            TracerEvent::Syscall {
-                pid,
-                tid,
-                op,
-                syscall,
-                args,
-                ret,
-                ..
-            } => {
-                self.boundary
-                    .audit
-                    .record_syscall(*pid, *tid, *op, syscall, args, *ret);
+            Fact::TargetExit(status) if self.target_outcome.is_none() => {
+                self.target_outcome = Some(outcome_from_status(status));
             }
-            TracerEvent::Exit { pid, status, .. } => {
-                self.boundary.audit.record_exit(*pid, *status);
-                if *pid == launcher && self.target_outcome.is_none() {
-                    self.target_outcome = Some(outcome_from_status(*status));
-                }
+            Fact::UntracedExit { pid, status } if pid == self.boundary.bwrap_pid => {
+                self.bwrap_status = Some(status);
             }
-            TracerEvent::UntracedChildExit { pid, status } => {
-                if *pid == self.boundary.bwrap_pid {
-                    self.bwrap_status = Some(*status);
-                }
+            Fact::CoverageLost(reason) if !self.evidence_reported => {
+                self.evidence_reported = true;
+                self.pending.push(RunEvent::EvidenceLost {
+                    reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
+                });
             }
-            TracerEvent::Gap {
-                reason,
-                ops,
-                from_ns,
-                to_ns,
-                count,
-            } => {
-                self.boundary
-                    .audit
-                    .record_gap(*reason, *ops, *from_ns, *to_ns, *count);
-                // §11.4 counts a hole only where a result went missing. A gap
-                // whose operation set is empty is bookkeeping — an argument
-                // the observer could not read and the kernel rejected for the
-                // same reason, say — and stopping a strict run for it would
-                // let a tracee deny service to its own supervisor by passing
-                // pointers that cannot work.
-                if !ops.is_empty() && !self.evidence_reported {
-                    self.evidence_reported = true;
-                    self.pending.push(RunEvent::EvidenceLost {
-                        reason: format!(
-                            "the closed-set observer lost coverage: {}",
-                            reason.as_str()
-                        ),
-                    });
-                }
-            }
-            TracerEvent::Finished => self.finished = true,
-            // §11.2 keeps fork out of the public audit set, and a thread is
-            // not a process: every count this consumer keeps is per thread
-            // group, which is what the observer's `pid` already is. Neither
-            // event adds a fact the receipt states.
-            TracerEvent::Attached { .. } | TracerEvent::Fork { .. } => {}
+            Fact::Finished => self.finished = true,
+            _ => {}
         }
     }
 
@@ -2387,6 +2825,12 @@ impl RunningExecution for LinuxRunning {
             }
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
+            // J3-agent begin: mediated connects, helper facts, and a loss of
+            // mediation or proxy evidence, which strict evidence stops for
+            if let Some(reason) = self.boundary.pump_agent() {
+                self.pending.push(RunEvent::EvidenceLost { reason });
+            }
+            // J3-agent end
             self.pump_status();
             self.sample_limits(false);
             self.check_exec_without_tracer();
@@ -2498,6 +2942,10 @@ impl RunningExecution for LinuxRunning {
         // to whether every tracee really ended.
         self.pump_tracer(Duration::ZERO);
         self.boundary.stop_observer(deadline.remaining());
+        // J3-agent begin: the tree is dead or given up on; the proxy drains
+        // its last results and the mediator stops
+        self.boundary.stop_agent(deadline.remaining());
+        // J3-agent end
         self.sample_limits(true);
         while !self.boundary.watcher.ended() && !deadline.expired() {
             sleep_for(WAIT_STEP);
@@ -2554,6 +3002,16 @@ impl RunningExecution for LinuxRunning {
             .then(|| "memory_oom".to_owned())
     }
 
+    // J3-agent begin: the bridge's counts, once it and the mediator stopped
+    fn final_native_details(&self) -> serde_json::Map<String, Value> {
+        let mut details = serde_json::Map::new();
+        if let Some(agent) = self.boundary.agent.as_ref() {
+            details.insert("helpers".to_owned(), agent.details().1);
+        }
+        details
+    }
+    // J3-agent end
+
     fn observer_summary(&mut self) -> Option<CoverageSummary> {
         // `wait_tree` already stopped the observer inside its budget; this
         // only covers a caller that skipped it.
@@ -2563,18 +3021,28 @@ impl RunningExecution for LinuxRunning {
         {
             let _ = child.try_wait();
         }
-        if self.boundary.observe_on {
-            let summary = self.boundary.tracer_summary.clone().unwrap_or_default();
-            return Some(self.boundary.audit.summary(&summary, true));
+        // J3-agent begin: `proxy.net` is the proxy's own class, with or
+        // without the observer (§11.4)
+        self.boundary.stop_agent(TREE_BUDGET);
+        let mut summary = if self.boundary.observe_on {
+            let tracer = self.boundary.tracer_summary.clone().unwrap_or_default();
+            self.boundary.audit.summary(&tracer, true)
+        } else {
+            // §11.4: observation off makes every audit class unsupported
+            // with a null count. The wrapper's own `limits` class still
+            // exists.
+            let mut summary = CoverageSummary::unobserved();
+            summary.classes.insert(
+                crate::observer::CoverageClass::Limits,
+                self.boundary.audit.limits_class(),
+            );
+            summary
+        };
+        if let Some(agent) = self.boundary.agent.as_ref() {
+            agent.apply_coverage(&mut summary);
         }
-        // §11.4: observation off makes every audit class unsupported with a
-        // null count. The wrapper's own `limits` class still exists.
-        let mut summary = CoverageSummary::unobserved();
-        summary.classes.insert(
-            crate::observer::CoverageClass::Limits,
-            self.boundary.audit.limits_class(),
-        );
         Some(summary)
+        // J3-agent end
     }
 }
 
@@ -2648,6 +3116,55 @@ pub fn verdict(inputs: &TreeInputs) -> TreeObservation {
     }
 }
 
+// J3-launch begin: the verdict of a teardown whose target never ran
+/// What a teardown after an abort or a failed release established.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbortInputs {
+    /// The backend, this supervisor's child, is dead and reaped.
+    pub backend_reaped: bool,
+    /// The outside watcher is dead and reaped.
+    pub watcher_reaped: bool,
+    /// The namespace init's pidfd reports its death.
+    pub init_dead: bool,
+    /// The execution cgroup, if any, was observed unpopulated with its
+    /// identity intact (true when there is no cgroup).
+    pub cgroup_empty: bool,
+    /// Tracees the observer had to kill on the way out.
+    pub abandoned_tracees: u64,
+    /// The observer's thread panicked.
+    pub observer_panicked: bool,
+    /// This process's children the observer left unreaped when it stopped.
+    pub unreaped_children: Vec<libc::pid_t>,
+    /// The backend's pid.
+    pub backend_pid: libc::pid_t,
+    /// The watcher's pid.
+    pub watcher_pid: libc::pid_t,
+}
+
+/// Whether a teardown whose target never ran verified the tree's death.
+///
+/// The settlement facts without the target: the init's death (which the PID
+/// namespace makes the death of every member), the backend and the watcher
+/// reaped, the leaf empty, and an observer account with nothing abandoned.
+/// The observer's "unreaped children" are forgiven only when they are exactly
+/// the backend and the watcher and this thread reaped them afterwards; any
+/// other child is a process this verdict knows nothing about.
+#[must_use]
+pub fn abort_verdict(inputs: &AbortInputs) -> bool {
+    let children_accounted = inputs.unreaped_children.iter().all(|pid| {
+        (*pid == inputs.backend_pid && inputs.backend_reaped)
+            || (*pid == inputs.watcher_pid && inputs.watcher_reaped)
+    });
+    inputs.backend_reaped
+        && inputs.watcher_reaped
+        && inputs.init_dead
+        && inputs.cgroup_empty
+        && inputs.abandoned_tracees == 0
+        && !inputs.observer_panicked
+        && children_accounted
+}
+// J3-launch end
+
 fn init_alive(init: libc::pid_t) -> bool {
     init > 0 && Path::new(&format!("/proc/{init}")).exists()
 }
@@ -2693,6 +3210,65 @@ fn sleep_for(step: Duration) {
     unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
 
+// J3-none begin: J2 helpers the uncontained boundary reuses instead of copying
+/// The J2 helpers `super::uncontained` calls. Delegation only: each body stays
+/// above, in one copy, so the two boundaries cannot drift apart.
+pub(super) mod shared {
+    use std::os::fd::RawFd;
+    use std::time::Duration;
+
+    use crate::capability::{Capability, CapabilityScope};
+    use crate::platform::{Deadline, RunEvent};
+
+    use super::super::probe::ProbeResult;
+    use super::super::tracer::TracerSummary;
+
+    pub(in crate::platform::linux) const STOP_GRACE: Duration = super::STOP_GRACE;
+    pub(in crate::platform::linux) const SETTLE_GRACE: Duration = super::SETTLE_GRACE;
+    pub(in crate::platform::linux) const WAIT_STEP: Duration = super::WAIT_STEP;
+    pub(in crate::platform::linux) const LIMIT_SAMPLE_INTERVAL: Duration =
+        super::LIMIT_SAMPLE_INTERVAL;
+
+    pub(in crate::platform::linux) fn capability_from(
+        requirement: &str,
+        probes: &[&str],
+        mechanism: &str,
+        scope: CapabilityScope,
+        results: &[ProbeResult],
+        measured_at: &str,
+    ) -> Capability {
+        super::capability_from(requirement, probes, mechanism, scope, results, measured_at)
+    }
+    pub(in crate::platform::linux) fn outcome_from_status(status: i32) -> RunEvent {
+        super::outcome_from_status(status)
+    }
+    pub(in crate::platform::linux) fn observer_verdict(summary: Option<&TracerSummary>) -> bool {
+        super::observer_verdict(summary)
+    }
+    pub(in crate::platform::linux) fn image_changed(pid: libc::pid_t) -> bool {
+        super::image_changed(pid)
+    }
+    pub(in crate::platform::linux) fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+        super::set_nonblocking(fd)
+    }
+    pub(in crate::platform::linux) fn write_all(fd: RawFd, bytes: &[u8]) -> std::io::Result<()> {
+        super::write_all(fd, bytes)
+    }
+    pub(in crate::platform::linux) fn read_environment_names(pid: libc::pid_t) -> Vec<String> {
+        super::read_environment_names(pid)
+    }
+    pub(in crate::platform::linux) fn step_for(deadline: Deadline) -> Duration {
+        super::step_for(deadline)
+    }
+    pub(in crate::platform::linux) fn sleep_for(step: Duration) {
+        super::sleep_for(step);
+    }
+    pub(in crate::platform::linux) fn nap() {
+        super::nap();
+    }
+}
+// J3-none end
+
 impl Drop for Boundary {
     fn drop(&mut self) {
         if self.child.is_some() || self.tracer.is_some() {
@@ -2717,7 +3293,15 @@ mod tests {
     #[test]
     fn a_run_probes_only_what_its_requirements_name() {
         assert!(super::probes_for("limit:wall").is_empty());
-        assert!(super::probes_for(super::REQ_NETWORK_PROXY).is_empty());
+        // J3-agent: the agent network is measured, never granted for free.
+        assert_eq!(
+            super::probes_for(super::REQ_NETWORK_PROXY),
+            [
+                "bwrap_present",
+                "network_namespace",
+                "seccomp_user_notification"
+            ]
+        );
         assert_eq!(super::probes_for("limit:pids"), ["cgroup_pids"]);
         assert_eq!(super::probes_for("limit:mem"), ["cgroup_memory"]);
         assert_eq!(super::probes_for("limit:cpu"), ["cgroup_cpu"]);
@@ -2975,9 +3559,251 @@ mod tests {
     }
 
     #[test]
-    fn a_proxy_requirement_is_unsupported_in_this_slice() {
-        let capability = capability_for(REQ_NETWORK_PROXY, &[], "2026-09-22T00:00:00Z");
-        assert_eq!(capability.status, CapabilityStatus::Unsupported);
-        assert_eq!(capability.measured_at, None);
+    fn a_proxy_requirement_rests_on_measured_probes_and_never_on_a_skip() {
+        // J3-agent: no longer unsupported; derived from what was measured.
+        let unmeasured = capability_for(REQ_NETWORK_PROXY, &[], "2026-09-22T00:00:00Z");
+        assert_eq!(unmeasured.status, CapabilityStatus::Skipped);
+        let ok = |name: &'static str| ProbeResult {
+            name,
+            status: ProbeStatus::Available,
+            mechanism: "m",
+            reason_code: "ok",
+            evidence: String::new(),
+        };
+        let all = [
+            ok("bwrap_present"),
+            ok("network_namespace"),
+            ok("seccomp_user_notification"),
+        ];
+        let measured = capability_for(REQ_NETWORK_PROXY, &all, "2026-09-22T00:00:00Z");
+        assert_eq!(measured.status, CapabilityStatus::Available);
+        let mut refused = all.clone();
+        refused[2].status = ProbeStatus::Unavailable;
+        refused[2].reason_code = "listener_refused";
+        let refused = capability_for(REQ_NETWORK_PROXY, &refused, "2026-09-22T00:00:00Z");
+        assert_eq!(refused.status, CapabilityStatus::Unavailable);
+        assert_eq!(refused.reason_code.as_deref(), Some("listener_refused"));
+        assert_eq!(
+            probes_for(REQ_NETWORK_PROXY),
+            &[
+                "bwrap_present",
+                "network_namespace",
+                "seccomp_user_notification"
+            ]
+        );
     }
+
+    #[test]
+    fn a_launcher_setup_failure_names_the_mechanism_it_could_not_establish() {
+        let busy = libc::EBUSY.to_le_bytes();
+        let mediation =
+            launcher_failure(Some(super::super::launch::EXIT_MEDIATION_FAILED), &busy, "");
+        assert_eq!(mediation.code, ErrorCode::MissingCapability);
+        assert_eq!(mediation.exit_code(), 125);
+        assert!(
+            mediation.message.contains("unix-peer mediation"),
+            "{}",
+            mediation.message
+        );
+        assert!(mediation.message.contains("EBUSY"), "{}", mediation.message);
+        let bridge = launcher_failure(Some(super::super::launch::EXIT_BRIDGE_FAILED), &[], "");
+        assert!(
+            bridge.message.contains("`agent` bridge"),
+            "{}",
+            bridge.message
+        );
+        assert!(bridge.message.contains("no errno reported"));
+        let other = launcher_failure(Some(1), &[], "{\"exit-code\": 1}");
+        assert_eq!(other.code, ErrorCode::BackendUnavailable);
+        assert!(!other.message.contains("agent"));
+    }
+
+    // J3-launch begin: the staged hand-off is checked against the policy
+    fn launch_snapshot(profile: ProfileName, bind_ro: bool) -> PolicySnapshot {
+        use crate::policy::{
+            CredentialDecl, LaunchSnapshot, ResolveInputs, ScratchRoot, VendorStateRoot,
+        };
+        let inputs = ResolveInputs {
+            platform: Os::Linux,
+            base_profile: profile,
+            policy_name: profile.as_str().to_owned(),
+            baseline: crate::profiles::baseline(profile, Os::Linux, &|_| None),
+            workspace: b"/work".to_vec(),
+            scratch: ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: Vec::new(),
+        };
+        let mut snapshot = crate::policy::resolve(&inputs).unwrap().snapshot;
+        snapshot.roots.vendor_state = Some(VendorStateRoot::Managed);
+        snapshot.launch = Some(LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: if bind_ro {
+                vec![CredentialDecl {
+                    id: "c".to_owned(),
+                    source: NativeString::Text("/src/c".to_owned()),
+                    dest: NativeString::Text("c".to_owned()),
+                    mode: "bind_ro".to_owned(),
+                }]
+            } else {
+                Vec::new()
+            },
+        });
+        snapshot
+    }
+
+    fn handoff(root: &std::path::Path, bind: bool) -> crate::credentials::LaunchHandoff {
+        use crate::credentials::{BindHandle, LaunchHandoff, VendorStateHandle};
+        use crate::state::anchored::{Dir, Name, fstat};
+        use std::os::fd::AsFd as _;
+        use std::sync::Arc;
+        let dir = Dir::open_trusted(root).unwrap();
+        let vendor = dir.mkdir_at(&Name::new(b"v").unwrap(), 0o700).unwrap();
+        std::fs::write(root.join("c"), b"c").unwrap();
+        let source = dir.open_path_at(&Name::new(b"c").unwrap()).unwrap();
+        let source_identity = fstat(source.as_fd()).unwrap().identity();
+        let vendor_identity = vendor.stat().unwrap().identity();
+        LaunchHandoff {
+            vendor_state: Some(VendorStateHandle {
+                host_path: root.join("v"),
+                fd: Arc::new(vendor.into_fd()),
+                identity: vendor_identity,
+            }),
+            binds: if bind {
+                vec![BindHandle {
+                    id: "c".to_owned(),
+                    fd: Arc::new(source),
+                    dest: NativeString::Text("c".to_owned()),
+                    identity: source_identity,
+                }]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    #[test]
+    fn a_matching_hand_off_is_bound_and_every_mismatch_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let good = handoff(&path, true);
+        let staged = super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&good))
+            .expect("a matching hand-off");
+        assert!(staged.vendor.is_some());
+        assert_eq!(staged.credentials.len(), 1);
+        assert_eq!(
+            staged.credentials[0].1,
+            std::path::Path::new("/run/ouro/state/c")
+        );
+
+        // Credentials under `tool` (§6.1), even with a matching hand-off.
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Tool, true), Some(&good)).is_err()
+        );
+        // Managed vendor state with nothing staged, and credentials with no
+        // vendor state at all.
+        assert!(super::staged_mounts(&launch_snapshot(ProfileName::Agent, false), None).is_err());
+        let mut stateless = launch_snapshot(ProfileName::Agent, true);
+        stateless.roots.vendor_state = None;
+        assert!(super::staged_mounts(&stateless, None).is_err());
+        // A bind the policy does not declare.
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, false), Some(&good)).is_err()
+        );
+        // A declared bind that was not staged.
+        let other = tempfile::tempdir().unwrap();
+        let unbound = handoff(&other.path().canonicalize().unwrap(), false);
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&unbound))
+                .is_err()
+        );
+        // A bind whose id or destination the policy does not declare, with
+        // the count right (J3 review RM36).
+        let mut renamed = good.clone();
+        renamed.binds[0].dest = NativeString::Text("elsewhere".to_owned());
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&renamed))
+                .is_err()
+        );
+        let mut relabelled = good.clone();
+        relabelled.binds[0].id = "other".to_owned();
+        assert!(
+            super::staged_mounts(
+                &launch_snapshot(ProfileName::Agent, true),
+                Some(&relabelled)
+            )
+            .is_err()
+        );
+        // A descriptor that is not the object staging recorded.
+        let mut swapped = good.clone();
+        swapped.binds[0].identity = (0, 0);
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&swapped))
+                .is_err()
+        );
+        let mut moved = good;
+        if let Some(vendor) = moved.vendor_state.as_mut() {
+            vendor.identity = (0, 0);
+        }
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
+        );
+    }
+    // J3-launch begin: the abort verdict
+    #[test]
+    fn an_abort_is_verified_only_by_every_settlement_fact() {
+        use super::{AbortInputs, abort_verdict};
+        let good = AbortInputs {
+            backend_reaped: true,
+            watcher_reaped: true,
+            init_dead: true,
+            cgroup_empty: true,
+            abandoned_tracees: 0,
+            observer_panicked: false,
+            unreaped_children: vec![10, 11],
+            backend_pid: 10,
+            watcher_pid: 11,
+        };
+        assert!(abort_verdict(&good));
+        assert!(abort_verdict(&AbortInputs {
+            unreaped_children: Vec::new(),
+            ..good.clone()
+        }));
+        for broken in [
+            AbortInputs {
+                backend_reaped: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                watcher_reaped: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                init_dead: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                cgroup_empty: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                abandoned_tracees: 1,
+                ..good.clone()
+            },
+            AbortInputs {
+                observer_panicked: true,
+                ..good.clone()
+            },
+            AbortInputs {
+                unreaped_children: vec![10, 11, 12],
+                ..good.clone()
+            },
+        ] {
+            assert!(!abort_verdict(&broken), "{broken:?}");
+        }
+    }
+    // J3-launch end
 }

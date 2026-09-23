@@ -100,7 +100,54 @@ pub struct PreparedPlan {
     pub argv: Vec<Vec<u8>>,
     /// The absolute resolved workspace.
     pub workspace: PathBuf,
+    // J3-launch begin: vendor state and bind_ro handles staged by the
+    // supervisor, bound by descriptor (§9.1, §12). A field, so the platform
+    // receives the exact objects staging examined instead of re-resolving
+    // paths. (The other J3-launch change here is the additive
+    // `release_reporting_teardown` default method.)
+    /// The vendor-state directory and `bind_ro` sources, when a launch
+    /// profile needs them; `None` otherwise.
+    pub launch: Option<crate::credentials::LaunchHandoff>,
+    // J3-launch end
+    // J3-agent begin: the registered proxy directory (jail-v1 §10)
+    /// The attempt's registered, 0700 proxy directory, for a proxy-mode
+    /// profile; `None` otherwise. The platform binds the proxy socket inside
+    /// it and exposes it read-only by this descriptor.
+    pub proxy: Option<ProxyDirHandoff>,
+    // J3-agent end
 }
+
+// J3-agent begin: the proxy directory hand-off
+/// The proxy directory the supervisor registered and created (§10).
+#[derive(Clone)]
+pub struct ProxyDirHandoff {
+    /// `<attempt>/proxy`, for diagnostics; never bound or resolved by path.
+    pub host_path: PathBuf,
+    /// The directory, opened by the supervisor at creation.
+    pub fd: std::sync::Arc<std::os::fd::OwnedFd>,
+    /// Its `(dev, ino)` as registered in jail state.
+    pub identity: (u64, u64),
+    /// Filled by the platform once it has bound and pinned `proxy.sock`, so
+    /// the supervisor can record the node in jail state for a later `gc`.
+    pub socket: std::sync::Arc<std::sync::OnceLock<crate::state::ProxySocketIdentity>>,
+}
+
+impl PartialEq for ProxyDirHandoff {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity && self.host_path == other.host_path
+    }
+}
+
+impl Eq for ProxyDirHandoff {}
+
+impl std::fmt::Debug for ProxyDirHandoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyDirHandoff")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+// J3-agent end
 
 /// The output channels a prepared execution may write to.
 ///
@@ -295,7 +342,42 @@ pub trait PreparedExecution {
     /// # Errors
     /// Returns a typed error when teardown could not be completed or verified.
     fn abort(self: Box<Self>) -> Result<Teardown, JailError>;
+
+    // J3-launch begin: a failed release reports its teardown (§13.2 row 4)
+    /// [`PreparedExecution::release`], plus what the teardown after a failed
+    /// release established about the tree.
+    ///
+    /// ADDITIVE, with a default that reports nothing (`None`), which the
+    /// supervisor records as an unverified tree: exactly today's behaviour.
+    /// A platform that tears the boundary down on a failed release and can
+    /// verify that teardown overrides it, so the refused receipt can say
+    /// `tree_empty = true` and vendor state can be removed honestly.
+    ///
+    /// # Errors
+    /// The release refusal and, when one ran, the teardown's observation.
+    fn release_reporting_teardown(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>> {
+        self.release().map_err(|error| {
+            Box::new(ReleaseFailure {
+                error,
+                teardown: None,
+            })
+        })
+    }
+    // J3-launch end
 }
+
+// J3-launch begin: a failed release with its teardown
+/// Why a release failed, and what the teardown it ran established.
+#[derive(Debug)]
+pub struct ReleaseFailure {
+    /// The refusal.
+    pub error: JailError,
+    /// The teardown's observation, when the platform ran and can report one.
+    pub teardown: Option<Teardown>,
+}
+// J3-launch end
 
 /// A released execution (§4).
 pub trait RunningExecution {
@@ -309,6 +391,25 @@ pub trait RunningExecution {
     fn limit_cause(&self) -> Option<String> {
         None
     }
+    // J3-none begin: a detected lifetime-integrity loss reaches the next receipt (§9.3)
+    /// Whether the platform has detected, while running, that the boundary's
+    /// lifetime integrity was lost: a membership escape, a replaced identity
+    /// or a failed verification. Once true it stays true. The default is a
+    /// platform that detects no such loss before tree verification.
+    fn integrity_lost(&self) -> bool {
+        false
+    }
+    // J3-none end
+    // J3-agent begin: native facts that exist only once the run is over
+    /// `lifetime.native.details` entries to replace in the receipts written
+    /// after [`RunningExecution::observer_summary`]: facts the platform only
+    /// knows once its helpers have stopped (what the `agent` bridge did, for
+    /// instance). The default replaces nothing.
+    fn final_native_details(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::new()
+    }
+    // J3-agent end
+
     /// Waits for the next event, up to `deadline`.
     fn wait(&mut self, deadline: Deadline) -> RunEvent;
 

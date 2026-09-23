@@ -1,7 +1,13 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 8, 2026-09-22. No implementation
-or backend conformance is claimed by this document. Revision 8 records the
+Status: implementation specification, revision 11, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 11 records what
+the J3 implementation and its reviews settled (§§6.2, 8.1, 9.2, 9.3, 10, 11.4,
+12, 14; [J3 authority](jail-v1/j3-authority.md)). Revision 10 names the
+host-peer isolation mechanism for `agent` (§10) and records the decisions the
+J3 reviews forced (§§6.1, 9.1, 10, 12; review-resolutions.md). Revision 9 makes the jail
+work on a stock host: no required host configuration, so `agent` no longer
+requires nested user namespaces (§§3.2, 9.2, S03). Revision 8 recorded the
 clarifications the first adversarial reviews of the J1 implementation forced
 (review-resolutions.md, "J1 review findings"); they correct ambiguities and
 add three native variants to the closed set, and they change no guarantee.
@@ -168,17 +174,16 @@ same facts read-only; its first run is
 and `doctor --json` output supersedes it. Ubuntu 24.04 and later restrict
 unprivileged user namespaces through AppArmor by default. The
 distribution's own `bwrap-userns-restrict` profile is measured sufficient for
-one containment layer on the reference host, which `tool` and `build` need,
-and insufficient for a nested sandbox, which `agent` needs, because it denies
-capabilities inside the user namespace
+the one containment layer every contained profile uses, and insufficient for a
+user namespace nested inside it, because it denies capabilities there
 ([probe](jail-v1/evidence/bwrap-probe-2026-09-22-ouro-ci.txt),
 [nesting probe](jail-v1/evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)).
-For `agent` the operator either installs a scoped profile granting `userns`,
-and capabilities within it, to the required executables, or changes that
-sysctl. The reference host uses the sysctl (decision 2026-09-22, recorded by
-the manifest); a multi-tenant host would need the scoped profile. The
-restriction is specific to Ubuntu 24.04 and later; `doctor` names the
-remediation for the host it runs on. All of
+An unprivileged Landlock domain does work inside that layer
+([Landlock nesting probe](jail-v1/evidence/landlock-nesting-probe-2026-09-22-ouro-ci.txt)). The jail requires no host configuration: every profile must work
+on a stock install of a supported distribution, and the reference host stays
+stock so that conformance proves it. Nested user namespaces are therefore a
+measured, optional host capability (§9.2), never a requirement. `doctor` names
+the host-specific change that would enable them, as an optional remediation. All of
 these are host policy: the tools report the state and change none of them. Conformance runs on the host as a dedicated operator account,
 `ouro-ci`: no sudo, lingering enabled so its `user@` service delegates the
 cgroup controllers, the provisioned tracing capabilities, and nothing else
@@ -495,6 +500,10 @@ environment; the executable must be visible under the final policy. Scripts
 and dynamic executables need their interpreter/runtime paths visible as well.
 
 Default profile: `tool`, or the launch profile's `jail` when `--launch` is set.
+Precedence is `--profile`, then `config.toml`'s `jail.profile`, then the launch
+profile's `jail`, then `tool`. When `config.toml` selects a profile and the
+launch profile's `jail` names a different built-in base, resolution refuses
+with both names rather than replacing either; `--profile` settles it.
 Default workspace: the invocation directory. Default scratch: a new private
 attempt directory. Default observation: `on`. Default evidence: `strict`.
 `--profile none` is the only way to select `none`; files and environment cannot
@@ -532,6 +541,9 @@ Apply configuration in this order:
 3. Operator environment settings from a fixed documented allow-list:
    `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
    `OURO_JAIL_EVIDENCE`. No environment-derived path or host grants.
+   `OURO_JAIL_TEST_MEDIATION_QUEUE` is a test-only knob: it can only shrink
+   the unix-peer mediation record queue (1 to 4096), never widens authority,
+   leaves the policy digest unchanged, and is recorded in the receipt.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 
@@ -911,6 +923,13 @@ repositories, symlink replacement and mount replacement separately. A newly
 created protected segment below a previously ordinary nested directory remains
 outside Linux `existing_and_root` coverage. Requiring `all_descendants` refuses.
 
+Vendor state is bound read-write at `/run/ouro/state`, and each `bind_ro`
+credential view read-only at its destination beneath it, after every operator
+grant; the attempt directory above it is never visible. Vendor state and
+scratch are attempt-private and removed at settlement, so the root-level
+protected literals above do not apply to them: `existing_and_root` speaks of
+the persistent writable roots (workspace and operator grants).
+
 ### 9.2 Syscall and namespace plan
 
 Use the selected unprivileged bubblewrap integration with user, mount, PID,
@@ -945,14 +964,37 @@ The reference conformance toolchain uses glibc. Other runtimes must pass their
 own threading fixture; a runtime that cannot fall back is incompatible, not
 a reason to silently allow `clone3`.
 
-`agent` uses a separate nesting filter permitting the setup actually needed
-by the scripted inner sandbox. It may permit mount/unmount and namespace
-creation within the outer restricted authority. It must not recover excluded
-paths, make locked read-only mounts writable, join a host namespace or obtain
-direct egress. Record the allowed setup operations and probe the real nesting
-sequence, not just one successful `unshare`. If safe nesting fails, refuse
-`agent`; do not disable the outer or inner sandbox. Seccomp restrictions are
-inherited; namespace creation does not remove them.
+Every contained profile creates sockets only in the AF_UNIX (subject to the
+rules above and the `agent` mediation), AF_INET and AF_INET6 families;
+`socket` and `socketpair` in any other family fail with EAFNOSUPPORT, because
+a network namespace does not isolate every family a kernel offers. The one
+exception is the `agent` launcher's own socket-diagnostic netlink socket,
+opened before the mediation filter, which then refuses every netlink socket.
+Before exec the trusted launcher restores exactly the signal state the jail
+itself changed (SIGPIPE to its default, the inherited signal mask); operator
+dispositions such as an inherited ignored SIGHUP pass through unchanged.
+
+`agent` uses a separate filter that permits the unprivileged sandboxing an
+inner vendor sandbox needs: `no_new_privs`, its own seccomp filters and
+Landlock. These work inside the outer layer on every supported host and are
+the nesting `agent` guarantees. Where the host also permits nested user
+namespaces, the filter additionally permits the namespace creation and
+mount/unmount an inner namespace sandbox needs, within the outer restricted
+authority. Nothing it permits may recover excluded paths, make locked
+read-only mounts writable, join a host namespace or obtain direct egress.
+Record the allowed setup operations and the measured nested-namespace
+capability in the receipt, and probe the real nesting sequence, not just one
+successful `unshare` or `landlock_restrict_self`. Where nested user namespaces
+are unavailable, `agent` still runs: an inner sandbox that needs them fails
+visibly to the child, the jail never simulates it, and the receipt never
+claims it ran. The jail never disables the outer sandbox, and never disables
+or rewrites an inner one; running a vendor with its own sandbox off is the
+operator's choice of argv or vendor configuration, and its tool commands then
+share the agent's jail authority. If a nesting mechanism the host does offer
+cannot be permitted safely, `agent` refuses rather than permitting it
+unsafely. Seccomp restrictions are inherited; namespace creation and Landlock
+domains do not remove them. An inner filter cannot obtain its own seccomp
+notification listener while the outer mediation filter (§10) holds one.
 
 The backend may use more restrictive mechanisms when their behavior passes
 the same contract. There is no arbitrary seccomp expression in user config.
@@ -995,6 +1037,13 @@ It mounts no jail, installs no containment filter and inherits the host view.
 It still closes private control fds, strips reserved environment variables and
 uses the same deadline logic. Same-UID interference remains possible, including
 interference with the supervisor's resources; `unprotected` is never upgraded.
+A narrowing that asks `none` for a restriction it cannot apply (read denials,
+read-only grants, protected coverage, network `none`) makes the requirement
+unsatisfiable and the run refuses with remediation `configuration`. The
+supervisor reads membership from `/proc/<pid>/cgroup`, is a child subreaper,
+and checks an exited child's zombie before reaping it; a detected loss adds a
+wrapper note (`fields.kind = lifetime`) and reaches the next receipt, and does
+not by itself stop the attempt. `none` adds no watcher of its own.
 Tree termination describes the verified boundary, not proof that an uncontained
 malicious child could not tamper with that boundary or launch effects elsewhere.
 
@@ -1069,6 +1118,50 @@ socket aliases and SCM_RIGHTS authority from a host peer. Enumerating/masking
 only existing socket nodes cannot satisfy it. If this cannot be enforced,
 `agent` refuses; do not advertise no-host-sockets based only on TCP/UDP tests.
 
+The Linux mechanism, measured on a stock host with no host configuration
+([spike](jail-v1/evidence/unixpeer-spike-2026-09-22-ouro-ci.txt)), is seccomp
+user-notification mediation. The `agent` filter returns
+`SECCOMP_RET_USER_NOTIF` for `connect` and permits AF_UNIX sockets only of
+type stream or seqpacket; datagram and raw AF_UNIX sockets are refused at
+`socket`/`socketpair`, because a datagram send can name a peer in
+`sendmsg`'s `msg_name`, which a filter cannot read. The trusted launcher
+installs the filter with its own listener and opens a `NETLINK_SOCK_DIAG`
+socket inside the attempt's network namespace; the supervisor takes both from
+the blocked launcher by descriptor before release. For each notification the
+supervisor reads the address, revalidates the notification, and takes a
+duplicate of the child's socket. A pathname address is resolved in the
+child's own view without leaving it, pinned by an `O_PATH` handle, and
+allowed only when a listener bound to that node's filesystem identity lives
+in the attempt's network namespace; the supervisor then connects the child's
+socket through the pinned handle, so the kernel reaches exactly the node that
+was checked. A node whose inode number does not fit the kernel's 32-bit
+socket-diagnostic identity is refused. Non-AF_UNIX and abstract addresses are
+connected by the supervisor on the child's own socket, whose network
+namespace is fixed at creation. The supervisor never answers with
+`SECCOMP_USER_NOTIF_FLAG_CONTINUE` for a security decision. Without a live
+listener the filter fails closed.
+
+Named limits of this mechanism: a mediated connect runs in the supervisor's
+security context, so an inner sandbox's Landlock network rules and
+abstract-socket scope do not compose through it (inner seccomp filters do,
+because their denials outrank the notification); the reach of a mediated
+connect is still only the attempt's own network namespace. A listener's peer
+credentials name the supervisor for a mediated pathname connect. A listener
+bound inside a network namespace nested within the attempt is not in the
+attempt's diagnostic view and is refused. An inner sandbox cannot install its
+own seccomp notification listener while the outer one holds one. A connect
+mediated this way is not a ptrace stop; the mediator emits its evidence. When
+the kernel offers a native, composable restriction of pathname Unix peers,
+prefer it and drop the mediation.
+
+The mediation governs connections the child initiates. A host process that
+itself connects to a socket the child bound in a writable shared root talks to
+the child, and can pass it descriptors; that is the host tool's choice, like
+reading a file the child wrote there. The jail does not protect host tools
+from sockets or files the child plants in roots it may write. A later
+hardening may refuse socket-node creation in shared roots (Landlock
+`MAKE_SOCK` beneath the workspace and operator grants); it is not claimed now.
+
 Set `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lowercase equivalents
 to `http://127.0.0.1:3128`; set `NO_PROXY` and `no_proxy` to the empty string.
 Environment variables offer compatibility; the network namespace and separate
@@ -1103,13 +1196,34 @@ For every CONNECT/plain-HTTP request:
 An allowed CONNECT only authorizes a byte tunnel to that destination. The
 proxy does not establish what TLS request or application action followed.
 Fail closed on proxy/bridge death for a contained agent. Emit safe reasons;
-do not log request paths, query strings, headers, tokens or bodies.
+do not log request paths, query strings, headers, tokens or bodies. Proxy death
+is a loss of `proxy.net` evidence: strict stops the attempt, best-effort
+continues degraded. Bridge death loses no evidence: it is recorded once, when
+it happens before settlement, and new connections fail. The bridge is started
+by the trusted launcher before the observer's filter, runs under the `agent`
+baseline and the mediation filter, is not a descendant of the target, and its
+own connects are the jail's plumbing, attributed by its pinned identity (pid
+and start time), not to the target. The mediator admits the authorized proxy by
+its full pinned device and inode. At capacity the bridge answers
+`503 bridge_overload` and closes. A target that signals every process it can
+reach can kill its own bridge; the attempt then loses its own network, which
+fails closed and is recorded.
 
 Initial budgets per attempt: 128 active connections, 32 KiB request headers,
 10-second DNS/connect/header deadline, 1 MiB total bounded relay buffers.
 At capacity, reject excess requests with a safe overload reason. Stream data
 with backpressure; do not buffer response bodies. Connections close on stop.
-These limits are resource budgets, not permission grants.
+These limits are resource budgets, not permission grants. The header deadline
+runs from accept and is absolute; resolution and connection each have their
+own 10-second deadline. The proxy serves one request per client connection:
+bytes after the first request are discarded and the connection closes after
+its response. Per-request work is bounded as well: host normalization refuses
+an over-long label or name before any encoding, so no request can make the
+supervisor do unbounded work. The proxy's descriptors are budgeted against the
+supervisor's limit; a request it cannot serve for lack of resources is
+recorded as the proxy's failure, never as the client's. A numeric allow rule is
+an explicit address grant for that address and port, whatever name resolved
+to it (network-rules.md).
 
 Emit one proxy `net.connect` result per request: immediately for denial or
 connect failure, at close for a successful tunnel so counters are final.
@@ -1222,6 +1336,11 @@ boot/birth identity and namespace mapping.
 
 ### 11.4 Loss and coverage
 
+For `agent`, `connect` results come from the unix-peer mediator, not a ptrace
+stop (`fields.observation = seccomp_user_notification`), and count under the
+same classes below. A mediation-queue overflow is evidence loss for those
+classes, handled exactly as tracer loss: strict stops the attempt.
+
 Each class has exactly the following source and operation assignment:
 
 | Class | Source | Results counted |
@@ -1331,7 +1450,14 @@ owner and mode, and reject special files. Initial total credential-copy budget:
 16 MiB per attempt; larger inputs refuse before exec. File identity and digest
 are computed from the same bytes copied. A readonly bind records source
 identity; if stable content cannot be established, its digest is unavailable
-rather than invented. Never recurse through a credential directory by default.
+rather than invented. Stable content is established only on a filesystem that
+cannot change (squashfs, erofs, iso9660) and when the content did not change
+while it was hashed; a read-only mount of a writable filesystem does not
+qualify. Never recurse through a credential directory by default. A credential
+source inside any child-writable grant refuses, compared by identity as for the
+launch profile file, and a `bind_ro` source with more than one hard link
+refuses, because the child could otherwise alter what it was granted
+read-only.
 
 Register vendor state before the first copy, create it mode 0700, and keep its
 parent unavailable to the contained child. Generated HOME/state paths and
@@ -1339,8 +1465,12 @@ proxy variables are recorded by name only. The contained environment starts
 empty and admits PATH, LANG, TERM, TZ, required generated paths and the explicit
 launch environment. Unlisted SSH/cloud/provider environment credentials are
 absent. `none` inherits the host environment except reserved Ouroboros state,
-socket and token names; the receipt lists removed names, never values. This is
-hygiene and does not protect uncontained state.
+socket and token names (every `OURO_*` name); the receipt lists removed names,
+never values. This is hygiene and does not protect uncontained state. A launch
+profile may not bind the contained environment's own names (PATH, LANG, TERM,
+TZ, TMPDIR, HOME), the proxy variables in any case, `LD_*`/`DYLD_*`, or the C
+library's loader and runtime controls (for example `GLIBC_TUNABLES`,
+`GCONV_PATH`, `MALLOC_*`), because they reach the trusted launcher first.
 
 On pre-exec refusal or verified tree death, remove vendor state using anchored
 directory traversal that does not follow symlinks or cross mount boundaries.
@@ -1437,7 +1567,8 @@ or an audited loopback connect with a successful remote API request.
 
 ### 13.2 Receipt lifecycle and shape
 
-Normal phases are `prepared`, `enforced`, `settled`. A separate `refused` phase
+Normal phases are `prepared`, `enforced`, `settled`. A run that ends unsettled
+without a confirmed target exec stays `prepared`. A separate `refused` phase
 records a proved pre-target-exec refusal; this resolves the north star's
 pre-exec receipt case without labelling failed preparation as enforcement.
 
@@ -1572,13 +1703,20 @@ Required Linux probes:
   accounting; loading an empty BPF program is insufficient.
 - Proxy/bridge connectivity, allowed and denied destinations, and direct-egress
   rejection for `agent`.
-- Scripted nested sandbox setup and attempted outer-boundary reversal for
+- Scripted nested sandbox setup (Landlock and seccomp; nested user namespaces
+  where the host permits them) and attempted outer-boundary reversal for
+  `agent`. An unavailable nested user namespace is reported, not a failure of
   `agent`.
 - Host AppArmor restrictions when detectable. If effective permission cannot
   be read, the execution probe remains authoritative and the explanation says
   policy details unavailable.
 - Launch profile credential existence/type/permissions without printing values
   or user-specific paths; experimental/supported status separately.
+- For `agent`, measured by one real run: `seccomp_user_notification`,
+  `agent_proxy_bridge` (an allowed and a denied destination, direct egress
+  refused), `agent_unix_peer_mediation` (a host socket denied, an attempt
+  socket allowed) and `agent_inner_sandbox` (a Landlock and seccomp inner
+  sandbox restricts its child; `nested_user_namespace` reported as measured).
 
 `doctor` does not edit user namespaces policy, install dependencies, enable
 lingering, alter TCC, change capabilities, start a permanent service or prompt
@@ -1588,6 +1726,10 @@ for provider sign-in. `explain` shows these as unmeasured requirements.
 
 `gc --dry-run` enumerates only the registered state root, takes nonblocking
 attempt locks, and reports actions/reasons in the same JSON shape as `gc`.
+Cleanup is bounded per pass (initially 100,000 entries, 128 open directories)
+and resumable; `gc` prints its report even when it exits 1 because a cleanup
+stays pending. It removes a dead attempt's proxy directory only through the
+socket identity recorded at bind, and reports it in a `proxy_dir` field.
 It never discovers deletion targets by searching all of `/tmp`, HOME or cgroupfs.
 Active locks, unverifiable identities or foreign-platform resources are retained.
 
@@ -1638,7 +1780,7 @@ its own processes. Never test against the operator's actual credentials.
 | F04 | Scan-limit exhaustion and source-identity swap refuse without a claimed complete boundary. |
 | S01 | Denied syscall and native ABI variants fail; ordinary threads still work with clone3 fallback. |
 | S02 | Child cannot reach host processes, cgroups, namespace fds, host sockets or supervisor state. |
-| S03 | Nested sandbox starts and restricts its child; attempts to undo each outer boundary fail. |
+| S03 | A Landlock and seccomp inner sandbox starts inside `agent` on a stock host and restricts its child; where the host permits nested user namespaces, a namespace inner sandbox does too, and where it does not, the failure is visible and the receipt records the capability as unavailable. Attempts to undo each outer boundary fail. |
 | S04 | Every contained profile rejects all three io_uring interfaces/ABI variants and inherits no ring; attempted async socket/open/connect cannot bypass policy. None retains explicit observation exclusions. |
 | N01 | Direct TCP/UDP/IPv6 egress and environment-proxy bypass fail for contained profiles. |
 | N02 | Allowed/denied proxy requests each yield exactly one matching proxy result; audit facts stay distinct. |
@@ -1688,7 +1830,7 @@ fleet scaffolding is needed to complete these steps.
 | J0: feasibility | Provision the reference host and record its manifest; measure the observer privilege model first (§5.2); then pin and evaluate the enforcement candidates (§5.1) with the fixture harness and lifecycle integration; fill [backend-evaluation.md](jail-v1/backend-evaluation.md). | §5 report has measured evidence and one chosen viable path or a named blocker. No fabricated backend selection. A blocked observer is a valid exit; it does not license `--observe off` as J1's acceptance run. |
 | J1: first execution | Cargo workspace; portable policy/records; Linux tool supervisor, observation, wall and receipts; macOS refusal implementation. | §1.1 runs end to end, with P01–P04, X01–X07, M01–M03, I03 and its relevant F/O/L/R tests. This is the first product implementation slice. P04's "credential special files refuse" sub-clause is scoped to J3, where credential staging exists; J1 refuses every credential-bearing launch profile fail-closed, so the sub-clause has no code path yet. |
 | J2: authority | Complete mounts/protected paths, filter families, native ABI checks, limits, gate faults and doctor probes. | F01–F04, S01–S02, S04, X02–X06, L01–L05 pass on the named Linux lane. |
-| J3: agent execution | Proxy, nested agent profile, data-only launch profiles, credential modes/cleanup and explicit none. | S03, N01–N05, C01–C02 and R05–R06 pass. Profiles remain experimental. |
+| J3: agent execution | Proxy, agent profile with unprivileged nesting, data-only launch profiles, credential modes/cleanup and explicit none, all on a stock host. | S03, N01–N05, C01–C02 and R05–R06 pass. Profiles remain experimental. |
 | J4: evidence/recovery | Complete closed set, loss handling, bounded trace, atomic records and GC. | O01–O06, R01–R06 and C03 pass, including failure injection. |
 | J5: milestone proof | Full independent suite, performance report, platform compilation, docs and schema freeze. | All noncredential gates pass; A01 is either recorded or explicitly skipped; no Linux mechanism leaks into portable requirements. |
 

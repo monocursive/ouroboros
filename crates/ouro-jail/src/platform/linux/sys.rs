@@ -72,6 +72,21 @@ pub fn last_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
+// J3-agent begin: an inherited ignored disposition is the operator's
+/// Whether `signal` is ignored in this process right now, read without
+/// changing it. A read that fails says "not ignored".
+#[must_use]
+pub fn signal_ignored(signal: libc::c_int) -> bool {
+    // SAFETY: a null new action only reads the current one into `current`,
+    // which is plain data this frame owns.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(signal, std::ptr::null(), &raw mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
+    }
+}
+// J3-agent end
+
 /// The symbolic name of a Linux errno, or `E<number>` when it is not one this
 /// project names. Receipts and probe evidence carry the name, never a bare
 /// number, because a number in a report is not a fact anyone can check.

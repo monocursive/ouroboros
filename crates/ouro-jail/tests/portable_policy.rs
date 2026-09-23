@@ -433,7 +433,10 @@ fn p02_a_host_the_ruleset_cannot_normalize_refuses_as_an_unknown_subset() {
                 baseline.network_allow = HostRule::parse("*.example.com:443").expect("parses");
             },
             PolicyDelta {
-                network_allow: vec!["bücher.example.com:443".to_owned()],
+                // J3-P begin: IDNA now maps `bücher`; a malformed A-label is
+                // what the ruleset still cannot normalize.
+                network_allow: vec!["xn--a.example.com:443".to_owned()],
+                // J3-P end
                 ..PolicyDelta::default()
             },
         )

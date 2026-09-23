@@ -44,6 +44,15 @@ pub const EXIT_USAGE: i32 = 125;
 pub const EXIT_INTERNAL: i32 = 126;
 /// `execvp` failed; the errno is on the error pipe.
 pub const EXIT_EXEC_FAILED: i32 = 127;
+// J3-agent begin: the agent launcher's own setup failures
+/// The unix-peer mediation (filter with its own listener, sock_diag socket)
+/// could not be set up; the errno is on the error pipe. The target did not
+/// run.
+pub const EXIT_MEDIATION_FAILED: i32 = 120;
+/// The in-namespace bridge could not be started; the errno is on the error
+/// pipe. The target did not run.
+pub const EXIT_BRIDGE_FAILED: i32 = 121;
+// J3-agent end
 
 /// Parsed `__launch` arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +63,22 @@ pub struct LaunchArgs {
     pub error_fd: RawFd,
     /// Whether to install the narrowing filter before releasing.
     pub narrow: bool,
+    // J3-agent begin: mediation and bridge (jail-v1 §10)
+    /// Install the unix-peer mediation filter with its own listener and open
+    /// a `NETLINK_SOCK_DIAG` socket, placing them at these two descriptor
+    /// numbers for the supervisor to take before release.
+    pub mediate: Option<(RawFd, RawFd)>,
+    /// Start the loopback bridge before blocking, and place the read end of
+    /// its report pipe (one byte per client it turned away at capacity) at
+    /// this descriptor number for the supervisor to take before release.
+    pub bridge: Option<RawFd>,
+    /// The signal mask the supervisor inherited (bit `n - 1` for signal
+    /// `n`), which the target gets instead of what bubblewrap left: it
+    /// blocks SIGCHLD for itself and unblocks it in its child, so an
+    /// inherited blocked SIGCHLD would otherwise be lost. `None` leaves the
+    /// mask as inherited (`none`, where nothing in between changes it).
+    pub sigmask: Option<u64>,
+    // J3-agent end
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
 }
@@ -96,7 +121,8 @@ impl fmt::Display for LaunchUsage {
 
 impl std::error::Error for LaunchUsage {}
 
-/// Parse `--release-fd N --error-fd M [--narrow] -- PROGRAM ARG...`.
+/// Parse `--release-fd N --error-fd M [--narrow] [--mediate L,S] [--bridge R]
+/// [--sigmask HEX] -- PROGRAM ARG...`.
 ///
 /// # Errors
 ///
@@ -105,6 +131,9 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     let mut release_fd: Option<RawFd> = None;
     let mut error_fd: Option<RawFd> = None;
     let mut narrow = false;
+    let mut mediate: Option<(RawFd, RawFd)> = None;
+    let mut bridge: Option<RawFd> = None;
+    let mut sigmask: Option<u64> = None;
     let mut index = 0usize;
     let mut argv: Option<Vec<OsString>> = None;
 
@@ -128,10 +157,41 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 narrow = true;
                 index += 1;
             }
+            // J3-agent begin
+            "--mediate" => {
+                mediate = Some(fd_pair(args.get(index + 1), "--mediate")?);
+                index += 2;
+            }
+            "--bridge" => {
+                let fd = fd_value(args.get(index + 1), "--bridge")?;
+                if fd < 3 {
+                    return Err(LaunchUsage::BadFd("--bridge"));
+                }
+                bridge = Some(fd);
+                index += 2;
+            }
+            "--sigmask" => {
+                let raw = args
+                    .get(index + 1)
+                    .ok_or(LaunchUsage::MissingValue("--sigmask"))?;
+                let text = raw.to_str().ok_or(LaunchUsage::BadFd("--sigmask"))?;
+                sigmask = Some(
+                    u64::from_str_radix(text, 16).map_err(|_| LaunchUsage::BadFd("--sigmask"))?,
+                );
+                index += 2;
+            }
+            // J3-agent end
             _ => return Err(LaunchUsage::UnknownOption(name)),
         }
     }
 
+    // J3-agent begin: the three placed descriptors are three numbers
+    if let (Some(report), Some((listener, sockdiag))) = (bridge, mediate)
+        && (report == listener || report == sockdiag)
+    {
+        return Err(LaunchUsage::BadFd("--bridge"));
+    }
+    // J3-agent end
     let argv = argv.ok_or(LaunchUsage::MissingSeparator)?;
     if argv.is_empty() {
         return Err(LaunchUsage::EmptyArgv);
@@ -145,9 +205,33 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         release_fd: release_fd.ok_or(LaunchUsage::Missing("--release-fd"))?,
         error_fd: error_fd.ok_or(LaunchUsage::Missing("--error-fd"))?,
         narrow,
+        mediate,
+        bridge,
+        sigmask,
         argv,
     })
 }
+
+// J3-agent begin: `--mediate L,S`
+fn fd_pair(raw: Option<&OsString>, option: &'static str) -> Result<(RawFd, RawFd), LaunchUsage> {
+    let raw = raw.ok_or(LaunchUsage::MissingValue(option))?;
+    let text = raw.to_str().ok_or(LaunchUsage::BadFd(option))?;
+    let (left, right) = text.split_once(',').ok_or(LaunchUsage::BadFd(option))?;
+    let parse = |part: &str| -> Result<RawFd, LaunchUsage> {
+        let value: RawFd = part.parse().map_err(|_| LaunchUsage::BadFd(option))?;
+        // Below 3 would replace stdio; the two must differ.
+        if value < 3 {
+            return Err(LaunchUsage::BadFd(option));
+        }
+        Ok(value)
+    };
+    let pair = (parse(left)?, parse(right)?);
+    if pair.0 == pair.1 {
+        return Err(LaunchUsage::BadFd(option));
+    }
+    Ok(pair)
+}
+// J3-agent end
 
 fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, LaunchUsage> {
     let raw = raw.ok_or(LaunchUsage::MissingValue(option))?;
@@ -213,6 +297,24 @@ pub fn launch_main(args: &[OsString]) -> ! {
         report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
     }
 
+    // J3-agent begin: mediation, then the bridge, both before the narrowing
+    // filter. The bridge must exist before it: an untraced process that
+    // meets the narrowing filter's SECCOMP_RET_TRACE gets ENOSYS, and the
+    // bridge is never traced (it is a helper, not a descendant of the
+    // target). It must come after the mediation filter, so its connect to
+    // the proxy is mediated like the target's.
+    if let Some((listener_fd, sockdiag_fd)) = parsed.mediate
+        && let Err(errno) = mediate(listener_fd, sockdiag_fd)
+    {
+        report_and_exit(parsed.error_fd, errno, EXIT_MEDIATION_FAILED);
+    }
+    if let Some(report_fd) = parsed.bridge
+        && let Err(errno) = spawn_bridge(report_fd)
+    {
+        report_and_exit(parsed.error_fd, errno, EXIT_BRIDGE_FAILED);
+    }
+    // J3-agent end
+
     if parsed.narrow {
         // The observer's own filter, so the numbers the launcher narrows to
         // and the numbers the tracer expects to be stopped on are one table.
@@ -256,6 +358,53 @@ pub fn launch_main(args: &[OsString]) -> ! {
     // SAFETY: closing a descriptor this process owns; the target must not see
     // the release pipe.
     unsafe { libc::close(parsed.release_fd) };
+    // J3-agent begin: undo what the jail itself changed in the signal state
+    // the target inherits. The Rust runtime set SIGPIPE to ignored in this
+    // process (and a raw execve keeps an ignored disposition), and
+    // bubblewrap unblocked SIGCHLD for its child; the target gets SIGPIPE's
+    // default and, when given, the supervisor's own inherited mask. Every
+    // other disposition is left exactly as inherited, so an operator's
+    // `nohup` still reaches the target. Async-signal-safe calls only.
+    // SAFETY: `action` and `set` are plain stack data; sigaction,
+    // sigemptyset, sigaddset and sigprocmask read or fill them only.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&raw mut action.sa_mask);
+        if libc::sigaction(libc::SIGPIPE, &raw const action, std::ptr::null_mut()) != 0 {
+            report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
+        }
+        if let Some(mask) = parsed.sigmask {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&raw mut set);
+            for signal in 1..=64 {
+                if mask & (1u64 << (signal - 1)) != 0 {
+                    libc::sigaddset(&raw mut set, signal);
+                }
+            }
+            if libc::sigprocmask(libc::SIG_SETMASK, &raw const set, std::ptr::null_mut()) != 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
+            }
+        }
+    }
+    // J3-agent end
+
+    // J3-agent begin: the supervisor took these objects before release; the
+    // target never holds the listener, the sock_diag socket or the bridge's
+    // report pipe (X06). This close is the only thing that keeps them from
+    // it (see `mediate` and `spawn_bridge`).
+    if let Some((listener_fd, sockdiag_fd)) = parsed.mediate {
+        // SAFETY: closing descriptors this process placed itself.
+        unsafe {
+            libc::close(listener_fd);
+            libc::close(sockdiag_fd);
+        }
+    }
+    if let Some(report_fd) = parsed.bridge {
+        // SAFETY: closing a descriptor this process placed itself.
+        unsafe { libc::close(report_fd) };
+    }
+    // J3-agent end
 
     // `execve`, never `execvp`. On `ENOEXEC` the library call re-executes the
     // file through `/bin/sh`, so a file that is neither ELF nor a script with
@@ -280,6 +429,170 @@ pub fn launch_main(args: &[OsString]) -> ! {
     }
     report_and_exit(parsed.error_fd, last_errno, EXIT_EXEC_FAILED);
 }
+
+// J3-agent begin: the signal mask the jail hands the target
+/// The calling thread's blocked signals as a bitmask (bit `n - 1` for signal
+/// `n`, `1..=64`). The supervisor calls it on its main thread, which never
+/// changes its mask, so it is the mask the supervisor inherited.
+#[must_use]
+pub fn blocked_mask() -> u64 {
+    // SAFETY: `set` is plain stack data that pthread_sigmask fills; a null
+    // new-mask pointer only reads the current one.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        if libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &raw mut set) != 0 {
+            return 0;
+        }
+        (1..=64).fold(0u64, |mask, signal| {
+            if libc::sigismember(&raw const set, signal) == 1 {
+                mask | (1u64 << (signal - 1))
+            } else {
+                mask
+            }
+        })
+    }
+}
+// J3-agent end
+
+// J3-agent begin: the launcher's agent setup
+/// Installs the unix-peer mediation filter with its own listener and opens a
+/// `NETLINK_SOCK_DIAG` socket in this network namespace, then places them at
+/// `listener_fd` and `sockdiag_fd` for the supervisor to take with
+/// `pidfd_getfd` while this process is blocked. They are deliberately not
+/// close-on-exec: the explicit close after release is the one thing that
+/// keeps them from the target (X06 goes red without it), rather than two
+/// overlapping mechanisms neither of which a test could fail alone. The
+/// bridge's own `close_range` keeps them from the bridge.
+///
+/// Refuses (`EEXIST`) if either number is already open: `dup3` would
+/// silently close whatever held it.
+fn mediate(listener_fd: RawFd, sockdiag_fd: RawFd) -> Result<(), i32> {
+    use std::os::fd::AsRawFd as _;
+    for target in [listener_fd, sockdiag_fd] {
+        // SAFETY: F_GETFD takes a descriptor number and dereferences nothing.
+        if unsafe { libc::fcntl(target, libc::F_GETFD) } >= 0 {
+            return Err(libc::EEXIST);
+        }
+    }
+    let setup = super::unixpeer::launcher_setup()
+        .map_err(|error| error.raw_os_error().unwrap_or(libc::EIO))?;
+    let (listener, sockdiag) = setup.into_fds();
+    for (source, target) in [
+        (listener.as_raw_fd(), listener_fd),
+        (sockdiag.as_raw_fd(), sockdiag_fd),
+    ] {
+        // SAFETY: both descriptors are live; dup2 places a copy at a number
+        // checked to be free above.
+        if unsafe { libc::dup2(source, target) } < 0 {
+            return Err(errno());
+        }
+    }
+    // The originals close here; the placed copies stay open.
+    drop((listener, sockdiag));
+    Ok(())
+}
+
+/// Starts `/run/ouro/jail __bridge` with a double fork, so the bridge is
+/// reparented to the namespace init and is never a child of the target: a
+/// target that waits for every child it has must not find one it did not
+/// start, and Yama's descendant rule keeps the target from attaching to it.
+///
+/// The bridge gets `/dev/null` as stdin and stdout, the write end of its
+/// report pipe as stderr, no other descriptor, an empty environment and a
+/// session of its own, so no terminal or process-group signal aimed at the
+/// target reaches it. Between each fork and `execve` only async-signal-safe
+/// calls run.
+///
+/// The pipe's read end is placed at `report_fd` for the supervisor to take
+/// while this process is blocked; like the mediation descriptors it is not
+/// close-on-exec, and the explicit close after release keeps it from the
+/// target. Refuses (`EEXIST`) if `report_fd` is already open.
+fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
+    let path = CString::new(super::bwrap::JAIL_INSIDE_PATH).map_err(|_| libc::EINVAL)?;
+    let subcommand = CString::new(super::bridge::SUBCOMMAND).map_err(|_| libc::EINVAL)?;
+    let argv: [*const libc::c_char; 3] = [path.as_ptr(), subcommand.as_ptr(), std::ptr::null()];
+    let envp: [*const libc::c_char; 1] = [std::ptr::null()];
+    let devnull = c"/dev/null";
+    // SAFETY: F_GETFD takes a descriptor number and dereferences nothing.
+    if unsafe { libc::fcntl(report_fd, libc::F_GETFD) } >= 0 {
+        return Err(libc::EEXIST);
+    }
+    let mut report = [-1 as RawFd; 2];
+    // SAFETY: pipe2 fills the two-element array it is given. Nonblocking on
+    // both ends: a bridge whose reader is slow drops a report byte rather
+    // than stall its relays, and the supervisor drains without waiting.
+    if unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+        return Err(errno());
+    }
+    let close_report = || {
+        // SAFETY: closing the two descriptors pipe2 just created here.
+        unsafe {
+            libc::close(report[0]);
+            libc::close(report[1]);
+        }
+    };
+    // SAFETY: this process is single-threaded here (nothing has spawned a
+    // thread), and both children call only async-signal-safe functions.
+    let first = unsafe { libc::fork() };
+    if first < 0 {
+        let e = errno();
+        close_report();
+        return Err(e);
+    }
+    if first == 0 {
+        // SAFETY: async-signal-safe calls only, then `_exit` or `execve`.
+        unsafe {
+            let second = libc::fork();
+            if second != 0 {
+                libc::_exit(i32::from(second < 0));
+            }
+            libc::setsid();
+            let null = libc::open(devnull.as_ptr(), libc::O_RDWR);
+            if null < 0 {
+                libc::_exit(EXIT_BRIDGE_FAILED);
+            }
+            for (source, stdio) in [(null, 0), (null, 1), (report[1], 2)] {
+                if libc::dup2(source, stdio) < 0 {
+                    libc::_exit(EXIT_BRIDGE_FAILED);
+                }
+            }
+            // Nothing above stdio: not the release or error pipe, not the
+            // mediation listener, not the sock_diag socket, not the report
+            // pipe's read end.
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) < 0 {
+                libc::_exit(EXIT_BRIDGE_FAILED);
+            }
+            libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            libc::_exit(EXIT_BRIDGE_FAILED);
+        }
+    }
+    let mut status = 0;
+    loop {
+        // SAFETY: `first` is this process's own child; `status` is writable.
+        let rc = unsafe { libc::waitpid(first, &raw mut status, 0) };
+        if rc == first {
+            break;
+        }
+        let e = errno();
+        if e != libc::EINTR {
+            close_report();
+            return Err(e);
+        }
+    }
+    if !(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0) {
+        close_report();
+        return Err(libc::ECHILD);
+    }
+    // The write end lives on only in the bridge; the read end moves to its
+    // agreed number (dup2 leaves the copy without close-on-exec).
+    // SAFETY: both descriptors are this process's own; dup2 places a copy
+    // at a number checked to be free above.
+    let placed = unsafe { libc::dup2(report[0], report_fd) };
+    let e = errno();
+    close_report();
+    if placed < 0 { Err(e) } else { Ok(()) }
+}
+// J3-agent end
 
 /// The same list as [`exec_candidates`], as raw bytes.
 ///
@@ -450,6 +763,90 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.argv, osv(&["/bin/echo", "--narrow", "--release-fd"]));
     }
+
+    // J3-agent begin
+    #[test]
+    fn the_agent_options_parse_and_bad_pairs_refuse() {
+        let parsed = parse(&osv(&[
+            "--release-fd",
+            "12",
+            "--error-fd",
+            "13",
+            "--mediate",
+            "18,19",
+            "--bridge",
+            "20",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.mediate, Some((18, 19)));
+        assert_eq!(parsed.bridge, Some(20));
+        assert_eq!(parsed.sigmask, None);
+        let masked = parse(&osv(&[
+            "--release-fd",
+            "3",
+            "--error-fd",
+            "4",
+            "--sigmask",
+            "201",
+            "--",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(masked.sigmask, Some(0x201), "SIGHUP and SIGUSR1");
+        assert_eq!(
+            parse(&osv(&[
+                "--release-fd",
+                "3",
+                "--error-fd",
+                "4",
+                "--sigmask",
+                "zz",
+                "--",
+                "x"
+            ])),
+            Err(LaunchUsage::BadFd("--sigmask"))
+        );
+        let plain = parse(&osv(&["--release-fd", "3", "--error-fd", "4", "--", "x"])).unwrap();
+        assert_eq!(plain.mediate, None);
+        assert_eq!(plain.bridge, None);
+        for bad in ["2", "x", "19"] {
+            assert_eq!(
+                parse(&osv(&[
+                    "--release-fd",
+                    "3",
+                    "--error-fd",
+                    "4",
+                    "--mediate",
+                    "18,19",
+                    "--bridge",
+                    bad,
+                    "--",
+                    "x"
+                ])),
+                Err(LaunchUsage::BadFd("--bridge")),
+                "{bad}"
+            );
+        }
+        for bad in ["18", "18,18", "2,19", "a,b", "18,19,20", "-1,4"] {
+            assert_eq!(
+                parse(&osv(&[
+                    "--release-fd",
+                    "3",
+                    "--error-fd",
+                    "4",
+                    "--mediate",
+                    bad,
+                    "--",
+                    "x"
+                ])),
+                Err(LaunchUsage::BadFd("--mediate")),
+                "{bad}"
+            );
+        }
+    }
+    // J3-agent end
 
     #[test]
     fn missing_pieces_are_usage_errors() {

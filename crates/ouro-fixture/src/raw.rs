@@ -19,6 +19,15 @@
 //! (no interior NUL can reach here, [`cpath`] refuses first), the argv/envp
 //! arrays are NULL-terminated arrays of live pointers, and the `open_how`
 //! pointer is a live, correctly sized `#[repr(C)]` value.
+//!
+//! The socket calls (`socket`, `socketpair`, `bind`, `listen`, `accept4`,
+//! `sendto`, `sendmsg`, `recvmsg`) and the inner-sandbox calls (`prctl`,
+//! `landlock_*`, `seccomp`) follow the same rule. Addresses arrive as
+//! [`crate::sockaddr::SockAddr`], whose length never exceeds its storage;
+//! the calls that take a structure with embedded pointers (`sendmsg`,
+//! `recvmsg`, `landlock_*`, `seccomp`) are `unsafe fn`s whose contract the
+//! caller states at the call site. Darwin has no `accept4`, so `accept` is
+//! used there and `ACCEPT_OP` names the call the line reports.
 
 use std::ffi::{CString, OsStr, c_int, c_long};
 use std::os::unix::ffi::OsStrExt;
@@ -385,6 +394,212 @@ mod imp {
         Attempt::finish(r)
     }
 
+    /// The syscall `accept` below issues, for the report line.
+    pub(crate) const ACCEPT_OP: &str = "accept4";
+
+    pub(crate) fn socket(domain: c_int, ty: c_int, protocol: c_int) -> Attempt {
+        // SAFETY: plain integers; the kernel allocates a descriptor or fails.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_socket,
+                domain as c_long,
+                ty as c_long,
+                protocol as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn socketpair(
+        domain: c_int,
+        ty: c_int,
+        protocol: c_int,
+        sv: &mut [c_int; 2],
+    ) -> Attempt {
+        // SAFETY: `sv` is a live, exclusively borrowed array of two ints,
+        // which is exactly what `socketpair` writes.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_socketpair,
+                domain as c_long,
+                ty as c_long,
+                protocol as c_long,
+                sv.as_mut_ptr(),
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn bind(fd: c_int, addr: &crate::sockaddr::SockAddr) -> Attempt {
+        // SAFETY: `SockAddr` guarantees its length never exceeds its live
+        // storage, which is borrowed for the whole call.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_bind,
+                fd as c_long,
+                addr.as_ptr(),
+                addr.len() as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn listen(fd: c_int, backlog: c_int) -> Attempt {
+        // SAFETY: plain integers.
+        let r = unsafe { libc::syscall(libc::SYS_listen, fd as c_long, backlog as c_long) };
+        Attempt::finish(r)
+    }
+
+    /// `accept4(fd, NULL, NULL, SOCK_CLOEXEC)`: the peer address is not asked
+    /// for, so no buffer crosses the boundary.
+    pub(crate) fn accept(fd: c_int) -> Attempt {
+        // SAFETY: both address arguments are NULL, which the kernel accepts
+        // as "do not report the peer"; the rest are plain integers.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_accept4,
+                fd as c_long,
+                std::ptr::null_mut::<libc::sockaddr>(),
+                std::ptr::null_mut::<libc::socklen_t>(),
+                libc::SOCK_CLOEXEC as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn sendto(
+        fd: c_int,
+        buf: &[u8],
+        flags: c_int,
+        addr: &crate::sockaddr::SockAddr,
+    ) -> Attempt {
+        // SAFETY: `buf` is a live slice read for exactly its length; `addr`
+        // is a live `SockAddr` whose length never exceeds its storage.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_sendto,
+                fd as c_long,
+                buf.as_ptr(),
+                buf.len() as c_long,
+                flags as c_long,
+                addr.as_ptr(),
+                addr.len() as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    /// # Safety
+    ///
+    /// Every pointer inside `msg` (name, iovecs, control buffer) must point to
+    /// live memory of at least the length recorded beside it.
+    pub(crate) unsafe fn sendmsg(fd: c_int, msg: *const libc::msghdr, flags: c_int) -> Attempt {
+        // SAFETY: the caller upholds this function's contract.
+        let r = unsafe { libc::syscall(libc::SYS_sendmsg, fd as c_long, msg, flags as c_long) };
+        Attempt::finish(r)
+    }
+
+    /// # Safety
+    ///
+    /// Every pointer inside `msg` must point to live, writable memory of at
+    /// least the length recorded beside it.
+    pub(crate) unsafe fn recvmsg(fd: c_int, msg: *mut libc::msghdr, flags: c_int) -> Attempt {
+        // SAFETY: the caller upholds this function's contract.
+        let r = unsafe { libc::syscall(libc::SYS_recvmsg, fd as c_long, msg, flags as c_long) };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn prctl(option: c_int, arg2: u64) -> Attempt {
+        // SAFETY: `PR_SET_NO_NEW_PRIVS`-style options take integers only; the
+        // unused arguments are zero as the kernel requires.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_prctl,
+                option as c_long,
+                arg2 as c_long,
+                0 as c_long,
+                0 as c_long,
+                0 as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    /// # Safety
+    ///
+    /// `attr` is NULL with `size` 0, or points to `size` live bytes laid out
+    /// as `struct landlock_ruleset_attr` (or a prefix of it).
+    pub(crate) unsafe fn landlock_create_ruleset(
+        attr: *const libc::c_void,
+        size: usize,
+        flags: u32,
+    ) -> Attempt {
+        // SAFETY: the caller upholds this function's contract.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                attr,
+                size as c_long,
+                flags as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    /// # Safety
+    ///
+    /// `attr` points to a live attribute of the layout `rule_type` names.
+    pub(crate) unsafe fn landlock_add_rule(
+        ruleset_fd: c_int,
+        rule_type: c_int,
+        attr: *const libc::c_void,
+        flags: u32,
+    ) -> Attempt {
+        // SAFETY: the caller upholds this function's contract.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset_fd as c_long,
+                rule_type as c_long,
+                attr,
+                flags as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn landlock_restrict_self(ruleset_fd: c_int, flags: u32) -> Attempt {
+        // SAFETY: plain integers.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_restrict_self,
+                ruleset_fd as c_long,
+                flags as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    /// # Safety
+    ///
+    /// `prog` points to a live `sock_fprog` whose `filter` points to `len`
+    /// live instructions.
+    pub(crate) unsafe fn seccomp_set_mode_filter(
+        prog: *const libc::sock_fprog,
+        flags: u32,
+    ) -> Attempt {
+        // SAFETY: the caller upholds this function's contract.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER as c_long,
+                flags as c_long,
+                prog,
+            )
+        };
+        Attempt::finish(r)
+    }
+
     pub(crate) fn mknod(path: *const c_char, mode: u32, dev: u64) -> Attempt {
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         {
@@ -586,6 +801,89 @@ mod imp {
         // SAFETY: `addr` points to a live sockaddr of at least `len` bytes.
         let r = unsafe { libc::connect(fd, addr, len) };
         Attempt::finish(c_long::from(r))
+    }
+
+    /// Darwin has no `accept4`; `accept` is the call, and close-on-exec is set
+    /// by the caller afterwards.
+    pub(crate) const ACCEPT_OP: &str = "accept";
+
+    pub(crate) fn socket(domain: c_int, ty: c_int, protocol: c_int) -> Attempt {
+        // SAFETY: plain integers.
+        let r = unsafe { libc::socket(domain, ty, protocol) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn socketpair(
+        domain: c_int,
+        ty: c_int,
+        protocol: c_int,
+        sv: &mut [c_int; 2],
+    ) -> Attempt {
+        // SAFETY: `sv` is a live, exclusively borrowed array of two ints.
+        let r = unsafe { libc::socketpair(domain, ty, protocol, sv.as_mut_ptr()) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn bind(fd: c_int, addr: &crate::sockaddr::SockAddr) -> Attempt {
+        // SAFETY: `SockAddr` guarantees its length never exceeds its storage.
+        let r = unsafe { libc::bind(fd, addr.as_ptr(), addr.len()) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn listen(fd: c_int, backlog: c_int) -> Attempt {
+        // SAFETY: plain integers.
+        let r = unsafe { libc::listen(fd, backlog) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn accept(fd: c_int) -> Attempt {
+        // SAFETY: both address arguments are NULL: the peer is not reported.
+        let r = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn sendto(
+        fd: c_int,
+        buf: &[u8],
+        flags: c_int,
+        addr: &crate::sockaddr::SockAddr,
+    ) -> Attempt {
+        // SAFETY: `buf` is read for exactly its length; `addr` never claims
+        // more than its storage.
+        let r = unsafe {
+            libc::sendto(
+                fd,
+                buf.as_ptr().cast::<libc::c_void>(),
+                buf.len(),
+                flags,
+                addr.as_ptr(),
+                addr.len(),
+            )
+        };
+        #[allow(clippy::unnecessary_cast)]
+        Attempt::finish(r as c_long)
+    }
+
+    /// # Safety
+    ///
+    /// Every pointer inside `msg` must point to live memory of at least the
+    /// length recorded beside it.
+    pub(crate) unsafe fn sendmsg(fd: c_int, msg: *const libc::msghdr, flags: c_int) -> Attempt {
+        // SAFETY: the caller upholds this function's contract.
+        let r = unsafe { libc::sendmsg(fd, msg, flags) };
+        #[allow(clippy::unnecessary_cast)]
+        Attempt::finish(r as c_long)
+    }
+
+    /// # Safety
+    ///
+    /// Every pointer inside `msg` must point to live, writable memory of at
+    /// least the length recorded beside it.
+    pub(crate) unsafe fn recvmsg(fd: c_int, msg: *mut libc::msghdr, flags: c_int) -> Attempt {
+        // SAFETY: the caller upholds this function's contract.
+        let r = unsafe { libc::recvmsg(fd, msg, flags) };
+        #[allow(clippy::unnecessary_cast)]
+        Attempt::finish(r as c_long)
     }
 
     pub(crate) fn mknod(path: *const c_char, mode: u32, dev: u64) -> Attempt {

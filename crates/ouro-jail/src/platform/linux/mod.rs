@@ -7,8 +7,16 @@
 //! and test on every host; everything below them is gated.
 
 pub mod bpf;
+// J3-agent begin: the loopback bridge is a portable byte relay; only its
+// hidden subcommand and its place in the sandbox are Linux's
+pub mod bridge;
+// J3-agent end
 pub mod seccomp;
 
+// J3-agent begin: the `agent` profile's proxy, mediator and bridge wiring
+#[cfg(target_os = "linux")]
+pub mod agent;
+// J3-agent end
 #[cfg(target_os = "linux")]
 pub mod audit;
 #[cfg(target_os = "linux")]
@@ -25,13 +33,27 @@ pub mod fs;
 pub mod identity;
 #[cfg(target_os = "linux")]
 pub mod launch;
+// J3-none begin: observer event consumption shared by both boundaries
+#[cfg(target_os = "linux")]
+pub mod observed;
+// J3-none end
 #[cfg(target_os = "linux")]
 pub mod platform;
 #[cfg(target_os = "linux")]
 pub mod probe;
+// J3-unixpeer begin: N05 mechanism modules
+#[cfg(target_os = "linux")]
+pub mod sockdiag;
+#[cfg(target_os = "linux")]
+pub mod unixpeer;
+// J3-unixpeer end
 #[cfg(target_os = "linux")]
 pub mod sys;
 #[cfg(target_os = "linux")]
 pub mod tracer;
+// J3-none begin: the uncontained `none` boundary (§9.3)
+#[cfg(target_os = "linux")]
+pub mod uncontained;
+// J3-none end
 #[cfg(target_os = "linux")]
 pub mod watch;

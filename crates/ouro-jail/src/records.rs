@@ -1378,6 +1378,38 @@ impl Event {
         }
     }
 
+    // J3-none begin: the note a detected lifetime-integrity loss writes (§9.3)
+    /// A wrapper lifetime note (`fields.kind = lifetime`): the registered
+    /// boundary's integrity was lost, what lost it, and a safe reason code.
+    /// It names no path, argument or value (I09).
+    #[must_use]
+    pub fn lifetime_note(
+        attempt_id: &str,
+        source_seq: u64,
+        observed_at: SystemTime,
+        monotonic_ns: u128,
+        subject: &str,
+        reason: &str,
+    ) -> Self {
+        let mut event =
+            Event::lifecycle_note(attempt_id, source_seq, observed_at, monotonic_ns, "");
+        event.fields.clear();
+        event
+            .fields
+            .insert("kind".to_owned(), serde_json::Value::from("lifetime"));
+        event
+            .fields
+            .insert("integrity".to_owned(), serde_json::Value::from("lost"));
+        event
+            .fields
+            .insert("subject".to_owned(), serde_json::Value::from(subject));
+        event
+            .fields
+            .insert("reason".to_owned(), serde_json::Value::from(reason));
+        event
+    }
+    // J3-none end
+
     /// A wrapper coverage-gap note (`fields.kind = coverage_gap`).
     #[must_use]
     pub fn coverage_gap_note(

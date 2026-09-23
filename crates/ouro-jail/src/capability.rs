@@ -97,6 +97,11 @@ pub const REQ_NETWORK_NONE: &str = "network_none";
 pub const REQ_NETWORK_PROXY: &str = "network_proxy";
 /// Requirement identifier for a supervisor-owned execution cgroup.
 pub const REQ_EXECUTION_CGROUP: &str = "execution_cgroup";
+// J3-launch begin: credential staging requirement (§12)
+/// Requirement identifier for staging launch credentials: anchored copies
+/// into vendor state and read-only binds of the exact source objects.
+pub const REQ_CREDENTIAL_STAGING: &str = "credential_staging";
+// J3-launch end
 
 /// Derives the capability requirements a snapshot implies (§6.4, §3.1).
 ///
@@ -117,6 +122,9 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
         "proxy" => out.push(REQ_NETWORK_PROXY.to_owned()),
         _ => {}
     }
+    // J3-none begin: restrictions `none` cannot apply are requirements it refuses
+    out.extend(none_restrictions(snapshot));
+    // J3-none end
     if snapshot.filesystem.protected_coverage != ProtectedCoverage::None {
         out.push(format!(
             "protected_coverage:{}",
@@ -145,8 +153,47 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
     if needs_cgroup {
         out.push(REQ_EXECUTION_CGROUP.to_owned());
     }
+    // J3-launch begin: a launch profile that declares credentials needs them
+    // staged, and a platform that cannot stage them must refuse, not skip.
+    if snapshot
+        .launch
+        .as_ref()
+        .is_some_and(|launch| !launch.credentials.is_empty())
+    {
+        out.push(REQ_CREDENTIAL_STAGING.to_owned());
+    }
+    // J3-launch end
     out
 }
+
+// J3-none begin: what `none` cannot apply refuses instead of running unapplied
+/// The reason code of a requirement the uncontained profile cannot satisfy on
+/// any host, because it applies no filesystem, syscall or network
+/// restriction (§3.1, §9.3).
+pub const REASON_NOT_APPLIED_BY_NONE: &str = "uncontained_profile";
+
+/// The requirements a `none` snapshot's restrictions derive.
+///
+/// `none` mounts, filters and isolates nothing, and a narrowing layer may
+/// still ask for a restriction (§6.3: add a denied subtree, make a subtree
+/// read-only, change the network to none). Each one becomes the requirement
+/// a contained profile would satisfy, which `none` reports unsatisfiable, so
+/// the run refuses instead of executing with the restriction dropped (I02).
+/// Protected coverage already derives its own requirement above.
+fn none_restrictions(snapshot: &PolicySnapshot) -> Vec<String> {
+    let mut out = Vec::new();
+    if snapshot.profile != ProfileName::None {
+        return out;
+    }
+    if !snapshot.filesystem.deny_read.is_empty() || !snapshot.filesystem.read_only.is_empty() {
+        out.push(REQ_FILESYSTEM_CONTAINMENT.to_owned());
+    }
+    if snapshot.network.mode.as_str() == "none" {
+        out.push(REQ_NETWORK_NONE.to_owned());
+    }
+    out
+}
+// J3-none end
 
 #[cfg(test)]
 mod tests {
@@ -204,6 +251,44 @@ mod tests {
             "a preferred pids ceiling is never a requirement"
         );
     }
+
+    // J3-none begin: narrowed `none` snapshots carry the restriction as a requirement
+    #[test]
+    fn a_restriction_on_none_is_a_requirement_not_a_silent_drop() {
+        let bare = requirements(&snapshot_for(ProfileName::None));
+        assert!(!bare.iter().any(|item| item == REQ_NETWORK_NONE));
+
+        let mut denied = snapshot_for(ProfileName::None);
+        denied.filesystem.deny_read.push(crate::policy::PathRef {
+            root: crate::policy::RootToken::Workspace,
+            path: crate::records::NativeString::Text("secret".to_owned()),
+        });
+        assert!(
+            requirements(&denied)
+                .iter()
+                .any(|item| item == REQ_FILESYSTEM_CONTAINMENT)
+        );
+
+        let mut read_only = snapshot_for(ProfileName::None);
+        read_only.filesystem.read_only.push(crate::policy::PathRef {
+            root: crate::policy::RootToken::Workspace,
+            path: crate::records::NativeString::Text("fixtures".to_owned()),
+        });
+        assert!(
+            requirements(&read_only)
+                .iter()
+                .any(|item| item == REQ_FILESYSTEM_CONTAINMENT)
+        );
+
+        let mut isolated = snapshot_for(ProfileName::None);
+        isolated.network.mode = "none".to_owned();
+        assert!(
+            requirements(&isolated)
+                .iter()
+                .any(|item| item == REQ_NETWORK_NONE)
+        );
+    }
+    // J3-none end
 
     #[test]
     fn none_requires_a_cgroup_but_no_containment() {

@@ -11,11 +11,23 @@ pub mod capability;
 pub mod cleanup;
 pub mod cli;
 pub mod config;
+// J3-launch begin: credential staging
+pub mod credentials;
+// J3-launch end
+// J3-none begin: reserved environment names (§12)
+pub mod environment;
+// J3-none end
+// J3-launch begin: data-only launch profiles
+pub mod launch_profile;
+// J3-launch end
 pub mod network;
 pub mod observer;
 pub mod platform;
 pub mod policy;
 pub mod profiles;
+// J3-P begin: the outside HTTP proxy library (jail-v1 §10)
+pub mod proxy;
+// J3-P end
 pub mod records;
 pub mod state;
 pub mod supervisor;

@@ -121,3 +121,32 @@ Still deferred with reasons: receipt-fsync on a worker
 thread with the 5-second budget (§13.3 — the synchronous write is bounded by
 the filesystem; the thread split lands with J4's failure-injection work where
 it can be tested); per-pid birth identity on audit events (J4).
+
+## Revision 9 decision (2026-09-22, stock hosts)
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| `agent` required nested user namespaces, which stock Ubuntu 24.04+ denies inside bubblewrap, so it needed a host sysctl or AppArmor profile | The operator requires no host configuration. `agent` guarantees unprivileged nesting (Landlock, seccomp, `no_new_privs`), measured working inside one bwrap layer; nested user namespaces are an optional, measured host capability; where unavailable `agent` runs and an inner namespace sandbox fails visibly; the reference host stays stock | jail-v1 §§3.2, 9.2, 14.1; S03, J3 row; north-star D9, §§4.3, 4.6, 11; backend-evaluation §1.1; manifest `nested_user_namespace` |
+
+## Revision 10 decisions (2026-09-23, J3 reviews)
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| N05 needs a mechanism; kernel 7.0 has no native pathname-peer restriction (Landlock ABI 8) | Seccomp user-notification mediation of `connect`, pathname peers allowed only when bound by a listener in the attempt's network namespace, connect through a pinned handle, datagram AF_UNIX refused, fail closed; named limits recorded | §10; N05, S03; evidence/unixpeer-spike-2026-09-22-ouro-ci.txt |
+| A mediated non-Unix or abstract connect does not compose an inner Landlock network rule | Accepted as a named limit confined to the attempt's network namespace; `CONTINUE` is never used for a security decision because a sibling thread can swap the descriptor | §10 |
+| One hostile hostname could make the supervisor do unbounded IDNA work | Length limits checked before encoding; per-request work bounded | §10; N04 |
+| Proxy deadlines, request framing and numeric grants were ambiguous | Absolute header deadline, per-phase resolve/connect deadlines, one request per connection, numeric grants apply to any resolving name | §10; network-rules.md |
+| `--launch` silently replaced the config-selected profile | Explicit precedence; a base conflict refuses | §6.1 |
+| `bind_ro` digest trusted a read-only mount of a writable filesystem; credential sources could sit inside a child-writable grant | Digest only on immutable filesystems; sources inside writable grants and multiply-linked `bind_ro` sources refuse | §12; C01 |
+| Vendor-state location and its protected-literal coverage were unstated | `/run/ouro/state`; attempt-private roots excluded from `existing_and_root` | §9.1 |
+
+## Revision 11 decisions (2026-09-23, J3 integration)
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| A network namespace does not isolate every socket family the kernel offers | Contained profiles create sockets only in AF_UNIX (per profile), AF_INET and AF_INET6; others fail EAFNOSUPPORT | §9.2; N01 |
+| Every contained target started with SIGPIPE ignored (inherited from the launcher's runtime) | The launcher restores exactly what the jail changed (SIGPIPE, the inherited mask); operator dispositions pass through | §9.2; X06 |
+| The bridge's own connects could be counted as the target's; its death note fired on every teardown; proxy death and mediation-queue loss were not tied to strict evidence | Bridge attributed by pinned identity; death noted only before settlement; proxy death and mediation overflow are evidence loss (strict stops) | §§10, 11.4; N04 |
+| `none` could silently drop a narrowing restriction; unsettled runs without exec were labelled `enforced` | Unapplicable restrictions refuse; such runs stay `prepared` | §§8.1, 9.3; R05, R06 |
+| A crashed attempt's proxy directory was never collected | `gc` removes it through the socket identity recorded at bind | §14.2 |
+| A test-only queue knob and launch-profile reserved names were unstated | Documented | §§6.2, 12 |

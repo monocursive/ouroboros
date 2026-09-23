@@ -187,9 +187,36 @@ fn redact_environment(snapshot: &mut serde_json::Value) {
     }
 }
 
+// J3-launch begin: credential sources are private operational state (§12)
+/// Removes every credential `source` from the snapshot's `launch` group,
+/// leaving the profile's own names: `id`, `mode` and `dest`.
+///
+/// §12: "Source identity/paths and credential contents stay in private
+/// operational state"; §14.1 holds inspection output to "without printing
+/// values or user-specific paths". The digest printed beside the snapshot
+/// still identifies the full policy, sources included.
+fn redact_launch(snapshot: &mut serde_json::Value) {
+    let Some(credentials) = snapshot
+        .get_mut("launch")
+        .and_then(|launch| launch.get_mut("credentials"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for credential in credentials.iter_mut() {
+        if let Some(object) = credential.as_object_mut() {
+            object.remove("source");
+        }
+    }
+}
+// J3-launch end
+
 fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> {
     let mut snapshot = report.resolved.snapshot.to_canonical_value()?;
     redact_environment(&mut snapshot);
+    // J3-launch begin
+    redact_launch(&mut snapshot);
+    // J3-launch end
     let requirements: Vec<serde_json::Value> = report
         .resolved
         .requirements
@@ -215,6 +242,9 @@ fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> 
             // says so rather than leaving a reader to infer it.
             "snapshot": snapshot,
             "environment_values": "omitted",
+            // J3-launch begin
+            "credential_sources": "omitted",
+            // J3-launch end
         },
         "requirements": requirements,
         "capabilities": {
@@ -269,6 +299,26 @@ fn print_explain_text(report: &ExplainReport) {
             );
         }
     }
+    // J3-launch begin: the launch group by the profile's own names only
+    if let Some(launch) = &snapshot.launch {
+        println!(
+            "launch state_var={} home_is_state={}",
+            launch.state_var.as_deref().unwrap_or("none"),
+            launch.home_is_state
+        );
+        for subdir in &launch.state_subdirs {
+            println!("launch state_subdir {}", subdir.to_display());
+        }
+        for credential in &launch.credentials {
+            println!(
+                "launch credential {} mode={} dest={} source=omitted",
+                credential.id,
+                credential.mode,
+                credential.dest.to_display()
+            );
+        }
+    }
+    // J3-launch end
     for requirement in &report.resolved.requirements {
         println!("requirement {requirement} unmeasured");
     }
@@ -314,6 +364,24 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             .map(capability_json)
             .collect::<Vec<_>>(),
         "ready": report.ready,
+        // J3-launch begin: §14.1 launch readiness, names and statuses only
+        "launch": report.launch.as_ref().map(|launch| serde_json::json!({
+            "name": launch.name,
+            "support": launch.support,
+            "support_reason": launch.support_reason,
+            "credentials": launch
+                .credentials
+                .iter()
+                .map(|check| serde_json::json!({
+                    "id": check.id,
+                    "mode": check.mode,
+                    "dest": check.dest,
+                    "status": if check.available { "available" } else { "unavailable" },
+                    "reason_code": check.reason_code,
+                }))
+                .collect::<Vec<_>>(),
+        })),
+        // J3-launch end
     })
 }
 
@@ -333,6 +401,28 @@ fn print_doctor_text(report: &DoctorReport) {
             capability.reason_code.as_deref().unwrap_or("none")
         );
     }
+    // J3-launch begin: §14.1 launch readiness, names and statuses only
+    if let Some(launch) = &report.launch {
+        println!(
+            "launch {} {} reason={}",
+            launch.name, launch.support, launch.support_reason
+        );
+        for check in &launch.credentials {
+            println!(
+                "credential {} mode={} dest={} {} reason={}",
+                check.id,
+                check.mode,
+                check.dest.to_display(),
+                if check.available {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+                check.reason_code
+            );
+        }
+    }
+    // J3-launch end
     println!("ready {}", report.ready);
 }
 
@@ -355,9 +445,24 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     } else {
         for entry in &report.entries {
             println!("{} {} {}", entry.attempt_id, entry.action, entry.reason);
+            // J3-agent begin
+            if let Some(proxy_dir) = &entry.proxy_dir {
+                println!("{} proxy_dir {proxy_dir}", entry.attempt_id);
+            }
+            // J3-agent end
         }
         println!("scanned {}", report.entries.len());
     }
+    // J3-launch begin: §6.4 — a cleanup that stopped again exits 1, after the
+    // report is printed (J3 review L1).
+    if !report.incomplete.is_empty() {
+        eprintln!(
+            "ouro-jail: cleanup did not complete for: {}",
+            report.incomplete.join(", ")
+        );
+        return ExitCode::from(1);
+    }
+    // J3-launch end
     ExitCode::SUCCESS
 }
 
@@ -372,6 +477,9 @@ fn gc_json(report: &GcReport) -> serde_json::Value {
                 "attempt_id": entry.attempt_id,
                 "action": entry.action,
                 "reason": entry.reason,
+                // J3-agent begin
+                "proxy_dir": entry.proxy_dir,
+                // J3-agent end
             }))
             .collect::<Vec<_>>(),
     })
@@ -458,12 +566,26 @@ fn internal_subcommand() -> Option<ExitCode> {
         // exists only where that ABI does.
         #[cfg(target_os = "linux")]
         "__seccomp-table" => {
-            print!(
-                "{}",
-                ouro_jail::platform::linux::seccomp::tool_baseline_table()
-            );
+            use ouro_jail::platform::linux::seccomp;
+            // J3-agent begin: the agent tables beside the tool one
+            let table = match args.get(2).and_then(|arg| arg.to_str()) {
+                None | Some("tool") => seccomp::tool_baseline_table(),
+                Some("agent") => {
+                    seccomp::agent_baseline_table(seccomp::AgentVariant::UnprivilegedInner)
+                }
+                Some("agent-namespace") => {
+                    seccomp::agent_baseline_table(seccomp::AgentVariant::NamespaceInner)
+                }
+                Some(_) => return Some(ExitCode::from(2)),
+            };
+            // J3-agent end
+            print!("{table}");
             Some(ExitCode::SUCCESS)
         }
+        // J3-agent begin: the in-namespace loopback bridge (jail-v1 §10)
+        #[cfg(target_os = "linux")]
+        "__bridge" => ouro_jail::platform::linux::bridge::bridge_main(&args[2..]),
+        // J3-agent end
         _ => None,
     }
 }

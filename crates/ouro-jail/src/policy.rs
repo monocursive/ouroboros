@@ -560,6 +560,11 @@ pub enum LayerOrigin {
     CommandLine,
     /// The workspace-root `ouro.toml`, which can only narrow.
     ProjectConfig(String),
+    // J3-launch begin: the §6.2 step-2 launch-profile layer
+    /// An operator launch profile (`<config-dir>/launch/<name>.toml`), whose
+    /// `network.allow` is an operator grant.
+    LaunchProfile(String),
+    // J3-launch end
 }
 
 impl LayerOrigin {
@@ -574,6 +579,9 @@ impl LayerOrigin {
             self,
             LayerOrigin::CommandLine | LayerOrigin::OperatorConfig(_)
         )
+        // J3-launch begin: a launch profile's allowed hosts are operator grants
+        || matches!(self, LayerOrigin::LaunchProfile(_))
+        // J3-launch end
     }
 
     /// Whether the paths in this layer are written by an untrusted party.
@@ -597,6 +605,9 @@ impl LayerOrigin {
             LayerOrigin::Environment => "environment".to_owned(),
             LayerOrigin::CommandLine => "cli".to_owned(),
             LayerOrigin::ProjectConfig(name) => format!("project-config:{name}"),
+            // J3-launch begin: provenance label
+            LayerOrigin::LaunchProfile(name) => format!("launch-profile:{name}"),
+            // J3-launch end
         }
     }
 }

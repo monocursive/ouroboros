@@ -24,6 +24,8 @@ pub const MAX_INSNS: usize = 4096;
 const BPF_LD: u16 = 0x00;
 const BPF_W: u16 = 0x00;
 const BPF_ABS: u16 = 0x20;
+const BPF_ALU: u16 = 0x04;
+const BPF_AND: u16 = 0x50;
 const BPF_JMP: u16 = 0x05;
 const BPF_JA: u16 = 0x00;
 const BPF_JEQ: u16 = 0x10;
@@ -41,6 +43,10 @@ pub const CODE_JSET_K: u16 = BPF_JMP | BPF_JSET | BPF_K;
 pub const CODE_JA: u16 = BPF_JMP | BPF_JA | BPF_K;
 /// Return the immediate as the filter's verdict.
 pub const CODE_RET_K: u16 = BPF_RET | BPF_K;
+/// `A &= k`: mask the accumulator with the immediate. The unix-peer
+/// fragment uses it to strip `SOCK_CLOEXEC`/`SOCK_NONBLOCK` from a socket
+/// type before comparing it (jail-v1 §10).
+pub const CODE_ALU_AND_K: u16 = BPF_ALU | BPF_AND | BPF_K;
 
 /// One classic-BPF instruction, laid out exactly as `struct sock_filter`.
 ///
@@ -188,6 +194,11 @@ impl Asm {
     /// `jset #k`: jump to `jt` when the accumulator has any bit of `k` set.
     pub fn jset(&mut self, k: u32, jt: Option<&str>, jf: Option<&str>) -> &mut Self {
         self.insn(CODE_JSET_K, jt, jf, k)
+    }
+
+    /// `and #k`: mask the accumulator with `k`, falling through.
+    pub fn and_k(&mut self, k: u32) -> &mut Self {
+        self.insn(CODE_ALU_AND_K, None, None, k)
     }
 
     /// `ja label`: unconditional jump, 32-bit distance.
@@ -374,6 +385,7 @@ impl Program {
                     ),
                     CODE_JA => format!("ja    {}", i + 1 + insn.k as usize),
                     CODE_RET_K => format!("ret   #0x{:08x}", insn.k),
+                    CODE_ALU_AND_K => format!("and   #0x{:08x}", insn.k),
                     other => format!("<unknown code 0x{other:04x}> k=0x{:08x}", insn.k),
                 };
                 format!("{i:04} {body}")
@@ -434,6 +446,28 @@ mod tests {
         assert_eq!(CODE_JSET_K, 0x45);
         assert_eq!(CODE_JA, 0x05);
         assert_eq!(CODE_RET_K, 0x06);
+        // BPF_ALU (0x04) | BPF_AND (0x50) | BPF_K (0x00), linux/bpf_common.h.
+        assert_eq!(CODE_ALU_AND_K, 0x54);
+    }
+
+    #[test]
+    fn and_masks_in_place_and_falls_through() {
+        let mut asm = Asm::new();
+        asm.ld_w_abs(24)
+            .and_k(0xf)
+            .jeq(1, Some("stream"), None)
+            .ret(0)
+            .label("stream")
+            .ret(1);
+        let prog = asm.assemble().expect("the masked comparison assembles");
+        assert_eq!(prog.len(), 5);
+        let and = prog.insns()[1];
+        assert_eq!(and.code, CODE_ALU_AND_K);
+        assert_eq!(and.k, 0xf);
+        assert_eq!((and.jt, and.jf), (0, 0), "an ALU op never jumps");
+        assert_eq!(and.to_bytes(), [0x54, 0x00, 0, 0, 0x0f, 0x00, 0x00, 0x00]);
+        assert_eq!(prog.insns()[2].jt, 1, "the jump after it still resolves");
+        assert!(prog.disassemble()[1].contains("and   #0x0000000f"));
     }
 
     #[test]
