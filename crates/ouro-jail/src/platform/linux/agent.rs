@@ -70,10 +70,29 @@ pub const PROXY_DIR_FD: RawFd = 17;
 pub const LISTENER_FD: RawFd = 18;
 /// Descriptor the launcher places its attempt-netns `sock_diag` socket at.
 pub const SOCKDIAG_FD: RawFd = 19;
+/// Descriptor the launcher places the read end of the bridge's report pipe
+/// at: one byte for every client the bridge turned away at capacity.
+pub const BRIDGE_REPORT_FD: RawFd = 20;
 
 /// Bound on the queue between the mediator's threads and the supervision
-/// loop. A record that finds it full is counted and becomes a gap.
-const RECORD_QUEUE: usize = 4096;
+/// loop. A record that finds it full is counted and becomes a gap, and is
+/// evidence loss (§11.4).
+pub const RECORD_QUEUE: usize = 4096;
+
+/// A test seam: a smaller mediation-record queue, so a live test can make it
+/// overflow. Accepted only as a number in `1..=RECORD_QUEUE` (it can only
+/// shrink the queue, which can only lose more evidence, which is then
+/// reported); anything else is ignored. The capacity in force is recorded in
+/// the receipt's native details.
+pub const RECORD_QUEUE_SEAM: &str = "OURO_JAIL_TEST_MEDIATION_QUEUE";
+
+/// The mediation-record queue capacity for this attempt.
+#[must_use]
+pub fn record_queue_capacity(seam: Option<&str>) -> usize {
+    seam.and_then(|text| text.parse::<usize>().ok())
+        .filter(|capacity| (1..=RECORD_QUEUE).contains(capacity))
+        .unwrap_or(RECORD_QUEUE)
+}
 /// How many recent proxy results are kept for diagnostics (doctor).
 const RECENT_RESULTS: usize = 16;
 /// The proxy's resolver concurrency.
@@ -181,6 +200,9 @@ impl MediationSink for RecordQueue {
 /// The bridge, once discovered.
 struct Bridge {
     pid: libc::pid_t,
+    /// Its start time, read while its pidfd pinned it: with `pid`, the
+    /// identity its mediation records are matched against.
+    start_ticks: u64,
     fd: OwnedFd,
     seccomp_filters: u32,
 }
@@ -211,10 +233,19 @@ pub struct AgentNet {
     records: Receiver<MediationRecord>,
     queue: Arc<RecordQueue>,
     lost_reported: u64,
+    queue_capacity: usize,
+    /// A mediation-record loss was already reported as evidence loss.
+    mediation_loss_reported: bool,
+    /// When the proxy was seen to stop serving on its own.
+    proxy_stopped_at: Option<u128>,
     bridge: Option<Bridge>,
     bridge_reported: bool,
     proxy_reported: bool,
     helper_connects: u64,
+    /// The read end of the bridge's report pipe, taken from the launcher.
+    bridge_report: Option<OwnedFd>,
+    /// Clients the bridge turned away at capacity, as it reported them.
+    bridge_rejected: u64,
     socket_removed: bool,
 }
 
@@ -268,10 +299,18 @@ impl AgentNet {
                 "its directory descriptor is not the registered directory",
             ));
         }
-        let (listener, pin, socket_identity) = bind_pinned(dir.as_fd())
+        let (listener, pin, socket_stat) = bind_pinned(dir.as_fd())
             .map_err(|error| refusal("proxy", format!("its socket: {error}")))?;
+        let socket_identity = socket_stat.identity();
+        // For the supervisor to record, so `gc` can recognise this node after
+        // a crash. A second set cannot happen: one bind per attempt.
+        let _ = handoff
+            .socket
+            .set(crate::state::ProxySocketIdentity::of(&socket_stat));
 
-        let (tx, records) = sync_channel(RECORD_QUEUE);
+        let queue_capacity =
+            record_queue_capacity(std::env::var(RECORD_QUEUE_SEAM).ok().as_deref());
+        let (tx, records) = sync_channel(queue_capacity);
         Ok(AgentNet {
             attempt_id: attempt_id.to_owned(),
             trace: trace.clone(),
@@ -300,10 +339,15 @@ impl AgentNet {
                 dropped: AtomicU64::new(0),
             }),
             lost_reported: 0,
+            queue_capacity,
+            mediation_loss_reported: false,
+            proxy_stopped_at: None,
             bridge: None,
             bridge_reported: false,
             proxy_reported: false,
             helper_connects: 0,
+            bridge_report: None,
+            bridge_rejected: 0,
             socket_removed: false,
         })
     }
@@ -349,11 +393,21 @@ impl AgentNet {
     }
 
     /// Step 3: take the mediation listener and `sock_diag` socket from the
-    /// blocked launcher and start the mediator.
+    /// blocked launcher and start the mediator; take the bridge's report
+    /// pipe too.
     ///
     /// # Errors
-    /// A refusal naming the unix-peer mediation.
+    /// A refusal naming the unix-peer mediation or the bridge.
     pub fn take_mediation(&mut self, launcher: BorrowedFd<'_>) -> Result<(), JailError> {
+        let report = unixpeer::pidfd_getfd(launcher, BRIDGE_REPORT_FD)
+            .map_err(|error| refusal("bridge", format!("its report pipe: {error}")))?;
+        let kind = crate::state::anchored::fstat(report.as_fd())
+            .map_err(|error| refusal("bridge", format!("its report pipe: {error}")))?
+            .kind;
+        if kind != crate::state::anchored::Kind::Fifo {
+            return Err(refusal("bridge", "its report descriptor is not a pipe"));
+        }
+        self.bridge_report = Some(report);
         let authority = unixpeer::take_from_launcher(
             launcher,
             LauncherFds {
@@ -428,8 +482,16 @@ impl AgentNet {
             }
             nap();
         }
+        // Read with the pidfd held and the process shown alive after it, so
+        // the start time is this bridge's and not a successor's.
+        let start_ticks =
+            identity::start_time_ticks(pid).map_err(|error| refusal("bridge", error))?;
+        if super::watch::readable(fd.as_raw_fd()) {
+            return Err(refusal("bridge", "it exited during discovery"));
+        }
         self.bridge = Some(Bridge {
             pid,
+            start_ticks,
             fd,
             seccomp_filters: filters,
         });
@@ -437,31 +499,80 @@ impl AgentNet {
     }
 
     /// While running: mediated connects become audit results (when
-    /// observation is on), and a bridge or proxy that stopped is recorded
-    /// once each.
-    pub fn pump(&mut self, audit: &mut AuditWriter, observe_on: bool) {
+    /// observation is on), and a bridge or proxy that stopped on its own is
+    /// recorded once each. `boundary_up` is asked only after the bridge is
+    /// seen dead, and says whether the boundary is still up (the namespace
+    /// init not exiting, the supervisor not killing): a bridge that died
+    /// while it was died on its own; one that died with the attempt at
+    /// settlement is not an event.
+    ///
+    /// Returns the reason of a new evidence loss the supervision loop must
+    /// act on (§11.4: strict stops the attempt, best-effort continues
+    /// degraded): mediation records the queue could not hold (the audit
+    /// source's `net`/`fs.deny` results), or the proxy stopping on its own
+    /// (every later request is refused, so `proxy.net` has no results for
+    /// them). Each is returned once. A dead bridge loses no evidence.
+    pub fn pump(
+        &mut self,
+        audit: &mut AuditWriter,
+        observe_on: bool,
+        boundary_up: &dyn Fn() -> bool,
+    ) -> Option<String> {
+        let mut loss = None;
         while let Ok(record) = self.records.try_recv() {
             self.account(audit, observe_on, &record);
         }
+        self.drain_bridge_report();
         let dropped = self.queue.dropped.load(Ordering::SeqCst);
         if observe_on && dropped > self.lost_reported {
             let now = u64::try_from(crate::platform::elapsed_since_start_ns()).unwrap_or(u64::MAX);
             audit.record_mediation_loss(dropped - self.lost_reported, now, now);
             self.lost_reported = dropped;
+            if !self.mediation_loss_reported {
+                self.mediation_loss_reported = true;
+                loss = Some(format!(
+                    "the unix-peer mediator's record queue ({} records) overflowed, so \
+                     connect results were lost",
+                    self.queue_capacity
+                ));
+            }
         }
         if !self.bridge_reported
             && let Some(bridge) = &self.bridge
             && super::watch::readable(bridge.fd.as_raw_fd())
         {
             self.bridge_reported = true;
-            self.helper_note("bridge", "exited");
+            // Asked after the death was seen, so "up" means up after it.
+            if boundary_up() {
+                self.helper_note("bridge", "exited");
+            }
         }
         if !self.proxy_reported
             && let Some(proxy) = &self.proxy
             && !proxy.serving()
         {
             self.proxy_reported = true;
+            self.proxy_stopped_at = Some(crate::platform::elapsed_since_start_ns());
             self.helper_note("proxy", "stopped");
+            loss.get_or_insert_with(|| {
+                "the outside proxy stopped serving, so later requests have no proxy.net result"
+                    .to_owned()
+            });
+        }
+        loss
+    }
+
+    /// Counts what the bridge reported since the last drain (nonblocking).
+    fn drain_bridge_report(&mut self) {
+        let Some(report) = &self.bridge_report else {
+            return;
+        };
+        let mut buffer = [0u8; 256];
+        loop {
+            match read_some(report.as_raw_fd(), &mut buffer) {
+                Some(n) if n > 0 => self.bridge_rejected += n as u64,
+                _ => return,
+            }
         }
     }
 
@@ -469,11 +580,14 @@ impl AgentNet {
         // A helper's connect (the bridge reaching the proxy) is the jail's
         // own plumbing, not a target operation (§11.1: "Setup helpers are
         // tagged as helpers, not attributed as user target operations"). The
-        // thread group was read while the task was parked in the
-        // notification, and a bridge that already exited never claims one.
-        let helper = self.bridge.as_ref().is_some_and(|bridge| {
-            record.tgid == Some(bridge.pid) && !super::watch::readable(bridge.fd.as_raw_fd())
-        });
+        // record's thread group and its start time were read while the task
+        // was parked in the notification; together they are the bridge's
+        // identity or not, whether or not the bridge is still alive when the
+        // record is drained.
+        let helper = self
+            .bridge
+            .as_ref()
+            .is_some_and(|bridge| is_bridge(record, bridge.pid, bridge.start_ticks));
         if helper {
             self.helper_connects += 1;
             return;
@@ -523,15 +637,16 @@ impl AgentNet {
     /// recorded.
     pub fn stop(&mut self, audit: &mut AuditWriter, observe_on: bool, budget: Duration) {
         // A proxy that died on its own is recorded as such before the stop
-        // makes every proxy look stopped.
-        self.pump(audit, observe_on);
+        // makes every proxy look stopped. The attempt is over: a loss found
+        // now is already in the coverage and has nothing left to stop.
+        let _ = self.pump(audit, observe_on, &|| false);
         if let Some(proxy) = self.proxy.take() {
             self.proxy_summary = Some(proxy.stop(budget));
         }
         if let Some(mediator) = self.mediator.take() {
             mediator.stop();
         }
-        self.pump(audit, observe_on);
+        let _ = self.pump(audit, observe_on, &|| false);
         self.remove_socket();
     }
 
@@ -567,12 +682,13 @@ impl AgentNet {
             .tally
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let class = proxy_coverage(
-            tally.delivered,
-            tally.lost,
-            self.proxy_summary.map(|summary| summary.results_missing),
-            &crate::platform::elapsed_since_start_ns().to_string(),
-        );
+        let class = proxy_coverage(&ProxyAccount {
+            delivered: tally.delivered,
+            lost: tally.lost,
+            missing: self.proxy_summary.map(|summary| summary.results_missing),
+            stopped_at: self.proxy_stopped_at,
+            now: crate::platform::elapsed_since_start_ns(),
+        });
         summary.sources.proxy = class.status;
         summary.gaps.extend(class.gaps.iter().cloned());
         summary.classes.insert(CoverageClass::ProxyNet, class);
@@ -639,6 +755,10 @@ impl AgentNet {
             Value::from("seccomp_user_notification"),
         );
         agent.insert(
+            "mediation_record_queue".to_owned(),
+            Value::from(self.queue_capacity),
+        );
+        agent.insert(
             "proxy_socket".to_owned(),
             Value::from(format!(
                 "{}/{PROXY_SOCKET_NAME}",
@@ -652,6 +772,8 @@ impl AgentNet {
                 "listen": bridge::LISTEN,
                 "seccomp_filters": bridge.seccomp_filters,
                 "charged_to_attempt": true,
+                "mediated_connects": self.helper_connects,
+                "rejected_at_capacity": self.bridge_rejected,
             }]),
             None => Value::Array(Vec::new()),
         };
@@ -678,34 +800,56 @@ impl AgentNet {
     }
 }
 
+/// What the proxy's accounting established at the end of an attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProxyAccount {
+    /// Results that reached the trace.
+    pub delivered: u64,
+    /// Results the trace refused.
+    pub lost: u64,
+    /// Accepted connections whose result the drain did not deliver; `None`
+    /// when the proxy was never stopped and drained.
+    pub missing: Option<u64>,
+    /// When the proxy was seen to stop serving on its own, in supervisor
+    /// nanoseconds; requests after it were refused and have no result.
+    pub stopped_at: Option<u128>,
+    /// Now, in supervisor nanoseconds.
+    pub now: u128,
+}
+
 /// `proxy.net` from the proxy's accounting (§11.4): active with the count of
 /// results delivered to the trace only when the drain completed
-/// (`missing == Some(0)`) and nothing was lost in transport; otherwise
-/// degraded, with a null count and a gap naming the class and the known
-/// number of results that are missing. `missing == None` means the proxy was
-/// never stopped and drained, which is never complete.
+/// (`missing == Some(0)`), nothing was lost in transport and the proxy never
+/// stopped on its own; otherwise degraded, with a null count and a gap per
+/// cause naming the class and, where it is known, the number of missing
+/// results. A proxy that was never stopped and drained is never complete.
 #[must_use]
-pub fn proxy_coverage(
-    delivered: u64,
-    lost: u64,
-    missing: Option<u64>,
-    now_ns: &str,
-) -> ClassSummary {
+pub fn proxy_coverage(account: &ProxyAccount) -> ClassSummary {
+    let gap = |start: u128, reason: &str, lost_count: Option<u64>| Gap {
+        classes: vec![CoverageClass::ProxyNet.as_str().to_owned()],
+        source: "proxy".to_owned(),
+        start_ns: start.to_string(),
+        end_ns: Some(account.now.to_string()),
+        reason: reason.to_owned(),
+        lost_count,
+    };
     let mut gaps = Vec::new();
-    let drain_missing = missing.unwrap_or(0);
-    if missing.is_none() || drain_missing > 0 || lost > 0 {
-        gaps.push(Gap {
-            classes: vec![CoverageClass::ProxyNet.as_str().to_owned()],
-            source: "proxy".to_owned(),
-            start_ns: "0".to_owned(),
-            end_ns: Some(now_ns.to_owned()),
-            reason: match missing {
-                None => "proxy_not_drained".to_owned(),
-                Some(0) => "proxy_result_undelivered".to_owned(),
-                Some(_) => "proxy_drain_incomplete".to_owned(),
+    match account.missing {
+        None => gaps.push(gap(0, "proxy_not_drained", None)),
+        Some(missing) if missing > 0 || account.lost > 0 => gaps.push(gap(
+            0,
+            if missing > 0 {
+                "proxy_drain_incomplete"
+            } else {
+                "proxy_result_undelivered"
             },
-            lost_count: missing.map(|missing| missing + lost),
-        });
+            Some(missing + account.lost),
+        )),
+        Some(_) => {}
+    }
+    if let Some(stopped_at) = account.stopped_at {
+        // How many requests the dead proxy refused is not knowable.
+        gaps.push(gap(stopped_at, "proxy_stopped", None));
     }
     let status = if gaps.is_empty() {
         SourceStatus::Active
@@ -714,9 +858,31 @@ pub fn proxy_coverage(
     };
     ClassSummary {
         status,
-        observed_count: (status == SourceStatus::Active).then_some(delivered),
+        observed_count: (status == SourceStatus::Active).then_some(account.delivered),
         gaps,
     }
+}
+
+/// Whether the boundary is still up, asked after a helper was seen dead: the
+/// supervisor is not killing it, and the namespace init has not exited
+/// (`init_exited`, asked before and after) and has not begun to (`PF_EXITING`
+/// is set before an init kills its namespace, so `init_exiting` reads it). A
+/// read that fails is not "up": a death that cannot be placed before the
+/// boundary's own end is not reported as one.
+#[must_use]
+pub fn boundary_up(
+    killing: bool,
+    init_exited: &dyn Fn() -> bool,
+    init_exiting: &dyn Fn() -> io::Result<bool>,
+) -> bool {
+    !killing && !init_exited() && matches!(init_exiting(), Ok(false)) && !init_exited()
+}
+
+/// Whether a mediation record is the bridge's own: the same thread group
+/// number and the same start time, both read while the task was parked.
+#[must_use]
+pub fn is_bridge(record: &MediationRecord, pid: libc::pid_t, start_ticks: u64) -> bool {
+    record.tgid == Some(pid) && record.tgid_start == Some(start_ticks)
 }
 
 /// The bridge runs under exactly the agent baseline and the mediation
@@ -736,7 +902,9 @@ fn bridge_argv() -> Vec<Vec<u8>> {
 /// and proves the pin is this listener's by connecting through it and
 /// accepting that connection. Returns the listener, the pin and the node's
 /// `(dev, ino)`.
-fn bind_pinned(dir: BorrowedFd<'_>) -> io::Result<(UnixListener, OwnedFd, (u64, u64))> {
+fn bind_pinned(
+    dir: BorrowedFd<'_>,
+) -> io::Result<(UnixListener, OwnedFd, crate::state::anchored::Stat)> {
     // Through the directory descriptor: no path the child or anyone else
     // renamed can redirect the bind, and the name fits `sun_path` whatever
     // the length of the state root.
@@ -760,7 +928,7 @@ fn bind_pinned(dir: BorrowedFd<'_>) -> io::Result<(UnixListener, OwnedFd, (u64, 
     })?;
     drop((probe, accepted));
     listener.set_nonblocking(false)?;
-    Ok((listener, pin, stat.identity()))
+    Ok((listener, pin, stat))
 }
 
 /// Whether `pid` holds a TCP socket listening on `127.0.0.1:3128`, read from
@@ -794,6 +962,14 @@ pub fn listening_inode(table: &str) -> Option<u64> {
             .then(|| fields.get(9)?.parse().ok())
             .flatten()
     })
+}
+
+/// One nonblocking `read`; `None` on an error (including `EAGAIN`), `Some(0)`
+/// at end of file.
+fn read_some(fd: RawFd, buffer: &mut [u8]) -> Option<usize> {
+    // SAFETY: `buffer` is live and writable for its whole length.
+    let n = unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), buffer.len()) };
+    usize::try_from(n).ok()
 }
 
 fn nap() {
@@ -857,28 +1033,217 @@ mod tests {
 
     #[test]
     fn proxy_coverage_is_active_only_for_a_complete_drain_with_nothing_lost() {
-        let complete = proxy_coverage(3, 0, Some(0), "9");
+        let account = |lost, missing, stopped_at| ProxyAccount {
+            delivered: 3,
+            lost,
+            missing,
+            stopped_at,
+            now: 9,
+        };
+        let complete = proxy_coverage(&account(0, Some(0), None));
         assert_eq!(complete.status, SourceStatus::Active);
         assert_eq!(complete.observed_count, Some(3));
         assert!(complete.gaps.is_empty());
-        for (lost, missing, reason, count) in [
-            (0, Some(2), "proxy_drain_incomplete", Some(2)),
-            (1, Some(0), "proxy_result_undelivered", Some(1)),
-            (1, Some(2), "proxy_drain_incomplete", Some(3)),
-            (0, None, "proxy_not_drained", None),
+        for (lost, missing, stopped, reasons, count) in [
+            (0, Some(2), None, vec!["proxy_drain_incomplete"], Some(2)),
+            (1, Some(0), None, vec!["proxy_result_undelivered"], Some(1)),
+            (1, Some(2), None, vec!["proxy_drain_incomplete"], Some(3)),
+            (0, None, None, vec!["proxy_not_drained"], None),
+            (0, Some(0), Some(5), vec!["proxy_stopped"], None),
+            (
+                1,
+                Some(0),
+                Some(5),
+                vec!["proxy_result_undelivered", "proxy_stopped"],
+                Some(1),
+            ),
         ] {
-            let degraded = proxy_coverage(3, lost, missing, "9");
-            assert_eq!(degraded.status, SourceStatus::Degraded, "{reason}");
+            let degraded = proxy_coverage(&account(lost, missing, stopped));
+            assert_eq!(degraded.status, SourceStatus::Degraded, "{reasons:?}");
             assert_eq!(
                 degraded.observed_count, None,
-                "{reason}: a degraded count is null"
+                "{reasons:?}: a degraded count is null"
             );
-            assert_eq!(degraded.gaps.len(), 1);
-            assert_eq!(degraded.gaps[0].reason, reason);
+            let seen: Vec<&str> = degraded
+                .gaps
+                .iter()
+                .map(|gap| gap.reason.as_str())
+                .collect();
+            assert_eq!(seen, reasons);
             assert_eq!(degraded.gaps[0].classes, vec!["proxy.net".to_owned()]);
             assert_eq!(degraded.gaps[0].source, "proxy");
             assert_eq!(degraded.gaps[0].lost_count, count);
         }
+        let stopped = proxy_coverage(&account(0, Some(0), Some(5)));
+        assert_eq!(
+            stopped.gaps[0].start_ns, "5",
+            "the gap starts when the proxy stopped"
+        );
+    }
+
+    /// A trace that refuses every frame, as a full or broken sink does.
+    struct Refusing;
+
+    impl crate::trace::TraceSink for Refusing {
+        fn write_frame(&mut self, _: &[u8], _: Priority) -> Result<(), JailError> {
+            Err(JailError::new(
+                ErrorCode::EvidenceLost,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                "refused".to_owned(),
+            ))
+        }
+        fn loss(&self) -> Option<&crate::trace::Loss> {
+            None
+        }
+    }
+
+    /// Counts frames and keeps them.
+    struct Keeping(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl crate::trace::TraceSink for Keeping {
+        fn write_frame(&mut self, frame: &[u8], _: Priority) -> Result<(), JailError> {
+            self.0.lock().unwrap().push(frame.to_vec());
+            Ok(())
+        }
+        fn loss(&self) -> Option<&crate::trace::Loss> {
+            None
+        }
+    }
+
+    fn a_result(id: u64) -> ProxyResult {
+        ProxyResult {
+            request_id: id,
+            kind: proxy::RequestKind::Unknown,
+            destination: None,
+            decision: ProxyDecision::Deny,
+            reason: proxy::Reason::MalformedRequest,
+            connected: None,
+            connect_errno: None,
+            bytes_in: 0,
+            bytes_out: 0,
+            discarded_bytes: 0,
+            duration: Duration::ZERO,
+            end: None,
+        }
+    }
+
+    fn sink_over(trace: SharedTrace) -> ProxyTraceSink {
+        ProxyTraceSink {
+            attempt_id: "attempt".to_owned(),
+            trace: Some(trace),
+            tally: Mutex::new(ProxyTally::default()),
+        }
+    }
+
+    fn account_of(sink: &ProxyTraceSink) -> ProxyAccount {
+        let tally = sink.tally.lock().unwrap();
+        ProxyAccount {
+            delivered: tally.delivered,
+            lost: tally.lost,
+            missing: Some(0),
+            stopped_at: None,
+            now: 1,
+        }
+    }
+
+    #[test]
+    fn a_proxy_result_the_trace_refused_is_counted_lost_and_degrades_proxy_net() {
+        let refusing = sink_over(crate::trace::shared(Refusing));
+        refusing.emit(a_result(1));
+        refusing.emit(a_result(2));
+        let account = account_of(&refusing);
+        assert_eq!((account.delivered, account.lost), (0, 2));
+        let class = proxy_coverage(&account);
+        assert_eq!(class.status, SourceStatus::Degraded);
+        assert_eq!(class.gaps[0].reason, "proxy_result_undelivered");
+        assert_eq!(class.gaps[0].lost_count, Some(2));
+        // The results are still kept for diagnostics: the loss is in the
+        // trace, not in what the supervisor knows.
+        assert_eq!(refusing.tally.lock().unwrap().recent.len(), 2);
+
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let keeping = sink_over(crate::trace::shared(Keeping(frames.clone())));
+        keeping.emit(a_result(1));
+        let account = account_of(&keeping);
+        assert_eq!((account.delivered, account.lost), (1, 0));
+        assert_eq!(proxy_coverage(&account).status, SourceStatus::Active);
+        let frames = frames.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        let event: Value = serde_json::from_slice(&frames[0]).unwrap();
+        assert_eq!(event["source"], "proxy");
+        assert_eq!(event["operation"], "net.connect");
+        assert_eq!(event["source_seq"], 1);
+    }
+
+    #[test]
+    fn the_boundary_is_up_only_if_nothing_says_it_is_ending() {
+        let no = || false;
+        let yes = || true;
+        let running = || Ok(false);
+        assert!(
+            boundary_up(false, &no, &running),
+            "nothing says it is ending"
+        );
+        assert!(
+            !boundary_up(true, &no, &running),
+            "the supervisor is killing"
+        );
+        assert!(!boundary_up(false, &yes, &running), "the init exited");
+        assert!(
+            !boundary_up(false, &no, &|| Ok(true)),
+            "the init is exiting (PF_EXITING)"
+        );
+        assert!(
+            !boundary_up(false, &no, &|| Err(io::Error::other("gone"))),
+            "unreadable is not up"
+        );
+        // Exited between the first look and the flags read: the flags read
+        // may have been of a successor, so the second look decides.
+        let looks = std::cell::Cell::new(0);
+        let exits_during = || {
+            looks.set(looks.get() + 1);
+            looks.get() > 1
+        };
+        assert!(!boundary_up(false, &exits_during, &running));
+    }
+
+    #[test]
+    fn the_queue_seam_can_only_shrink_the_queue() {
+        assert_eq!(record_queue_capacity(None), RECORD_QUEUE);
+        assert_eq!(record_queue_capacity(Some("1")), 1);
+        assert_eq!(record_queue_capacity(Some("4096")), 4096);
+        for ignored in ["0", "4097", "-1", "x", ""] {
+            assert_eq!(
+                record_queue_capacity(Some(ignored)),
+                RECORD_QUEUE,
+                "{ignored}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_is_the_bridges_by_number_and_start_time_never_by_liveness() {
+        let record = |tgid: Option<i32>, start: Option<u64>| MediationRecord {
+            pid: 7,
+            tgid,
+            tgid_start: start,
+            family: Some(1),
+            address_complete: true,
+            reason: "authorized_proxy",
+            verdict: Verdict::Allowed,
+        };
+        assert!(is_bridge(&record(Some(40), Some(9)), 40, 9));
+        assert!(
+            !is_bridge(&record(Some(40), Some(10)), 40, 9),
+            "a reused pid"
+        );
+        assert!(!is_bridge(&record(Some(41), Some(9)), 40, 9));
+        assert!(
+            !is_bridge(&record(Some(40), None), 40, 9),
+            "no identity, no claim"
+        );
+        assert!(!is_bridge(&record(None, Some(9)), 40, 9));
     }
 
     #[test]

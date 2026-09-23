@@ -9,8 +9,9 @@
 //! policy.
 //!
 //! The launcher starts it before the target is released, with a double fork,
-//! `/dev/null` as stdio, no other descriptor, an empty environment and a
-//! session of its own. It runs under the same seccomp filters as the child,
+//! `/dev/null` as stdin and stdout, the write end of a report pipe as stderr
+//! (the supervisor holds the read end), no other descriptor, an empty
+//! environment and a session of its own. It runs under the same seccomp filters as the child,
 //! so its `connect` to the proxy socket is mediated: the supervisor allows
 //! exactly the pinned proxy socket identity, whatever the path now names.
 //! That is what makes the path unredirectable by a child rename, unlink,
@@ -37,9 +38,19 @@ pub const LISTEN: &str = "127.0.0.1:3128";
 pub const PROXY_URL: &str = "http://127.0.0.1:3128";
 /// The proxy socket as the sandbox sees it.
 pub const PROXY_PATH: &str = "/run/ouro/proxy/proxy.sock";
-/// The most relays at once; beyond it, pending clients wait in the kernel's
-/// backlog. It matches the proxy's own connection budget (§10).
+/// The most relays at once. It matches the proxy's own connection budget
+/// (§10); a client beyond it is answered [`OVERLOAD_RESPONSE`] and closed at
+/// once rather than left in the kernel's backlog until it gives up, and
+/// counted: one byte on the report pipe, which the supervisor records as the
+/// bridge's `rejected_at_capacity`.
 pub const MAX_CONNECTIONS: usize = 128;
+
+/// What a client beyond [`MAX_CONNECTIONS`] gets: a complete, fixed
+/// `503` in the proxy's own refusal format, written without reading or
+/// parsing anything the client sent (§10: "At capacity, reject excess
+/// requests with a safe overload reason").
+pub const OVERLOAD_RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\
+Content-Length: 16\r\nX-Ouro-Proxy-Reason: bridge_overload\r\nConnection: close\r\n\r\nbridge_overload\n";
 /// Bytes buffered per relay direction.
 pub const BUFFER: usize = 16 * 1024;
 
@@ -76,10 +87,22 @@ pub fn bridge_main(args: &[OsString]) -> ! {
     if listener.set_nonblocking(true).is_err() {
         std::process::exit(EXIT_BIND_FAILED);
     }
-    serve(&listener, &|| UnixStream::connect(PROXY_PATH));
+    serve(
+        &listener,
+        &|| UnixStream::connect(PROXY_PATH),
+        &report_rejection,
+    );
     // `serve` only returns when polling itself fails, which leaves nothing
     // to relay with; the attempt's clients then see connections refused.
     std::process::exit(0);
+}
+
+/// One byte on stderr, which the launcher made the write end of a
+/// nonblocking pipe the supervisor drains: the supervisor counts the bridge's
+/// rejections from it. A full pipe drops the byte rather than stall a relay.
+fn report_rejection() {
+    use std::io::Write as _;
+    let _ = std::io::stderr().write(b"o");
 }
 
 /// One direction of a relay.
@@ -179,17 +202,21 @@ impl Relay {
 }
 
 /// The relay loop. `connect` opens one proxy connection; the live bridge
-/// passes [`PROXY_PATH`], tests pass their own socket.
+/// passes [`PROXY_PATH`], tests pass their own socket. `rejected` is called
+/// once for each client turned away at capacity.
 ///
 /// Returns only when `poll` fails for a reason other than `EINTR`.
-pub fn serve(listener: &TcpListener, connect: &dyn Fn() -> io::Result<UnixStream>) {
+pub fn serve(
+    listener: &TcpListener,
+    connect: &dyn Fn() -> io::Result<UnixStream>,
+    rejected: &dyn Fn(),
+) {
     let mut relays: Vec<Relay> = Vec::new();
     loop {
-        let accepting = relays.len() < MAX_CONNECTIONS;
         let mut fds = Vec::with_capacity(1 + relays.len() * 2);
         fds.push(libc::pollfd {
             fd: listener.as_raw_fd(),
-            events: if accepting { libc::POLLIN } else { 0 },
+            events: libc::POLLIN,
             revents: 0,
         });
         for relay in &relays {
@@ -252,8 +279,8 @@ pub fn serve(listener: &TcpListener, connect: &dyn Fn() -> io::Result<UnixStream
         }
         relays.retain(|relay| !relay.finished());
 
-        if accepting && fds[0].revents != 0 {
-            accept_all(listener, connect, &mut relays);
+        if fds[0].revents != 0 {
+            accept_all(listener, connect, rejected, &mut relays);
         }
     }
 }
@@ -285,13 +312,27 @@ fn step(relay: &mut Relay, client: libc::c_short, upstream: libc::c_short) -> io
 fn accept_all(
     listener: &TcpListener,
     connect: &dyn Fn() -> io::Result<UnixStream>,
+    rejected: &dyn Fn(),
     relays: &mut Vec<Relay>,
 ) {
-    while relays.len() < MAX_CONNECTIONS {
+    loop {
         let client = match listener.accept() {
             Ok((client, _)) => client,
             Err(_) => return,
         };
+        if relays.len() >= MAX_CONNECTIONS {
+            // A nonblocking best effort: the response is far smaller than a
+            // socket buffer, and a client that cannot take it is closed
+            // anyway. Nothing is read, so nothing waits on the client.
+            use std::io::Write as _;
+            // Counted first, so the count is in before the client sees
+            // the answer.
+            rejected();
+            let _ = client.set_nonblocking(true);
+            let _ = (&client).write(OVERLOAD_RESPONSE);
+            let _ = client.shutdown(Shutdown::Both);
+            continue;
+        }
         // A proxy that cannot be reached (dead, replaced, refused by the
         // mediator) closes this client and nothing else: fail closed.
         let Ok(upstream) = connect() else {
@@ -317,13 +358,26 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     /// A bridge on an ephemeral loopback port, relaying to a Unix listener
-    /// this test owns, on a thread that lives for the test process.
-    fn bridge_to(path: std::path::PathBuf) -> std::net::SocketAddr {
+    /// this test owns, on a thread that lives for the test process; with the
+    /// count of clients it turned away.
+    fn bridge_to(
+        path: std::path::PathBuf,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
-        std::thread::spawn(move || serve(&listener, &|| UnixStream::connect(&path)));
-        address
+        let rejected = std::sync::Arc::new(AtomicUsize::new(0));
+        let count = rejected.clone();
+        std::thread::spawn(move || {
+            serve(&listener, &|| UnixStream::connect(&path), &|| {
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+        (address, rejected)
     }
 
     #[test]
@@ -331,7 +385,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("proxy.sock");
         let upstream = UnixListener::bind(&path).unwrap();
-        let address = bridge_to(path);
+        let (address, _) = bridge_to(path);
         let server = std::thread::spawn(move || {
             let (mut stream, _) = upstream.accept().unwrap();
             let mut request = Vec::new();
@@ -348,6 +402,108 @@ mod tests {
         server.join().unwrap();
         assert_eq!(&reply[..6], b"reply:");
         assert_eq!(&reply[6..], &payload[..]);
+    }
+
+    /// About four descriptors per relay live in this one test process, next
+    /// to every other unit test running in parallel: the budget under test is
+    /// the bridge's, not the test runner's soft descriptor limit.
+    fn raise_soft_descriptor_limit() {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit and setrlimit read or fill a live rlimit.
+        unsafe {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) == 0 {
+                let wanted = limit.rlim_max.min(8192);
+                if limit.rlim_cur < wanted {
+                    limit.rlim_cur = wanted;
+                    libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_client_beyond_the_budget_is_answered_503_at_once_and_the_rest_are_relayed() {
+        use std::os::unix::net::UnixListener;
+        raise_soft_descriptor_limit();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.sock");
+        let upstream = UnixListener::bind(&path).unwrap();
+        let (address, rejected) = bridge_to(path);
+        // Fill the budget with relays that stay open, each one accepted by
+        // the stand-in proxy so the bridge's connect completes.
+        let mut held = Vec::new();
+        let mut accepted = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            let mut client = TcpStream::connect(address).unwrap();
+            client.write_all(b"x").unwrap();
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut byte = [0u8; 1];
+            stream.read_exact(&mut byte).unwrap();
+            held.push(client);
+            accepted.push(stream);
+        }
+        let mut extra = TcpStream::connect(address).unwrap();
+        extra
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut reply = Vec::new();
+        extra.read_to_end(&mut reply).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(reply, OVERLOAD_RESPONSE);
+        assert!(reply.starts_with(b"HTTP/1.1 503 "));
+        assert_eq!(
+            rejected.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "counted, once"
+        );
+        // Every held relay still carries bytes both ways.
+        for (client, stream) in held.iter_mut().zip(&mut accepted) {
+            stream.write_all(b"y").unwrap();
+            let mut byte = [0u8; 1];
+            client.read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"y");
+        }
+        // A slot freed is a slot the next client gets.
+        drop(held.pop());
+        drop(accepted.pop());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let mut next = TcpStream::connect(address).unwrap();
+            next.write_all(b"z").unwrap();
+            upstream.set_nonblocking(true).unwrap();
+            let relayed = loop {
+                match upstream.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut byte = [0u8; 1];
+                        stream.set_nonblocking(false).unwrap();
+                        stream.read_exact(&mut byte).unwrap();
+                        break byte == *b"z";
+                    }
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        let mut probe = [0u8; 1];
+                        next.set_nonblocking(true).unwrap();
+                        if next.read(&mut probe).is_ok() {
+                            break false; // answered 503: the slot was not free yet
+                        }
+                        next.set_nonblocking(false).unwrap();
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("no relay after a slot was freed: {error}"),
+                }
+            };
+            upstream.set_nonblocking(false).unwrap();
+            if relayed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the freed slot never came back"
+            );
+        }
     }
 
     #[test]
@@ -369,7 +525,7 @@ mod tests {
     #[test]
     fn an_unreachable_proxy_closes_the_client_and_nothing_else_happens() {
         let dir = tempfile::tempdir().unwrap();
-        let address = bridge_to(dir.path().join("absent.sock"));
+        let (address, rejected) = bridge_to(dir.path().join("absent.sock"));
         let mut client = TcpStream::connect(address).unwrap();
         client
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
@@ -382,6 +538,11 @@ mod tests {
             "the client is closed, not left hanging"
         );
         assert!(reply.is_empty(), "the bridge never answers for the proxy");
+        assert_eq!(
+            rejected.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "not a capacity rejection"
+        );
     }
 
     #[test]

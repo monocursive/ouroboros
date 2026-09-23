@@ -164,6 +164,12 @@ pub struct GcEntry {
     pub action: String,
     /// Why.
     pub reason: String,
+    // J3-agent begin: the attempt's proxy directory (§10, §14.2)
+    /// What became of a crashed or settled attempt's proxy directory:
+    /// `removed`, `would_remove`, `retained: <reason>`, `failed: <reason>`,
+    /// or `None` when there was none to act on.
+    pub proxy_dir: Option<String>,
+    // J3-agent end
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +822,9 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
     };
     for entry in listing.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        // J3-agent begin
+        let mut proxy_dir: Option<String> = None;
+        // J3-agent end
         let (action, reason) = match AttemptId::parse(&name) {
             Err(_) => (
                 "skipped".to_owned(),
@@ -830,7 +839,16 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
                     ),
                     // J3-launch begin: §12, §14.2 — resume a pending
                     // vendor-state cleanup the terminal receipt permits.
-                    Ok(Some(_lease)) => match cleanup::resume(&dir, args.dry_run) {
+                    // J3-agent begin: the dead supervisor's proxy directory
+                    // goes first; vendor state follows as before
+                    Ok(Some(_lease)) => match gc_proxy_then_resume(
+                        &dir,
+                        &name,
+                        args.dry_run,
+                        &mut incomplete,
+                        &mut proxy_dir,
+                    ) {
+                        // J3-agent end
                         Ok(cleanup::Resume::NothingPending) => (
                             "retained".to_owned(),
                             "no vendor-state cleanup is pending; receipts, policy and trace \
@@ -873,6 +891,9 @@ pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
             attempt_id: name,
             action,
             reason,
+            // J3-agent begin
+            proxy_dir,
+            // J3-agent end
         });
     }
     entries.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
@@ -1211,7 +1232,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             launch: launch_handoff,
             // J3-launch end
             // J3-agent begin: the registered proxy directory
-            proxy: proxy_handoff,
+            proxy: proxy_handoff.clone(),
             // J3-agent end
         },
         Sinks {
@@ -1231,6 +1252,25 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     };
 
+    // J3-agent begin: the proxy socket node the platform bound, recorded so
+    // `gc` can remove exactly it after a crash (§14.2)
+    if let Some(socket) = proxy_handoff
+        .as_ref()
+        .and_then(|handoff| handoff.socket.get())
+        && let Err(error) = state::record_proxy_socket(&attempt_dir, socket)
+    {
+        let teardown = prepared.abort();
+        record_teardown(&mut record, &teardown);
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
+    // J3-agent end
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
     // §7: the state file names the registered execution boundary once it
@@ -1544,6 +1584,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         record.observer = summary.to_observer_record();
         record.coverage = summary.to_coverage();
     }
+    // J3-agent begin: what the helpers did, known now that they stopped
+    if let Some(native) = record.lifetime.native.as_mut() {
+        native.details.extend(running.final_native_details());
+    }
+    // J3-agent end
     record.lifetime.tree_empty = tree.tree_empty;
     record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
     record.lifetime.verification_scope = Some(tree.verification_scope);
@@ -2372,6 +2417,38 @@ fn refuse_vendor_state(
 }
 // J3-launch end
 
+// J3-agent begin: `gc` of a dead supervisor's proxy directory (§14.2)
+/// Runs [`state::gc_proxy_dir`], says in `proxy_dir` what became of the
+/// directory (one whose read or removal failed is a cleanup that did not
+/// complete, §6.4: `gc` exits 1; one whose identity cannot be proven is
+/// retained and said so, §14.2), then resumes the vendor-state cleanup
+/// exactly as before.
+fn gc_proxy_then_resume(
+    dir: &AttemptDir,
+    name: &str,
+    dry_run: bool,
+    incomplete: &mut Vec<String>,
+    proxy_dir: &mut Option<String>,
+) -> Result<cleanup::Resume, JailError> {
+    *proxy_dir = match state::gc_proxy_dir(dir, dry_run) {
+        Ok(outcome) => {
+            // §6.4, §14.2: an identity gc cannot prove is a skip reported
+            // with its reason; a read or removal that failed is a failed
+            // cleanup.
+            if let state::ProxyDirGc::Failed(reason) = &outcome {
+                incomplete.push(format!("{name} (proxy directory: {reason})"));
+            }
+            outcome.describe()
+        }
+        Err(error) => {
+            incomplete.push(format!("{name} ({})", error.code.as_str()));
+            Some(format!("failed: {}", error.code.as_str()))
+        }
+    };
+    cleanup::resume(dir, dry_run)
+}
+// J3-agent end
+
 // J3-agent begin: the proxy directory (§10)
 /// Registers and creates `<attempt>/proxy/` for a proxy-mode profile and
 /// returns the hand-off the platform binds the proxy socket in.
@@ -2398,6 +2475,7 @@ fn prepare_proxy_dir(
         host_path: attempt_dir.proxy_dir_path(),
         fd: Arc::new(dir.into_fd()),
         identity,
+        socket: Arc::new(std::sync::OnceLock::new()),
     }))
 }
 
@@ -2419,6 +2497,22 @@ fn remove_proxy_directory(attempt_dir: &AttemptDir, record: &mut AttemptRecord) 
         }
         Ok(_) => {}
         Err(error) => record.errors.push(error.to_object()),
+    }
+}
+// J3-agent end
+
+// J3-agent begin: an inherited ignored disposition is the operator's
+/// Whether `signal` is ignored in this process as inherited. Only Linux runs
+/// a target, so only Linux has a disposition to pass through.
+fn signals_inherited_ignored(signal: libc::c_int) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::linux::sys::signal_ignored(signal)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = signal;
+        false
     }
 }
 // J3-agent end
@@ -3215,6 +3309,15 @@ pub mod signals {
         std::mem::forget(write);
 
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            // J3-agent begin: a signal the operator's environment ignores
+            // (`nohup`, a background job of a non-interactive shell) stays
+            // ignored: the supervisor honours it, and the ignored disposition
+            // reaches the target across every exec. Catching it would reset
+            // it to the default in every child.
+            if super::signals_inherited_ignored(signal) {
+                continue;
+            }
+            // J3-agent end
             // SAFETY: `sigaction` is given a zeroed, fully initialized action
             // whose handler is an `extern "C"` function with the right
             // signature, and a null old-action pointer.

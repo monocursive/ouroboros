@@ -127,6 +127,9 @@ pub struct ProxyDirHandoff {
     pub fd: std::sync::Arc<std::os::fd::OwnedFd>,
     /// Its `(dev, ino)` as registered in jail state.
     pub identity: (u64, u64),
+    /// Filled by the platform once it has bound and pinned `proxy.sock`, so
+    /// the supervisor can record the node in jail state for a later `gc`.
+    pub socket: std::sync::Arc<std::sync::OnceLock<crate::state::ProxySocketIdentity>>,
 }
 
 impl PartialEq for ProxyDirHandoff {
@@ -397,6 +400,15 @@ pub trait RunningExecution {
         false
     }
     // J3-none end
+    // J3-agent begin: native facts that exist only once the run is over
+    /// `lifetime.native.details` entries to replace in the receipts written
+    /// after [`RunningExecution::observer_summary`]: facts the platform only
+    /// knows once its helpers have stopped (what the `agent` bridge did, for
+    /// instance). The default replaces nothing.
+    fn final_native_details(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::Map::new()
+    }
+    // J3-agent end
 
     /// Waits for the next event, up to `deadline`.
     fn wait(&mut self, deadline: Deadline) -> RunEvent;

@@ -435,9 +435,12 @@ fn service_one(w: &Workers) -> io::Result<()> {
     }
     // J3-agent begin: read while the task is parked in its notification, so
     // the thread group named is the one that asked (validated again below).
+    let tgid = task_tgid(pid);
     let mut facts = Facts {
         pid,
-        tgid: task_tgid(pid),
+        tgid,
+        tgid_start: tgid
+            .and_then(|tgid| crate::platform::linux::identity::start_time_ticks(tgid).ok()),
         family: None,
         address_complete: false,
     };
@@ -665,6 +668,7 @@ fn so_error(fd: RawFd) -> i32 {
 struct Facts {
     pid: libc::pid_t,
     tgid: Option<libc::pid_t>,
+    tgid_start: Option<u64>,
     family: Option<u16>,
     address_complete: bool,
 }
@@ -682,6 +686,7 @@ fn record(sink: &dyn MediationSink, facts: &Facts, reason: &'static str, verdict
     sink.record(MediationRecord {
         pid: facts.pid,
         tgid: facts.tgid,
+        tgid_start: facts.tgid_start,
         family: facts.family,
         address_complete: facts.address_complete,
         reason,

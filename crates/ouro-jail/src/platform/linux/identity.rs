@@ -43,6 +43,41 @@ pub fn start_time_ticks(pid: libc::pid_t) -> io::Result<u64> {
     parse_start_time_ticks(&raw)
 }
 
+/// `PF_EXITING` in the `flags` field of `/proc/<pid>/stat`: set at the very
+/// start of the task's exit, before a namespace init kills the rest of its
+/// namespace, and never cleared.
+pub const PF_EXITING: u64 = 0x4;
+
+/// Whether `pid` has begun to exit (field 9, `flags`, holds
+/// [`PF_EXITING`]).
+///
+/// # Errors
+/// The read or parse error; a pid that is gone reads as an error.
+pub fn exiting(pid: libc::pid_t) -> io::Result<bool> {
+    let raw = fs::read_to_string(stat_path(pid))?;
+    Ok(parse_flags(&raw)? & PF_EXITING != 0)
+}
+
+/// Parse field 9 (`flags`) out of the contents of a `/proc/<pid>/stat` file.
+///
+/// # Errors
+/// [`io::ErrorKind::InvalidData`] when the field is missing or not a number.
+pub fn parse_flags(raw: &str) -> io::Result<u64> {
+    let close = raw
+        .rfind(')')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "stat has no comm field"))?;
+    // After ")" the next field is field 3 (state), so field 9 is index 6.
+    let field = raw[close + 1..]
+        .split_ascii_whitespace()
+        .nth(6)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "stat has fewer than 9 fields")
+        })?;
+    field
+        .parse::<u64>()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("flags: {e}")))
+}
+
 fn stat_path(pid: libc::pid_t) -> PathBuf {
     PathBuf::from(format!("/proc/{pid}/stat"))
 }
@@ -248,6 +283,20 @@ pub fn is_own_directory(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flags_are_field_nine_even_after_a_comm_with_spaces_and_parentheses() {
+        let raw = "77 (a) b (c) R 1 77 77 0 -1 4194564 0 0 0 0 0 0 0 0 20 0 1 0 12345 0 0";
+        assert_eq!(parse_flags(raw).unwrap(), 4_194_564);
+        assert_eq!(parse_flags(raw).unwrap() & PF_EXITING, 4);
+        assert!(parse_flags("77 (x) R 1 2").is_err());
+        let live = fs::read_to_string(stat_path(std::process::id().cast_signed())).unwrap();
+        assert_eq!(
+            parse_flags(&live).unwrap() & PF_EXITING,
+            0,
+            "this process is not exiting"
+        );
+    }
 
     #[test]
     fn start_time_is_parsed_after_the_last_parenthesis() {

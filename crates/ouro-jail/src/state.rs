@@ -928,6 +928,19 @@ impl AttemptDir {
 /// [`ErrorCode::UnsafeStatePath`] when the attempt directory fails its checks
 /// or `proxy` already exists.
 pub fn create_proxy_dir(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailError> {
+    create_proxy_dir_observed(attempt_dir, &mut |_| {})
+}
+
+/// [`create_proxy_dir`], calling `between` after the registration is durable
+/// and before the directory exists: the seam a test uses to observe that
+/// order (§10: "registered before creation").
+///
+/// # Errors
+/// As [`create_proxy_dir`].
+pub fn create_proxy_dir_observed(
+    attempt_dir: &AttemptDir,
+    between: &mut dyn FnMut(&AttemptDir),
+) -> Result<anchored::Dir, JailError> {
     update_attempt_state(attempt_dir, |state| {
         state["proxy_dir"] = serde_json::json!({
             "name": PROXY_DIR_NAME,
@@ -937,6 +950,7 @@ pub fn create_proxy_dir(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailE
             "removed": false,
         });
     })?;
+    between(attempt_dir);
     let attempt = open_attempt_dir(attempt_dir)?;
     let name = anchored::Name::new(PROXY_DIR_NAME.as_bytes())
         .map_err(|error| write_failed(attempt_dir.root(), &error))?;
@@ -968,6 +982,201 @@ pub fn create_proxy_dir(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailE
         .sync()
         .map_err(|error| write_failed(attempt_dir.root(), &error))?;
     Ok(proxy)
+}
+
+/// The proxy socket node as bound: enough to recognise it after a crash.
+/// `(dev, ino)` alone is not an identity across a delete and a recreate
+/// (ext4 hands a freed inode straight back), so the node's change time, set
+/// when it was created and untouched since, goes with it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ProxySocketIdentity {
+    /// Device.
+    pub dev: u64,
+    /// Inode.
+    pub ino: u64,
+    /// Change time, seconds and nanoseconds.
+    pub ctime: (i64, i64),
+}
+
+impl ProxySocketIdentity {
+    /// The identity a `stat` of the node shows.
+    #[must_use]
+    pub fn of(stat: &anchored::Stat) -> Self {
+        ProxySocketIdentity {
+            dev: stat.dev,
+            ino: stat.ino,
+            ctime: stat.ctime,
+        }
+    }
+}
+
+/// Records the bound proxy socket's identity under the registered proxy
+/// directory, so `gc` can remove exactly that node after a crash.
+///
+/// # Errors
+/// [`ErrorCode::StateWriteFailed`] when the state write fails.
+pub fn record_proxy_socket(
+    attempt_dir: &AttemptDir,
+    socket: &ProxySocketIdentity,
+) -> Result<(), JailError> {
+    update_attempt_state(attempt_dir, |state| {
+        state["proxy_dir"]["socket"] = serde_json::json!({
+            "dev": socket.dev.to_string(),
+            "ino": socket.ino.to_string(),
+            "ctime_sec": socket.ctime.0.to_string(),
+            "ctime_nsec": socket.ctime.1.to_string(),
+        });
+    })
+}
+
+/// What `gc` did with an attempt's proxy directory.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ProxyDirGc {
+    /// None was registered, or it was already removed.
+    Nothing,
+    /// Removed now, and recorded.
+    Removed,
+    /// Would be removed (dry run).
+    WouldRemove,
+    /// Retained because it cannot be proven the attempt's own (§14.2:
+    /// "unverifiable identities ... are retained"), with the reason: a skip
+    /// reported with its reason, not a failed cleanup.
+    Retained(&'static str),
+    /// Retained because reading or removing it failed: a failed cleanup
+    /// (§6.4, `gc` exits 1).
+    Failed(&'static str),
+}
+
+impl ProxyDirGc {
+    /// The report's spelling, `None` when there was nothing to do.
+    #[must_use]
+    pub fn describe(&self) -> Option<String> {
+        match self {
+            ProxyDirGc::Nothing => None,
+            ProxyDirGc::Removed => Some("removed".to_owned()),
+            ProxyDirGc::WouldRemove => Some("would_remove".to_owned()),
+            ProxyDirGc::Retained(reason) => Some(format!("retained: {reason}")),
+            ProxyDirGc::Failed(reason) => Some(format!("failed: {reason}")),
+        }
+    }
+}
+
+/// `gc` of the proxy directory of an attempt whose supervisor is gone (the
+/// caller holds its lease). Its proxy died with it; the directory holds
+/// nothing the child could write. The socket node is unlinked only when its
+/// `(dev, ino, ctime)` is the one recorded when it was bound, and the
+/// directory only when it is the registered one and then empty; anything
+/// else is retained and said so.
+///
+/// # Errors
+/// [`ErrorCode::StateWriteFailed`] when jail state cannot be read or updated.
+pub fn gc_proxy_dir(attempt_dir: &AttemptDir, dry_run: bool) -> Result<ProxyDirGc, JailError> {
+    let state = read_attempt_state(attempt_dir)?;
+    let Some(proxy) = state.get("proxy_dir").filter(|value| !value.is_null()) else {
+        return Ok(ProxyDirGc::Nothing);
+    };
+    if proxy.get("removed").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(ProxyDirGc::Nothing);
+    }
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let number = |value: &serde_json::Value, key: &str| text(value, key)?.parse::<u64>().ok();
+    let signed = |value: &serde_json::Value, key: &str| text(value, key)?.parse::<i64>().ok();
+    let registered = number(proxy, "dev").zip(number(proxy, "ino"));
+    let socket = proxy.get("socket").and_then(|socket| {
+        Some(ProxySocketIdentity {
+            dev: number(socket, "dev")?,
+            ino: number(socket, "ino")?,
+            ctime: (signed(socket, "ctime_sec")?, signed(socket, "ctime_nsec")?),
+        })
+    });
+    let outcome = gc_removal(attempt_dir, registered, socket, dry_run);
+    if !dry_run {
+        update_attempt_state(attempt_dir, |state| match &outcome {
+            ProxyDirGc::Removed => {
+                state["proxy_dir"]["removed"] = serde_json::Value::from(true);
+                state["proxy_dir"]["removed_by"] = serde_json::Value::from("gc");
+            }
+            ProxyDirGc::Retained(reason) | ProxyDirGc::Failed(reason) => {
+                state["proxy_dir"]["retained"] = serde_json::Value::from(*reason);
+            }
+            ProxyDirGc::Nothing | ProxyDirGc::WouldRemove => {}
+        })?;
+    }
+    Ok(outcome)
+}
+
+fn gc_removal(
+    attempt_dir: &AttemptDir,
+    registered: Option<(u64, u64)>,
+    socket: Option<ProxySocketIdentity>,
+    dry_run: bool,
+) -> ProxyDirGc {
+    let removed = if dry_run {
+        ProxyDirGc::WouldRemove
+    } else {
+        ProxyDirGc::Removed
+    };
+    let Ok(attempt) = open_attempt_dir(attempt_dir) else {
+        return ProxyDirGc::Failed("attempt_directory_unusable");
+    };
+    let Ok(name) = anchored::Name::new(PROXY_DIR_NAME.as_bytes()) else {
+        return ProxyDirGc::Retained("name_invalid");
+    };
+    let stat = match attempt.stat_at(&name) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return removed,
+        Err(_) => return ProxyDirGc::Failed("proxy_directory_unreadable"),
+    };
+    if registered.is_none() {
+        // Created, and the supervisor died before it recorded what it
+        // created: nothing proves this directory is the one it made.
+        return ProxyDirGc::Retained("proxy_directory_unrecorded");
+    }
+    if registered != Some(stat.identity()) || stat.kind != anchored::Kind::Directory {
+        return ProxyDirGc::Retained("proxy_directory_identity_changed");
+    }
+    let Ok(proxy) = attempt.open_dir_at(&name, Some(&stat)) else {
+        return ProxyDirGc::Failed("proxy_directory_unreadable");
+    };
+    let Ok(entries) = proxy.names(4) else {
+        return ProxyDirGc::Failed("proxy_directory_unreadable");
+    };
+    let Ok(socket_name) = anchored::Name::new(PROXY_SOCKET_NAME.as_bytes()) else {
+        return ProxyDirGc::Retained("name_invalid");
+    };
+    for entry in &entries {
+        if entry.as_bytes() != socket_name.as_bytes() {
+            return ProxyDirGc::Retained("proxy_directory_holds_a_foreign_object");
+        }
+        let Ok(node) = proxy.stat_at(entry) else {
+            return ProxyDirGc::Failed("proxy_socket_unreadable");
+        };
+        match socket {
+            None => return ProxyDirGc::Retained("proxy_socket_unrecorded"),
+            Some(recorded)
+                if node.kind == anchored::Kind::Socket
+                    && ProxySocketIdentity::of(&node) == recorded => {}
+            Some(_) => return ProxyDirGc::Retained("proxy_socket_identity_changed"),
+        }
+    }
+    if dry_run {
+        return removed;
+    }
+    if !entries.is_empty() && proxy.unlink_at(&socket_name).is_err() {
+        return ProxyDirGc::Failed("proxy_socket_removal_failed");
+    }
+    if attempt.rmdir_at(&name).is_err() {
+        return ProxyDirGc::Retained("proxy_directory_not_empty");
+    }
+    if attempt.sync().is_err() {
+        return ProxyDirGc::Failed("sync_failed");
+    }
+    removed
 }
 
 /// What became of the proxy directory.
@@ -1293,6 +1502,126 @@ mod tests {
             remove_proxy_dir(&attempt).unwrap(),
             ProxyDirRemoval::Removed
         );
+    }
+
+    #[test]
+    fn the_proxy_directory_is_registered_before_it_exists() {
+        let (_dir, attempt) = claimed_attempt();
+        let mut seen = None;
+        let _proxy = create_proxy_dir_observed(&attempt, &mut |attempt| {
+            let state = read_attempt_state(attempt).unwrap();
+            seen = Some((
+                state["proxy_dir"]["name"].clone(),
+                state["proxy_dir"]["ino"].clone(),
+                attempt.proxy_dir_path().exists(),
+            ));
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            Some((serde_json::json!("proxy"), serde_json::Value::Null, false)),
+            "registered, identity not yet known, directory not yet there"
+        );
+    }
+
+    #[test]
+    fn gc_retains_a_proxy_directory_whose_identity_was_never_recorded() {
+        let (_dir, attempt) = claimed_attempt();
+        drop(create_proxy_dir(&attempt).unwrap());
+        update_attempt_state(&attempt, |state| {
+            state["proxy_dir"]["dev"] = serde_json::Value::Null;
+            state["proxy_dir"]["ino"] = serde_json::Value::Null;
+        })
+        .unwrap();
+        assert_eq!(
+            gc_proxy_dir(&attempt, false).unwrap(),
+            ProxyDirGc::Retained("proxy_directory_unrecorded")
+        );
+        assert!(attempt.proxy_dir_path().exists());
+        assert_eq!(
+            read_attempt_state(&attempt).unwrap()["proxy_dir"]["retained"],
+            "proxy_directory_unrecorded"
+        );
+        // Registered and never created (the supervisor died in between):
+        // nothing to remove, and it is recorded as done.
+        let (_dir, attempt) = claimed_attempt();
+        drop(create_proxy_dir(&attempt).unwrap());
+        std::fs::remove_dir(attempt.proxy_dir_path()).unwrap();
+        assert_eq!(gc_proxy_dir(&attempt, false).unwrap(), ProxyDirGc::Removed);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn bind_in(proxy: &anchored::Dir) -> std::os::unix::net::UnixListener {
+        use std::os::fd::AsRawFd as _;
+        std::os::unix::net::UnixListener::bind(format!(
+            "/proc/self/fd/{}/{PROXY_SOCKET_NAME}",
+            proxy.as_fd().as_raw_fd()
+        ))
+        .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gc_removes_the_recorded_socket_node_and_the_directory_and_records_it() {
+        let (_dir, attempt) = claimed_attempt();
+        let proxy = create_proxy_dir(&attempt).unwrap();
+        drop(bind_in(&proxy));
+        let name = anchored::Name::new(PROXY_SOCKET_NAME.as_bytes()).unwrap();
+        let node = proxy.stat_at(&name).unwrap();
+        record_proxy_socket(&attempt, &ProxySocketIdentity::of(&node)).unwrap();
+        assert_eq!(
+            gc_proxy_dir(&attempt, true).unwrap(),
+            ProxyDirGc::WouldRemove
+        );
+        assert!(
+            attempt.proxy_dir_path().join(PROXY_SOCKET_NAME).exists(),
+            "dry run"
+        );
+        assert_eq!(gc_proxy_dir(&attempt, false).unwrap(), ProxyDirGc::Removed);
+        assert!(!attempt.proxy_dir_path().exists());
+        let state = read_attempt_state(&attempt).unwrap();
+        assert_eq!(state["proxy_dir"]["removed"], true);
+        assert_eq!(state["proxy_dir"]["removed_by"], "gc");
+        assert_eq!(gc_proxy_dir(&attempt, false).unwrap(), ProxyDirGc::Nothing);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gc_retains_a_socket_it_cannot_prove_it_bound() {
+        // Unrecorded: the supervisor died between bind and record.
+        let (_dir, attempt) = claimed_attempt();
+        let proxy = create_proxy_dir(&attempt).unwrap();
+        drop(bind_in(&proxy));
+        assert_eq!(
+            gc_proxy_dir(&attempt, false).unwrap(),
+            ProxyDirGc::Retained("proxy_socket_unrecorded")
+        );
+        assert!(attempt.proxy_dir_path().join(PROXY_SOCKET_NAME).exists());
+        // Replaced after it was recorded, by a node that may even reuse the
+        // freed inode number: the change time tells them apart.
+        let (_dir, attempt) = claimed_attempt();
+        let proxy = create_proxy_dir(&attempt).unwrap();
+        drop(bind_in(&proxy));
+        let name = anchored::Name::new(PROXY_SOCKET_NAME.as_bytes()).unwrap();
+        let node = proxy.stat_at(&name).unwrap();
+        record_proxy_socket(&attempt, &ProxySocketIdentity::of(&node)).unwrap();
+        proxy.unlink_at(&name).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(bind_in(&proxy));
+        assert_eq!(
+            gc_proxy_dir(&attempt, false).unwrap(),
+            ProxyDirGc::Retained("proxy_socket_identity_changed")
+        );
+        assert!(attempt.proxy_dir_path().join(PROXY_SOCKET_NAME).exists());
+        // Anything else in the directory is not the jail's to delete.
+        let (_dir, attempt) = claimed_attempt();
+        drop(create_proxy_dir(&attempt).unwrap());
+        std::fs::write(attempt.proxy_dir_path().join("other"), b"x").unwrap();
+        assert_eq!(
+            gc_proxy_dir(&attempt, false).unwrap(),
+            ProxyDirGc::Retained("proxy_directory_holds_a_foreign_object")
+        );
+        assert!(attempt.proxy_dir_path().join("other").exists());
     }
 
     #[test]

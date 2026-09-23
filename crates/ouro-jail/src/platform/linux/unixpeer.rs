@@ -230,6 +230,10 @@ pub struct MediationRecord {
     /// not say. The platform uses it to tell a helper's connect (the bridge)
     /// from the target's.
     pub tgid: Option<libc::pid_t>,
+    /// That thread group's start time (field 22 of `/proc/<tgid>/stat`),
+    /// read in the same window: with `tgid`, the process's identity, which
+    /// a later process reusing the number does not share.
+    pub tgid_start: Option<u64>,
     /// The address family the child named, when its `sockaddr` was read.
     pub family: Option<u16>,
     /// Whether the whole `sockaddr` the child passed was read.

@@ -445,6 +445,11 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     } else {
         for entry in &report.entries {
             println!("{} {} {}", entry.attempt_id, entry.action, entry.reason);
+            // J3-agent begin
+            if let Some(proxy_dir) = &entry.proxy_dir {
+                println!("{} proxy_dir {proxy_dir}", entry.attempt_id);
+            }
+            // J3-agent end
         }
         println!("scanned {}", report.entries.len());
     }
@@ -452,7 +457,7 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     // report is printed (J3 review L1).
     if !report.incomplete.is_empty() {
         eprintln!(
-            "ouro-jail: vendor-state cleanup did not complete for: {}",
+            "ouro-jail: cleanup did not complete for: {}",
             report.incomplete.join(", ")
         );
         return ExitCode::from(1);
@@ -472,6 +477,9 @@ fn gc_json(report: &GcReport) -> serde_json::Value {
                 "attempt_id": entry.attempt_id,
                 "action": entry.action,
                 "reason": entry.reason,
+                // J3-agent begin
+                "proxy_dir": entry.proxy_dir,
+                // J3-agent end
             }))
             .collect::<Vec<_>>(),
     })

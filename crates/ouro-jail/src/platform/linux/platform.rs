@@ -530,6 +530,9 @@ struct Boundary {
     // J3-agent begin: the agent network, and the filter count read back
     /// The proxy, mediator and bridge of an `agent` attempt.
     agent: Option<super::agent::AgentNet>,
+    /// Set before this boundary kills anything: what dies after it did not
+    /// die on its own.
+    killing: std::sync::atomic::AtomicBool,
     /// `Seccomp_filters` of the blocked launcher, read back and checked
     /// against what this boundary installs.
     seccomp_filters: Option<u32>,
@@ -810,9 +813,14 @@ impl Boundary {
             RELEASE_FD,
             ERROR_FD,
             observe_on,
-            agent
-                .is_some()
-                .then_some((super::agent::LISTENER_FD, super::agent::SOCKDIAG_FD)),
+            agent.is_some().then_some((
+                super::agent::LISTENER_FD,
+                super::agent::SOCKDIAG_FD,
+                super::agent::BRIDGE_REPORT_FD,
+            )),
+            // bubblewrap unblocks SIGCHLD in its child: the launcher puts
+            // back the mask this supervisor inherited.
+            Some(super::launch::blocked_mask()),
             &target,
         );
         // J3-agent end
@@ -1031,6 +1039,7 @@ impl Boundary {
             watcher,
             // J3-agent begin
             agent: agent.take(),
+            killing: std::sync::atomic::AtomicBool::new(false),
             seccomp_filters: None,
             // J3-agent end
         };
@@ -1488,11 +1497,23 @@ impl Boundary {
         }
     }
 
-    /// Mediated connects and helper facts, while the target runs.
-    fn pump_agent(&mut self) {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.pump(&mut self.audit, self.observe_on);
-        }
+    /// Mediated connects and helper facts, while the target runs; the
+    /// reason of a new evidence loss, when there is one.
+    fn pump_agent(&mut self) -> Option<String> {
+        let (init_pid, init_fd, killing) = (self.init_pid, self.init_fd.as_ref(), &self.killing);
+        // Asked only once the bridge is seen dead: the boundary was up after
+        // the bridge died, so the bridge did not die with it. A namespace
+        // init sets PF_EXITING before it kills its namespace, and this
+        // supervisor sets `killing` before it kills anything.
+        let boundary_up = || {
+            super::agent::boundary_up(
+                killing.load(std::sync::atomic::Ordering::SeqCst),
+                &|| init_fd.is_none_or(|fd| super::watch::readable(fd.as_raw_fd())),
+                &|| identity::exiting(init_pid),
+            )
+        };
+        let agent = self.agent.as_mut()?;
+        agent.pump(&mut self.audit, self.observe_on, &boundary_up)
     }
     // J3-agent end
 
@@ -1505,6 +1526,8 @@ impl Boundary {
     /// init makes the kernel kill the namespace; the backend outside it goes
     /// too.
     fn kill_boundary(&self) {
+        self.killing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(leaf) = &self.cgroup {
             let _ = leaf.kill();
         }
@@ -2802,8 +2825,11 @@ impl RunningExecution for LinuxRunning {
             }
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
-            // J3-agent begin
-            self.boundary.pump_agent();
+            // J3-agent begin: mediated connects, helper facts, and a loss of
+            // mediation or proxy evidence, which strict evidence stops for
+            if let Some(reason) = self.boundary.pump_agent() {
+                self.pending.push(RunEvent::EvidenceLost { reason });
+            }
             // J3-agent end
             self.pump_status();
             self.sample_limits(false);
@@ -2975,6 +3001,16 @@ impl RunningExecution for LinuxRunning {
             .is_some_and(ExecutionCgroup::oom_killed)
             .then(|| "memory_oom".to_owned())
     }
+
+    // J3-agent begin: the bridge's counts, once it and the mediator stopped
+    fn final_native_details(&self) -> serde_json::Map<String, Value> {
+        let mut details = serde_json::Map::new();
+        if let Some(agent) = self.boundary.agent.as_ref() {
+            details.insert("helpers".to_owned(), agent.details().1);
+        }
+        details
+    }
+    // J3-agent end
 
     fn observer_summary(&mut self) -> Option<CoverageSummary> {
         // `wait_tree` already stopped the observer inside its budget; this

@@ -97,7 +97,12 @@ struct Case {
 }
 
 fn case(profile: &str) -> Case {
-    let jail = Jail::new().unwrap();
+    case_on(Jail::new().unwrap(), profile)
+}
+
+/// [`case`] over a harness whose program is already chosen (a wrapper that
+/// execs the real `ouro-jail`, for instance).
+fn case_on(jail: Jail, profile: &str) -> Case {
     let workspace = jail.root().join("workspace");
     private_dir(&workspace.join("bin"));
     let fixture = workspace.join("bin/ouro-fixture");
@@ -976,13 +981,39 @@ fn kill_proxy_listener(supervisor: u32) {
     }
 }
 
-/// N04, proxy death. Attempted: after `prepared`, the proxy's listener is
-/// shut down from outside; then the target makes an allowed request through
-/// the bridge, connects to the proxy socket directly, and tries direct
-/// egress. Verdict: every path fails, the origin sees nothing, nothing fell
-/// back to direct egress, and the trace records the proxy as stopped.
+/// The proxy.net class of a settled receipt, its gap reasons, and whether
+/// the receipt records an `evidence_lost` error.
+fn proxy_net_loss(receipt: &Value) -> (String, Vec<String>, bool) {
+    let class = &receipt["coverage"]["proxy.net"];
+    let reasons = class["gaps"]
+        .as_array()
+        .map(|gaps| {
+            gaps.iter()
+                .map(|gap| gap["reason"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let lost = receipt["errors"]
+        .as_array()
+        .is_some_and(|errors| errors.iter().any(|error| error["code"] == "evidence_lost"));
+    (
+        class["status"].as_str().unwrap_or_default().to_owned(),
+        reasons,
+        lost,
+    )
+}
+
+/// N04, proxy death under `--evidence best-effort`. Attempted: after
+/// `prepared`, the proxy's listener is shut down from outside; then the
+/// target makes an allowed request through the bridge, connects to the proxy
+/// socket directly, and tries direct egress. Verdict: every path fails, the
+/// origin sees nothing, nothing fell back to direct egress; the death is
+/// recorded once, `proxy.net` is degraded with a `proxy_stopped` gap (the
+/// requests after it have no proxy result), the attempt continued to the
+/// target's own end (exit status 0, no stop cause), and the evidence loss
+/// makes the jail exit 1 (§11.4, I05).
 #[test]
-fn n04_proxy_death_fails_closed_and_is_recorded() {
+fn n04_proxy_death_fails_closed_and_best_effort_continues_degraded() {
     if !common::live() {
         return;
     }
@@ -1009,6 +1040,7 @@ fn n04_proxy_death_fails_closed_and_is_recorded() {
     let argv = c.script("n04-proxy", &steps);
     let mut spawned = c
         .jail
+        .args(["--evidence", "best-effort"])
         .arg("--allow-host")
         .arg(format!("127.0.0.1:{o}"))
         .gate()
@@ -1020,16 +1052,100 @@ fn n04_proxy_death_fails_closed_and_is_recorded() {
     kill_proxy_listener(spawned.pid());
     release(&mut spawned, &message, &receipt);
     let run = spawned.wait().unwrap();
-    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    let get = ops(&run.fixture_lines(), "http-get")[0].clone();
+    assert_eq!(run.code(), Some(1), "stderr: {}", run.stderr_text());
+    let lines = run.fixture_lines();
+    assert!(
+        ops(&lines, "connect")
+            .iter()
+            .any(|line| line["args"]["addr"]
+                .as_str()
+                .is_some_and(|addr| addr.contains("10.255.255.1"))),
+        "the target ran to its last step: {lines:#?}"
+    );
+    let get = ops(&lines, "http-get")[0].clone();
     assert!(get["args"]["status_code"].is_null(), "no response: {get}");
     assert_eq!(origin.stop().len(), 0);
-    settled(&run);
+    let receipt = settled(&run);
+    assert_eq!(receipt["outcome"]["kind"], "exited");
+    assert_eq!(receipt["outcome"]["code"], 0);
+    assert!(
+        receipt["outcome"]["cause"].is_null(),
+        "{}",
+        receipt["outcome"]
+    );
+    let (status, reasons, lost) = proxy_net_loss(&receipt);
+    assert_eq!(status, "degraded");
+    assert!(reasons.iter().any(|r| r == "proxy_stopped"), "{reasons:?}");
+    assert!(lost, "{}", receipt["errors"]);
     assert_eq!(
         helper_notes(&run, "proxy_stopped").len(),
         1,
         "the death is recorded"
     );
+}
+
+/// N04, proxy death under strict evidence (the default). Attempted: the
+/// proxy's listener is shut down after `prepared`; the target then asks for
+/// an allowed URL through the bridge every 100 ms for up to 20 s. Verdict:
+/// the attempt is stopped for the evidence loss well before the target would
+/// have ended (`outcome.cause = evidence_loss`), with the same record as
+/// best-effort: one note, `proxy.net` degraded with `proxy_stopped`, no
+/// request reaching the origin, exit 1.
+#[test]
+fn n04_proxy_death_under_strict_evidence_stops_the_attempt() {
+    if !common::live() {
+        return;
+    }
+    const SCRIPT: &str = r#"
+import json, sys, time, urllib.request
+url = sys.argv[1]
+end = time.monotonic() + 20
+tries = 0
+while time.monotonic() < end:
+    tries += 1
+    try:
+        urllib.request.urlopen(url, timeout=1)
+    except Exception:
+        pass
+    time.sleep(0.1)
+print(json.dumps({"finished": True, "tries": tries}))
+"#;
+    let origin = HttpServer::start(b"never".to_vec()).unwrap();
+    let o = origin.addr().port();
+    let url = format!("http://127.0.0.1:{o}/strict");
+    let c = case("agent");
+    let mut spawned = c
+        .jail
+        .arg("--allow-host")
+        .arg(format!("127.0.0.1:{o}"))
+        .gate()
+        .receipt()
+        .timeout(Duration::from_secs(60))
+        .target(py(SCRIPT, &[&url]))
+        .spawn()
+        .unwrap();
+    let (message, receipt) = prepared(&mut spawned);
+    assert_eq!(receipt["policy"]["evidence"], "strict", "the default");
+    kill_proxy_listener(spawned.pid());
+    let started = std::time::Instant::now();
+    release(&mut spawned, &message, &receipt);
+    let run = spawned.wait().unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(run.code(), Some(1), "stderr: {}", run.stderr_text());
+    assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
+    assert!(
+        !run.stdout_text().contains("finished"),
+        "the target ran to its end: {}",
+        run.stdout_text()
+    );
+    assert_eq!(origin.stop().len(), 0);
+    let receipt = settled(&run);
+    assert_eq!(receipt["outcome"]["cause"], "evidence_loss");
+    let (status, reasons, lost) = proxy_net_loss(&receipt);
+    assert_eq!(status, "degraded");
+    assert!(reasons.iter().any(|r| r == "proxy_stopped"), "{reasons:?}");
+    assert!(lost);
+    assert_eq!(helper_notes(&run, "proxy_stopped").len(), 1);
 }
 
 /// N04, bridge death. Attempted: the target makes one request through the
@@ -1094,7 +1210,32 @@ print(json.dumps(out))
     );
     assert_eq!(origin.stop().len(), 1, "only the request before the death");
     settled(&run);
-    assert_eq!(helper_notes(&run, "bridge_exited").len(), 1);
+    let notes = helper_notes(&run, "bridge_exited");
+    assert_eq!(notes.len(), 1);
+    // The wrapper note of kind `helper`, validated on its own against both
+    // checked-in event schemas (settled() already validated every event
+    // against jail-event), next to a copy the schema must refuse, so the
+    // validation is shown able to fail.
+    let note = notes[0].clone();
+    assert_eq!(note["fields"]["helper"], "bridge");
+    for schema in ["event", "jail-event"] {
+        validators()[schema]
+            .validate(&note)
+            .unwrap_or_else(|error| panic!("{schema}: {error}\n{note:#}"));
+    }
+    let mut unnamed = note.clone();
+    unnamed["fields"]["kind"] = Value::from("");
+    assert!(validators()["jail-event"].validate(&unnamed).is_err());
+    // A bridge death loses no evidence: nothing is degraded for it.
+    let receipt = run.receipt_phase("settled").unwrap();
+    assert_eq!(receipt["coverage"]["proxy.net"]["status"], "active");
+    assert!(
+        receipt["errors"]
+            .as_array()
+            .is_none_or(|errors| errors.iter().all(|e| e["code"] != "evidence_lost")),
+        "{}",
+        receipt["errors"]
+    );
 }
 
 /// N04, budgets through the real proxy. Attempted: a request head past
@@ -1138,7 +1279,11 @@ for _ in range(128):
     held.append(h)
 extra = socket.socket(socket.AF_UNIX)
 extra.connect("/run/ouro/proxy/proxy.sock")
-extra.sendall((head + "\r\n").encode())
+try:
+    # The proxy may answer and close before the request is written.
+    extra.sendall((head + "\r\n").encode())
+except OSError:
+    pass
 out["saturated"] = status(extra)
 extra.close()
 for h in held:
@@ -1976,9 +2121,11 @@ print(json.dumps(out))
 /// X06 for `agent`. Attempted: while the target is still blocked, the
 /// launcher's and the bridge's descriptor tables are read from outside; the
 /// released target then lists its own descriptors, status and environment.
-/// Verdict: before release the launcher holds the mediation listener and the
-/// sock_diag socket (the supervisor took copies of both) and the bridge holds
-/// only /dev/null stdio and its one listening socket; after release the
+/// Verdict: before release the launcher holds the mediation listener, the
+/// sock_diag socket and the read end of the bridge's report pipe (the
+/// supervisor took copies of all three) and the bridge holds /dev/null as
+/// stdin and stdout, that pipe's write end as stderr, and its one listening
+/// socket; after release the
 /// target holds exactly 0/1/2, no notification listener, no sock_diag, proxy
 /// or bridge socket; it has no capability, runs under the three filters, is
 /// not traced visibly, and its environment has the proxy variables, no
@@ -2006,6 +2153,8 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
             .get(&19)
             .is_some_and(|link| link.starts_with("socket:"))
     );
+    let report = launcher_fds.get(&20).cloned().unwrap_or_default();
+    assert!(report.starts_with("pipe:"), "{launcher_fds:?}");
     let bridge = native["helpers"][0]["pid"].as_i64().unwrap();
     assert_eq!(native["helpers"][0]["kind"], "bridge");
     assert_eq!(native["helpers"][0]["seccomp_filters"], 2);
@@ -2019,13 +2168,18 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
         .map(str::trim);
     assert_eq!(filters, Some("2"), "{status}");
     let bridge_fds = readlinks(bridge);
-    for fd in 0..3 {
+    for fd in 0..2 {
         assert_eq!(
             bridge_fds.get(&fd).map(String::as_str),
             Some("/dev/null"),
             "{bridge_fds:?}"
         );
     }
+    assert_eq!(
+        bridge_fds.get(&2),
+        Some(&report),
+        "stderr is the report pipe the launcher holds the other end of"
+    );
     let others: Vec<&String> = bridge_fds
         .iter()
         .filter(|(fd, _)| **fd > 2)
@@ -2248,4 +2402,797 @@ fn agent_refuses_naming_the_proxy_it_cannot_establish() {
         "{error}"
     );
     assert!(!attempt_of(&run.data_dir).join("proxy").exists());
+}
+
+// ===========================================================================
+// Integration review follow-ups (J3 wave 2): the reviewer's reproducers,
+// adopted as assertions
+// ===========================================================================
+
+/// Python: `find_bridge()` by its exact command line.
+const FIND_BRIDGE: &str = r#"
+def find_bridge():
+    for pid in os.listdir("/proc"):
+        if pid.isdigit():
+            try:
+                if open("/proc/%s/cmdline" % pid, "rb").read() == b"/run/ouro/jail\0__bridge\0":
+                    return int(pid)
+            except OSError:
+                pass
+    return None
+"#;
+
+/// Review r05 (§11.1: helpers are tagged as helpers, not attributed as
+/// target operations). Attempted, six times: the target connects to the
+/// bridge, sends a complete request, and SIGKILLs the bridge 3 ms later, so
+/// the bridge's own mediated connect to the proxy is often still queued when
+/// the bridge is already dead. Verdict: no audit result ever carries the
+/// bridge's pid; the only AF_INET mediated connect is the target's one to
+/// the bridge; and the bridge's connects were seen and counted as the
+/// helper's in at least one round, so the race was exercised. Every
+/// mediated result carries the target's own pid.
+#[test]
+fn review_a_bridge_killed_after_its_connect_is_never_the_targets_connect() {
+    if !common::live() {
+        return;
+    }
+    let script = format!(
+        r#"
+import json, os, signal, socket, sys, time
+{FIND_BRIDGE}
+port = int(sys.argv[1])
+b = find_bridge()
+c = socket.create_connection(("127.0.0.1", 3128))
+c.sendall(("GET http://127.0.0.1:%d/r05 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % (port, port)).encode())
+time.sleep(0.003)
+os.kill(b, signal.SIGKILL)
+print(json.dumps({{"bridge": b}}))
+"#
+    );
+    let mut helper_connects = 0;
+    for round in 0..6 {
+        let origin = HttpServer::start(b"ok".to_vec()).unwrap();
+        let o = origin.addr().port();
+        let c = case("agent");
+        let run = c
+            .jail
+            .arg("--allow-host")
+            .arg(format!("127.0.0.1:{o}"))
+            .target(py(&script, &[&o.to_string()]))
+            .run()
+            .unwrap();
+        assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+        let receipt = settled(&run);
+        let bridge = &details(&receipt)["helpers"][0];
+        let pid = bridge["pid"].as_i64().unwrap();
+        // The launcher's pid is the target's: it execs the target in place.
+        let target = details(&receipt)["launcher_pid"].as_i64().unwrap();
+        assert_ne!(target, pid);
+        let audit = mediated(&run);
+        assert!(
+            audit
+                .iter()
+                .all(|event| event["fields"]["pid"].as_i64() == Some(target)),
+            "round {round}: a connect not the target's is attributed to it \
+             (bridge {pid}, target {target}): {audit:#?}"
+        );
+        // Besides the connect to the bridge, the target's resolver may try
+        // the name-service cache socket (AF_UNIX, refused): its own connects.
+        let inet: Vec<&&Value> = audit
+            .iter()
+            .filter(|event| event["fields"]["address_family"] == 2)
+            .collect();
+        assert_eq!(inet.len(), 1, "round {round}: {audit:#?}");
+        assert_eq!(inet[0]["operation"], "net.connect");
+        helper_connects += bridge["mediated_connects"].as_u64().unwrap();
+        let _ = origin.stop();
+    }
+    assert!(
+        helper_connects >= 1,
+        "the bridge's connect was never recorded: nothing was exercised"
+    );
+}
+
+/// `SigIgn` and `SigBlk` as `grep` reads them from its own status.
+fn signal_state(stdout: &str) -> (u64, u64) {
+    let field = |key: &str| {
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+            .unwrap_or_else(|| panic!("no {key} in {stdout:?}"))
+    };
+    (field("SigIgn:"), field("SigBlk:"))
+}
+
+/// `yes | head -n1`'s exit status as `bash` reports it.
+fn yes_status(stdout: &str) -> Option<i64> {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("yes_status="))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// Review r01. Attempted, under `tool`, `agent` and `none`: `grep` prints
+/// its own `SigIgn`/`SigBlk`, and `bash` runs `yes | head -n1`; once from
+/// this test process, and once through a wrapper that ignores SIGHUP (as
+/// `nohup` does), blocks SIGUSR1 and SIGCHLD and execs what it is given —
+/// the jail, or the same command directly. Verdict: in every case the
+/// contained target shows exactly the dispositions and mask a direct exec
+/// from the same parent shows — the jail restores what it changed itself
+/// (SIGPIPE, which the Rust runtime ignores; SIGCHLD, which bubblewrap
+/// unblocks in its child) and passes an inherited ignore through — and
+/// `yes` dies of SIGPIPE (141) rather than failing with EPIPE.
+#[test]
+fn review_the_target_inherits_the_callers_signal_dispositions_and_mask() {
+    if !common::live() {
+        return;
+    }
+    const SIGNALS: [&str; 4] = ["/usr/bin/grep", "-E", "^Sig(Ign|Blk)", "/proc/self/status"];
+    const PIPE: [&str; 3] = [
+        "/bin/bash",
+        "-c",
+        "yes | head -n1 >/dev/null; echo \"yes_status=${PIPESTATUS[0]}\"",
+    ];
+    const WRAPPER: &str = "#!/usr/bin/python3\n\
+import os, signal, sys\n\
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)\n\
+signal.signal(signal.SIGXFSZ, signal.SIG_DFL)\n\
+signal.signal(signal.SIGHUP, signal.SIG_IGN)\n\
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1, signal.SIGCHLD})\n\
+os.execv(sys.argv[1], sys.argv[1:])\n";
+    let dir = common::private_tempdir();
+    let wrapper = dir.path().join("wrap");
+    std::fs::write(&wrapper, WRAPPER).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let direct = |via: Option<&Path>, argv: &[&str]| {
+        let mut command = std::process::Command::new(via.unwrap_or(Path::new(argv[0])));
+        if via.is_some() {
+            command.arg(argv[0]);
+        }
+        let output = command.args(&argv[1..]).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let plain = signal_state(&direct(None, &SIGNALS));
+    let wrapped = signal_state(&direct(Some(&wrapper), &SIGNALS));
+    assert_eq!(yes_status(&direct(None, &PIPE)), Some(141));
+    assert_eq!(yes_status(&direct(Some(&wrapper), &PIPE)), Some(141));
+    assert_ne!(
+        wrapped.0 & 0x1,
+        0,
+        "the wrapper ignores SIGHUP: {wrapped:x?}"
+    );
+    assert_eq!(
+        wrapped.1 & 0x10200,
+        0x10200,
+        "the wrapper blocks SIGUSR1 and SIGCHLD: {wrapped:x?}"
+    );
+    for profile in ["tool", "agent", "none"] {
+        for (label, expected, wrap) in [("plain", plain, false), ("wrapped", wrapped, true)] {
+            let jail = || {
+                if wrap {
+                    Jail::with_program(&wrapper)
+                        .unwrap()
+                        .arg(harness::jail_path())
+                } else {
+                    Jail::new().unwrap()
+                }
+            };
+            let run = case_on(jail(), profile).jail.target(SIGNALS).run().unwrap();
+            assert_eq!(
+                run.code(),
+                Some(0),
+                "{profile} {label}: stderr {}",
+                run.stderr_text()
+            );
+            settled(&run);
+            let seen = signal_state(&run.stdout_text());
+            assert_eq!(
+                seen, expected,
+                "{profile} {label}: (SigIgn, SigBlk) {seen:x?} != {expected:x?}"
+            );
+            let run = case_on(jail(), profile).jail.target(PIPE).run().unwrap();
+            assert_eq!(run.code(), Some(0), "{profile} {label}");
+            assert_eq!(
+                yes_status(&run.stdout_text()),
+                Some(141),
+                "{profile} {label}: {}",
+                run.stdout_text()
+            );
+        }
+    }
+}
+
+/// Review r10 (§14.2). Attempted: an `agent` run whose target sleeps; once
+/// the target is confirmed, its supervisor (this test's child) is SIGKILLed;
+/// then `gc --dry-run --json` and `gc --json` over the same state root.
+/// Verdict: the attempt's processes die with their supervisor; the proxy
+/// directory and its socket node are left behind; the dry run reports
+/// `would_remove` and changes nothing; gc removes both (the node's recorded
+/// identity matches), records `removed_by: gc` in jail state and exits 0;
+/// a second gc has nothing left to do.
+#[test]
+fn review_gc_removes_a_crashed_agent_attempts_proxy_directory() {
+    if !common::live() {
+        return;
+    }
+    let c = case("agent");
+    let argv = vec![
+        c.fixture.clone().into_os_string(),
+        OsString::from("sleep"),
+        OsString::from("30000"),
+    ];
+    let mut spawned = c.jail.receipt().target(argv).spawn().unwrap();
+    let data = spawned.root().join("data");
+    let config = spawned.root().join("config");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let enforced = loop {
+        if let Some(receipt) = spawned
+            .receipt_value()
+            .filter(|receipt| receipt["phase"] == "enforced")
+        {
+            break receipt;
+        }
+        assert!(std::time::Instant::now() < deadline, "never enforced");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let bridge = details(&enforced)["helpers"][0]["pid"].as_i64().unwrap();
+    let attempt = attempt_of(&data);
+    let proxy = attempt.join("proxy");
+    spawned.kill().unwrap();
+    let run = spawned.wait().unwrap();
+    assert_eq!(run.signal(), Some(libc::SIGKILL));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while Path::new(&format!("/proc/{bridge}")).exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the bridge outlived its supervisor"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let names = |dir: &Path| -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(names(&proxy), ["proxy.sock"], "left behind by the crash");
+    let gc = |extra: &[&str]| {
+        let output = std::process::Command::new(harness::jail_path())
+            .arg("gc")
+            .args(extra)
+            .arg("--json")
+            .env("OURO_DATA_DIR", &data)
+            .env("OURO_CONFIG_DIR", &config)
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+        (
+            output.status.code(),
+            report,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (code, report, stderr) = gc(&["--dry-run"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        report["entries"][0]["proxy_dir"], "would_remove",
+        "{report}"
+    );
+    assert_eq!(names(&proxy), ["proxy.sock"], "a dry run changes nothing");
+    let (code, report, stderr) = gc(&[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(report["entries"][0]["proxy_dir"], "removed", "{report}");
+    assert!(!proxy.exists());
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("jail-state.json")).unwrap()).unwrap();
+    assert_eq!(state["proxy_dir"]["removed"], true, "{state:#}");
+    assert_eq!(state["proxy_dir"]["removed_by"], "gc");
+    let (code, report, _) = gc(&[]);
+    assert_eq!(code, Some(0));
+    assert!(report["entries"][0]["proxy_dir"].is_null(), "{report}");
+}
+
+/// Review r13. Attempted: `agent` runs in which nothing happens to the
+/// bridge or the proxy except settlement itself: a 0.3 s `sleep` with
+/// observation on and off (three each; with observation off a target that
+/// ends at once leaves its exec unconfirmed, J2's rule), a target that exits leaving a background child the
+/// namespace's teardown kills with the bridge, and a target the wall limit
+/// ends (the supervisor kills the tree). Verdict: no `bridge_exited` and no
+/// `proxy_stopped` note in any of them — the notes mean an unexpected death
+/// before settlement, which N04 shows produces exactly one.
+#[test]
+fn review_settlement_itself_produces_no_helper_note() {
+    if !common::live() {
+        return;
+    }
+    let quiet = |run: &Run, label: &str| {
+        assert!(
+            helper_notes(run, "bridge_exited").is_empty(),
+            "{label}: {:#?}",
+            events(run, "wrapper")
+        );
+        assert!(helper_notes(run, "proxy_stopped").is_empty(), "{label}");
+    };
+    for round in 0..3 {
+        for observe in ["on", "off"] {
+            let c = case("agent");
+            let run = c
+                .jail
+                .args(["--observe", observe])
+                .target(["/usr/bin/sleep", "0.3"])
+                .run()
+                .unwrap();
+            assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+            let receipt = settled(&run);
+            assert_eq!(receipt["coverage"]["proxy.net"]["status"], "active");
+            quiet(&run, &format!("sleep, observe {observe}, round {round}"));
+        }
+    }
+    let c = case("agent");
+    let run = c
+        .jail
+        .target(["/bin/sh", "-c", "sleep 30 & exit 0"])
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    settled(&run);
+    quiet(&run, "a background child");
+    let c = case("agent");
+    let run = c
+        .jail
+        .args(["--limit", "wall=1s"])
+        .target(["/usr/bin/sleep", "30"])
+        .run()
+        .unwrap();
+    let receipt = settled(&run);
+    assert_eq!(receipt["outcome"]["cause"], "wall_expiry");
+    quiet(&run, "wall expiry");
+}
+
+/// Review r07 through the queue seam (§11.4: "On loss under strict, stop the
+/// attempt and preserve the gap"). Attempted: with the mediation record
+/// queue shrunk to one record (`OURO_JAIL_TEST_MEDIATION_QUEUE=1`), 32
+/// threads connect to a missing AF_UNIX path as fast as they can for up to
+/// 8 s. Verdict under strict: the attempt is stopped for the loss
+/// (`outcome.cause = evidence_loss`, exit 1) long before 8 s, `net` is
+/// degraded with a `queue_full` gap and a `coverage_gap` note is in the
+/// trace. Under best-effort: the same record, but the target runs to its
+/// end (exit status 0, no cause) and the jail exits 1 for the loss.
+#[test]
+fn review_a_mediation_queue_overflow_is_evidence_loss() {
+    if !common::live() {
+        return;
+    }
+    const SCRIPT: &str = r#"
+import json, socket, threading, time
+stop = time.monotonic() + 8
+counts = []
+def worker():
+    n = 0
+    while time.monotonic() < stop:
+        s = socket.socket(socket.AF_UNIX)
+        try:
+            s.connect("/tmp/absent.sock")
+        except OSError:
+            pass
+        s.close()
+        n += 1
+    counts.append(n)
+ts = [threading.Thread(target=worker) for _ in range(32)]
+[t.start() for t in ts]
+[t.join() for t in ts]
+print(json.dumps({"finished": True, "connects": sum(counts)}))
+"#;
+    for evidence in ["strict", "best-effort"] {
+        let c = case("agent");
+        let started = std::time::Instant::now();
+        let run = c
+            .jail
+            .env("OURO_JAIL_TEST_MEDIATION_QUEUE", "1")
+            .args(["--evidence", evidence])
+            .timeout(Duration::from_secs(60))
+            .target(py(SCRIPT, &[]))
+            .run()
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(run.code(), Some(1), "{evidence}: {}", run.stderr_text());
+        let receipt = settled(&run);
+        assert_eq!(
+            details(&receipt)["agent"]["mediation_record_queue"],
+            1,
+            "the seam took effect"
+        );
+        let net = &receipt["coverage"]["net"];
+        assert_eq!(net["status"], "degraded", "{evidence}: {net}");
+        assert!(
+            net["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gap| gap["reason"] == "queue_full"),
+            "{evidence}: {net}"
+        );
+        assert!(
+            events(&run, "wrapper")
+                .iter()
+                .any(|event| event["fields"]["kind"] == "coverage_gap"),
+            "{evidence}"
+        );
+        assert!(
+            receipt["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error["code"] == "evidence_lost"),
+            "{evidence}"
+        );
+        if evidence == "strict" {
+            assert_eq!(receipt["outcome"]["cause"], "evidence_loss");
+            assert!(!run.stdout_text().contains("finished"));
+            assert!(elapsed < Duration::from_secs(7), "{elapsed:?}");
+        } else {
+            assert_eq!(receipt["outcome"]["kind"], "exited");
+            assert_eq!(receipt["outcome"]["code"], 0);
+            assert!(receipt["outcome"]["cause"].is_null());
+            assert_eq!(py_out(&run)["finished"], true);
+        }
+    }
+}
+
+/// Review r06 and the M06 survivor (§10: bounded, and "at capacity, reject
+/// excess requests with a safe overload reason"). Attempted, through the
+/// bridge: 128 connections each holding an incomplete request head; a
+/// 129th complete request through the bridge; a 129th directly on the proxy
+/// socket; then every held request completed; then one more. Verdict: the
+/// bridge carries 128 requests at once (each completes with 200); the 129th
+/// through the bridge is answered `503 bridge_overload` at once rather than
+/// left to time out, and counted in the receipt; the 129th at the proxy is
+/// the proxy's own `503 overload`; the bridge recovers.
+#[test]
+fn review_the_bridge_carries_its_whole_budget_and_turns_the_next_away_at_once() {
+    if !common::live() {
+        return;
+    }
+    const SCRIPT: &str = r#"
+import json, socket, sys, time
+port = int(sys.argv[1])
+def head(path):
+    return "GET http://127.0.0.1:%d/%s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n" % (port, path, port)
+def reply(sock, timeout=8):
+    sock.settimeout(timeout)
+    data = b""
+    try:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        data += b"<timeout>"
+    except OSError as e:
+        data += ("<%s>" % type(e).__name__).encode()
+    first = data.split(b"\r\n")[0].decode(errors="replace")
+    reason = None
+    for line in data.split(b"\r\n"):
+        if line.lower().startswith(b"x-ouro-proxy-reason:"):
+            reason = line.split(b":", 1)[1].strip().decode()
+    return first, reason
+out = {}
+held = []
+for i in range(128):
+    s = socket.create_connection(("127.0.0.1", 3128))
+    s.sendall(head("held%d" % i).encode())
+    held.append(s)
+time.sleep(0.5)
+t = time.monotonic()
+s = socket.create_connection(("127.0.0.1", 3128))
+try:
+    s.sendall((head("extra") + "\r\n").encode())
+except OSError:
+    pass
+out["bridge_129th"] = list(reply(s, 5)) + [round(time.monotonic() - t, 2)]
+s.close()
+d = socket.socket(socket.AF_UNIX)
+d.connect("/run/ouro/proxy/proxy.sock")
+try:
+    # The proxy may answer and close before the request is written.
+    d.sendall((head("direct") + "\r\n").encode())
+except OSError:
+    pass
+out["proxy_129th"] = list(reply(d, 5))
+d.close()
+for s in held:
+    s.sendall(b"\r\n")
+statuses = {}
+for s in held:
+    first, _ = reply(s)
+    statuses[first] = statuses.get(first, 0) + 1
+    s.close()
+out["held"] = statuses
+s = socket.create_connection(("127.0.0.1", 3128))
+s.sendall((head("after") + "\r\n").encode())
+out["after"] = reply(s)[0]
+print(json.dumps(out))
+"#;
+    let origin = HttpServer::start(b"ok".to_vec()).unwrap();
+    let o = origin.addr().port();
+    let c = case("agent");
+    let run = c
+        .jail
+        .arg("--allow-host")
+        .arg(format!("127.0.0.1:{o}"))
+        .timeout(Duration::from_secs(90))
+        .target(py(SCRIPT, &[&o.to_string()]))
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let out = py_out(&run);
+    assert_eq!(
+        out["held"],
+        serde_json::json!({"HTTP/1.1 200 OK": 128}),
+        "{out}"
+    );
+    let extra = &out["bridge_129th"];
+    assert!(
+        extra[0].as_str().unwrap().starts_with("HTTP/1.1 503"),
+        "{out}"
+    );
+    assert_eq!(extra[1], "bridge_overload", "{out}");
+    assert!(extra[2].as_f64().unwrap() < 1.0, "at once: {out}");
+    assert!(
+        out["proxy_129th"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("HTTP/1.1 503"),
+        "{out}"
+    );
+    assert_eq!(out["proxy_129th"][1], "overload", "{out}");
+    assert_eq!(out["after"], "HTTP/1.1 200 OK", "{out}");
+    let receipt = settled(&run);
+    assert_eq!(details(&receipt)["helpers"][0]["rejected_at_capacity"], 1);
+    let reasons: Vec<&str> = events(&run, "proxy")
+        .iter()
+        .map(|event| event["fields"]["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons.iter().filter(|r| **r == "relayed").count(),
+        129,
+        "{reasons:?}"
+    );
+    assert_eq!(reasons.iter().filter(|r| **r == "overload").count(), 1);
+    assert_eq!(origin.stop().len(), 129);
+}
+
+/// The M15 survivor (the bridge has a session of its own). Attempted: the
+/// target ignores SIGTERM, SIGHUP and SIGINT and sends each to its own
+/// process group (`kill(0, sig)`), reads the bridge's session and group,
+/// then makes a request through the bridge. Verdict: the bridge is in
+/// neither the target's session nor its group, survives all three, and
+/// still relays (200); no `bridge_exited` note.
+///
+/// Not `killpg(getpgrp(), sig)`: the target's group is the namespace init's,
+/// number 1, and `killpg(1, sig)` is `kill(-1, sig)`, a broadcast to every
+/// process the caller may signal, which reaches the bridge like the direct
+/// kill of N04 does (and fails closed the same way).
+#[test]
+fn review_a_signal_to_the_targets_process_group_does_not_reach_the_bridge() {
+    if !common::live() {
+        return;
+    }
+    let script = format!(
+        r#"
+import json, os, signal, sys, time, urllib.request
+{FIND_BRIDGE}
+url = sys.argv[1]
+for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(sig, signal.SIG_IGN)
+b = find_bridge()
+out = {{"bridge_sid": os.getsid(b), "bridge_pgid": os.getpgid(b),
+        "sid": os.getsid(0), "pgid": os.getpgrp()}}
+for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    os.kill(0, sig)
+time.sleep(0.3)
+state = open("/proc/%d/stat" % b).read().rsplit(")", 1)[1].split()[0]
+out["bridge_state"] = state
+out["get"] = urllib.request.urlopen(url, timeout=5).status
+print(json.dumps(out))
+"#
+    );
+    let origin = HttpServer::start(b"ok".to_vec()).unwrap();
+    let o = origin.addr().port();
+    let url = format!("http://127.0.0.1:{o}/m15");
+    let c = case("agent");
+    let run = c
+        .jail
+        .arg("--allow-host")
+        .arg(format!("127.0.0.1:{o}"))
+        .target(py(&script, &[&url]))
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let out = py_out(&run);
+    assert_ne!(out["bridge_sid"], out["sid"], "{out}");
+    assert_ne!(out["bridge_pgid"], out["pgid"], "{out}");
+    assert!(
+        ["S", "R"].contains(&out["bridge_state"].as_str().unwrap()),
+        "{out}"
+    );
+    assert_eq!(out["get"], 200, "{out}");
+    assert_eq!(origin.stop().len(), 1);
+    settled(&run);
+    assert!(helper_notes(&run, "bridge_exited").is_empty());
+}
+
+/// Review r03: what the target can do to the bridge. Attempted from the
+/// target: open the bridge's `/proc/<pid>/mem` read-only and read-write,
+/// `pidfd_getfd` its descriptor 3 (its listening socket), stop it with
+/// SIGSTOP and make a request, continue it and make another. Verdict: the
+/// memory and descriptor are out of reach (Yama's descendant rule: the
+/// bridge is not the target's descendant); a stopped bridge stalls requests
+/// (they time out, nothing falls back to direct egress) and a continued one
+/// relays again.
+#[test]
+fn review_the_target_cannot_reach_into_the_bridge() {
+    if !common::live() {
+        return;
+    }
+    let script = format!(
+        r#"
+import ctypes, errno, json, os, signal, sys, time, urllib.request
+{FIND_BRIDGE}
+url = sys.argv[1]
+out = {{}}
+b = find_bridge()
+for label, flags in (("mem_rdonly", os.O_RDONLY), ("mem_rdwr", os.O_RDWR)):
+    try:
+        os.close(os.open("/proc/%d/mem" % b, flags)); out[label] = "ok"
+    except OSError as e:
+        out[label] = errno.errorcode[e.errno]
+libc = ctypes.CDLL(None, use_errno=True)
+pidfd = libc.syscall(434, b, 0)
+out["pidfd_open"] = "ok" if pidfd >= 0 else errno.errorcode[ctypes.get_errno()]
+r = libc.syscall(438, pidfd, 3, 0)
+out["pidfd_getfd"] = "ok" if r >= 0 else errno.errorcode[ctypes.get_errno()]
+out["yama"] = open("/proc/sys/kernel/yama/ptrace_scope").read().strip()
+def get():
+    try:
+        return urllib.request.urlopen(url, timeout=2).status
+    except Exception as e:
+        return type(e).__name__
+out["before"] = get()
+os.kill(b, signal.SIGSTOP)
+out["stopped"] = get()
+os.kill(b, signal.SIGCONT)
+time.sleep(0.2)
+out["continued"] = get()
+print(json.dumps(out))
+"#
+    );
+    let origin = HttpServer::start(b"ok".to_vec()).unwrap();
+    let o = origin.addr().port();
+    let url = format!("http://127.0.0.1:{o}/r03");
+    let c = case("agent");
+    let run = c
+        .jail
+        .arg("--allow-host")
+        .arg(format!("127.0.0.1:{o}"))
+        .target(py(&script, &[&url]))
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let out = py_out(&run);
+    assert_eq!(out["yama"], "1", "the reference host's scope: {out}");
+    assert_eq!(out["mem_rdonly"], "EACCES", "{out}");
+    assert_eq!(out["mem_rdwr"], "EACCES", "{out}");
+    assert_eq!(out["pidfd_open"], "ok", "{out}");
+    assert_eq!(out["pidfd_getfd"], "EPERM", "{out}");
+    assert_eq!(out["before"], 200, "{out}");
+    assert_ne!(out["stopped"], 200, "{out}");
+    assert_eq!(out["continued"], 200, "{out}");
+    settled(&run);
+    assert!(helper_notes(&run, "bridge_exited").is_empty());
+    // The request made while the bridge was stopped may reach the origin
+    // once the bridge continues; nothing else does.
+    let seen = origin.stop().len();
+    assert!((2..=3).contains(&seen), "{seen}");
+}
+
+/// Review r02: X06 with observation off. Attempted: `--observe off`; before
+/// release the launcher's and the bridge's descriptor tables are read from
+/// outside; the target lists its descriptors and status. Verdict: the same
+/// holds as with observation on (three placed descriptors in the blocked
+/// launcher, stdio plus one listening socket in the bridge), the target
+/// holds exactly 0/1/2 and runs under two filters, the bridge under two.
+#[test]
+fn review_x06_holds_with_observation_off() {
+    if !common::live() {
+        return;
+    }
+    let c = case("agent");
+    // The sleep keeps the target alive until its exec is confirmed without
+    // an observer (J2: a target that ends at once leaves it unknown).
+    let steps = serde_json::json!([["fds"], ["status"], ["sleep", "300"]]);
+    let argv = c.script("x06off", &steps);
+    let mut spawned = c
+        .jail
+        .args(["--observe", "off"])
+        .gate()
+        .receipt()
+        .target(argv)
+        .spawn()
+        .unwrap();
+    let (message, receipt) = prepared(&mut spawned);
+    let native = details(&receipt);
+    let launcher = readlinks(native["launcher_pid"].as_i64().unwrap());
+    assert_eq!(
+        launcher.get(&18).map(String::as_str),
+        Some("anon_inode:seccomp notify")
+    );
+    assert!(launcher.get(&19).is_some_and(|l| l.starts_with("socket:")));
+    assert!(launcher.get(&20).is_some_and(|l| l.starts_with("pipe:")));
+    let bridge = readlinks(native["helpers"][0]["pid"].as_i64().unwrap());
+    assert_eq!(bridge.len(), 4, "{bridge:?}");
+    assert_eq!(native["helpers"][0]["seccomp_filters"], 2);
+    release(&mut spawned, &message, &receipt);
+    let run = spawned.wait().unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let lines = run.fixture_lines();
+    let fds: Vec<i64> = ops(&lines, "fds")[0]["args"]["fds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["fd"].as_i64().unwrap())
+        .collect();
+    assert_eq!(fds, [0, 1, 2], "{lines:#?}");
+    assert_eq!(
+        ops(&lines, "status")[0]["args"]["fields"]["Seccomp_filters"],
+        "2"
+    );
+    settled(&run);
+}
+
+/// Review r08: a stop under mediation load is bounded. Attempted: 32
+/// threads in continuous mediated connects when a 2 s wall limit ends the
+/// attempt, with observation on and off. Verdict: settled within a few
+/// seconds of the limit, the tree verified empty, cause `wall_expiry`.
+#[test]
+fn review_a_stop_under_mediation_load_is_bounded() {
+    if !common::live() {
+        return;
+    }
+    const SCRIPT: &str = r#"
+import socket, threading
+def worker():
+    while True:
+        s = socket.socket(socket.AF_UNIX)
+        try:
+            s.connect("/tmp/absent.sock")
+        except OSError:
+            pass
+        s.close()
+ts = [threading.Thread(target=worker, daemon=True) for _ in range(32)]
+[t.start() for t in ts]
+[t.join() for t in ts]
+"#;
+    for observe in ["on", "off"] {
+        let c = case("agent");
+        let started = std::time::Instant::now();
+        let run = c
+            .jail
+            .args(["--observe", observe, "--evidence", "best-effort"])
+            .args(["--limit", "wall=2s"])
+            .timeout(Duration::from_secs(60))
+            .target(py(SCRIPT, &[]))
+            .run()
+            .unwrap();
+        let elapsed = started.elapsed();
+        let receipt = settled(&run);
+        assert!(elapsed < Duration::from_secs(10), "{observe}: {elapsed:?}");
+        assert_eq!(receipt["outcome"]["cause"], "wall_expiry", "{observe}");
+        assert_eq!(receipt["lifetime"]["tree_empty"], true, "{observe}");
+    }
 }

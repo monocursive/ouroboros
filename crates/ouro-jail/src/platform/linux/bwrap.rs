@@ -1112,19 +1112,21 @@ pub fn inner_launch_command(
     narrow: bool,
     target: &[OsString],
 ) -> Vec<OsString> {
-    inner_launch_command_with(release_fd, error_fd, narrow, None, target)
+    inner_launch_command_with(release_fd, error_fd, narrow, None, None, target)
 }
 
 // J3-agent begin: the agent launcher's mediation and bridge options
 /// [`inner_launch_command`], plus, for `agent`, the descriptor numbers the
-/// launcher places its mediation listener and sock_diag socket at, and the
-/// bridge (jail-v1 §10).
+/// launcher places its mediation listener, sock_diag socket and the bridge's
+/// report pipe at (jail-v1 §10), and the signal mask the launcher restores
+/// before exec (bubblewrap unblocks SIGCHLD in its child).
 #[must_use]
 pub fn inner_launch_command_with(
     release_fd: RawFd,
     error_fd: RawFd,
     narrow: bool,
-    agent: Option<(RawFd, RawFd)>,
+    agent: Option<(RawFd, RawFd, RawFd)>,
+    sigmask: Option<u64>,
     target: &[OsString],
 ) -> Vec<OsString> {
     let mut out = vec![
@@ -1138,10 +1140,15 @@ pub fn inner_launch_command_with(
     if narrow {
         out.push(OsString::from("--narrow"));
     }
-    if let Some((listener, sockdiag)) = agent {
+    if let Some((listener, sockdiag, report)) = agent {
         out.push(OsString::from("--mediate"));
         out.push(OsString::from(format!("{listener},{sockdiag}")));
         out.push(OsString::from("--bridge"));
+        out.push(OsString::from(report.to_string()));
+    }
+    if let Some(mask) = sigmask {
+        out.push(OsString::from("--sigmask"));
+        out.push(OsString::from(format!("{mask:x}")));
     }
     // J3-agent end
     out.push(OsString::from("--"));
@@ -1575,7 +1582,14 @@ mod tests {
         let proxy_at = text.find(PROXY_INSIDE_PATH).unwrap();
         let jail_at = text.find(JAIL_INSIDE_PATH).unwrap();
         assert!(proxy_at < jail_at, "after every grant, before the binary");
-        let inner = inner_launch_command_with(12, 13, true, Some((18, 19)), &[OsString::from("x")]);
+        let inner = inner_launch_command_with(
+            12,
+            13,
+            true,
+            Some((18, 19, 20)),
+            Some(0x201),
+            &[OsString::from("x")],
+        );
         let joined: Vec<String> = inner
             .iter()
             .map(|part| part.to_string_lossy().into_owned())
@@ -1586,10 +1600,11 @@ mod tests {
                 .windows(2)
                 .any(|w| w == ["--mediate", "18,19"])
         );
-        assert!(joined[..sep].contains(&"--bridge".to_owned()));
+        assert!(joined[..sep].windows(2).any(|w| w == ["--bridge", "20"]));
+        assert!(joined[..sep].windows(2).any(|w| w == ["--sigmask", "201"]));
         assert_eq!(
             inner_launch_command(12, 13, false, &[OsString::from("x")]),
-            inner_launch_command_with(12, 13, false, None, &[OsString::from("x")])
+            inner_launch_command_with(12, 13, false, None, None, &[OsString::from("x")])
         );
     }
     // J3-agent end
