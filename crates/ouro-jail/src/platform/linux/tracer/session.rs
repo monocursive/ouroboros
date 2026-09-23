@@ -1787,7 +1787,8 @@ mod tests {
     /// namespace's `pid_max` all need `CAP_SYS_ADMIN` there), so the seam
     /// over the two `/proc` reads plays it. Every event names the birth its
     /// process had when the tracer took it on: a worker's result names its
-    /// leader's birth, not the worker's own; the old process's exec, result
+    /// leader's birth, not the worker's own, even when the worker is the
+    /// first task of the group the tracer sees; the old process's exec, result
     /// and exit name the old birth; the new task under the same number names
     /// its own, inherits no witnessed exec (so its death is no `Exit`) and
     /// no entry in flight.
@@ -1803,12 +1804,15 @@ mod tests {
         );
         table.lock().unwrap().insert(RECYCLED, (RECYCLED, 1000));
         table.lock().unwrap().insert(WORKER, (RECYCLED, 1500));
-        session.register(RECYCLED);
-        session.handle_exec(RECYCLED);
+        // The worker's first stop arrives before anything of its leader's:
+        // the group is taken on through the worker, and is still named by
+        // its leader's birth, not by the worker's own.
         session.register(WORKER);
+        session.register(RECYCLED);
         pend(&mut session, WORKER, 83, "/w/by-worker");
         session.handle_exit(WORKER, 0);
         session.handle_death(WORKER, 0);
+        session.handle_exec(RECYCLED);
         pend(&mut session, RECYCLED, 83, "/w/old");
         session.handle_exit(RECYCLED, 0);
         session.handle_death(RECYCLED, 0);
@@ -1841,8 +1845,8 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                (format!("exec {RECYCLED}"), Some(1000)),
                 (format!("mkdir {RECYCLED}/{WORKER}"), Some(1000)),
+                (format!("exec {RECYCLED}"), Some(1000)),
                 (format!("mkdir {RECYCLED}/{RECYCLED}"), Some(1000)),
                 (format!("exit {RECYCLED}"), Some(1000)),
                 (format!("unlink {RECYCLED}/{RECYCLED}"), Some(2000)),
