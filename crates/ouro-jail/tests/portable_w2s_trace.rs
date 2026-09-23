@@ -307,9 +307,16 @@ fn run(steps: &[Step], integrity: &'static str) -> Outcome {
     }
 }
 
-fn digest(receipt: &Value) -> String {
+/// The digests a receipt note may name for `receipt`: over its serialized
+/// bytes (this branch's base), or over its RFC 8785 canonical bytes (j4 from
+/// 62d09d40 on). Either identifies this receipt and no other.
+fn digests(receipt: &Value) -> [String; 2] {
     let typed: ouro_jail::records::Receipt = serde_json::from_value(receipt.clone()).unwrap();
-    ouro_jail::canonical::sha256_prefixed(&serde_json::to_vec(&typed).unwrap())
+    let canonical = ouro_jail::canonical::to_jcs(&serde_json::to_value(&typed).unwrap()).unwrap();
+    [
+        ouro_jail::canonical::sha256_prefixed(&serde_json::to_vec(&typed).unwrap()),
+        ouro_jail::canonical::sha256_prefixed(&canonical),
+    ]
 }
 
 /// The receipt says what the trace loss took: the wrapper source degraded,
@@ -372,10 +379,14 @@ fn j4_w2s_a_an_unsettled_attempts_final_receipt_note_uses_the_reserve() {
             .filter(|frame| frame["operation"] == "jail.receipt")
             .map(|frame| &frame["fields"]["phase"])
             .collect();
-        assert_eq!(
-            outcome.trace.last_receipt_note(),
-            Some((phase, digest(&outcome.receipt).as_str())),
-            "{integrity}: the trace ends on its last frame {:#} ({:?}); receipt notes: {notes:?}",
+        let note = outcome.trace.last_receipt_note();
+        assert!(
+            note.is_some_and(|(noted, digest)| noted == phase
+                && digests(&outcome.receipt)
+                    .iter()
+                    .any(|known| known == digest)),
+            "{integrity}: the trace must end on the final {phase} receipt's note, not on its \
+             last frame {:#} ({:?}); receipt notes: {notes:?}",
             outcome.trace.frames.last().unwrap(),
             outcome.trace.state
         );
@@ -422,6 +433,7 @@ fn j4_w2s_b_the_enforced_receipt_after_a_trace_loss_records_it_in_coverage() {
         .before_settlement
         .expect("the enforced receipt was on disk");
     assert_eq!(enforced["phase"], "enforced");
+    common::check_receipt(&enforced).unwrap_or_else(|error| panic!("{error}\n{enforced:#}"));
     assert_trace_loss_recorded("enforced", &enforced);
     assert_eq!(outcome.receipt["phase"], "settled");
     assert_eq!(

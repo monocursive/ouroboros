@@ -6,7 +6,8 @@
 //! identity" (§9.3). Nothing here signals a pid at all. The owner's pid is
 //! only read (`/proc/<pid>/stat`), and compared by birth time; the only kill
 //! is a write of `cgroup.kill` opened relative to a descriptor of the leaf
-//! directory whose `(device, inode)` the receipt registered.
+//! directory whose `(device, inode)` jail state registered (J4 wave 2, N7;
+//! a leaf registered by name only is never killed, see [`probe_named_leaf`]).
 //!
 //! How a recorded leaf is pinned ([`pin`]):
 //! 1. The path must be a direct child of this user's delegated subtree

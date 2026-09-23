@@ -8,8 +8,10 @@
 //!   bound per invocation (S7), identifies each attempt root without following
 //!   a link out of it, takes the lease only of a claimed root, reads jail state
 //!   and the last receipt, asks [`decide`] what may be done, does it through
-//!   the [`Host`], records it in jail state (S6), then runs the J3 resumption
-//!   of the proxy directory and vendor state exactly as before.
+//!   the [`Host`], records it in jail state (S6), removes the temporary files
+//!   a crash left when the owner is dead, then runs the J3 resumption of the
+//!   proxy directory and vendor state within what is left of the bound, which
+//!   gc's own verification of the registered leaf also permits (J4 wave 2).
 //! - [`decide`] is pure: [`Facts`] in, the next probe or a [`Decision`] out.
 //!   Every "may gc touch this" rule lives there and is tested without a host.
 //! - [`Host`] is the only place the host is asked or changed: the recorded
@@ -17,7 +19,7 @@
 //!   execution cgroup (Linux: `platform::linux::reconcile`).
 //!
 //! What `gc` never does: signal a pid (the only kill is `cgroup.kill` of a
-//! leaf pinned by the inode its receipt registered), touch a cgroup recorded
+//! leaf pinned by the inode jail state registered), touch a cgroup recorded
 //! in another boot, act while the recorded owner is alive, clean an attempt
 //! whose state or receipt it cannot read, clean a foreign platform's attempt,
 //! take the lease of an unclaimed root, or rewrite the supervisor's receipt
@@ -350,8 +352,9 @@ pub struct Entry {
     /// The temporary files (`.<name>.tmp`) found in the attempt root when
     /// gc held its lease, sorted: what a crashed durable replacement left.
     pub leftover_temp_files: Vec<String>,
-    /// What became of them: `removed`, `would_remove`, `retained: <why>` or
-    /// `failed: <why>`; `None` when there were none.
+    /// What became of them: `removed <count>`, `would_remove`,
+    /// `retained: <why>`, `pending: <why>` or `failed: <why>`; `None` when
+    /// there were none.
     pub temp_files: Option<String>,
     // J4 W2-S end
 }
@@ -392,7 +395,7 @@ pub struct StateView {
     pub owner: Option<OwnerRecord>,
     /// N7: the execution leaf the platform registered in jail state, by
     /// name before `mkdir` and by identity right after; the only source of
-    /// the leaf gc acts on ([`recorded_leaf`]).
+    /// the leaf gc acts on (`recorded_leaf`).
     pub leaf: Option<RegisteredLeaf>,
     /// Leaves an earlier pass removed (`gc_removed_cgroup`).
     pub gc_removed: Vec<LeafRecord>,
