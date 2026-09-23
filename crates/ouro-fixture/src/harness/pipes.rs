@@ -272,6 +272,183 @@ impl Drop for LineReader {
     }
 }
 
+/// How the test's end of the trace pipe behaves while the jail runs.
+///
+/// jail-v1 §13.3 makes a consumer that stops reading, reads slowly or goes
+/// away evidence loss that must never block the supervisor; these are the
+/// consumers that exercise it. Only [`TraceConsumer::Drain`] promises the
+/// whole stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceConsumer {
+    /// Read everything as it arrives, up to EOF. The default.
+    Drain,
+    /// Read nothing while the jail runs, so the pipe fills and stays full.
+    /// Once the jail has exited, read what the pipe still holds, which is
+    /// exactly what a consumer that came back late would find.
+    Never,
+    /// Read exactly this many bytes, then close the read end: a consumer that
+    /// disconnects, mid-frame when the count says so.
+    CloseAfter(usize),
+    /// Read at most `chunk` bytes, then pause, until EOF. The pause is the
+    /// consumer's behaviour under test, not a synchronisation.
+    Slow {
+        /// Bytes per read.
+        chunk: usize,
+        /// Pause after each read.
+        pause: Duration,
+    },
+}
+
+/// The raw bytes a [`TraceCapture`] took, and why it stopped.
+pub struct Captured {
+    /// Every byte read, in order, including a torn last frame.
+    pub bytes: Vec<u8>,
+    /// `None` when the consumer ended as its mode says (EOF, or its byte
+    /// count); otherwise why it stopped early, so the capture may be short.
+    pub error: Option<io::Error>,
+}
+
+/// Bound on one capture, so a runaway stream fails a test instead of the host.
+/// Above the local trace cap (§13.3, 64 MiB) with room to spare.
+pub const CAPTURE_MAX: usize = 128 * 1024 * 1024;
+
+/// The test's end of the trace pipe, read on a thread in one [`TraceConsumer`]
+/// mode. Bytes, not lines: whether the stream ends on a frame boundary is one
+/// of the facts under test, and a line splitter would hide it.
+pub struct TraceCapture {
+    exited: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<Captured>>,
+}
+
+impl TraceCapture {
+    #[must_use]
+    pub fn new(fd: OwnedFd, mode: TraceConsumer, deadline: Instant) -> TraceCapture {
+        let (exited, wait_exit) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let error = match mode {
+                TraceConsumer::Drain => read_until(&fd, &mut bytes, None, None, deadline),
+                TraceConsumer::Never => {
+                    // Disconnected is the signal: the harness drops the sender
+                    // once the jail has exited.
+                    let wait = deadline.saturating_duration_since(Instant::now());
+                    match wait_exit.recv_timeout(wait) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Some(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "the jail never exited while the consumer withheld reads",
+                        )),
+                        _ => read_until(&fd, &mut bytes, None, None, deadline),
+                    }
+                }
+                TraceConsumer::CloseAfter(count) => {
+                    read_until(&fd, &mut bytes, Some(count), None, deadline)
+                }
+                TraceConsumer::Slow { chunk, pause } => {
+                    read_until(&fd, &mut bytes, None, Some((chunk, pause)), deadline)
+                }
+            };
+            // The read end closes here, which is the disconnect for
+            // `CloseAfter` and plain EOF handling for the rest.
+            drop(fd);
+            Captured { bytes, error }
+        });
+        TraceCapture {
+            exited: Some(exited),
+            worker: Some(worker),
+        }
+    }
+
+    /// Tell the consumer that the jail has exited, and collect what it read.
+    pub fn finish(mut self) -> Captured {
+        self.exited.take();
+        match self.worker.take().map(std::thread::JoinHandle::join) {
+            Some(Ok(captured)) => captured,
+            _ => Captured {
+                bytes: Vec::new(),
+                error: Some(io::Error::other("the trace consumer panicked")),
+            },
+        }
+    }
+}
+
+impl Drop for TraceCapture {
+    fn drop(&mut self) {
+        self.exited.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Read into `bytes` until EOF, until `limit` bytes, or until the deadline.
+/// `pace` makes each read at most `chunk` bytes and pauses after it.
+fn read_until(
+    fd: &OwnedFd,
+    bytes: &mut Vec<u8>,
+    limit: Option<usize>,
+    pace: Option<(usize, Duration)>,
+    deadline: Instant,
+) -> Option<io::Error> {
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let want = limit.map_or(chunk.len(), |limit| limit - bytes.len());
+        let want = pace.map_or(want, |(size, _)| want.min(size.max(1)));
+        if want == 0 {
+            return None;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Some(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the trace exceeded the harness deadline",
+            ));
+        }
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = c_int::try_from(left.as_millis().min(50)).unwrap_or(50);
+        // SAFETY: one live pollfd; the worker exclusively owns its fd.
+        let ready = unsafe { libc::poll(&raw mut pfd, 1, millis.max(1)) };
+        if ready == 0 {
+            continue;
+        }
+        if ready < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Some(err);
+        }
+        let want = want.min(chunk.len());
+        // SAFETY: `chunk` is live and at least `want` bytes long, and the
+        // descriptor is readable and owned by this worker.
+        let n = unsafe { libc::read(fd.as_raw_fd(), chunk.as_mut_ptr().cast(), want) };
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Some(err);
+        }
+        if n == 0 {
+            return None;
+        }
+        let n = n.unsigned_abs();
+        if bytes.len() + n > CAPTURE_MAX {
+            return Some(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the trace exceeds the harness capture bound",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        if let Some((_, pause)) = pace {
+            std::thread::sleep(pause);
+        }
+    }
+}
+
 /// The writing end of the gate. Dropping it closes the gate.
 pub struct GateWriter {
     fd: OwnedFd,

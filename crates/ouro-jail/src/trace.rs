@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 
 use crate::records::{ErrorCode, ErrorStage, JailError, Remediation};
 
+pub mod readback;
+pub use readback::{Readback, TraceState, read_frames};
+
 /// Initial local trace cap (§13.3).
 pub const LOCAL_CAP: u64 = 64 * 1024 * 1024;
 /// Reserve inside the cap for bounded final gap and receipt notes (§13.3).

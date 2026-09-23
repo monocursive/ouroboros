@@ -14,6 +14,12 @@
 pub mod gate;
 pub mod http;
 pub mod pipes;
+// The product's own trace recogniser (jail-v1 §13.3, contract S8), included by
+// path so the harness and `ouro-jail` cannot disagree about what a torn frame
+// is. It depends on nothing but `std` and `serde_json`, and this crate does
+// not depend on `ouro-jail`.
+#[path = "../../../ouro-jail/src/trace/readback.rs"]
+pub mod readback;
 pub mod tempdir;
 pub mod unix_probe;
 
@@ -30,7 +36,8 @@ use serde_json::Value;
 
 pub use gate::{ExpectedPlan, GateOwner, Proposal, Release};
 pub use http::{HttpServer, SeenRequest};
-pub use pipes::{Direction, GateWriter, LineReader};
+pub use pipes::{Captured, Direction, GateWriter, LineReader, TraceCapture, TraceConsumer};
+pub use readback::{Readback, TraceState, read_frames};
 pub use tempdir::TempDir;
 pub use unix_probe::{ProbeKind, UnixProbe};
 
@@ -295,6 +302,8 @@ pub struct Jail {
     kinds: Vec<Kind>,
     receipt: Option<PathBuf>,
     stdin: Option<Vec<u8>>,
+    trace_consumer: TraceConsumer,
+    file_size_limit: Option<u64>,
     pub timeout: Duration,
 }
 
@@ -326,6 +335,8 @@ impl Jail {
             kinds: Vec::new(),
             receipt: None,
             stdin: None,
+            trace_consumer: TraceConsumer::Drain,
+            file_size_limit: None,
             timeout: Duration::from_secs(60),
         })
     }
@@ -404,6 +415,24 @@ impl Jail {
         self
     }
 
+    /// Ask for `--trace-fd` read by this kind of consumer (§13.3 pressure).
+    pub fn trace_consumer(mut self, consumer: TraceConsumer) -> Jail {
+        if !self.kinds.contains(&Kind::Trace) {
+            self.kinds.push(Kind::Trace);
+        }
+        self.trace_consumer = consumer;
+        self
+    }
+
+    /// Run the jail with `RLIMIT_FSIZE` lowered to `bytes` and `SIGXFSZ`
+    /// ignored, so a write that crosses the limit is short and the next one
+    /// fails with `EFBIG`: a real local write failure without privileges.
+    /// Only the soft limit moves; the target inherits it too.
+    pub fn file_size_limit(mut self, bytes: u64) -> Jail {
+        self.file_size_limit = Some(bytes);
+        self
+    }
+
     /// Ask for `--receipt <root>/receipt.json`.
     pub fn receipt(mut self) -> Jail {
         self.receipt = Some(self.root.path().join("receipt.json"));
@@ -443,6 +472,8 @@ impl Jail {
             kinds,
             receipt,
             stdin,
+            trace_consumer,
+            file_size_limit,
             timeout,
         } = self;
         let deadline = std::time::Instant::now() + timeout;
@@ -497,9 +528,16 @@ impl Jail {
         }
         // SAFETY: the closure runs between `fork` and `exec` in the child. It
         // calls only `dup2` and `fcntl`, both async-signal-safe, over a plan
-        // built before the fork whose targets collide with no source.
+        // built before the fork whose targets collide with no source, and,
+        // when asked, `limit_file_size` (see its own safety note).
         unsafe {
-            cmd.pre_exec(move || pipes::place_in_child(&plan));
+            cmd.pre_exec(move || {
+                pipes::place_in_child(&plan)?;
+                match file_size_limit {
+                    Some(bytes) => limit_file_size(bytes),
+                    None => Ok(()),
+                }
+            });
         }
 
         let mut child = cmd.spawn()?;
@@ -555,7 +593,7 @@ impl Jail {
 
         let mut control = None;
         let mut gate = None;
-        let mut trace_reader = None;
+        let mut trace_capture = None;
         for (kind, fd) in kinds.iter().zip(ours) {
             match kind {
                 Kind::Control => {
@@ -566,10 +604,7 @@ impl Jail {
                 }
                 Kind::Gate => gate = Some(GateWriter::new(fd)),
                 Kind::Trace => {
-                    let mut r = LineReader::new(fd);
-                    r.timeout = timeout;
-                    r.set_deadline(deadline);
-                    trace_reader = Some(r);
+                    trace_capture = Some(TraceCapture::new(fd, trace_consumer, deadline));
                 }
             }
         }
@@ -582,7 +617,7 @@ impl Jail {
             child,
             control,
             gate,
-            trace_reader,
+            trace_capture,
             stdout,
             stderr,
             stdin_writer,
@@ -597,6 +632,41 @@ impl Jail {
     pub fn run(self) -> io::Result<Run> {
         self.spawn()?.wait()
     }
+}
+
+/// Lower the soft `RLIMIT_FSIZE` and ignore `SIGXFSZ`, in the forked child.
+///
+/// # Safety
+///
+/// Runs between `fork` and `exec`. `sigaction` is async-signal-safe. POSIX
+/// does not list `setrlimit`, but it is a single system call in every libc
+/// this runs on (glibc: `prlimit64`; macOS: `setrlimit`) that takes no lock
+/// and allocates nothing; both structures live on this stack frame.
+unsafe fn limit_file_size(bytes: u64) -> io::Result<()> {
+    // SAFETY: a zeroed `sigaction` with `SIG_IGN` is a valid disposition.
+    let mut ignore: libc::sigaction = unsafe { std::mem::zeroed() };
+    ignore.sa_sigaction = libc::SIG_IGN;
+    // SAFETY: both pointers are live for the call; the old action is not read.
+    if unsafe { libc::sigaction(libc::SIGXFSZ, &raw const ignore, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live, writable rlimit for the call.
+    if unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &raw mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    limit.rlim_cur = libc::rlim_t::try_from(bytes).unwrap_or(limit.rlim_max);
+    if limit.rlim_max != libc::RLIM_INFINITY && limit.rlim_cur > limit.rlim_max {
+        limit.rlim_cur = limit.rlim_max;
+    }
+    // SAFETY: as above, a live rlimit read back from the kernel and narrowed.
+    if unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn nonblocking(fd: RawFd) -> io::Result<()> {
@@ -642,7 +712,7 @@ pub struct Spawned {
     child: Child,
     control: Option<LineReader>,
     gate: Option<GateWriter>,
-    trace_reader: Option<LineReader>,
+    trace_capture: Option<TraceCapture>,
     stdout: Option<std::thread::JoinHandle<io::Result<Vec<u8>>>>,
     stderr: Option<std::thread::JoinHandle<io::Result<Vec<u8>>>>,
     stdin_writer: Option<std::thread::JoinHandle<io::Result<()>>>,
@@ -743,23 +813,44 @@ impl Spawned {
             }
         }
 
+        // §13.3 readback: the trace is classified by the product's own
+        // recogniser. A torn LAST frame is a fact a test may be about (a
+        // writer that stopped mid-frame, a consumer that left mid-frame): the
+        // run is returned, the guarded accessor refuses to answer questions of
+        // absence over it, and the frames before it stay available. A torn
+        // frame followed by more bytes is corrupt, which no §13.3 writer
+        // produces, and invalidates the run as a malformed transcript does.
         let mut trace_events = Vec::new();
-        if let Some(mut reader) = self.trace_reader.take() {
-            let drained = reader.drain();
-            if let Some(e) = &drained.error {
+        let mut trace_readback = None;
+        let mut trace_bytes = Vec::new();
+        if let Some(capture) = self.trace_capture.take() {
+            let captured = capture.finish();
+            if let Some(e) = &captured.error {
                 channels_timed_out.push(format!("trace: {e}"));
             }
-            for line in drained.lines {
-                if line.is_empty() {
-                    continue;
-                }
-                trace_events.push(serde_json::from_slice::<Value>(&line).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("malformed trace event: {e}"),
-                    )
-                })?);
+            let readback = read_frames(&captured.bytes);
+            if readback.state == TraceState::Corrupt {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "malformed trace event: the line at byte {:?} is not one JSON \
+                         object and more bytes follow it",
+                        readback.bad_offset
+                    ),
+                ));
             }
+            if readback.state != TraceState::Complete {
+                eprintln!(
+                    "ouro-fixture harness: the trace is {:?} at byte {:?}; only the {} \
+                     frame(s) before that point are in `trace_events`",
+                    readback.state,
+                    readback.bad_offset,
+                    readback.frames.len()
+                );
+            }
+            trace_events.clone_from(&readback.frames);
+            trace_readback = Some(readback);
+            trace_bytes = captured.bytes;
         }
 
         if !channels_timed_out.is_empty() {
@@ -819,6 +910,8 @@ impl Spawned {
             stderr,
             control_messages,
             trace_events,
+            trace_readback,
+            trace_bytes,
             data_dir,
             receipt_path: self.receipt.take(),
             gate_closed_by_harness,
@@ -836,7 +929,15 @@ pub struct Run {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub control_messages: Vec<Value>,
+    /// The complete trace frames, in order, up to the first line that is not
+    /// one (see `trace_readback`). Prefer [`Run::trace_events`], which
+    /// refuses a partial transcript.
     pub trace_events: Vec<Value>,
+    /// How the recogniser classified the trace bytes, when a trace was asked
+    /// for: complete, visibly incomplete (a torn last line) or corrupt.
+    pub trace_readback: Option<Readback>,
+    /// The raw trace bytes the consumer took, torn tail included.
+    pub trace_bytes: Vec<u8>,
     pub data_dir: PathBuf,
     pub receipt_path: Option<PathBuf>,
     /// True when the harness, not the test, closed the gate at `wait` time.
@@ -955,11 +1056,63 @@ impl Run {
         &self.control_messages
     }
 
-    /// The whole trace transcript. Panics on a partial one.
+    /// The whole trace transcript. Panics on a partial one: a channel that
+    /// never reached EOF, or a trace whose bytes are not complete frames.
     #[must_use]
     pub fn trace_events(&self) -> &[Value] {
         self.assert_channels_complete();
+        if let Err(message) = trace_guard(self.trace_readback.as_ref()) {
+            panic!("{message}");
+        }
         &self.trace_events
+    }
+
+    /// Every local `trace.ndjson` under the private data directory, with the
+    /// recogniser's classification of its bytes. A file that cannot be read
+    /// panics: an absent classification must not look like a clean trace.
+    #[must_use]
+    pub fn local_traces(&self) -> Vec<(PathBuf, Readback)> {
+        let mut found = Vec::new();
+        collect_named(&self.data_dir, OsStr::new("trace.ndjson"), &mut found);
+        found
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(&path)
+                    .unwrap_or_else(|e| panic!("{} cannot be read: {e}", path.display()));
+                let readback = read_frames(&bytes);
+                (path, readback)
+            })
+            .collect()
+    }
+}
+
+/// Whether a trace readback is a complete transcript. `Err` is the message
+/// the caller must panic with.
+pub fn trace_guard(readback: Option<&Readback>) -> Result<(), String> {
+    match readback {
+        Some(readback) if readback.state != TraceState::Complete => Err(format!(
+            "the trace is {:?} at byte {:?}, so the {} frame(s) before that point are a \
+             partial transcript: an absence proves nothing here. Inspect \
+             `trace_readback` directly if that is what the test means to do.",
+            readback.state,
+            readback.bad_offset,
+            readback.frames.len()
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn collect_named(dir: &Path, name: &OsStr, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_named(&path, name, out);
+        } else if path.file_name() == Some(name) {
+            out.push(path);
+        }
     }
 }
 
@@ -1226,6 +1379,132 @@ mod tests {
             .collect();
         assert_eq!(phases.len(), 3, "got {phases:?}");
         assert!(phases.contains(&"settled"));
+    }
+
+    /// A stand-in "jail" that writes one complete frame and a torn one to the
+    /// trace descriptor the harness passes it, then exits.
+    fn torn_trace_writer() -> Jail {
+        Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", r#"printf '{"n":1}\n{"n":2,"pa' >&"$2""#, "sh"])
+            .trace()
+    }
+
+    #[test]
+    fn j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run() {
+        let run = torn_trace_writer().run().expect(
+            "a torn last line is a recognisable fact about the trace, not a harness failure",
+        );
+        assert_eq!(run.trace_events, vec![serde_json::json!({"n": 1})]);
+        let readback = run.trace_readback.as_ref().expect("a trace was requested");
+        assert_eq!(readback.state, TraceState::Incomplete);
+        assert_eq!(readback.bad_line, b"{\"n\":2,\"pa");
+        assert_eq!(run.trace_bytes, b"{\"n\":1}\n{\"n\":2,\"pa");
+        let guarded =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.trace_events().len()));
+        assert!(
+            guarded.is_err(),
+            "the guarded accessor must refuse an incomplete transcript"
+        );
+    }
+
+    #[test]
+    fn a_torn_frame_followed_by_more_frames_still_invalidates_the_run() {
+        let result = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", r#"printf '{"n":1}\n{"n\n{"n":3}\n' >&"$2""#, "sh"])
+            .trace()
+            .run();
+        assert!(
+            matches!(result, Err(ref e) if e.kind() == io::ErrorKind::InvalidData),
+            "a corrupt trace was accepted"
+        );
+    }
+
+    #[test]
+    fn a_consumer_that_closes_after_n_bytes_takes_exactly_those_bytes() {
+        let run = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", r#"printf '{"n":1}\n{"n":2}\n{"n":3}\n' >&"$2""#, "sh"])
+            .trace_consumer(TraceConsumer::CloseAfter(11))
+            .run()
+            .expect("the stand-in runs");
+        assert_eq!(run.trace_bytes, b"{\"n\":1}\n{\"n");
+        let readback = run.trace_readback.as_ref().unwrap();
+        assert_eq!(readback.state, TraceState::Incomplete);
+        assert_eq!(readback.frames.len(), 1);
+        assert!(
+            run.channels_timed_out.is_empty(),
+            "leaving is not a timeout"
+        );
+    }
+
+    #[test]
+    fn a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit() {
+        let run = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", r#"printf '{"n":1}\n{"n":2}\n' >&"$2""#, "sh"])
+            .trace_consumer(TraceConsumer::Never)
+            .run()
+            .expect("the stand-in runs");
+        assert_eq!(run.trace_bytes, b"{\"n\":1}\n{\"n\":2}\n");
+        assert_eq!(run.trace_events().len(), 2);
+    }
+
+    #[test]
+    fn a_slow_consumer_still_reads_to_eof() {
+        let run = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", r#"printf '{"n":1}\n{"n":2}\n' >&"$2""#, "sh"])
+            .trace_consumer(TraceConsumer::Slow {
+                chunk: 3,
+                pause: Duration::from_millis(1),
+            })
+            .run()
+            .expect("the stand-in runs");
+        assert_eq!(run.trace_events().len(), 2);
+    }
+
+    #[test]
+    fn the_trace_guard_refuses_an_incomplete_or_corrupt_trace_only() {
+        assert!(trace_guard(None).is_ok());
+        assert!(trace_guard(Some(&read_frames(b"{\"n\":1}\n"))).is_ok());
+        let torn = trace_guard(Some(&read_frames(b"{\"n\":1}\n{"))).unwrap_err();
+        assert!(torn.contains("Incomplete"), "{torn}");
+        assert!(torn.contains("partial transcript"), "{torn}");
+        let corrupt = trace_guard(Some(&read_frames(b"{\n{\"n\":1}\n"))).unwrap_err();
+        assert!(corrupt.contains("Corrupt"), "{corrupt}");
+    }
+
+    #[test]
+    fn a_file_size_limit_makes_a_real_short_write_then_efbig() {
+        // The stand-in writes 3000 bytes to a regular file under a 1000-byte
+        // limit; with SIGXFSZ ignored it survives, and the file stops at the
+        // limit (Linux writes up to the limit, macOS refuses the whole write).
+        let jail = Jail::with_program("/bin/sh").expect("a private harness root");
+        let file = jail.root().join("limited");
+        let run = jail
+            .args([
+                OsStr::new("-c"),
+                OsStr::new(r#"head -c 3000 /dev/zero > "$1"; echo "status=$?""#),
+                OsStr::new("sh"),
+                file.as_os_str(),
+            ])
+            .file_size_limit(1000)
+            .run()
+            .expect("the stand-in runs");
+        let written = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        assert!(written <= 1000, "the limit held: {written} bytes");
+        assert!(
+            run.stdout_text().contains("status="),
+            "SIGXFSZ was ignored, so the shell lived to report: {}",
+            run.stderr_text()
+        );
+        assert!(
+            !run.stdout_text().contains("status=0"),
+            "the write failed: {}",
+            run.stdout_text()
+        );
     }
 
     #[test]

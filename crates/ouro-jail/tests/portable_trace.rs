@@ -177,3 +177,89 @@ fn a_closed_reader_is_evidence_loss_rather_than_a_signal() {
     assert_eq!(error.code, ErrorCode::EvidenceLost);
     assert!(sink.loss().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// S8: the readback recogniser (§13.3 "A corrupted/truncated last frame must be
+// recognizable at readback").
+// ---------------------------------------------------------------------------
+
+#[test]
+fn j4_s8_the_recogniser_tells_complete_incomplete_and_corrupt_apart() {
+    use ouro_jail::trace::{TraceState, read_frames};
+
+    let complete = read_frames(b"{\"n\":1}\n{\"n\":2}\n");
+    assert_eq!(complete.state, TraceState::Complete);
+    assert_eq!(complete.frames.len(), 2);
+    assert_eq!(complete.bad_offset, None);
+
+    let empty = read_frames(b"");
+    assert_eq!(
+        empty.state,
+        TraceState::Complete,
+        "no frame is not a torn frame"
+    );
+    assert!(empty.frames.is_empty());
+
+    // A torn last frame, with no LF.
+    let torn = read_frames(b"{\"n\":1}\n{\"n\":2,\"pa");
+    assert_eq!(torn.state, TraceState::Incomplete);
+    assert_eq!(torn.frames, vec![serde_json::json!({"n": 1})]);
+    assert_eq!(torn.bad_offset, Some(8));
+    assert_eq!(torn.bad_line, b"{\"n\":2,\"pa");
+
+    // A last line that happens to be a whole object but has no LF is still
+    // not a frame: the writer never finished it.
+    let unterminated = read_frames(b"{\"n\":1}\n{\"n\":2}");
+    assert_eq!(unterminated.state, TraceState::Incomplete);
+    assert_eq!(unterminated.frames.len(), 1);
+
+    // A torn last frame that a later LF happened to close.
+    let closed = read_frames(b"{\"n\":1}\n{\"n\":2,\"pa\n");
+    assert_eq!(closed.state, TraceState::Incomplete);
+    assert_eq!(closed.frames.len(), 1);
+
+    // A torn frame followed by more frames: corrupt, and nothing after the
+    // torn line is interpreted.
+    let corrupt = read_frames(b"{\"n\":1}\n{\"n\":2,\"pa{\"n\":3}\n{\"n\":4}\n");
+    assert_eq!(corrupt.state, TraceState::Corrupt);
+    assert_eq!(corrupt.frames, vec![serde_json::json!({"n": 1})]);
+    assert_eq!(corrupt.bad_offset, Some(8));
+
+    // A frame is an object: a bare value or an empty line is not one.
+    assert_eq!(read_frames(b"1\n{\"n\":1}\n").state, TraceState::Corrupt);
+    assert_eq!(read_frames(b"\n{\"n\":1}\n").state, TraceState::Corrupt);
+    // Two objects on one line are not one frame.
+    assert_eq!(
+        read_frames(b"{\"n\":1}{\"n\":2}\n{\"n\":3}\n").state,
+        TraceState::Corrupt
+    );
+}
+
+#[test]
+fn j4_s8_the_last_receipt_note_is_read_only_from_a_complete_trace() {
+    use ouro_jail::trace::read_frames;
+
+    let note = serde_json::json!({
+        "source": "wrapper",
+        "operation": "jail.receipt",
+        "fields": {"phase": "settled", "receipt_digest": "sha256:ab"}
+    });
+    let mut bytes = serde_json::to_vec(&serde_json::json!({"source": "audit"})).unwrap();
+    bytes.push(b'\n');
+    bytes.extend(serde_json::to_vec(&note).unwrap());
+    bytes.push(b'\n');
+    assert_eq!(
+        read_frames(&bytes).last_receipt_note(),
+        Some(("settled", "sha256:ab"))
+    );
+
+    // A trace that ends on some other frame has no final note.
+    let mut prefix = serde_json::to_vec(&note).unwrap();
+    prefix.push(b'\n');
+    prefix.extend(b"{\"source\":\"audit\"}\n");
+    assert_eq!(read_frames(&prefix).last_receipt_note(), None);
+
+    // A torn tail after the note: the note is not the last line.
+    bytes.extend(b"{\"source\":");
+    assert_eq!(read_frames(&bytes).last_receipt_note(), None);
+}
