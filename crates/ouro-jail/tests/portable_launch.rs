@@ -1684,9 +1684,12 @@ fn p04_a_source_below_a_directory_others_can_write_refuses() {
     private_dir(&shared);
     fixture_file(&shared.join("token"), b"t");
     assert!(stage_one_source(&fixture, &shared.join("token")).is_ok());
-    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o770)).unwrap();
+    // World-writable: "others" on every host. (A group-writable parent is
+    // others only when the group is not the owner's private group, which
+    // depends on the host's accounts; state.rs tests that rule.)
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
     let (error, _) = stage_one_source(&fixture, &shared.join("token"))
-        .expect_err("a group-writable parent lets someone else swap the source");
+        .expect_err("a parent anyone can write lets someone else swap the source");
     assert!(
         error.message.contains("writable by others"),
         "{}",
@@ -2344,7 +2347,8 @@ fn rm24_rm25_an_oversized_launch_file_or_a_shared_launch_directory_refuses() {
             .is_ok()
     );
     let launch_dir = fixture.config.join("launch");
-    std::fs::set_permissions(&launch_dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+    // World-writable, so it is "others" whatever the host's groups are.
+    std::fs::set_permissions(&launch_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
     let error = refused(
         fixture.plan(launch_args("fixture", &fixture.workspace)),
         "shared",

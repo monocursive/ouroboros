@@ -300,8 +300,8 @@ mod accounts {
             && !facts.another_primary
     }
 
-    /// `getpwent` walks one process-wide cursor.
-    static PASSWD_CURSOR: Mutex<()> = Mutex::new(());
+    /// `getpwent` walks one process-wide position.
+    static PASSWD_WALK: Mutex<()> = Mutex::new(());
 
     pub(super) fn group_is_private_to(uid: u32, gid: u32) -> bool {
         let Some((name, primary)) = owner(uid) else {
@@ -360,11 +360,11 @@ mod accounts {
             return None;
         }
         let mut out = Vec::new();
-        let mut cursor = entry.gr_mem;
-        while !cursor.is_null() {
+        let mut slot = entry.gr_mem;
+        while !slot.is_null() {
             // SAFETY: gr_mem is a NULL-terminated array of pointers into
-            // `buffer`; `cursor` has not passed its terminator.
-            let member = unsafe { *cursor };
+            // `buffer`; `slot` has not passed its terminator.
+            let member = unsafe { *slot };
             if member.is_null() {
                 break;
             }
@@ -373,17 +373,17 @@ mod accounts {
             out.push(unsafe { CStr::from_ptr(member) }.to_bytes().to_vec());
             // SAFETY: the array continues until its NULL terminator, which
             // has not been reached.
-            cursor = unsafe { cursor.add(1) };
+            slot = unsafe { slot.add(1) };
         }
         Some(out)
     }
 
     fn another_primary(uid: u32, gid: u32) -> bool {
-        let _guard = PASSWD_CURSOR
+        let _guard = PASSWD_WALK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut found = false;
-        // SAFETY: setpwent/getpwent/endpwent use a process-wide cursor, which
+        // SAFETY: setpwent/getpwent/endpwent share one process-wide position, which
         // the mutex serializes within this process; each entry is read
         // before the next call.
         unsafe {
