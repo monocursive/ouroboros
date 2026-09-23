@@ -1692,6 +1692,14 @@ fn r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount() {
 /// R17: a filter that traces a number outside the closed set. The tracer says
 /// the filter is not its own instead of guessing, and does not wedge the
 /// tracee.
+///
+/// Since J4 D1 the tracer tells whose a stop is by its trace data: a stop
+/// carrying the narrowing filter's own data on a number it never traces
+/// means the installed program is not the observer's, while one with other
+/// data was asked for by another filter (a child's own `SECCOMP_RET_TRACE`)
+/// and is continued untouched. This filter therefore carries the observer's
+/// data, which is the case this test pins; the other is
+/// `observer_j4_linux::j4_d1_a_child_trace_request_is_continued_not_mislabelled`.
 #[test]
 fn r17_a_foreign_filter_is_named_not_guessed() {
     let _serial = serial();
@@ -1731,7 +1739,7 @@ fn r17_a_foreign_filter_is_named_not_guessed() {
             code: 0x06,
             jt: 0,
             jf: 0,
-            k: 0x7ff0_0000,
+            k: 0x7ff0_0000 | u32::from(ouro_jail::platform::linux::tracer::NARROWING_TRACE_DATA),
         },
     ];
     let foreign = work.path("foreign.bin");
@@ -2146,6 +2154,10 @@ fn r26_a_tracee_cannot_manufacture_the_observers_loss() {
 
 /// R27: a seccomp stop whose `nr` belongs to another architecture's table is
 /// never labelled from this one. i386 42 is `pipe`; x86_64 42 is `connect`.
+///
+/// Since J4 D2 such a stop is labelled foreign (`foreign_abi`), not
+/// `unexpected_trace_stop`: the narrowing filter itself now stops on every
+/// foreign call, so the stop is expected and the gap says what it is.
 #[test]
 fn r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table() {
     let _serial = serial();
@@ -2198,11 +2210,15 @@ fn r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table() {
         observed.describe()
     );
     assert!(
-        observed.summary.loss.unexpected_trace_stops >= 1,
+        observed.summary.loss.foreign_abi >= 1,
         "the stop from another architecture must be a named gap: {:?}",
         observed.summary.loss
     );
-    assert!(observed.has_gap(GapReason::UnexpectedTraceStop));
+    assert!(observed.has_gap(GapReason::ForeignAbi));
+    assert_eq!(
+        observed.summary.loss.unexpected_trace_stops, 0,
+        "and it is labelled foreign, not as a filter that is not the observer's"
+    );
 }
 
 /// R28: two threads of one process making concurrent covered calls. Each

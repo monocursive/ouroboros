@@ -112,6 +112,10 @@ pub const NR_SOCKET: u32 = 41;
 pub const NR_SOCKETPAIR: u32 = 53;
 /// `ioctl`.
 pub const NR_IOCTL: u32 = 16;
+/// `seccomp`.
+pub const NR_SECCOMP: u32 = 317;
+/// `SECCOMP_FILTER_FLAG_NEW_LISTENER`, tested in argument 1 of `seccomp`.
+pub const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
 
 /// `AF_UNIX`, compared against argument 0 of `socket` and `socketpair`.
 pub const AF_UNIX: u32 = 1;
@@ -160,6 +164,7 @@ const L_SOCKET: &str = "socket_family";
 const L_NETLINK: &str = "netlink_protocol";
 const L_DENY_FAMILY: &str = "deny_eafnosupport";
 const L_IOCTL: &str = "ioctl_arg";
+const L_SECCOMP_FLAGS: &str = "seccomp_flags";
 
 /// What distinguishes one contained baseline from another. Every baseline
 /// shares the architecture check, the x32 denial, `clone3` as `ENOSYS` and
@@ -175,6 +180,13 @@ struct Shape {
     af_unix_denied: bool,
     /// The netlink protocols `socket` may open; none for `tool`.
     netlink_protocols: &'static [u32],
+    /// Deny `seccomp(2)` asking for `SECCOMP_FILTER_FLAG_NEW_LISTENER` (J4
+    /// D1). A child's own notification listener outranks the observer's
+    /// trace stop, and a `CONTINUE` reply runs the call unobserved. Not for
+    /// `agent`: its launcher installs the jail's own mediation listener
+    /// after this baseline, and that one makes a child's second listener
+    /// fail with `EBUSY`.
+    notification_listener_denied: bool,
 }
 
 /// Build the `tool` baseline filter.
@@ -193,6 +205,7 @@ pub fn tool_baseline() -> Result<Program, BpfError> {
         clone_namespaces_denied: true,
         af_unix_denied: true,
         netlink_protocols: &[],
+        notification_listener_denied: true,
     })
 }
 
@@ -218,6 +231,9 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
     asm.jeq(NR_SOCKET, Some(L_SOCKET), None);
     asm.jeq(NR_SOCKETPAIR, Some(L_SOCKET), None);
     asm.jeq(NR_IOCTL, Some(L_IOCTL), None);
+    if shape.notification_listener_denied {
+        asm.jeq(NR_SECCOMP, Some(L_SECCOMP_FLAGS), None);
+    }
     asm.ja(L_ALLOW);
 
     if shape.clone_namespaces_denied {
@@ -260,6 +276,16 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
         .ld_w_abs(sd_arg_low(1))
         .jeq(TIOCSTI, Some(L_DENY_EPERM), None)
         .ja(L_ALLOW);
+
+    if shape.notification_listener_denied {
+        // seccomp: deny a notification listener. `flags` is an `unsigned
+        // int`, so its low word is the whole question; a plain filter, the
+        // query operations and strict mode stay allowed.
+        asm.label(L_SECCOMP_FLAGS)
+            .ld_w_abs(sd_arg_low(1))
+            .jset(SECCOMP_FILTER_FLAG_NEW_LISTENER, Some(L_DENY_EPERM), None)
+            .ja(L_ALLOW);
+    }
 
     asm.label(L_ALLOW).ret(SECCOMP_RET_ALLOW);
     asm.label(L_DENY_EPERM).ret(ret_errno(LINUX_EPERM));
@@ -379,6 +405,7 @@ pub fn agent_baseline(variant: AgentVariant) -> Result<Program, BpfError> {
         clone_namespaces_denied: variant == AgentVariant::UnprivilegedInner,
         af_unix_denied: false,
         netlink_protocols: &[NETLINK_SOCK_DIAG],
+        notification_listener_denied: false,
     })
 }
 
@@ -601,6 +628,11 @@ pub fn tool_baseline_table() -> String {
         "{:<22} {:<6} EPERM when args[1] == 0x{TIOCSTI:04x} (TIOCSTI)",
         "ioctl", NR_IOCTL
     );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} EPERM when args[1] & 0x{SECCOMP_FILTER_FLAG_NEW_LISTENER:08x} (SECCOMP_FILTER_FLAG_NEW_LISTENER)",
+        "seccomp", NR_SECCOMP
+    );
     out.push_str("\neverything else        ALLOW\n");
     if let Ok(prog) = tool_baseline() {
         let _ = writeln!(out, "\ninstructions: {}", prog.len());
@@ -795,7 +827,14 @@ mod tests {
         for (name, _) in DENY_EPERM {
             assert!(table.contains(name), "table omits {name}");
         }
-        for name in ["clone3", "clone", "socket", "socketpair", "ioctl"] {
+        for name in [
+            "clone3",
+            "clone",
+            "socket",
+            "socketpair",
+            "ioctl",
+            "seccomp",
+        ] {
             assert!(table.contains(name), "table omits {name}");
         }
         assert!(table.contains(&tool_baseline().unwrap().digest()));
@@ -807,7 +846,14 @@ mod tests {
         for (name, nr) in DENY_EPERM {
             assert!(seen.insert(*nr), "{name} ({nr}) listed twice");
         }
-        for nr in [NR_CLONE3, NR_CLONE, NR_SOCKET, NR_SOCKETPAIR, NR_IOCTL] {
+        for nr in [
+            NR_CLONE3,
+            NR_CLONE,
+            NR_SOCKET,
+            NR_SOCKETPAIR,
+            NR_IOCTL,
+            NR_SECCOMP,
+        ] {
             assert!(seen.insert(nr), "{nr} listed twice");
         }
     }
@@ -1125,6 +1171,69 @@ mod tests {
         }
     }
 
+    /// J4 D1: `tool` and `build` refuse `seccomp(2)` asking for a
+    /// notification listener. A child's own listener outranks the observer's
+    /// trace stop, and a `CONTINUE` reply runs the call unobserved. Only the
+    /// flag decides: the other operations and a plain filter stay allowed,
+    /// and the flags argument is an `unsigned int`, so only its low word is
+    /// read. `agent` is untouched: its launcher installs the jail's own
+    /// mediation listener after this baseline, and that listener is what
+    /// makes a child's second one fail with `EBUSY` (jail-v1 §9.2).
+    #[test]
+    fn j4_d1_the_tool_baseline_refuses_a_notification_listener() {
+        const SECCOMP: u32 = 317;
+        const SET_MODE_FILTER: u32 = 1;
+        const NEW_LISTENER: u32 = 1 << 3;
+        const TSYNC: u32 = 1;
+        let tool = tool_baseline().unwrap();
+        for flags in [
+            NEW_LISTENER,
+            NEW_LISTENER | TSYNC,
+            NEW_LISTENER | (1 << 4),
+            0xffff_ffff,
+        ] {
+            assert_eq!(
+                run3(&tool, X86, SECCOMP, [SET_MODE_FILTER, flags, 0]),
+                EPERM,
+                "flags {flags:#x}"
+            );
+        }
+        for (op, flags) in [
+            (SET_MODE_FILTER, 0),
+            (SET_MODE_FILTER, TSYNC),
+            (SET_MODE_FILTER, 1 << 2),
+            (0, 0),
+            (2, 0),
+            (3, 0),
+        ] {
+            assert_eq!(
+                run3(&tool, X86, SECCOMP, [op, flags, 0]),
+                SECCOMP_RET_ALLOW,
+                "op {op} flags {flags:#x}"
+            );
+        }
+        for variant in [
+            AgentVariant::UnprivilegedInner,
+            AgentVariant::NamespaceInner,
+        ] {
+            let agent = agent_baseline(variant).unwrap();
+            assert_eq!(
+                run3(&agent, X86, SECCOMP, [SET_MODE_FILTER, NEW_LISTENER, 0]),
+                SECCOMP_RET_ALLOW,
+                "the agent launcher installs the jail's own listener after its baseline"
+            );
+        }
+        let table = tool_baseline_table();
+        assert!(
+            table.contains("SECCOMP_FILTER_FLAG_NEW_LISTENER"),
+            "the table names the rule"
+        );
+        assert_eq!(
+            (NR_SECCOMP, SECCOMP_FILTER_FLAG_NEW_LISTENER),
+            (SECCOMP, NEW_LISTENER)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn the_spelled_out_errnos_match_this_kernel() {
@@ -1133,6 +1242,11 @@ mod tests {
         assert_eq!(
             LINUX_EAFNOSUPPORT,
             u32::try_from(libc::EAFNOSUPPORT).unwrap()
+        );
+        assert_eq!(i64::from(NR_SECCOMP), libc::SYS_seccomp);
+        assert_eq!(
+            u64::from(SECCOMP_FILTER_FLAG_NEW_LISTENER),
+            libc::SECCOMP_FILTER_FLAG_NEW_LISTENER
         );
         for (ours, theirs) in [
             (AF_UNIX, libc::AF_UNIX),

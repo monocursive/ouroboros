@@ -729,6 +729,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         ("socket", seccomp::NR_SOCKET),
         ("socketpair", seccomp::NR_SOCKETPAIR),
         ("ioctl", seccomp::NR_IOCTL),
+        ("seccomp", seccomp::NR_SECCOMP),
     ] {
         assert_eq!(table.get(name), Some(&nr), "{name} has the wrong number");
         checked += 1;
@@ -762,7 +763,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         "symlinkat",
         "connect",
     ];
-    let expected: std::collections::BTreeSet<u32> = CLOSED_SET_NAMES
+    let mut expected: std::collections::BTreeSet<u32> = CLOSED_SET_NAMES
         .iter()
         .map(|name| {
             *table
@@ -770,21 +771,31 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
                 .unwrap_or_else(|| panic!("{name} is not in this kernel's syscall table"))
         })
         .collect();
+    // J4 D1: besides the closed set, the narrowing filter stops on
+    // `seccomp(2)` asking for a notification listener.
+    let (listener_name, listener_nr) = tracer::LISTENER_SYSCALL;
+    assert_eq!(
+        table.get(listener_name),
+        Some(&listener_nr),
+        "{listener_name} has the wrong number"
+    );
+    expected.insert(listener_nr);
     let installed: std::collections::BTreeSet<u32> = tracer::narrowing_filter()
         .iter()
         // A `jeq #k` in the narrowing filter is a syscall number it traces;
-        // the architecture compare and the x32 mask are the other immediates.
+        // the architecture compare is the other `jeq` immediate, and the x32
+        // bit and the listener flag are `jset` masks.
         .filter(|insn| insn.code == 0x15 && insn.k < 0x4000_0000)
         .map(|insn| insn.k)
         .collect();
     assert_eq!(
         installed, expected,
-        "the narrowing filter does not trace exactly the closed set"
+        "the narrowing filter does not trace exactly the closed set and the listener request"
     );
     checked += expected.len();
     assert_eq!(
         checked,
-        seccomp::DENY_EPERM.len() + 5 + CLOSED_SET_NAMES.len()
+        seccomp::DENY_EPERM.len() + 6 + CLOSED_SET_NAMES.len() + 1
     );
 }
 

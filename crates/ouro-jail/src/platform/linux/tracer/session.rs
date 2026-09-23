@@ -34,11 +34,15 @@
 //! * Results are droppable, lifecycle facts are not. A consumer that stops
 //!   reading loses `Syscall` events after a bounded stall; the lifecycle
 //!   facts queue in the tracer's own buffer and are delivered when the
-//!   consumer returns. The §11.4 byte budget bounds them too — an `Exec`
-//!   carries a child-chosen pathname, so it is dropped with a gap when the
-//!   budget is full — but a reserve the results may not touch keeps `Exit`,
-//!   `UntracedChildExit`, `Gap` and `Finished` flowing. A supervisor never
-//!   loses the exit status it exists to report.
+//!   consumer returns. The §11.4 byte budget and a count bound them too — an
+//!   `Exec` carries a child-chosen pathname, so it is dropped with a gap when
+//!   either is full — but the critical facts, `Exit`, `UntracedChildExit`,
+//!   `Gap` and `Finished`, are exempt from every cap (J4 D6). The first
+//!   three are fixed-size and bounded by the tasks that exist; a `Gap` past a
+//!   cap is merged into the one summary per reason that is delivered ahead of
+//!   the next fact, so its reason, classes, count and interval survive while
+//!   the backlog stays bounded. A supervisor never loses the exit status it
+//!   exists to report, nor the record of what it could not see.
 //! * The buffer is bounded in bytes, not in events, because §11.4 budgets
 //!   bytes and two four-kilobyte pathnames per event make a count meaningless.
 //! * Nothing is ever delivered with a bare `try_send`. Every send has a
@@ -77,7 +81,9 @@ const TERMINAL_POLL: Duration = Duration::from_millis(5);
 
 /// Most lifecycle events the tracer will hold for a consumer that is not
 /// reading. They are tiny and bounded by the number of tasks; past this the
-/// backlog itself is the problem and is reported as one.
+/// backlog itself is the problem and is reported as one. The critical facts
+/// are exempt ([`Session::is_critical`]): a gap past it is coalesced, an
+/// exit is admitted.
 const LIFECYCLE_MAX: usize = 16_384;
 
 /// Bytes of the §11.4 queue budget that results may not consume, so the
@@ -105,7 +111,31 @@ pub(super) struct Handles {
 struct Task {
     tgid: pid_t,
     start_ticks: Option<u64>,
-    pending: Option<Pending>,
+    pending: Option<InFlight>,
+}
+
+/// A call that stopped at its entry and has not yet returned.
+enum InFlight {
+    /// A closed-set call, with the arguments read at its entry.
+    Closed(Pending),
+    /// A syscall under another ABI (J4 D2): never decoded, so its return is
+    /// the one thing the observer learns about it.
+    Foreign,
+    /// `seccomp(2)` asking for a notification listener (J4 D1): its return
+    /// says whether the child now holds one.
+    Listener,
+}
+
+impl InFlight {
+    /// The operations a hole left by this call could have held: the row's
+    /// own for a closed-set call, all of them for a call nothing decoded or
+    /// a listener that could hide any of them.
+    fn ops(&self) -> OpSet {
+        match self {
+            InFlight::Closed(pending) => OpSet::of(pending.entry.op),
+            InFlight::Foreign | InFlight::Listener => OpSet::ALL,
+        }
+    }
 }
 
 /// A traced thread group.
@@ -222,7 +252,8 @@ struct CoalescedGap {
     ops: OpSet,
     from_ns: u64,
     to_ns: u64,
-    count: u64,
+    /// `None` once any merged gap had an unknown size.
+    count: Option<u64>,
 }
 
 struct Session {
@@ -241,9 +272,10 @@ struct Session {
     /// waiting another second to find out again.
     stalled: bool,
     disconnected: bool,
-    /// The loss being coalesced into a single `Gap`, per §11.4 ("Coalesce
-    /// repeated losses into bounded interval summaries").
-    coalesced: Option<CoalescedGap>,
+    /// The loss being coalesced, one summary per reason, per §11.4
+    /// ("Coalesce repeated losses into bounded interval summaries"). At most
+    /// one entry per [`GapReason`], so it is bounded whatever the child does.
+    coalesced: Vec<CoalescedGap>,
     /// The `CLOCK_BOOTTIME` reading at supervisor start. Gap endpoints are
     /// elapsed time since it, not time since boot (§11.4).
     epoch_boottime_ns: u64,
@@ -289,7 +321,7 @@ impl Session {
             result_bytes_max,
             stalled: false,
             disconnected: false,
-            coalesced: None,
+            coalesced: Vec::new(),
             epoch_boottime_ns,
             last_healthy_ns: clock::boottime_ns().saturating_sub(epoch_boottime_ns),
             summary: TracerSummary::default(),
@@ -401,6 +433,9 @@ impl Session {
         if lifecycle {
             self.lifecycle_pending += 1;
         }
+        if matches!(event, TracerEvent::Gap { .. }) {
+            self.summary.gaps += 1;
+        }
         self.pending_bytes += bytes;
         self.summary.queue_bytes_peak = self.summary.queue_bytes_peak.max(self.pending_bytes);
         self.pending.push_back(Queued {
@@ -410,22 +445,21 @@ impl Session {
         });
     }
 
-    /// Put the coalesced gap in front of whatever comes next, so the loss is
-    /// never hidden behind the event that followed it.
+    /// Put the coalesced gaps in front of whatever comes next, so the loss
+    /// is never hidden behind the event that followed it. They are critical
+    /// facts, so no cap applies to them.
     fn materialise_gap(&mut self) {
-        let Some(gap) = self.coalesced.take() else {
-            return;
-        };
-        let event = TracerEvent::Gap {
-            reason: gap.reason,
-            ops: gap.ops,
-            from_ns: gap.from_ns,
-            to_ns: gap.to_ns,
-            count: Some(gap.count),
-        };
-        let bytes = Session::event_bytes(&event);
-        self.summary.gaps += 1;
-        self.enqueue(event, bytes, true);
+        for gap in std::mem::take(&mut self.coalesced) {
+            let event = TracerEvent::Gap {
+                reason: gap.reason,
+                ops: gap.ops,
+                from_ns: gap.from_ns,
+                to_ns: gap.to_ns,
+                count: gap.count,
+            };
+            let bytes = Session::event_bytes(&event);
+            self.enqueue(event, bytes, true);
+        }
     }
 
     fn emit(&mut self, event: TracerEvent) {
@@ -435,22 +469,41 @@ impl Session {
         let ops = Session::ops_of(&event);
 
         if lifecycle {
-            if self.lifecycle_pending >= LIFECYCLE_MAX {
-                self.summary.loss.lifecycle_dropped += 1;
-                self.note_drop(GapReason::LifecycleDropped, ops);
-                return;
-            }
-            // §11.4 budgets bytes, lifecycle events included: an `Exec`
-            // carries a child-chosen pathname of up to
-            // `path_snapshot_max` bytes, so without this the lifecycle
-            // backlog alone could exceed the budget many times over. The
-            // critical facts below are exempt, and results stop short of
-            // [`LIFECYCLE_RESERVE`], so a dropped `Exec` means the budget
-            // was full of evidence, not that the reserve failed.
-            if self.pending_bytes + bytes > self.bytes_max && !Session::is_critical(&event) {
-                self.summary.loss.lifecycle_dropped += 1;
-                self.note_drop(GapReason::LifecycleDropped, ops);
-                return;
+            // Two caps bound the lifecycle backlog: a count, and the §11.4
+            // byte budget, lifecycle events included — an `Exec` carries a
+            // child-chosen pathname of up to `path_snapshot_max` bytes, so
+            // without the budget the backlog alone could exceed it many times
+            // over. Results stop short of [`LIFECYCLE_RESERVE`], so a dropped
+            // `Exec` means the budget was full of evidence, not that the
+            // reserve failed.
+            let over = self.lifecycle_pending >= LIFECYCLE_MAX
+                || self.pending_bytes + bytes > self.bytes_max;
+            if over {
+                // J4 D6: the critical facts are exempt from every cap, both
+                // of them. Checking the count first, as this used to, dropped
+                // a target's `Exit` behind a backlog of fork facts.
+                if !Session::is_critical(&event) {
+                    self.summary.loss.lifecycle_dropped += 1;
+                    self.note_drop(GapReason::LifecycleDropped, ops);
+                    return;
+                }
+                if let TracerEvent::Gap {
+                    reason,
+                    ops,
+                    from_ns,
+                    to_ns,
+                    count,
+                } = event
+                {
+                    // Not dropped: merged into this reason's summary, which
+                    // is delivered ahead of the next fact. A child that can
+                    // cause a gap per syscall cannot grow the backlog past
+                    // one entry per reason this way.
+                    self.coalesce(reason, ops, from_ns, to_ns, count);
+                    return;
+                }
+                // `Exit`, `UntracedChildExit` and `Finished` are fixed-size
+                // and bounded by the tasks that exist: past every cap.
             }
             self.materialise_gap();
             self.enqueue(event, bytes, true);
@@ -491,26 +544,36 @@ impl Session {
         }
     }
 
-    /// Record loss into the coalesced gap. A gap of a different reason is
-    /// materialised first rather than merged into one that would misname it.
+    /// Record one dropped event into its reason's coalesced gap.
     fn note_drop(&mut self, reason: GapReason, ops: OpSet) {
         let now = self.now_ns();
-        match &mut self.coalesced {
-            Some(gap) if gap.reason == reason => {
-                gap.to_ns = now;
-                gap.count += 1;
-                gap.ops = gap.ops.union(ops);
-                return;
-            }
-            Some(_) => self.materialise_gap(),
-            None => {}
+        let from = self.last_healthy_ns;
+        self.coalesce(reason, ops, from, now, Some(1));
+    }
+
+    /// Merge a gap into the summary for its reason, or open one. Reasons are
+    /// never merged into each other, so no summary misnames its loss.
+    fn coalesce(
+        &mut self,
+        reason: GapReason,
+        ops: OpSet,
+        from_ns: u64,
+        to_ns: u64,
+        count: Option<u64>,
+    ) {
+        if let Some(gap) = self.coalesced.iter_mut().find(|gap| gap.reason == reason) {
+            gap.from_ns = gap.from_ns.min(from_ns);
+            gap.to_ns = gap.to_ns.max(to_ns);
+            gap.ops = gap.ops.union(ops);
+            gap.count = gap.count.zip(count).and_then(|(a, b)| a.checked_add(b));
+            return;
         }
-        self.coalesced = Some(CoalescedGap {
+        self.coalesced.push(CoalescedGap {
             reason,
             ops,
-            from_ns: self.last_healthy_ns,
-            to_ns: now,
-            count: 1,
+            from_ns,
+            to_ns,
+            count,
         });
     }
 
@@ -524,7 +587,6 @@ impl Session {
             to_ns: self.now_ns(),
             count,
         };
-        self.summary.gaps += 1;
         self.emit(event);
     }
 
@@ -780,7 +842,7 @@ impl Session {
         let former = sys::event_msg(tid)
             .map(|value| value as pid_t)
             .unwrap_or(tid);
-        let mut carried: Option<Pending> = None;
+        let mut carried: Option<InFlight> = None;
         if former != tid
             && former > 0
             && let Some(task) = self.tasks.remove(&former)
@@ -819,25 +881,21 @@ impl Session {
                 // reported, not an anonymous hole (§11.4).
                 self.inflight = self.inflight.saturating_sub(1);
                 self.summary.loss.abandoned_entries += 1;
-                self.gap(
-                    GapReason::EntryAbandoned,
-                    OpSet::of(pending.entry.op),
-                    Some(1),
-                );
+                self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
             }
         }
         if carried.is_some()
-            && let Some(op) = self
+            && let Some(ops) = self
                 .tasks
                 .get(&tid)
-                .and_then(|t| t.pending.as_ref().map(|pending| pending.entry.op))
+                .and_then(|t| t.pending.as_ref().map(InFlight::ops))
         {
             // Both the leader and the thread that execed had a call in
             // flight; the leader's can no longer return, and the gap names
             // it because the entry is in hand.
             self.inflight = self.inflight.saturating_sub(1);
             self.summary.loss.abandoned_entries += 1;
-            self.gap(GapReason::EntryAbandoned, OpSet::of(op), Some(1));
+            self.gap(GapReason::EntryAbandoned, ops, Some(1));
         }
         let mut path = None;
         let mut dirfd = None;
@@ -845,7 +903,7 @@ impl Session {
             if let Some(pending) = carried {
                 task.pending = Some(pending);
             }
-            if let Some(pending) = task.pending.as_mut()
+            if let Some(InFlight::Closed(pending)) = task.pending.as_mut()
                 && pending.entry.op == ClosedOp::Exec
             {
                 pending.exec_confirmed = true;
@@ -861,8 +919,8 @@ impl Session {
         });
     }
 
-    /// A `PTRACE_EVENT_SECCOMP` stop: the tracee is at the entry of a
-    /// closed-set call and the syscall has not run.
+    /// A `PTRACE_EVENT_SECCOMP` stop: the tracee is at the entry of a call
+    /// the narrowing filter traces, and the syscall has not run.
     fn handle_entry(&mut self, tid: pid_t) {
         let Some(info) = sys::syscall_info(tid) else {
             self.summary.loss.syscall_info_unavailable += 1;
@@ -876,22 +934,30 @@ impl Session {
         }
         // jail-v1 §9.2: validate the architecture before the syscall number.
         // A compat or x32 entry carries a number from a different table, and
-        // naming it from this one would mislabel the call.
-        if info.arch != sys::AUDIT_ARCH_X86_64 {
-            self.summary.loss.unexpected_trace_stops += 1;
-            self.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
+        // naming it from this one would mislabel the call (J4 D2): it is
+        // foreign, followed to its return and never decoded.
+        if info.arch != sys::AUDIT_ARCH_X86_64 || info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0 {
+            if self.admit(OpSet::ALL) {
+                self.begin(tid, InFlight::Foreign);
+            }
+            return;
+        }
+        // J4 D1: a child asking for its own notification listener. The flags
+        // are the register the kernel will read, not memory the child could
+        // change behind this stop.
+        if info.nr == u64::from(super::filter::LISTENER_SYSCALL.1)
+            && info.args[1] & u64::from(super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
+        {
+            if self.admit(OpSet::ALL) {
+                self.begin(tid, InFlight::Listener);
+            }
             return;
         }
         let Some(entry) = closed_set::lookup(info.nr) else {
-            // The filter stopped a number this table does not name, so the
-            // filter the launcher installed is not this module's. Say so.
-            self.summary.loss.unexpected_trace_stops += 1;
-            self.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
+            self.stop_not_ours(tid);
             return;
         };
-        if self.inflight >= self.config.inflight_max {
-            self.summary.loss.inflight_rejected += 1;
-            self.gap(GapReason::InflightExhausted, OpSet::of(entry.op), Some(1));
+        if !self.admit(OpSet::of(entry.op)) {
             return;
         }
         // Flags first: they decide whether this call is in the closed set at
@@ -911,21 +977,62 @@ impl Session {
         let mut pending = self.capture_paths(tid, entry, &info.args);
         pending.args.flags = flags;
         pending.flags_unavailable = flags_unavailable;
+        self.begin(tid, InFlight::Closed(pending));
+    }
 
+    /// Whether another call may be followed to its return. When the
+    /// in-flight bound is reached the entry is refused, and the gap names
+    /// what that call could have been.
+    fn admit(&mut self, ops: OpSet) -> bool {
+        if self.inflight >= self.config.inflight_max {
+            self.summary.loss.inflight_rejected += 1;
+            self.gap(GapReason::InflightExhausted, ops, Some(1));
+            return false;
+        }
+        true
+    }
+
+    /// Record `call` as this thread's call in flight.
+    fn begin(&mut self, tid: pid_t, call: InFlight) {
         let replaced = self
             .tasks
             .get(&tid)
-            .and_then(|task| task.pending.as_ref().map(|pending| pending.entry.op));
-        if let Some(op) = replaced {
+            .and_then(|task| task.pending.as_ref().map(InFlight::ops));
+        if let Some(ops) = replaced {
             // The previous entry for this thread never returned, and the gap
             // names the call it was (§11.4).
             self.summary.loss.abandoned_entries += 1;
             self.inflight = self.inflight.saturating_sub(1);
-            self.gap(GapReason::EntryAbandoned, OpSet::of(op), Some(1));
+            self.gap(GapReason::EntryAbandoned, ops, Some(1));
         }
         if let Some(task) = self.tasks.get_mut(&tid) {
-            task.pending = Some(pending);
+            task.pending = Some(call);
             self.inflight += 1;
+        }
+    }
+
+    /// A stop for a number the narrowing filter never traces. The trace
+    /// data says whose it is: a stop carrying other data was asked for by
+    /// another filter — a child's own `SECCOMP_RET_TRACE` — on a call outside
+    /// the closed set, and is continued untouched (not a result, not a loss,
+    /// and never decoded). One carrying this filter's own data means the
+    /// program the launcher installed is not this module's, which is a gap.
+    fn stop_not_ours(&mut self, tid: pid_t) {
+        match sys::event_msg(tid) {
+            Ok(data)
+                if data & u64::from(sys::SECCOMP_RET_DATA)
+                    != u64::from(super::filter::NARROWING_TRACE_DATA) =>
+            {
+                self.summary.requested_by_other_filters += 1;
+            }
+            Ok(_) => {
+                self.summary.loss.unexpected_trace_stops += 1;
+                self.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
+            }
+            Err(_) => {
+                self.summary.loss.syscall_info_unavailable += 1;
+                self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
+            }
         }
     }
 
@@ -953,7 +1060,7 @@ impl Session {
 
     fn handle_exit(&mut self, tid: pid_t, rval: i64) {
         let tgid = self.tgid_of(tid);
-        let Some(pending) = self
+        let Some(call) = self
             .tasks
             .get_mut(&tid)
             .and_then(|task| task.pending.take())
@@ -971,6 +1078,36 @@ impl Session {
             self.summary.restarts += 1;
             return;
         }
+        let pending = match call {
+            InFlight::Closed(pending) => pending,
+            InFlight::Foreign => {
+                if rval == -i64::from(libc::ENOSYS) {
+                    // No such call in its table, or an ABI this kernel lacks
+                    // (x32 on the reference host): it had no effect, and a
+                    // tracee must not be able to manufacture loss by naming
+                    // a call nothing has.
+                    self.summary.foreign_rejected += 1;
+                } else {
+                    self.summary.loss.foreign_abi += 1;
+                    self.gap(GapReason::ForeignAbi, OpSet::ALL, Some(1));
+                }
+                return;
+            }
+            InFlight::Listener => {
+                if rval >= 0 {
+                    // The return is the listener's descriptor. From here on
+                    // any closed-set call may be continued with no stop, for
+                    // as long as anyone holds it: every class, no count.
+                    self.summary.loss.notification_listeners += 1;
+                    self.gap(GapReason::ChildNotificationListener, OpSet::ALL, None);
+                } else {
+                    // Refused (EBUSY under the `agent` mediation listener,
+                    // EINVAL, EACCES): no listener exists, nothing is hidden.
+                    self.summary.listener_refused += 1;
+                }
+                return;
+            }
+        };
         if pending.exec_confirmed {
             // `Exec` was already emitted for this call at the confirmed
             // transition; the zero that follows is the same event.
@@ -1058,11 +1195,7 @@ impl Session {
             // was, because the entry is in hand (§11.4).
             self.inflight = self.inflight.saturating_sub(1);
             self.summary.loss.abandoned_entries += 1;
-            self.gap(
-                GapReason::EntryAbandoned,
-                OpSet::of(pending.entry.op),
-                Some(1),
-            );
+            self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
         }
         let Some(process) = self.procs.get_mut(&task.tgid) else {
             // A task whose thread group we no longer hold: its death cannot
@@ -1373,6 +1506,132 @@ fn sockaddr_len(family: u16, declared: u64) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::sockaddr_len;
+    use super::*;
+
+    /// A session whose consumer never reads: the handoff holds one event.
+    fn stalled_session() -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let config = TracerConfig {
+            queue_bytes_max: 64 * 1024 * 1024,
+            ..TracerConfig::default()
+        };
+        (Session::new(config, tx, 0), rx)
+    }
+
+    fn fork(child: pid_t) -> TracerEvent {
+        TracerEvent::Fork {
+            parent: 1,
+            parent_tid: 1,
+            child,
+            is_thread: false,
+            child_start_ticks: None,
+            monotonic_ns: 0,
+        }
+    }
+
+    /// J4 D6, at the unit level: with the lifecycle count full, a gap is not
+    /// dropped but merged into its reason's summary (so a child that causes
+    /// one per syscall cannot grow the backlog), an exit is admitted past
+    /// the cap, and the summaries are delivered ahead of it.
+    #[test]
+    fn j4_d6_gaps_past_the_caps_are_coalesced_and_exits_admitted() {
+        let (mut session, rx) = stalled_session();
+        let mut child = 2;
+        while session.lifecycle_pending < LIFECYCLE_MAX {
+            session.emit(fork(child));
+            child += 1;
+        }
+        let queued = session.pending.len();
+        session.emit(fork(child));
+        assert_eq!(
+            session.summary.loss.lifecycle_dropped, 1,
+            "a fork is not critical"
+        );
+        for i in 0..10_000u64 {
+            let reason = if i % 2 == 0 {
+                GapReason::UnexpectedTraceStop
+            } else {
+                GapReason::PathUnreadable
+            };
+            session.gap(reason, OpSet::ALL, Some(1));
+        }
+        assert_eq!(
+            session.pending.len(),
+            queued,
+            "gaps past the cap wait in their summaries, not in the backlog"
+        );
+        assert_eq!(
+            session.summary.loss.lifecycle_dropped, 1,
+            "no gap was dropped"
+        );
+        session.emit(TracerEvent::Exit {
+            pid: 1,
+            status: 0,
+            monotonic_ns: 0,
+        });
+        let tail: Vec<&TracerEvent> = session
+            .pending
+            .iter()
+            .skip(queued)
+            .map(|queued| &queued.event)
+            .collect();
+        assert_eq!(tail.len(), 4, "{tail:?}");
+        let counts: Vec<(GapReason, Option<u64>)> = tail
+            .iter()
+            .filter_map(|event| match event {
+                TracerEvent::Gap { reason, count, .. } => Some((*reason, *count)),
+                _ => None,
+            })
+            .collect();
+        assert!(counts.contains(&(GapReason::UnexpectedTraceStop, Some(5_000))));
+        assert!(counts.contains(&(GapReason::PathUnreadable, Some(5_000))));
+        assert!(matches!(tail[3], TracerEvent::Exit { pid: 1, .. }));
+        assert_eq!(
+            session.summary.loss.lifecycle_dropped, 1,
+            "the exit was admitted"
+        );
+        drop(rx);
+    }
+
+    /// The byte budget is a cap too: with it full, an exit is still admitted
+    /// and a gap still coalesced.
+    #[test]
+    fn j4_d6_the_byte_budget_does_not_drop_critical_facts_either() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        let config = TracerConfig {
+            queue_bytes_max: 4 * EVENT_FIXED_BYTES,
+            ..TracerConfig::default()
+        };
+        let mut session = Session::new(config, tx, 0);
+        for child in 2..100 {
+            session.emit(fork(child));
+        }
+        assert!(
+            session.summary.loss.lifecycle_dropped > 0,
+            "the budget is full"
+        );
+        let dropped = session.summary.loss.lifecycle_dropped;
+        session.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
+        session.emit(TracerEvent::Exit {
+            pid: 1,
+            status: 0,
+            monotonic_ns: 0,
+        });
+        assert_eq!(session.summary.loss.lifecycle_dropped, dropped);
+        assert!(session.pending.iter().any(|queued| matches!(
+            queued.event,
+            TracerEvent::Gap {
+                reason: GapReason::UnexpectedTraceStop,
+                ..
+            }
+        )));
+        assert!(
+            session
+                .pending
+                .iter()
+                .any(|queued| matches!(queued.event, TracerEvent::Exit { pid: 1, .. }))
+        );
+    }
 
     #[test]
     fn a_sockaddr_is_clamped_to_its_family_not_the_callers_claim() {

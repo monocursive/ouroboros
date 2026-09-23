@@ -63,6 +63,7 @@ use libc::pid_t;
 
 pub use closed_set::ClosedOp;
 pub use filter::{
+    LISTENER_SYSCALL, NARROWING_TRACE_DATA, SECCOMP_FILTER_FLAG_NEW_LISTENER,
     install_narrowing_filter, narrowing_filter, narrowing_filter_bytes, narrowing_filter_digest,
 };
 pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
@@ -264,6 +265,16 @@ pub enum GapReason {
     LifecycleDropped,
     /// A tracee died and could not be attributed to a thread group.
     DeathUnattributed,
+    /// A syscall under another ABI — a non-native architecture or the x32
+    /// bit — ran, and this observer decodes only the native table, so it
+    /// cannot say which operation, if any, it was (J4 D2). One the kernel
+    /// refused as nonexistent (`ENOSYS`) had no effect and is not this.
+    ForeignAbi,
+    /// A child installed a seccomp filter with its own notification
+    /// listener (J4 D1). The listener can answer `CONTINUE`, which runs the
+    /// call with no trace stop, so from then on any closed-set call may be
+    /// unobserved; how many is unknown and the interval has no end.
+    ChildNotificationListener,
 }
 
 impl GapReason {
@@ -287,7 +298,17 @@ impl GapReason {
             GapReason::RestartFailed => "restart_failed",
             GapReason::LifecycleDropped => "lifecycle_dropped",
             GapReason::DeathUnattributed => "death_unattributed",
+            GapReason::ForeignAbi => "foreign_abi",
+            GapReason::ChildNotificationListener => "child_notification_listener",
         }
+    }
+
+    /// A gap that lasts from where it starts to the end of the attempt: the
+    /// condition that opened it is never observed to end. A child's
+    /// notification listener lives as long as some process holds it.
+    #[must_use]
+    pub fn is_open_ended(self) -> bool {
+        matches!(self, GapReason::ChildNotificationListener)
     }
 }
 
@@ -479,6 +500,10 @@ pub struct LossCounters {
     pub lifecycle_dropped: u64,
     /// Task deaths that could not be attributed to a thread group.
     pub death_unattributed: u64,
+    /// Syscalls under another ABI that ran and could not be attributed.
+    pub foreign_abi: u64,
+    /// Notification listeners a child installed for itself.
+    pub notification_listeners: u64,
 }
 
 impl LossCounters {
@@ -502,6 +527,8 @@ impl LossCounters {
             + self.restart_failed
             + self.lifecycle_dropped
             + self.death_unattributed
+            + self.foreign_abi
+            + self.notification_listeners
     }
 }
 
@@ -525,7 +552,8 @@ pub struct TracerSummary {
     pub late_fork_races: u64,
     /// `PTRACE_EVENT_EXEC` transitions.
     pub exec_transitions: u64,
-    /// `Gap` events that reached the consumer.
+    /// `Gap` events queued for the consumer. Gaps merged into one
+    /// coalesced summary count once.
     pub gaps: u64,
     /// Events of any kind that reached the consumer.
     pub emitted: u64,
@@ -549,6 +577,18 @@ pub struct TracerSummary {
     /// Syscall exits in the `ERESTARTSYS` family. Not loss and not results:
     /// the kernel re-enters the call, which then produces its one result.
     pub restarts: u64,
+    /// Syscalls under another ABI the kernel refused as nonexistent
+    /// (`ENOSYS`): stopped and labelled foreign, but with no effect, so not
+    /// loss — a tracee cannot manufacture a gap by naming a call no table has.
+    pub foreign_rejected: u64,
+    /// Stops another filter asked for — a child's own `SECCOMP_RET_TRACE`,
+    /// recognised by trace data that is not
+    /// [`NARROWING_TRACE_DATA`] — on calls outside the closed set. Continued
+    /// untouched: not a result and not loss.
+    pub requested_by_other_filters: u64,
+    /// Notification-listener requests the kernel refused (`EBUSY` under the
+    /// `agent` mediation listener, for one): no listener, nothing hidden.
+    pub listener_refused: u64,
     pub loss: LossCounters,
     pub ops: OpCounts,
     /// The tracer thread panicked. Every other field is then unreliable.
@@ -933,6 +973,9 @@ mod tests {
             GapReason::FinalStatusUnknown,
             GapReason::UnexpectedTraceStop,
             GapReason::TraceesAbandoned,
+            GapReason::MediationResponseUndelivered,
+            GapReason::ForeignAbi,
+            GapReason::ChildNotificationListener,
         ];
         let names: std::collections::BTreeSet<&str> = reasons.iter().map(|r| r.as_str()).collect();
         assert_eq!(names.len(), reasons.len());

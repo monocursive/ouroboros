@@ -100,12 +100,17 @@ pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 pub const BPF_LD_W_ABS: u16 = 0x20;
 pub const BPF_JEQ_K: u16 = 0x15;
-pub const BPF_JGE_K: u16 = 0x35;
+pub const BPF_JSET_K: u16 = 0x45;
 pub const BPF_RET_K: u16 = 0x06;
 
 /// Byte offsets into `struct seccomp_data`.
 pub const SECCOMP_DATA_NR: u32 = 0;
 pub const SECCOMP_DATA_ARCH: u32 = 4;
+/// The low word of `args[1]` on a little-endian host.
+pub const SECCOMP_DATA_ARG1_LOW: u32 = 24;
+/// `SECCOMP_RET_DATA`: the low sixteen bits of a verdict, which
+/// `PTRACE_GETEVENTMSG` reports at a `PTRACE_EVENT_SECCOMP` stop.
+pub const SECCOMP_RET_DATA: u32 = 0x0000_ffff;
 
 // ------------------------------------------------------------ ptrace calls
 
@@ -463,6 +468,24 @@ mod tests {
         );
         assert_eq!(SECCOMP_RET_ALLOW, libc::SECCOMP_RET_ALLOW);
         assert_eq!(SECCOMP_RET_TRACE, libc::SECCOMP_RET_TRACE);
+        assert_eq!(SECCOMP_RET_DATA, libc::SECCOMP_RET_DATA);
+        assert_eq!(
+            super::super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            u32::try_from(libc::SECCOMP_FILTER_FLAG_NEW_LISTENER).unwrap()
+        );
+        assert_eq!(
+            i64::from(super::super::filter::LISTENER_SYSCALL.1),
+            libc::SYS_seccomp
+        );
+        assert_eq!(
+            u32::from(BPF_JSET_K),
+            libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K
+        );
+        // `args[1]` starts 16 + 8 bytes into `struct seccomp_data`.
+        assert_eq!(
+            SECCOMP_DATA_ARG1_LOW as usize,
+            std::mem::offset_of!(libc::seccomp_data, args) + 8
+        );
     }
 
     #[test]

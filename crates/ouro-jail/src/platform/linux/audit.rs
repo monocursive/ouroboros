@@ -497,7 +497,10 @@ impl AuditWriter {
                 .collect(),
             source: "audit".to_owned(),
             start_ns: from_ns.to_string(),
-            end_ns: Some(to_ns.to_string()),
+            // A hole whose cause is never observed to end — a child's own
+            // notification listener — has no end the observer can state:
+            // `null`, not the moment it was noticed (§13.1 lets it be).
+            end_ns: (!reason.is_open_ended()).then(|| to_ns.to_string()),
             reason: reason.as_str().to_owned(),
             lost_count: count,
         };
@@ -787,14 +790,11 @@ fn extend_gap_interval(gap: &mut Gap, from: u64, to: u64) {
         .unwrap_or(from)
         .min(from)
         .to_string();
-    gap.end_ns = Some(
-        gap.end_ns
-            .as_deref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(to)
-            .max(to)
-            .to_string(),
-    );
+    // An open interval stays open: merging a later loss into it cannot give
+    // it an end.
+    if let Some(end) = gap.end_ns.as_deref() {
+        gap.end_ns = Some(end.parse::<u64>().unwrap_or(to).max(to).to_string());
+    }
 }
 
 #[cfg(test)]
@@ -1136,6 +1136,46 @@ mod tests {
             0,
         );
         assert_eq!(writer.count(CoverageClass::FsWrite), 1);
+    }
+
+    /// J4 D1: a child's notification listener degrades every audit class,
+    /// with no count and no end — the listener can continue calls unseen
+    /// for as long as anyone holds it — and a merged repeat keeps it open.
+    #[test]
+    fn j4_d1_a_listener_gap_degrades_every_class_and_has_no_end() {
+        let mut writer = writer();
+        writer.record_gap(GapReason::ChildNotificationListener, OpSet::ALL, 5, 9, None);
+        writer.record_gap(
+            GapReason::ChildNotificationListener,
+            OpSet::ALL,
+            3,
+            20,
+            None,
+        );
+        assert_eq!(writer.gaps().len(), 1);
+        let gap = &writer.gaps()[0];
+        assert_eq!(gap.reason, "child_notification_listener");
+        assert_eq!(gap.end_ns, None, "the interval has no end");
+        assert_eq!(gap.start_ns, "3");
+        assert_eq!(gap.lost_count, None);
+        let summary = writer.summary(&TracerSummary::default(), true);
+        for class in [
+            CoverageClass::Exec,
+            CoverageClass::FsWrite,
+            CoverageClass::FsDeny,
+            CoverageClass::Net,
+        ] {
+            assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
+            assert_eq!(summary.classes[&class].observed_count, None);
+        }
+        // A foreign-ABI gap is per call: it has an end.
+        writer.record_gap(GapReason::ForeignAbi, OpSet::ALL, 1, 2, Some(1));
+        let foreign = writer
+            .gaps()
+            .iter()
+            .find(|gap| gap.reason == "foreign_abi")
+            .unwrap();
+        assert_eq!(foreign.end_ns.as_deref(), Some("2"));
     }
 
     #[test]
