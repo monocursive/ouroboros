@@ -98,12 +98,17 @@ impl Case {
     }
 }
 
-/// The receipt the attempt ended with (`jail.json` holds the latest).
+/// The receipt the attempt ended with (`jail.json` holds the latest),
+/// checked against the schema and the rules it cannot state
+/// (`common::check_receipt`), as every receipt of the run is.
 fn last_receipt(run: &Run) -> Value {
-    let receipts = run.receipts();
-    receipts
+    let mut receipts: Vec<Value> = run
+        .receipts()
         .into_iter()
-        .last()
+        .map(common::checked_receipt)
+        .collect();
+    receipts
+        .pop()
         .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
 }
 

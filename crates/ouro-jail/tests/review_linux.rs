@@ -74,13 +74,24 @@ fn audit_events(run: &Run) -> Vec<&Value> {
         .collect()
 }
 
+/// Every receipt the run left, each checked against the schema and the rules
+/// it cannot state (`common::check_receipt`). J4 W2-H: the reviewer's checks
+/// read receipts field by field; a receipt breaking its contract fails here.
+fn checked_receipts(run: &Run) -> Vec<Value> {
+    run.receipts()
+        .into_iter()
+        .map(common::checked_receipt)
+        .collect()
+}
+
 fn settled(run: &Run) -> Value {
+    let _ = checked_receipts(run);
     run.receipt_phase("settled")
         .unwrap_or_else(|| panic!("no settled receipt; receipts: {:?}", phases(run)))
 }
 
 fn phases(run: &Run) -> Vec<String> {
-    run.receipts()
+    checked_receipts(run)
         .iter()
         .filter_map(|r| r.get("phase").and_then(Value::as_str))
         .map(ToOwned::to_owned)
@@ -548,7 +559,7 @@ fn r2_an_unrecognised_executable_is_not_handed_to_a_shell() {
         .target([target.to_str().unwrap()])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "exit={:?} stdout={:?} phase={:?} outcome={}",
@@ -583,7 +594,7 @@ fn r2_a_proved_exec_failure_is_an_exec_error_outcome() {
         .target([missing.to_str().unwrap()])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!("{}", serde_json::to_string_pretty(last).unwrap());
     assert_eq!(
@@ -600,14 +611,14 @@ fn r2_a_proved_exec_failure_is_an_exec_error_outcome() {
 
 #[allow(dead_code)] // a reviewer's helper, kept for the next check that needs it
 fn last_outcome(run: &Run) -> Option<Value> {
-    run.receipts()
+    checked_receipts(run)
         .last()
         .and_then(|r| r.get("outcome").cloned())
 }
 
 /// The four exec failures must at least be distinguishable from one another.
 fn exec_failure_facts(run: &Run, name: &str) -> (String, String, String) {
-    let receipts = run.receipts();
+    let receipts = checked_receipts(run);
     let last = receipts
         .last()
         .unwrap_or_else(|| panic!("{name}: no receipt at all"));
@@ -635,7 +646,7 @@ fn exec_failure_facts(run: &Run, name: &str) -> (String, String, String) {
 
 #[allow(dead_code)] // a reviewer's helper, kept for the next check that needs it
 fn check_exec_error(run: &Run, name: &str, errno: &str) {
-    let receipts = run.receipts();
+    let receipts = checked_receipts(run);
     let last = receipts
         .last()
         .unwrap_or_else(|| panic!("{name}: no receipt at all"));
@@ -1119,7 +1130,7 @@ fn r4_receipt_revisions_advance_and_phases_carry_their_tuples() {
         }
     }
     eprintln!("receipt notes in the trace: {by_phase:?}");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     for receipt in &receipts {
         eprintln!(
             "phase={:?} revision={:?} containment={:?} protection={:?} exec_observed={:?} \
@@ -1247,7 +1258,7 @@ fn receipt_in(root: &Path) -> Option<Value> {
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(value) = serde_json::from_str::<Value>(&text)
         {
-            return Some(value);
+            return Some(common::checked_receipt(value));
         }
     }
     None
@@ -1915,7 +1926,7 @@ fn r4_killing_the_backend_leaves_an_honest_receipt() {
     unsafe { libc::kill(bwrap, libc::SIGKILL) };
 
     let run = spawned.wait().expect("wait");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!("{}", serde_json::to_string_pretty(last).unwrap());
     eprintln!("exit={:?}", run.code());
@@ -1953,7 +1964,7 @@ fn r2_observe_off_keeps_an_ambiguous_exit_unknown() {
         .target([c.fixture.to_str().unwrap(), "raise", "TERM"])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "signal death, observe off: exit={:?} outcome={}",
@@ -1974,7 +1985,7 @@ fn r2_observe_off_keeps_an_ambiguous_exit_unknown() {
         .target([c.fixture.to_str().unwrap(), "exit", "130"])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "exit 130, observe off: exit={:?} outcome={}",
@@ -2782,7 +2793,7 @@ fn r9_a_symlinked_root_git_refuses_rather_than_downgrade() {
         .expect("run");
     assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
     assert!(!marker.exists(), "the target ran despite the refusal");
-    let receipt = run.receipt_phase("refused").expect("a receipt");
+    let receipt = common::checked_receipt(run.receipt_phase("refused").expect("a receipt"));
     let codes: Vec<&str> = receipt
         .pointer("/errors")
         .and_then(Value::as_array)

@@ -163,8 +163,9 @@ fn py_out(run: &Run) -> Value {
     serde_json::from_str(line).unwrap()
 }
 
-/// Every receipt and trace event validated against the checked-in schemas;
-/// returns the settled receipt.
+/// Every receipt and trace event validated against the checked-in schemas,
+/// and every receipt against the rules they cannot state
+/// (`common::semantic_receipt`); returns the settled receipt.
 fn settled(run: &Run) -> Value {
     run.assert_channels_complete();
     assert!(
@@ -176,6 +177,7 @@ fn settled(run: &Run) -> Value {
         validators()["jail-receipt"]
             .validate(&receipt)
             .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
+        common::assert_semantic_receipt(&receipt);
     }
     for event in run.trace_events() {
         validators()["jail-event"]
@@ -241,7 +243,7 @@ fn prepared(spawned: &mut Spawned) -> (Value, Value) {
         .owner()
         .await_prepared()
         .expect("a prepared message");
-    let receipt = spawned.receipt_value().expect("a prepared receipt");
+    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
     assert_eq!(receipt["phase"], "prepared");
     (message, receipt)
 }
@@ -2664,7 +2666,7 @@ fn agent_refuses_naming_the_proxy_it_cannot_establish() {
         .unwrap();
     assert_eq!(run.code(), Some(125), "stderr: {}", run.stderr_text());
     assert!(!marker.exists(), "the target ran");
-    let receipt = run.receipt_phase("refused").expect("a refused receipt");
+    let receipt = common::checked_receipt(run.receipt_phase("refused").expect("a refused receipt"));
     let error = receipt["outcome"]["error"].to_string();
     assert!(
         error.contains("`agent` proxy could not be established"),
@@ -2900,7 +2902,7 @@ fn review_gc_removes_a_crashed_agent_attempts_proxy_directory() {
             .receipt_value()
             .filter(|receipt| receipt["phase"] == "enforced")
         {
-            break receipt;
+            break common::checked_receipt(receipt);
         }
         assert!(std::time::Instant::now() < deadline, "never enforced");
         std::thread::sleep(Duration::from_millis(50));

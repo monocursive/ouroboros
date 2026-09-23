@@ -120,7 +120,8 @@ fn case() -> Case {
 // ---------------------------------------------------------------------------
 
 /// Every receipt the run produced, from the trace's `jail.receipt` notes and
-/// from `jail.json`, each validated against the checked-in schema.
+/// from `jail.json`, each validated against the checked-in schema and the
+/// rules it cannot state (`common::semantic_receipt`).
 struct Receipts {
     by_phase: BTreeMap<String, Value>,
     phases_seen: Vec<String>,
@@ -134,6 +135,7 @@ fn receipts_of(run: &Run, validators: &BTreeMap<String, Validator>) -> Receipts 
         receipt_schema
             .validate(&receipt)
             .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
+        common::assert_semantic_receipt(&receipt);
         let phase = receipt
             .get("phase")
             .and_then(Value::as_str)
@@ -1440,9 +1442,11 @@ fn i03_gate() {
         };
         // The prepared receipt is durable before the control message is sent,
         // so the owner reads the plan it is being asked to authorise.
-        let receipt = spawned
-            .receipt_value()
-            .expect("the prepared receipt is on disk when `prepared` arrives");
+        let receipt = common::checked_receipt(
+            spawned
+                .receipt_value()
+                .expect("the prepared receipt is on disk when `prepared` arrives"),
+        );
         let attempt_id = control
             .get("attempt_id")
             .and_then(Value::as_str)

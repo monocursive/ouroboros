@@ -373,3 +373,22 @@ pub fn check_receipt(receipt: &serde_json::Value) -> Result<(), String> {
     }
     semantic_receipt(receipt).map_err(|error| format!("semantic: {error}"))
 }
+
+/// [`semantic_receipt`] as an assertion, for a product receipt a live test
+/// has already validated against the schema: a failure names the rule and
+/// prints the receipt. It is a product finding, never a reason to relax it.
+pub fn assert_semantic_receipt(receipt: &serde_json::Value) {
+    if let Err(error) = semantic_receipt(receipt) {
+        panic!("a receipt breaks a rule its schema cannot state: {error}\n{receipt:#}");
+    }
+}
+
+/// [`check_receipt`] as an assertion, for a product receipt a live test
+/// reads: schema and semantic rules. Returns the receipt.
+#[must_use]
+pub fn checked_receipt(receipt: serde_json::Value) -> serde_json::Value {
+    if let Err(error) = check_receipt(&receipt) {
+        panic!("a product receipt fails its contract: {error}\n{receipt:#}");
+    }
+    receipt
+}

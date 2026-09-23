@@ -39,7 +39,12 @@ fn live() -> bool {
     true
 }
 
+/// The settled receipt, after every receipt of the run passed the schema and
+/// the rules it cannot state (`common::check_receipt`).
 fn settled(run: &Run) -> Value {
+    for receipt in run.receipts() {
+        let _ = common::checked_receipt(receipt);
+    }
     run.receipt_phase("settled")
         .unwrap_or_else(|| panic!("{}; {:?}", run.stderr_text(), run.receipts()))
 }
@@ -77,7 +82,7 @@ fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
             .spawn()
             .unwrap();
         let prepared = spawned.owner().await_prepared().unwrap();
-        let receipt = spawned.receipt_value().unwrap();
+        let receipt = common::checked_receipt(spawned.receipt_value().unwrap());
         let native = &receipt["lifetime"]["native"]["details"];
         let leaf = Path::new(native["execution_cgroup"]["path"].as_str().unwrap()).to_owned();
         let members = std::fs::read_to_string(leaf.join("cgroup.procs")).unwrap();
@@ -183,7 +188,7 @@ fn l03_a_ceiling_too_small_for_charged_helpers_refuses_before_target_exec() {
         .unwrap();
     assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
     assert!(!marker.exists());
-    assert!(run.receipt_phase("refused").is_some());
+    let _ = common::checked_receipt(run.receipt_phase("refused").expect("a refused receipt"));
 }
 
 #[test]
@@ -209,7 +214,7 @@ fn l04_memory_events_prove_oom_but_exit_137_does_not() {
             .spawn()
             .unwrap();
         let prepared = spawned.owner().await_prepared().unwrap();
-        let before = spawned.receipt_value().unwrap();
+        let before = common::checked_receipt(spawned.receipt_value().unwrap());
         // memory.max limits resident memory; the host has swap. Disable swap
         // only in this test's own leaf so allocation deterministically reaches
         // OOM instead of legitimately completing through reclaim/swap.
@@ -369,7 +374,7 @@ fn l02_every_runtime_helper_loss_ends_the_tree() {
                 .spawn()
                 .unwrap();
             let prepared = spawned.owner().await_prepared().unwrap();
-            let receipt = spawned.receipt_value().unwrap();
+            let receipt = common::checked_receipt(spawned.receipt_value().unwrap());
             let details = &receipt["lifetime"]["native"]["details"];
             let killed = identity::pidfd_open(if key == "supervisor" {
                 spawned.pid() as i32

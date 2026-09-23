@@ -107,13 +107,16 @@ fn validators() -> BTreeMap<String, Validator> {
         .collect()
 }
 
-/// Every receipt and trace event of the run validates against its schema.
+/// Every receipt and trace event of the run validates against its schema,
+/// and every receipt keeps the rules the schema cannot state
+/// (`common::semantic_receipt`).
 fn validate(run: &Run) {
     let validators = validators();
     for receipt in run.receipts() {
         validators["jail-receipt"]
             .validate(&receipt)
             .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
+        common::assert_semantic_receipt(&receipt);
     }
     for event in run.trace_events() {
         validators["jail-event"]
@@ -155,7 +158,7 @@ fn receipt_in_phase(spawned: &Spawned, phase: &str) -> Value {
         latest = spawned.receipt_value().unwrap_or(Value::Null);
         latest["phase"] == phase
     });
-    latest
+    common::checked_receipt(latest)
 }
 
 /// The latest `--receipt` copy once its lifetime integrity reads `integrity`.
@@ -165,7 +168,7 @@ fn receipt_in_integrity(spawned: &Spawned, integrity: &str) -> Value {
         latest = spawned.receipt_value().unwrap_or(Value::Null);
         latest["lifetime"]["integrity"] == integrity
     });
-    latest
+    common::checked_receipt(latest)
 }
 
 /// The last receipt the run left in its canonical location.
@@ -933,7 +936,8 @@ fn x06_none_reserved_names_and_private_channels_do_not_reach_the_child() {
             .spawn()
             .expect("the jail starts");
         let prepared = spawned.owner().await_prepared().expect("prepared");
-        let receipt = spawned.receipt_value().expect("the prepared receipt");
+        let receipt =
+            common::checked_receipt(spawned.receipt_value().expect("the prepared receipt"));
         spawned
             .owner()
             .release(
@@ -1028,6 +1032,7 @@ fn none_runs_without_the_enforcement_backend_on_path() {
             .run()
             .expect("the jail runs");
         assert_eq!(run.code(), Some(0), "{observe}: {}", run.stderr_text());
+        validate(&run);
         let receipt = run
             .receipt_phase("settled")
             .unwrap_or_else(|| panic!("{observe}: {}", run.stderr_text()));
@@ -1165,7 +1170,8 @@ fn none_gate_closed_refuses_after_a_verified_teardown() {
             .spawn()
             .expect("the jail starts");
         spawned.owner().await_prepared().expect("prepared");
-        let prepared = spawned.receipt_value().expect("a prepared receipt");
+        let prepared =
+            common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
         assert_eq!(prepared["phase"], "prepared");
         assert_unprotected(&prepared);
         assert_eq!(prepared["lifetime"]["integrity"], "verified");
@@ -1358,7 +1364,8 @@ fn g1_tampering_between_prepared_and_release_refuses_with_integrity_lost() {
                 .spawn()
                 .expect("the jail starts");
             let prepared = spawned.owner().await_prepared().expect("prepared");
-            let receipt = spawned.receipt_value().expect("a prepared receipt");
+            let receipt =
+                common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
             let (leaf, inode) = leaf_of(&receipt);
             let launcher = receipt["lifetime"]["native"]["details"]["launcher_pid"]
                 .as_i64()
@@ -1452,7 +1459,7 @@ fn a13_an_oom_kill_in_the_leaf_ends_the_tree() {
         .spawn()
         .expect("the jail starts");
     let prepared = spawned.owner().await_prepared().expect("prepared");
-    let receipt = spawned.receipt_value().expect("a prepared receipt");
+    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
     let (leaf, _) = leaf_of(&receipt);
     // memory.max bounds resident memory; the host has swap. Disable swap in
     // this leaf only, so the allocation deterministically reaches OOM.
@@ -1586,6 +1593,7 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     validators["jail-receipt"]
         .validate(&mid_run)
         .unwrap_or_else(|error| panic!("{error}\n{mid_run:#}"));
+    common::assert_semantic_receipt(&mid_run);
     assert_eq!(mid_run["phase"], "prepared", "{mid_run:#}");
     assert_eq!(mid_run["exec_observed"], false);
 
@@ -1604,6 +1612,7 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     validators["jail-receipt"]
         .validate(&last)
         .unwrap_or_else(|error| panic!("{error}\n{last:#}"));
+    common::assert_semantic_receipt(&last);
     assert_unprotected(&last);
     assert_eq!(last["phase"], "prepared", "{last:#}");
     assert_eq!(last["exec_observed"], false);

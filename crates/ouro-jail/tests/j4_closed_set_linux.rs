@@ -229,8 +229,9 @@ fn target_identity(receipt: &Value) -> (i64, u64) {
     (process["pid"].as_i64().unwrap(), ticks)
 }
 
-/// Every receipt and event validated against the checked-in schemas; the
-/// settled receipt.
+/// Every receipt and event validated against the checked-in schemas, and
+/// every receipt against the rules they cannot state
+/// (`common::semantic_receipt`); the settled receipt.
 fn settled(run: &Run) -> Value {
     run.assert_channels_complete();
     assert!(
@@ -242,6 +243,7 @@ fn settled(run: &Run) -> Value {
         validators()["jail-receipt"]
             .validate(&receipt)
             .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
+        common::assert_semantic_receipt(&receipt);
     }
     for event in run.trace_events() {
         validators()["jail-event"]
