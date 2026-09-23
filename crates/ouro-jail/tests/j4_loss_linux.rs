@@ -1548,9 +1548,12 @@ fn j4_o03_unmatched_exit_is_unreachable() {
     );
     assert_eq!(line(&out, "parked").raw, 0, "{out:#?}");
     assert_eq!(line(&out, "after").raw, 0, "{out:#?}");
-    assert!(
-        summary.loss.inflight_rejected >= 20,
-        "the bound refused entries: {summary:?}"
+    // Exactly the twenty covered calls: the twenty read-only opens made
+    // meanwhile are outside the closed set and never take or are refused a
+    // slot (J4 O-1).
+    assert_eq!(
+        summary.loss.inflight_rejected, 20,
+        "the bound refused the covered entries and nothing else: {summary:?}"
     );
     assert_eq!(
         unmatched(&events, &summary),
@@ -1592,7 +1595,10 @@ fn j4_o03_exhaustion_through_the_product() {
         details(&settled)
     );
     let gap = assert_degraded(&settled, "fs.write", "inflight_exhausted");
-    assert!(gap["lost_count"].as_u64().unwrap_or(0) >= 1, "{gap:#}");
+    assert_eq!(
+        gap["lost_count"], 20,
+        "the twenty directory-entry calls made while the slot was held: {gap:#}"
+    );
     assert_active(&settled, "net", 1);
     assert_active(&settled, "exec", 2);
     assert_eq!(line(&out, "mkdir").raw, 0, "{out:#?}");

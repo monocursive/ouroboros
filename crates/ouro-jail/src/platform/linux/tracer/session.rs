@@ -17,12 +17,22 @@
 //!   thread's id becomes the leader's, the in-flight entry moves with it, and
 //!   the process keeps the identity it was born with.
 //! * Entry and exit are paired per thread. An exit with no entry is a gap. A
-//!   result in the `ERESTARTSYS` family is not a result at all: the kernel
-//!   re-enters the syscall, so emitting one would be the duplicate §11.2
-//!   forbids.
-//! * A read-only open never becomes an event, and never even costs a second
+//!   kernel restart code at the exit (`ERESTARTSYS` and its family) is not a
+//!   result yet: the kernel decides afterwards whether to re-enter the call
+//!   or to return `EINTR` (J4 O-2), and the call stays in flight until the
+//!   observer has seen that decision — see [`RestartWait`]. A re-entry
+//!   produces the one result; an `EINTR` is the result; emitting the code
+//!   itself would be the duplicate §11.2 forbids, and dropping it would be
+//!   the silence §11.4 forbids.
+//! * A read-only open never becomes an event, never takes an in-flight slot
+//!   and so is never refused one (J4 O-1), and never even costs a second
 //!   stop: the tracee is continued from the seccomp stop instead of being
 //!   stepped to the syscall exit.
+//! * A tracee killed at its seccomp entry stop before the observer resumed
+//!   it made no call: the kernel skips a call whose thread has a fatal signal
+//!   pending after the trace event (`__seccomp_filter`), so it is neither a
+//!   result nor a loss (J4 O-3). A call the observer had already let run
+//!   when the kill came may have had its effect and stays a gap.
 //! * Nothing observed is ever replaced by a guess. Unreadable argument
 //!   memory, an undecodable `open_how`, an untracked task and a final status
 //!   that cannot be attributed each become a `Gap` with its own reason, its
@@ -138,6 +148,91 @@ struct Task {
     tgid: pid_t,
     start_ticks: Option<u64>,
     pending: Option<InFlight>,
+    /// Where `pending` entered the kernel.
+    site: Site,
+    /// `pending` was taken at the stop not yet resumed: a resume that fails
+    /// with `ESRCH` means the kernel will skip it (J4 O-3).
+    entry_fresh: bool,
+    /// A call whose exit carried a restart code, waiting for the kernel's
+    /// decision. While it is set the thread is single-stepped.
+    restart: Option<RestartWait>,
+}
+
+/// Where a call entered the kernel: its ABI, its number and the user
+/// instruction pointer just past the instruction that made it. A kernel
+/// restart re-executes that instruction with the same number, so a re-entry
+/// stops here again (J4 O-2).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Site {
+    arch: u32,
+    nr: u64,
+    ip: u64,
+}
+
+/// A call whose syscall exit carried a kernel restart code (J4 O-2).
+///
+/// The code is not the call's result. When the thread next heads for user
+/// space the kernel delivers any pending signal and then either re-enters
+/// the call or returns `EINTR` (the table on [`sys::ERESTARTSYS`]). The
+/// observer steps the thread (`PTRACE_SINGLESTEP`), which makes every way
+/// out a stop:
+///
+/// * the entry stop of the re-entered call, at the same [`Site`], before any
+///   user instruction has run: restarted;
+/// * the notification the kernel gives a single-stepped tracee at a signal
+///   handler's entry, after it has settled the call and written the frame:
+///   `EINTR` or restarted, from the restart code and, for `ERESTARTSYS`
+///   (whose outcome depends on `SA_RESTART`, which a tracer cannot read),
+///   from the `rax` and `rip` the kernel saved in that frame;
+/// * a death, or the thread's destruction by another's `execve`: the call
+///   did nothing and nothing was returned — neither a result nor a loss;
+/// * anything else — a step trap in user space (the continuation ran through
+///   `restart_syscall`, which is not traced), an unreadable or unrecognised
+///   frame, a stop out of this sequence: [`GapReason::RestartUnresolved`].
+///
+/// The call keeps its in-flight slot until then.
+struct RestartWait {
+    call: InFlight,
+    /// The positive restart code.
+    code: i64,
+    site: Site,
+    /// The last signal delivered to the thread since the exit, if any. The
+    /// kernel notifies a handler's entry only after a signal was delivered.
+    delivered: Option<libc::c_int>,
+}
+
+/// What the kernel did with a call whose exit carried a restart code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Re-entered: the re-entered call produces the one result.
+    Restarted,
+    /// `EINTR` was returned to the program: that is the call's result.
+    Interrupted,
+    /// Not established: a [`GapReason::RestartUnresolved`] gap.
+    Unknown,
+}
+
+/// The kernel's decision at a signal handler's entry (`handle_signal` in
+/// `arch/x86/kernel/signal.c`). `ERESTARTNOHAND` and `ERESTART_RESTARTBLOCK`
+/// become `EINTR` and `ERESTARTNOINTR` is re-entered, whatever the handler.
+/// `ERESTARTSYS` is re-entered only under `SA_RESTART`, which is read from
+/// what the kernel saved in the frame: `rax = -EINTR` with `rip` unchanged,
+/// or `rax` = the call's number with `rip` rewound over the two-byte
+/// `syscall` (or `int 0x80`) instruction. Anything else is not a frame this
+/// call produced.
+fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdict {
+    match code {
+        sys::ERESTARTNOINTR => Verdict::Restarted,
+        sys::ERESTARTNOHAND | sys::ERESTART_RESTARTBLOCK => Verdict::Interrupted,
+        sys::ERESTARTSYS => match frame {
+            Some((ax, ip)) if ax == (-i64::from(libc::EINTR)) as u64 && ip == site.ip => {
+                Verdict::Interrupted
+            }
+            Some((ax, ip)) if ax == site.nr && ip == site.ip.wrapping_sub(2) => Verdict::Restarted,
+            _ => Verdict::Unknown,
+        },
+        _ => Verdict::Unknown,
+    }
 }
 
 /// A call that stopped at its entry and has not yet returned.
@@ -725,6 +820,16 @@ impl Session {
         // child stopped before its parent reported the event that created it.
         self.register(pid);
 
+        if self
+            .tasks
+            .get(&pid)
+            .is_some_and(|task| task.restart.is_some())
+            && let Some(inject) = self.handle_restart_stop(pid, signal, event)
+        {
+            self.restart(pid, inject);
+            return;
+        }
+
         let mut inject = 0;
         match event {
             sys::PTRACE_EVENT_SECCOMP => self.handle_entry(pid),
@@ -764,17 +869,46 @@ impl Session {
     }
 
     fn restart(&mut self, pid: pid_t, signal: libc::c_int) {
-        let stepping = self
-            .tasks
-            .get(&pid)
-            .is_some_and(|task| task.pending.is_some());
-        let request = if stepping {
-            sys::PTRACE_SYSCALL
-        } else {
-            sys::PTRACE_CONT
+        // A call waiting for the kernel's restart decision is followed one
+        // instruction at a time, so that decision is a stop (`RestartWait`);
+        // a call in flight is stepped to its syscall exit; anything else
+        // runs to its next traced event.
+        let (request, fresh) = match self.tasks.get(&pid) {
+            Some(task) if task.restart.is_some() => (sys::PTRACE_SINGLESTEP, false),
+            Some(task) if task.pending.is_some() => (sys::PTRACE_SYSCALL, task.entry_fresh),
+            _ => (sys::PTRACE_CONT, false),
         };
-        if let Err(err) = sys::restart(pid, request, signal) {
-            self.restart_failed(pid, &err);
+        let result = sys::restart(pid, request, signal);
+        if let Some(task) = self.tasks.get_mut(&pid) {
+            task.entry_fresh = false;
+        }
+        match result {
+            Ok(()) => {}
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
+                if fresh {
+                    // J4 O-3: the entry was taken at this very stop, and the
+                    // tracee was killed before it could be resumed from it
+                    // (at an unresumed stop only SIGKILL makes the resume
+                    // fail with ESRCH). The kernel skips a call whose thread
+                    // has a fatal signal pending after the trace event, so
+                    // this one never ran: no result, and no loss.
+                    self.entry_never_ran(pid);
+                }
+            }
+            Err(err) => self.restart_failed(pid, &err),
+        }
+    }
+
+    /// J4 O-3: forget the entry of a thread killed at its seccomp stop.
+    fn entry_never_ran(&mut self, tid: pid_t) {
+        if self
+            .tasks
+            .get_mut(&tid)
+            .and_then(|task| task.pending.take())
+            .is_some()
+        {
+            self.inflight = self.inflight.saturating_sub(1);
+            self.summary.killed_at_entry += 1;
         }
     }
 
@@ -815,6 +949,9 @@ impl Session {
                 tgid,
                 start_ticks,
                 pending: None,
+                site: Site::default(),
+                entry_fresh: false,
+                restart: None,
             },
         );
         // A new group's birth is its leader's start time: the task itself
@@ -904,12 +1041,17 @@ impl Session {
         let former = sys::event_msg(tid)
             .map(|value| value as pid_t)
             .unwrap_or(tid);
-        let mut carried: Option<InFlight> = None;
+        let mut carried: Option<(InFlight, Site)> = None;
         if former != tid
             && former > 0
             && let Some(task) = self.tasks.remove(&former)
         {
-            carried = task.pending;
+            carried = task.pending.map(|pending| (pending, task.site));
+            if task.restart.is_some() {
+                // Not reachable: the thread that execs is in its `execve`,
+                // not waiting for a restart decision. Kept exact anyway.
+                self.restart_unfinished();
+            }
             // That task did not die: it is this one now, under the leader's
             // id. Nothing will ever report it, so it is not retired — a
             // recycled pid with this number must not be swallowed.
@@ -936,14 +1078,20 @@ impl Session {
             // already on its way.
             self.retired.insert(thread, Instant::now() + KILL_GRACE);
             self.summary.tasks_destroyed_by_exec += 1;
-            if let Some(task) = self.tasks.remove(&thread)
-                && let Some(pending) = task.pending
-            {
+            let Some(task) = self.tasks.remove(&thread) else {
+                continue;
+            };
+            if let Some(pending) = task.pending {
                 // The entry is in hand: the gap names the call it would have
                 // reported, not an anonymous hole (§11.4).
                 self.inflight = self.inflight.saturating_sub(1);
                 self.summary.loss.abandoned_entries += 1;
                 self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
+            }
+            if task.restart.is_some() {
+                // Destroyed between a restart code and the kernel's
+                // decision: the call did nothing and returned nothing.
+                self.restart_unfinished();
             }
         }
         if carried.is_some()
@@ -963,8 +1111,9 @@ impl Session {
         let mut dirfd = None;
         let mut syscall = None;
         if let Some(task) = self.tasks.get_mut(&tid) {
-            if let Some(pending) = carried {
+            if let Some((pending, site)) = carried {
                 task.pending = Some(pending);
+                task.site = site;
             }
             if let Some(InFlight::Closed(pending)) = task.pending.as_mut()
                 && pending.entry.op == ClosedOp::Exec
@@ -989,23 +1138,43 @@ impl Session {
     /// A `PTRACE_EVENT_SECCOMP` stop: the tracee is at the entry of a call
     /// the narrowing filter traces, and the syscall has not run.
     fn handle_entry(&mut self, tid: pid_t) {
-        let Some(info) = sys::syscall_info(tid) else {
-            self.summary.loss.syscall_info_unavailable += 1;
-            self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
-            return;
+        let info = match sys::syscall_info(tid) {
+            Ok(info)
+                if info.op == sys::SYSCALL_INFO_SECCOMP || info.op == sys::SYSCALL_INFO_ENTRY =>
+            {
+                info
+            }
+            // J4 O-3: the tracee left this stop without being resumed, which
+            // only a SIGKILL does — it is either on its way out (`ESRCH`) or
+            // already stopped at its exit notification. The kernel skips a
+            // call whose thread has a fatal signal pending after the trace
+            // event (`__seccomp_filter`), so whatever it was, it never ran.
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
+                self.summary.killed_at_entry += 1;
+                return;
+            }
+            Ok(_) if Self::at_exit_notification(tid) => {
+                self.summary.killed_at_entry += 1;
+                return;
+            }
+            _ => {
+                self.summary.loss.syscall_info_unavailable += 1;
+                self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
+                return;
+            }
         };
-        if info.op != sys::SYSCALL_INFO_SECCOMP && info.op != sys::SYSCALL_INFO_ENTRY {
-            self.summary.loss.syscall_info_unavailable += 1;
-            self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
-            return;
-        }
+        let site = Site {
+            arch: info.arch,
+            nr: info.nr,
+            ip: info.ip,
+        };
         // jail-v1 §9.2: validate the architecture before the syscall number.
         // A compat or x32 entry carries a number from a different table, and
         // naming it from this one would mislabel the call (J4 D2): it is
         // foreign, followed to its return and never decoded.
         if info.arch != sys::AUDIT_ARCH_X86_64 || info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0 {
             if self.admit(OpSet::ALL) {
-                self.begin(tid, InFlight::Foreign);
+                self.begin(tid, InFlight::Foreign, site);
             }
             return;
         }
@@ -1016,7 +1185,7 @@ impl Session {
             && info.args[1] & u64::from(super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
         {
             if self.admit(OpSet::ALL) {
-                self.begin(tid, InFlight::Listener);
+                self.begin(tid, InFlight::Listener, site);
             }
             return;
         }
@@ -1027,7 +1196,7 @@ impl Session {
             && info.args[0] & u64::from(super::filter::CLONE_UNTRACED) != 0
         {
             if self.admit(OpSet::ALL) {
-                self.begin(tid, InFlight::Untraced);
+                self.begin(tid, InFlight::Untraced, site);
             }
             return;
         }
@@ -1035,12 +1204,9 @@ impl Session {
             self.stop_not_ours(tid);
             return;
         };
-        if !self.admit(OpSet::of(entry.op)) {
-            return;
-        }
         // Flags first: they decide whether this call is in the closed set at
         // all, and one that is not must cost neither a read of the tracee's
-        // memory nor a mark in the loss counters.
+        // memory, nor an in-flight slot, nor a mark in the loss counters.
         let (flags, flags_unavailable) = self.capture_flags(tid, entry, &info.args);
         if entry.op == ClosedOp::Open
             && let Some(flags) = flags
@@ -1048,14 +1214,29 @@ impl Session {
         {
             // A read-only open is outside `linux-closed-v1`. It is not a
             // loss, it is not an event, and the tracee is continued from
-            // here rather than stepped to a syscall exit nobody reads.
+            // here rather than stepped to a syscall exit nobody reads. It is
+            // filtered before the in-flight bound is consulted (J4 O-1):
+            // with the table full it is still not a call the observer had to
+            // follow, so refusing it would record a read as lost evidence.
             self.summary.filtered_readonly_opens += 1;
+            return;
+        }
+        if !self.admit(OpSet::of(entry.op)) {
             return;
         }
         let mut pending = self.capture_paths(tid, entry, &info.args);
         pending.args.flags = flags;
         pending.flags_unavailable = flags_unavailable;
-        self.begin(tid, InFlight::Closed(pending));
+        self.begin(tid, InFlight::Closed(pending), site);
+    }
+
+    /// Whether a tracee is stopped at its `PTRACE_EVENT_EXIT` notification:
+    /// where a thread killed at another stop stops next (J4 O-3).
+    fn at_exit_notification(tid: pid_t) -> bool {
+        matches!(
+            sys::siginfo(tid),
+            Ok((libc::SIGTRAP, code)) if code == libc::SIGTRAP | (sys::PTRACE_EVENT_EXIT << 8)
+        )
     }
 
     /// Whether another call may be followed to its return. When the
@@ -1070,8 +1251,19 @@ impl Session {
         true
     }
 
-    /// Record `call` as this thread's call in flight.
-    fn begin(&mut self, tid: pid_t, call: InFlight) {
+    /// Record `call`, which entered the kernel at `site`, as this thread's
+    /// call in flight.
+    fn begin(&mut self, tid: pid_t, call: InFlight, site: Site) {
+        if self
+            .tasks
+            .get(&tid)
+            .is_some_and(|task| task.restart.is_some())
+        {
+            // A new entry while a restart decision is still owed: the entry
+            // stop that could have been the re-entry was judged in
+            // `handle_restart_stop`, so this is out of sequence.
+            self.settle_restart(tid, Verdict::Unknown);
+        }
         let replaced = self
             .tasks
             .get(&tid)
@@ -1085,6 +1277,8 @@ impl Session {
         }
         if let Some(task) = self.tasks.get_mut(&tid) {
             task.pending = Some(call);
+            task.site = site;
+            task.entry_fresh = true;
             self.inflight += 1;
         }
     }
@@ -1107,6 +1301,10 @@ impl Session {
                 self.summary.loss.unexpected_trace_stops += 1;
                 self.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
             }
+            // J4 O-3: killed at this seccomp stop; the kernel skips the call.
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
+                self.summary.killed_at_entry += 1;
+            }
             Err(_) => {
                 self.summary.loss.syscall_info_unavailable += 1;
                 self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
@@ -1117,10 +1315,27 @@ impl Session {
     /// A `SIGTRAP | 0x80` stop: the syscall entry or exit of a call whose
     /// entry we recorded.
     fn handle_syscall_stop(&mut self, tid: pid_t) {
-        let Some(info) = sys::syscall_info(tid) else {
-            self.summary.loss.syscall_info_unavailable += 1;
-            self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
-            return;
+        let info = match sys::syscall_info(tid) {
+            Ok(info) => info,
+            Err(err)
+                if err.raw_os_error() == Some(libc::ESRCH)
+                    && self
+                        .tasks
+                        .get(&tid)
+                        .is_some_and(|task| task.pending.is_some()) =>
+            {
+                // J4 O-3, at the exit: killed after its call ran, before the
+                // return could be read. The result is lost, and the entry in
+                // hand is what names it: the death that follows records it
+                // once, as `entry_abandoned` of that call's own classes —
+                // not a second gap in every class.
+                return;
+            }
+            Err(_) => {
+                self.summary.loss.syscall_info_unavailable += 1;
+                self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
+                return;
+            }
         };
         match info.op {
             // With the narrowing filter the entry is reported as a seccomp
@@ -1149,13 +1364,21 @@ impl Session {
             self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
             return;
         };
-        self.inflight = self.inflight.saturating_sub(1);
         if sys::is_restart(rval) {
-            // The kernel will re-enter this syscall. Its entry stops again
-            // and produces the one result the call actually has.
-            self.summary.restarts += 1;
+            // Not a result yet (J4 O-2): the kernel decides after this stop
+            // whether to re-enter the call or to return EINTR, and the call
+            // stays in flight until the observer has seen which.
+            if let Some(task) = self.tasks.get_mut(&tid) {
+                task.restart = Some(RestartWait {
+                    call,
+                    code: -rval,
+                    site: task.site,
+                    delivered: None,
+                });
+            }
             return;
         }
+        self.inflight = self.inflight.saturating_sub(1);
         let pending = match call {
             InFlight::Closed(pending) => pending,
             InFlight::Foreign => {
@@ -1261,6 +1484,160 @@ impl Session {
         });
     }
 
+    // ------------------------------------------------ restart decisions (O-2)
+
+    /// A stop of a thread whose last call exited with a restart code and is
+    /// waiting for the kernel's decision ([`RestartWait`]). Returns the
+    /// signal to deliver when this stop is fully handled here; `None` hands
+    /// it on to the ordinary handling, after settling the wait if the stop
+    /// settles it.
+    fn handle_restart_stop(
+        &mut self,
+        tid: pid_t,
+        signal: libc::c_int,
+        event: libc::c_int,
+    ) -> Option<libc::c_int> {
+        let (code, site, delivered) = {
+            let wait = self.tasks.get(&tid)?.restart.as_ref()?;
+            (wait.code, wait.site, wait.delivered)
+        };
+        match event {
+            sys::PTRACE_EVENT_SECCOMP => {
+                // The thread's next entry. It was single-stepped since the
+                // exit, so no user instruction ran before this one: an entry
+                // of the same call at the same instruction is the kernel's
+                // re-entry, and anything else is not.
+                match sys::syscall_info(tid) {
+                    Ok(info)
+                        if info.arch == site.arch && info.nr == site.nr && info.ip == site.ip =>
+                    {
+                        self.settle_restart(tid, Verdict::Restarted);
+                    }
+                    // Killed at this stop: the death ends the wait, and the
+                    // entry is judged (and skipped) by `handle_entry`.
+                    Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {}
+                    Ok(_) if Self::at_exit_notification(tid) => {}
+                    _ => self.settle_restart(tid, Verdict::Unknown),
+                }
+                None
+            }
+            // A group-stop, or the thread's exit: the decision is still
+            // ahead, or never comes. Handled as ever; the thread keeps
+            // stepping.
+            sys::PTRACE_EVENT_STOP | sys::PTRACE_EVENT_EXIT => None,
+            0 if signal != sys::SYSCALL_STOP_SIG => {
+                if signal == libc::SIGTRAP {
+                    if let Some(uc) = delivered.and_then(|sig| self.handler_entry(tid, sig)) {
+                        // The kernel has set up a handler and settled the
+                        // call. This notification is not a signal: nothing
+                        // is delivered for it.
+                        let frame = Self::read_frame(tid, uc);
+                        self.settle_restart(tid, verdict_at_handler(code, frame, site));
+                        return Some(0);
+                    }
+                    if Self::is_step_trap(tid) {
+                        // A step that ended in user space without a re-entry
+                        // or a handler: the continuation ran through
+                        // `restart_syscall`, or a code reached user space.
+                        // The trap is this observer's own, not the tracee's.
+                        self.settle_restart(tid, Verdict::Unknown);
+                        return Some(0);
+                    }
+                }
+                // A signal on its way: deliver it, still stepping, so the
+                // handler it may run announces itself.
+                if let Some(wait) = self.tasks.get_mut(&tid).and_then(|t| t.restart.as_mut()) {
+                    wait.delivered = Some(signal);
+                }
+                Some(signal)
+            }
+            // A syscall stop, a fork or an exec: not a stop this sequence
+            // produces. Settled as unknown, then handled as ever.
+            _ => {
+                self.settle_restart(tid, Verdict::Unknown);
+                None
+            }
+        }
+    }
+
+    /// The `ucontext` of the signal frame the kernel has just set up, when
+    /// the stop is the notification of a handler's entry to a single-stepped
+    /// tracee: `si_code` is the notification's own, and the registers are
+    /// the ones `__setup_rt_frame` loads — `rdi` the signal delivered, `rax`
+    /// zero, `rsp` the frame and `rdx` its `ucontext`, one word above it. At
+    /// a signal-delivery stop inside the same sequence `rax` still holds the
+    /// restart code, so a `SIGTRAP` sent by anyone is not mistaken for it.
+    fn handler_entry(&mut self, tid: pid_t, delivered: libc::c_int) -> Option<u64> {
+        let (signo, code) = sys::siginfo(tid).ok()?;
+        if signo != libc::SIGTRAP || code != sys::SI_CODE_HANDLER_ENTRY {
+            return None;
+        }
+        let regs = sys::regs(tid).ok()?;
+        let delivered = u64::try_from(delivered).ok()?;
+        (regs.rax == 0 && regs.rdi == delivered && regs.rsp.checked_add(8) == Some(regs.rdx))
+            .then_some(regs.rdx)
+    }
+
+    /// The interrupted `rax` and `rip` the kernel saved in the frame whose
+    /// `ucontext` is at `uc`.
+    fn read_frame(tid: pid_t, uc: u64) -> Option<(u64, u64)> {
+        let mut word = [0u8; 8];
+        let mut read = |offset: u64| {
+            (sys::read_remote(tid, uc.checked_add(offset)?, &mut word) == 8)
+                .then(|| u64::from_ne_bytes(word))
+        };
+        let ax = read(sys::FRAME_RAX)?;
+        let ip = read(sys::FRAME_RIP)?;
+        Some((ax, ip))
+    }
+
+    /// Whether a `SIGTRAP` stop is a trap this observer's stepping raised.
+    fn is_step_trap(tid: pid_t) -> bool {
+        matches!(
+            sys::siginfo(tid),
+            Ok((libc::SIGTRAP, sys::TRAP_TRACE | sys::TRAP_BRKPT))
+        )
+    }
+
+    /// Settle a thread's restart wait with `verdict`.
+    fn settle_restart(&mut self, tid: pid_t, verdict: Verdict) {
+        let Some(wait) = self
+            .tasks
+            .get_mut(&tid)
+            .and_then(|task| task.restart.take())
+        else {
+            return;
+        };
+        match verdict {
+            Verdict::Restarted => {
+                // The re-entered call is a new entry with its own slot.
+                self.inflight = self.inflight.saturating_sub(1);
+                self.summary.restarts += 1;
+            }
+            Verdict::Interrupted => {
+                // The call's result is EINTR, delivered as any other result
+                // (which also releases its slot).
+                self.summary.interrupted += 1;
+                if let Some(task) = self.tasks.get_mut(&tid) {
+                    task.pending = Some(wait.call);
+                    task.site = wait.site;
+                }
+                self.handle_exit(tid, -i64::from(libc::EINTR));
+            }
+            Verdict::Unknown => {
+                self.inflight = self.inflight.saturating_sub(1);
+                self.summary.loss.restart_unresolved += 1;
+                self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
+            }
+        }
+    }
+
+    /// A restart wait whose thread ended before the kernel decided.
+    fn restart_unfinished(&mut self) {
+        self.inflight = self.inflight.saturating_sub(1);
+        self.summary.restarts_unfinished += 1;
+    }
+
     fn handle_death(&mut self, pid: pid_t, status: libc::c_int) {
         let Some(task) = self.tasks.remove(&pid) else {
             if self.retired.remove(&pid).is_some() {
@@ -1290,6 +1667,12 @@ impl Session {
             self.inflight = self.inflight.saturating_sub(1);
             self.summary.loss.abandoned_entries += 1;
             self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
+        }
+        if task.restart.is_some() {
+            // Died between a restart code and the kernel's decision (a fatal
+            // signal's delivery is exactly such a decision point): the call
+            // did nothing, and no result was ever returned.
+            self.restart_unfinished();
         }
         let Some(process) = self.procs.get_mut(&task.tgid) else {
             // A task whose thread group we no longer hold: its death cannot
@@ -1877,10 +2260,10 @@ mod tests {
             Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
         );
         session.register(RECYCLED);
-        session.begin(RECYCLED, InFlight::Untraced);
+        session.begin(RECYCLED, InFlight::Untraced, Site::default());
         session.handle_exit(RECYCLED, -i64::from(libc::EPERM));
         assert_eq!(session.summary.untraced_clone_refused, 1);
-        session.begin(RECYCLED, InFlight::Untraced);
+        session.begin(RECYCLED, InFlight::Untraced, Site::default());
         session.handle_exit(RECYCLED, 4242);
         let gaps: Vec<(GapReason, OpSet, Option<u64>)> = drained(&rx, &mut session)
             .into_iter()
@@ -1901,6 +2284,440 @@ mod tests {
             GapReason::UntracedDescendant.as_str(),
             "untraced_descendant"
         );
+    }
+
+    // ------------------------------------------------ O-2, the decision
+
+    /// J4 O-2: the kernel's rule at a handler's entry, for every restart
+    /// code. Only `ERESTARTSYS` depends on the frame, and only the two frames
+    /// the kernel writes for it are accepted.
+    #[test]
+    fn j4_o2_the_verdict_at_a_handler_follows_the_kernel_for_every_code() {
+        let site = Site {
+            arch: sys::AUDIT_ARCH_X86_64,
+            nr: 257,
+            ip: 0x40_1002,
+        };
+        let eintr = (-i64::from(libc::EINTR)) as u64;
+        let restarted = Some((257, 0x40_1000));
+        let interrupted = Some((eintr, 0x40_1002));
+        for frame in [None, restarted, interrupted] {
+            assert_eq!(
+                verdict_at_handler(sys::ERESTARTNOINTR, frame, site),
+                Verdict::Restarted,
+                "ERESTARTNOINTR is re-entered whatever the handler"
+            );
+            for code in [sys::ERESTARTNOHAND, sys::ERESTART_RESTARTBLOCK] {
+                assert_eq!(
+                    verdict_at_handler(code, frame, site),
+                    Verdict::Interrupted,
+                    "{code} becomes EINTR under any handler"
+                );
+            }
+        }
+        assert_eq!(
+            verdict_at_handler(sys::ERESTARTSYS, interrupted, site),
+            Verdict::Interrupted,
+            "no SA_RESTART"
+        );
+        assert_eq!(
+            verdict_at_handler(sys::ERESTARTSYS, restarted, site),
+            Verdict::Restarted,
+            "SA_RESTART"
+        );
+        for frame in [
+            None,
+            Some((257, 0x40_1002)),
+            Some((eintr, 0x40_1000)),
+            Some((0, 0x40_1002)),
+            Some((258, 0x40_1000)),
+            Some((eintr, 0x40_2002)),
+        ] {
+            assert_eq!(
+                verdict_at_handler(sys::ERESTARTSYS, frame, site),
+                Verdict::Unknown,
+                "{frame:x?} is not a frame the kernel wrote for this call"
+            );
+        }
+        assert_eq!(
+            verdict_at_handler(515, interrupted, site),
+            Verdict::Unknown,
+            "515 is not a restart code"
+        );
+    }
+
+    fn waiting(session: &mut Session, tid: pid_t, nr: u64, path: &str) {
+        pend(session, tid, nr, path);
+        session.handle_exit(tid, -sys::ERESTARTSYS);
+    }
+
+    /// J4 O-2 at the session: a restart code keeps the call in flight; each
+    /// way the wait ends gives exactly what it should — `EINTR` one result,
+    /// a re-entry nothing (the re-entered call is its own entry), an
+    /// unresolved decision one gap naming the call's classes, a death
+    /// nothing — and every one releases the slot.
+    #[test]
+    fn j4_o2_each_end_of_a_restart_wait_is_exact() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 1000));
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let mut session = Session::new(
+            TracerConfig::default(),
+            tx,
+            0,
+            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+        );
+        session.register(RECYCLED);
+
+        waiting(&mut session, RECYCLED, 257, "/w/interrupted");
+        assert_eq!(session.inflight, 1, "still in flight while waiting");
+        assert!(drained(&rx, &mut session).is_empty(), "no result yet");
+        session.settle_restart(RECYCLED, Verdict::Interrupted);
+        let events = drained(&rx, &mut session);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [TracerEvent::Syscall { op: ClosedOp::Open, ret, .. }] if *ret == -i64::from(libc::EINTR)
+            ),
+            "{events:?}"
+        );
+        assert_eq!(session.inflight, 0);
+
+        waiting(&mut session, RECYCLED, 83, "/w/restarted");
+        session.settle_restart(RECYCLED, Verdict::Restarted);
+        assert!(drained(&rx, &mut session).is_empty());
+        assert_eq!(session.inflight, 0);
+
+        waiting(&mut session, RECYCLED, 83, "/w/unknown");
+        session.settle_restart(RECYCLED, Verdict::Unknown);
+        let events = drained(&rx, &mut session);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [TracerEvent::Gap { reason: GapReason::RestartUnresolved, ops, count: Some(1), .. }]
+                    if *ops == OpSet::of(ClosedOp::Mkdir)
+            ),
+            "{events:?}"
+        );
+        assert_eq!(session.inflight, 0);
+
+        waiting(&mut session, RECYCLED, 83, "/w/died");
+        session.handle_death(RECYCLED, libc::SIGKILL);
+        assert!(drained(&rx, &mut session).is_empty(), "no result, no gap");
+        assert_eq!(session.inflight, 0);
+
+        assert_eq!(session.summary.interrupted, 1);
+        assert_eq!(session.summary.restarts, 1);
+        assert_eq!(session.summary.restarts_unfinished, 1);
+        assert_eq!(session.summary.loss.restart_unresolved, 1);
+        assert_eq!(
+            session.summary.loss.total(),
+            1,
+            "{:?}",
+            session.summary.loss
+        );
+        assert_eq!(GapReason::RestartUnresolved.as_str(), "restart_unresolved");
+        assert!(!GapReason::RestartUnresolved.is_open_ended());
+    }
+
+    // ------------------------------------------------ O-3, with a real kernel
+
+    /// A child of this test, seized by the calling thread, that has the
+    /// narrowing filter installed and makes one `mkdir` of `path` when
+    /// released: its first stop is that call's seccomp entry stop.
+    struct Mkdirer {
+        pid: pid_t,
+        go: libc::c_int,
+    }
+
+    impl Mkdirer {
+        /// `None` when this host will not let a test trace its own child.
+        fn start(path: &std::ffi::CStr) -> Option<Mkdirer> {
+            let mut fds: [libc::c_int; 2] = [0; 2];
+            // SAFETY: `pipe2` writes two descriptors into the live array.
+            assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            // SAFETY: the child runs only async-signal-safe code — `close`,
+            // the allocation-free filter install, `read`, one raw syscall
+            // with a pointer prepared before the fork, and `_exit` — so the
+            // other threads of this test process cannot matter to it.
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                // SAFETY: as above; every pointer is live in the child's copy
+                // of this address space.
+                unsafe {
+                    libc::close(fds[1]);
+                    if super::super::install_narrowing_filter().is_err() {
+                        libc::_exit(3);
+                    }
+                    let mut byte = 0u8;
+                    libc::read(fds[0], (&raw mut byte).cast::<libc::c_void>(), 1);
+                    libc::syscall(libc::SYS_mkdir, path.as_ptr(), 0o700);
+                    libc::_exit(0);
+                }
+            }
+            assert!(pid > 0, "fork: {}", std::io::Error::last_os_error());
+            // SAFETY: the read end belongs to the child now.
+            unsafe { libc::close(fds[0]) };
+            let child = Mkdirer { pid, go: fds[1] };
+            if let Err(err) = sys::seize(pid, sys::SEIZE_OPTIONS) {
+                ouro_fixture::harness::skip_or_fail(&format!(
+                    "this host will not let a test trace its own child: {err}"
+                ));
+                return None;
+            }
+            Some(child)
+        }
+
+        /// Release the child and return the status of its first stop.
+        fn release(&self) -> libc::c_int {
+            // SAFETY: one byte from a live buffer to a descriptor we own.
+            assert_eq!(
+                unsafe { libc::write(self.go, b"g".as_ptr().cast::<libc::c_void>(), 1) },
+                1
+            );
+            self.wait()
+        }
+
+        /// The next status of this child only: never `waitpid(-1)`, which
+        /// would take another test's children.
+        fn wait(&self) -> libc::c_int {
+            let mut status = 0;
+            // SAFETY: `waitpid` writes one int through a live pointer.
+            let got = unsafe { libc::waitpid(self.pid, &raw mut status, libc::__WALL) };
+            assert_eq!(got, self.pid, "{}", std::io::Error::last_os_error());
+            status
+        }
+
+        fn kill(&self) {
+            // SAFETY: a pid this test created, and a valid signal.
+            assert_eq!(unsafe { libc::kill(self.pid, libc::SIGKILL) }, 0);
+        }
+
+        /// Hand every remaining status to the session until the child is
+        /// reaped.
+        fn reap_into(&self, session: &mut Session) {
+            loop {
+                let status = self.wait();
+                session.handle(self.pid, status);
+                if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+                    return;
+                }
+            }
+        }
+    }
+
+    impl Drop for Mkdirer {
+        fn drop(&mut self) {
+            // SAFETY: our own pid and descriptor; both calls tolerate either
+            // being already gone.
+            unsafe {
+                libc::kill(self.pid, libc::SIGKILL);
+                libc::close(self.go);
+            }
+        }
+    }
+
+    fn live_session() -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1024);
+        (
+            Session::new(TracerConfig::default(), tx, 0, Box::new(LiveProc)),
+            rx,
+        )
+    }
+
+    fn is_seccomp_stop(status: libc::c_int) -> bool {
+        libc::WIFSTOPPED(status) && (status >> 16) & 0xff == sys::PTRACE_EVENT_SECCOMP
+    }
+
+    fn gaps_of(events: &[TracerEvent]) -> Vec<(GapReason, OpSet, Option<u64>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TracerEvent::Gap {
+                    reason, ops, count, ..
+                } => Some((*reason, *ops, *count)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn target_path(dir: &std::path::Path) -> (std::path::PathBuf, std::ffi::CString) {
+        let target = dir.join("made");
+        let c = std::ffi::CString::new(target.as_os_str().as_encoded_bytes()).unwrap();
+        (target, c)
+    }
+
+    /// The control for the two checks below: not killed, the child's
+    /// `mkdir` runs and is one result. The harness is sound, so an absent
+    /// directory below is the kernel skipping the call, not a child that
+    /// never tried.
+    #[test]
+    fn j4_o3_control_an_unkilled_entry_runs_and_is_one_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (target, c) = target_path(dir.path());
+        let Some(child) = Mkdirer::start(&c) else {
+            return;
+        };
+        let (mut session, rx) = live_session();
+        let status = child.release();
+        assert!(is_seccomp_stop(status), "status {status:#x}");
+        session.handle(child.pid, status);
+        child.reap_into(&mut session);
+        let events = drained(&rx, &mut session);
+        assert!(target.is_dir(), "the call ran");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TracerEvent::Syscall {
+                    op: ClosedOp::Mkdir,
+                    ret: 0,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        assert_eq!(gaps_of(&events), vec![]);
+    }
+
+    /// J4 O-3, the first window: the tracee is killed after the tracer has
+    /// taken its seccomp entry stop from `waitpid` and before the tracer
+    /// reads it. `PTRACE_GET_SYSCALL_INFO` then fails with `ESRCH` — and the
+    /// kernel skips the call, because a fatal signal is pending after the
+    /// trace event (`__seccomp_filter`). The directory is never made: the
+    /// call had no effect, so it is not loss.
+    #[test]
+    fn j4_o3_a_tracee_killed_before_its_entry_is_read_made_no_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let (target, c) = target_path(dir.path());
+        let Some(child) = Mkdirer::start(&c) else {
+            return;
+        };
+        let (mut session, rx) = live_session();
+        let status = child.release();
+        assert!(is_seccomp_stop(status), "status {status:#x}");
+        child.kill();
+        session.handle(child.pid, status);
+        child.reap_into(&mut session);
+        let events = drained(&rx, &mut session);
+        assert!(!target.exists(), "the kernel skipped the call");
+        assert_eq!(
+            gaps_of(&events),
+            vec![],
+            "a call the kernel provably did not execute is not a loss"
+        );
+        assert_eq!(
+            session.summary.loss.total(),
+            0,
+            "{:?}",
+            session.summary.loss
+        );
+        assert_eq!(session.summary.killed_at_entry, 1, "{:?}", session.summary);
+        assert_eq!(session.inflight, 0);
+    }
+
+    /// J4 O-3, the second window: the entry was read (the tracer holds it)
+    /// and the tracee is killed before the tracer resumes it. The resume
+    /// fails with `ESRCH`, and the kernel skips the call for the same
+    /// reason. The entry is not abandoned: it never ran.
+    ///
+    /// The kill has to reach the tracee before the resume does. A tracee
+    /// fast enough to get to its exit notification first is resumed from
+    /// there — the resume succeeds, the observer cannot tell that stop from
+    /// a call that ran and was then killed, and the entry stays an
+    /// `entry_abandoned` gap (uncertain, so a gap). That branch is checked
+    /// too, and the attempt repeated until the first branch is met, which on
+    /// the reference host is the first try.
+    #[test]
+    fn j4_o3_a_tracee_killed_before_its_entry_is_resumed_made_no_call() {
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let (target, c) = target_path(dir.path());
+            let Some(child) = Mkdirer::start(&c) else {
+                return;
+            };
+            let (mut session, rx) = live_session();
+            let status = child.release();
+            assert!(is_seccomp_stop(status), "status {status:#x}");
+            session.register(child.pid);
+            session.handle_entry(child.pid);
+            assert_eq!(session.inflight, 1, "the entry is in hand");
+            child.kill();
+            session.restart(child.pid, 0);
+            let met_the_killed_stop = session.summary.killed_at_entry == 1;
+            child.reap_into(&mut session);
+            let events = drained(&rx, &mut session);
+            assert!(!target.exists(), "the kernel skipped the call");
+            assert_eq!(session.inflight, 0);
+            if !met_the_killed_stop {
+                assert_eq!(
+                    gaps_of(&events),
+                    vec![(
+                        GapReason::EntryAbandoned,
+                        OpSet::of(ClosedOp::Mkdir),
+                        Some(1)
+                    )],
+                    "resumed from somewhere it cannot tell: uncertain, so a gap"
+                );
+                continue;
+            }
+            assert_eq!(
+                gaps_of(&events),
+                vec![],
+                "a call the kernel provably did not execute is not a loss"
+            );
+            assert_eq!(
+                session.summary.loss.total(),
+                0,
+                "{:?}",
+                session.summary.loss
+            );
+            return;
+        }
+        panic!("the resume never met the killed stop in 20 attempts");
+    }
+
+    /// J4 O-3, the exit window: the tracee is killed after its call ran and
+    /// stopped at its syscall exit, before the tracer read the return. The
+    /// call did run (the directory exists), and its result can no longer be
+    /// read: that is a loss, and exactly one — of the call's own classes
+    /// (`entry_abandoned` naming `mkdir`), not a second gap in every class.
+    #[test]
+    fn j4_o3_a_tracee_killed_at_its_exit_stop_is_one_loss_of_its_own_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (target, c) = target_path(dir.path());
+        let Some(child) = Mkdirer::start(&c) else {
+            return;
+        };
+        let (mut session, rx) = live_session();
+        let status = child.release();
+        assert!(is_seccomp_stop(status), "status {status:#x}");
+        session.handle(child.pid, status);
+        let status = child.wait();
+        assert!(
+            libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == sys::SYSCALL_STOP_SIG,
+            "the exit stop: {status:#x}"
+        );
+        child.kill();
+        session.handle(child.pid, status);
+        child.reap_into(&mut session);
+        let events = drained(&rx, &mut session);
+        assert!(target.is_dir(), "the call ran");
+        assert_eq!(
+            gaps_of(&events),
+            vec![(
+                GapReason::EntryAbandoned,
+                OpSet::of(ClosedOp::Mkdir),
+                Some(1)
+            )],
+            "one lost result, of the call's classes"
+        );
+        assert_eq!(
+            session.summary.loss.total(),
+            1,
+            "{:?}",
+            session.summary.loss
+        );
+        assert_eq!(session.inflight, 0);
     }
 
     #[test]
