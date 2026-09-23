@@ -561,6 +561,15 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
     if let Some(error) = &report.trace_error {
         eprintln!("{error}");
     }
+    // J4-G: control messages the consumer never took are reported, never
+    // waited on (§13.3); the count comes from `RunReport.control_dropped`.
+    if report.control_dropped > 0 {
+        eprintln!(
+            "ouro-jail: {} control message(s) were dropped: the --control-fd consumer did not \
+             read them",
+            report.control_dropped
+        );
+    }
     if let Some(path) = &report.receipt_path
         && report.receipt.is_some()
         && stderr_is_a_terminal()
