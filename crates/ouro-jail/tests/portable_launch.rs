@@ -1798,7 +1798,14 @@ fn explain_prints_credentials_by_id_mode_and_dest_never_by_source() {
             .collect();
         assert_eq!(keys, ["dest", "id", "mode"], "{credential}");
     }
-    assert_eq!(credentials[2]["dest"], "conf/pipe");
+    // J4-D7: the snapshot's arrays are in canonical-byte order, and a
+    // credential's canonical bytes begin with its `dest` (canonicalization.md),
+    // so `conf/pipe` (id `pipe`) comes first, not last as it would by id.
+    let dests: Vec<&str> = credentials
+        .iter()
+        .map(|credential| credential["dest"].as_str().unwrap())
+        .collect();
+    assert_eq!(dests, ["conf/pipe", "good.json", "missing.json"]);
 
     let text = jail_binary(&fixture, &["explain", "--launch", "inspect"]);
     assert!(text.status.success());

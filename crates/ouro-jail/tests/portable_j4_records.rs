@@ -8,6 +8,8 @@
 //!   file, file sync, rename or directory sync).
 //! - D5 (§6.4, §13.2): the first stop cause wins; a later wall expiry or strict
 //!   evidence loss does not overwrite `outcome.cause`.
+//! - D7 (canonicalization.md): every snapshot array, keyed collections
+//!   included, is ordered by its elements' RFC 8785 bytes.
 //!
 //! Portable: the platform is simulated, the filesystem is real.
 
@@ -928,6 +930,129 @@ mod d5 {
             receipt["outcome"]["cause"], "evidence_loss",
             "the receipt must name the stop the platform acted on: {:#}",
             receipt["outcome"]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D7: keyed collections sort by canonical bytes
+// ---------------------------------------------------------------------------
+
+mod d7 {
+    use super::*;
+
+    use ouro_jail::canonical;
+    use ouro_jail::policy::{EnvBinding, EnvValue};
+    use ouro_jail::records::NativeString;
+
+    /// Every array in `value`, at any depth, is strictly ascending by its
+    /// elements' RFC 8785 bytes: `validate_contract.py`'s `check_policy_sets`.
+    fn unsorted_arrays(value: &Value, at: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Object(members) => {
+                for (key, member) in members {
+                    unsorted_arrays(member, &format!("{at}.{key}"), out);
+                }
+            }
+            Value::Array(items) => {
+                let encoded: Vec<Vec<u8>> = items
+                    .iter()
+                    .map(|item| canonical::to_jcs(item).unwrap())
+                    .collect();
+                if encoded.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    out.push(at.to_owned());
+                }
+                for (index, item) in items.iter().enumerate() {
+                    unsorted_arrays(item, &format!("{at}[{index}]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// canonicalization.md: "sort every array lexicographically by each
+    /// element's RFC 8785 UTF-8 bytes". A credential's canonical bytes begin with
+    /// its `dest` (keys sort `dest`, `id`, `mode`, `source`), so id order and
+    /// canonical order differ whenever the two disagree, as they do here.
+    #[test]
+    fn j4_d7_keyed_collections_sort_by_their_canonical_bytes() {
+        let fixture = Fixture::new();
+        let creds = fixture.root.join("creds");
+        private_dir(&creds);
+        let alpha = creds.join("alpha.json");
+        let beta = creds.join("beta.json");
+        private_file(&alpha, b"a");
+        private_file(&beta, b"b");
+        private_file(
+            &fixture.config.join("launch/ordered.toml"),
+            format!(
+                "name = \"ordered\"\njail = \"agent\"\n\
+             [credentials.alpha]\nsource = \"{}\"\ndest = \"z.json\"\nmode = \"copy_rw\"\n\
+             [credentials.beta]\nsource = \"{}\"\ndest = \"a.json\"\nmode = \"bind_ro\"\n",
+                alpha.display(),
+                beta.display()
+            )
+            .as_bytes(),
+        );
+        let args = fixture.run_args(&["--launch", "ordered"]);
+        let plan = supervisor::resolve_plan(&fixture.context(Script::default()), &args.policy)
+            .unwrap_or_else(|error| panic!("the plan resolves: {error}"));
+        let value = plan.resolved.snapshot.to_canonical_value().unwrap();
+
+        let mut unsorted = Vec::new();
+        unsorted_arrays(&value, "snapshot", &mut unsorted);
+        assert!(
+            unsorted.is_empty(),
+            "arrays not in canonical order: {unsorted:?}\n{:#}",
+            value["launch"]["credentials"]
+        );
+        let ids: Vec<&str> = value["launch"]["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|credential| credential["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["beta", "alpha"], "`a.json` sorts before `z.json`");
+
+        // The digest is the one over those bytes, whatever order the resolver
+        // built the collection in.
+        let mut reversed = value.clone();
+        reversed["launch"]["credentials"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        assert_eq!(
+            plan.resolved.digest,
+            canonical::policy_digest(&value).unwrap(),
+            "the digest covers the canonical order"
+        );
+        assert_ne!(
+            canonical::policy_digest(&reversed).unwrap(),
+            plan.resolved.digest,
+            "the canonical order is the only one that hashes to the digest"
+        );
+
+        // The order is the serializer's own, not an accident of how the resolver
+        // happened to build the collections: shuffled credentials, and bindings
+        // whose name order and byte order disagree ("A!" sorts before "A" once
+        // encoded, because `!` is below the closing quote), still come out in
+        // canonical order with the same digest.
+        let mut snapshot = plan.resolved.snapshot.clone();
+        snapshot.launch.as_mut().unwrap().credentials.reverse();
+        assert_eq!(snapshot.digest().unwrap(), plan.resolved.digest);
+        for name in ["A", "A!"] {
+            snapshot.environment.bindings.push(EnvBinding {
+                name: name.to_owned(),
+                value: EnvValue::Native(NativeString::from_bytes(b"v".to_vec()).unwrap()),
+            });
+        }
+        let value = snapshot.to_canonical_value().unwrap();
+        let mut unsorted = Vec::new();
+        unsorted_arrays(&value, "snapshot", &mut unsorted);
+        assert!(
+            unsorted.is_empty(),
+            "arrays not in canonical order: {unsorted:?}\n{:#}",
+            value["environment"]["bindings"]
         );
     }
 }
