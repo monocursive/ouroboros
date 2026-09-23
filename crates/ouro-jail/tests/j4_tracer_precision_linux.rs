@@ -54,10 +54,12 @@ const HELPER_C: &str = r##"
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -66,6 +68,7 @@ const HELPER_C: &str = r##"
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 static void report(const char *label, long r, int err, const char *p) {
@@ -130,6 +133,10 @@ struct parked {
     long result;
     int err;
     int stat_fd, syscall_fd, status_fd;
+    /* A directory the thread makes once its call has returned, if set. */
+    const char *after;
+    long after_result;
+    int after_err;
 };
 
 static void *park_thread(void *arg) {
@@ -143,6 +150,10 @@ static void *park_thread(void *arg) {
         p->result = syscall(SYS_connect, p->sock, (struct sockaddr *) &p->addr,
                             (socklen_t) sizeof p->addr);
     p->err = p->result < 0 ? errno : 0;
+    if (p->after) {
+        p->after_result = syscall(SYS_mkdir, p->after, 0700);
+        p->after_err = p->after_result < 0 ? errno : 0;
+    }
     return NULL;
 }
 
@@ -250,6 +261,22 @@ static void on_mkdir(int sig) {
     g_hits++;
 }
 
+/* A handler that rewrites its own frame: where the kernel prepared a
+   restart (rax = the call's number, rip on the syscall instruction), it
+   makes the thread see EINTR instead, so no re-entry ever follows. */
+static volatile sig_atomic_t g_rewrote;
+static long g_rewrite_nr;
+static void on_rewrite(int sig, siginfo_t *info, void *ucv) {
+    ucontext_t *uc = ucv;
+    (void) sig; (void) info;
+    g_hits++;
+    if (uc->uc_mcontext.gregs[REG_RAX] == g_rewrite_nr) {
+        uc->uc_mcontext.gregs[REG_RAX] = -EINTR;
+        uc->uc_mcontext.gregs[REG_RIP] += 2;
+        g_rewrote++;
+    }
+}
+
 static void set_action(int sig, void (*handler)(int), int flags) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -270,12 +297,18 @@ static void set_action(int sig, void (*handler)(int), int flags) {
      default      SIGWINCH, ignored by default: restarted;
      twice        SIGHUP ignored (restarted), then SIGUSR1 without
                   SA_RESTART (EINTR), both inside the same call;
-     fatal        SIGTERM, fatal by default: the process dies inside it. */
+     fatal        SIGTERM, fatal by default: the process dies inside it;
+     rewrite      SA_SIGINFO with SA_RESTART, the handler rewriting the
+                  restart the kernel prepared in its frame into EINTR: no
+                  re-entry follows, and the thread then ends;
+     rewrite-mkdir  the same, the thread then making mkdir DIR/after;
+     restart-mkdir  SA_RESTART, the handler making a covered call of its
+                  own (mkdir DIR/h): restarted, then let complete. */
 static int mode_interrupt(int argc, char **argv) {
     struct parked p;
     pthread_t t;
     const char *how, *kind;
-    char hpath[4096];
+    char hpath[4096], apath[4096];
     int listener = -1, rr, restarts = 0;
     long before;
     stack_t ss;
@@ -286,6 +319,7 @@ static int mode_interrupt(int argc, char **argv) {
     p.kind = strcmp(kind, "connect") ? K_OPEN : K_CONNECT;
     p.path = argv[4];
     snprintf(hpath, sizeof hpath, "%s/h", argv[5]);
+    snprintf(apath, sizeof apath, "%s/after", argv[5]);
     g_hpath = hpath;
     if (p.kind == K_CONNECT && (rr = full_listener(&p, argv[5], &listener))) {
         report("listener", rr, errno, "");
@@ -306,6 +340,18 @@ static int mode_interrupt(int argc, char **argv) {
         sigaction(SIGUSR1, &sa, NULL);
     } else if (!strcmp(how, "mkdir")) {
         set_action(SIGUSR1, on_mkdir, 0);
+    } else if (!strcmp(how, "rewrite") || !strcmp(how, "rewrite-mkdir")) {
+        struct sigaction sa;
+        g_rewrite_nr = parked_nr(&p);
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = on_rewrite;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGUSR1, &sa, NULL);
+        if (!strcmp(how, "rewrite-mkdir")) p.after = apath;
+    } else if (!strcmp(how, "restart-mkdir")) {
+        set_action(SIGUSR1, on_mkdir, SA_RESTART);
+        restarts = 1;
     } else if (!strcmp(how, "restart")) {
         set_action(SIGUSR1, on_sig, SA_RESTART);
         restarts = 1;
@@ -360,6 +406,8 @@ static int mode_interrupt(int argc, char **argv) {
     report("call", p.result, p.err, p.path);
     report("handled", (long) g_hits, 0, "");
     report("handler_mkdir", access(hpath, F_OK) == 0, 0, hpath);
+    report("rewrote", (long) g_rewrote, 0, "");
+    if (p.after) report("after", p.after_result, p.after_err, apath);
     return 0;
 }
 
@@ -436,8 +484,164 @@ static int mode_killrace(int argc, char **argv) {
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* J4 wave 3                                                            */
+/* ------------------------------------------------------------------ */
+
+/* Whether the process's main (leader) thread is asleep inside openat. */
+struct leader { const char *self; int stat_fd, syscall_fd; };
+
+static int leader_parked(struct leader *a) {
+    char buf[512];
+    char *rp;
+    char state;
+    ssize_t n = pread(a->stat_fd, buf, sizeof buf - 1, 0);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    rp = strrchr(buf, ')');
+    state = rp && rp[1] == ' ' ? rp[2] : 0;
+    n = pread(a->syscall_fd, buf, sizeof buf - 1, 0);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return state == 'S' && buf[0] >= '0' && buf[0] <= '9' && atol(buf) == SYS_openat;
+}
+
+static void *exec_when_leader_parked(void *arg) {
+    struct leader *a = arg;
+    char *args[3];
+    int i;
+    for (i = 0; i < 200000 && !leader_parked(a); i++) usleep(100);
+    report("leader_parked", leader_parked(a), 0, "");
+    args[0] = (char *) a->self;
+    args[1] = "exit0";
+    args[2] = NULL;
+    execv(a->self, args);
+    report("thread_execv", -1, errno, a->self);
+    _exit(126);
+}
+
+/* leader-exec FIFO SELF: the main (leader) thread parks in
+   openat(FIFO, O_WRONLY); a second thread waits until it is parked and then
+   execs SELF exit0, which destroys the leader with its call in flight: the
+   open never returns. */
+static int mode_leader_exec(int argc, char **argv) {
+    static struct leader a;
+    char path[96];
+    pthread_t t;
+    long r;
+    if (argc < 4) return 2;
+    a.self = argv[3];
+    snprintf(path, sizeof path, "/proc/self/task/%d/stat", (int) getpid());
+    a.stat_fd = open(path, O_RDONLY | O_CLOEXEC);
+    snprintf(path, sizeof path, "/proc/self/task/%d/syscall", (int) getpid());
+    a.syscall_fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (a.stat_fd < 0 || a.syscall_fd < 0) return 3;
+    if (pthread_create(&t, NULL, exec_when_leader_parked, &a)) return 4;
+    r = syscall(SYS_openat, AT_FDCWD, argv[2], O_WRONLY | O_CLOEXEC);
+    report("leader_open_returned", r, r < 0 ? errno : 0, argv[2]);
+    return 5;
+}
+
+/* A thread that serves a notification listener with CONTINUE. */
+static int g_listener = -1;
+static void *serve_continue(void *arg) {
+    (void) arg;
+    for (;;) {
+        struct seccomp_notif req;
+        struct seccomp_notif_resp resp;
+        memset(&req, 0, sizeof req);
+        if (ioctl(g_listener, SECCOMP_IOCTL_NOTIF_RECV, &req) < 0) {
+            if (errno == EINTR || errno == ENOENT) continue;
+            return NULL;
+        }
+        memset(&resp, 0, sizeof resp);
+        resp.id = req.id;
+        resp.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+        ioctl(g_listener, SECCOMP_IOCTL_NOTIF_SEND, &resp);
+    }
+    return NULL;
+}
+
+/* hide FIFO DIR HOW: a thread parks in openat(FIFO), holding the one
+   in-flight slot a bound of one allows; meanwhile the main thread (HOW
+   listener) installs a filter with its own notification listener for mkdir,
+   served with CONTINUE, and makes mkdir DIR/hidden1, or (HOW untraced)
+   makes clone(CLONE_UNTRACED), whose child makes mkdir DIR/untraced. Then
+   the parked thread is released (EINTR) and the main thread makes mkdir
+   DIR/hidden2. */
+static int mode_hide(int argc, char **argv) {
+    struct parked p;
+    pthread_t t, s;
+    char path[4096];
+    long r;
+    struct sock_filter prog[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mkdir, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog fprog = { 4, prog };
+    if (argc < 5) return 2;
+    set_action(SIGUSR1, on_sig, 0);
+    memset(&p, 0, sizeof p);
+    p.kind = K_OPEN;
+    p.path = argv[2];
+    r = park(&p, &t);
+    report("parked", r, 0, p.path);
+    if (r) return 3;
+    if (!strcmp(argv[4], "listener")) {
+        g_listener = (int) syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
+                                   SECCOMP_FILTER_FLAG_NEW_LISTENER, &fprog);
+        report("listener", g_listener, g_listener < 0 ? errno : 0, "");
+        if (g_listener < 0) return 3;
+        pthread_create(&s, NULL, serve_continue, NULL);
+        snprintf(path, sizeof path, "%s/hidden1", argv[3]);
+        r = syscall(SYS_mkdir, path, 0700);
+        report("hidden1", r, r < 0 ? errno : 0, path);
+    } else if (!strcmp(argv[4], "untraced")) {
+        int status = 0;
+        long child = syscall(SYS_clone, CLONE_UNTRACED | SIGCHLD, 0, 0, 0, 0);
+        if (child == 0) {
+            snprintf(path, sizeof path, "%s/untraced", argv[3]);
+            r = syscall(SYS_mkdir, path, 0700);
+            report("untraced_mkdir", r, r < 0 ? errno : 0, path);
+            _exit(0);
+        }
+        report("clone", child, child < 0 ? errno : 0, "");
+        if (child > 0) waitpid((pid_t) child, &status, 0);
+    } else {
+        return 2;
+    }
+    pthread_kill(t, SIGUSR1);
+    pthread_join(t, NULL);
+    report("released", p.result, p.err, p.path);
+    snprintf(path, sizeof path, "%s/hidden2", argv[3]);
+    r = syscall(SYS_mkdir, path, 0700);
+    report("hidden2", r, r < 0 ? errno : 0, path);
+    return 0;
+}
+
+/* reexec N PATH: exec PATH reexec N-1 PATH until N is 0. */
+static int mode_reexec(int argc, char **argv) {
+    char n[32];
+    char *args[5];
+    int left;
+    if (argc < 4) return 2;
+    left = atoi(argv[2]);
+    if (left <= 0) { report("done", 0, 0, ""); return 0; }
+    snprintf(n, sizeof n, "%d", left - 1);
+    args[0] = argv[3]; args[1] = "reexec"; args[2] = n; args[3] = argv[3]; args[4] = NULL;
+    execv(argv[3], args);
+    report("execv", -1, errno, argv[3]);
+    return 3;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
+    if (!strcmp(argv[1], "exit0")) return 0;
+    if (!strcmp(argv[1], "leader-exec")) return mode_leader_exec(argc, argv);
+    if (!strcmp(argv[1], "hide")) return mode_hide(argc, argv);
+    if (!strcmp(argv[1], "reexec")) return mode_reexec(argc, argv);
     if (!strcmp(argv[1], "launch")) return mode_launch(argc, argv);
     if (!strcmp(argv[1], "interrupt")) return mode_interrupt(argc, argv);
     if (!strcmp(argv[1], "inflight")) return mode_inflight(argc, argv);
@@ -627,11 +831,24 @@ impl Observed {
 /// Run the fixture under the bare tracer: the filter installed by the
 /// launcher, `Tracer::attach`, release, every event until `Finished`.
 fn observe(argv: &[&dyn AsRef<std::ffi::OsStr>], config: TracerConfig) -> Observed {
+    let (helper, _) = build().expect("built");
+    observe_image(helper, argv, config, Duration::ZERO)
+}
+
+/// [`observe`], launching `image` (a copy of the fixture), and reading no
+/// event until the tree has ended and `idle` has passed: a consumer that is
+/// not reading.
+fn observe_image(
+    image: &Path,
+    argv: &[&dyn AsRef<std::ffi::OsStr>],
+    config: TracerConfig,
+    idle: Duration,
+) -> Observed {
     let (helper, filter) = build().expect("built");
     let mut child = Command::new(helper)
         .arg("launch")
         .arg(filter)
-        .arg(helper)
+        .arg(image)
         .args(argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -654,6 +871,7 @@ fn observe(argv: &[&dyn AsRef<std::ffi::OsStr>], config: TracerConfig) -> Observ
         text.push_str(&buf);
         buf.clear();
     }
+    std::thread::sleep(idle);
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut events = Vec::new();
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -1029,6 +1247,11 @@ fn j4_o1_read_only_opens_are_never_inflight_loss() {
 /// which is not loss: no `syscall_info_unavailable`, ever. A call the
 /// observer had let run when the kill came may have had its effect, so
 /// `entry_abandoned` stays a gap there — the only reason allowed.
+///
+/// The check means something only if the kill did land at such a stop
+/// (J4 W3, tracer review R3): at least `RUNS` races are run, and more, up to
+/// `MAX_RUNS`, until one has; if none ever does, the test fails rather than
+/// pass having checked nothing.
 #[test]
 fn j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss() {
     let _serial = serial();
@@ -1036,10 +1259,16 @@ fn j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss() {
         return;
     }
     const RUNS: usize = 40;
+    const MAX_RUNS: usize = 400;
     let mut seen_abandoned = 0u64;
     let mut killed = 0u64;
     let mut unavailable = Vec::new();
-    for run in 0..RUNS {
+    let mut runs = 0;
+    for run in 0..MAX_RUNS {
+        if run >= RUNS && killed > 0 {
+            break;
+        }
+        runs += 1;
         let w = work();
         let observed = observe(
             &[&"killrace", &w.root, &"4", &"30"],
@@ -1058,11 +1287,15 @@ fn j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss() {
             unavailable.push(format!("run {run}: {:?}", observed.summary.loss));
         }
     }
-    println!("entry_abandoned across {RUNS} runs: {seen_abandoned}; killed at entry: {killed}");
+    println!("entry_abandoned across {runs} runs: {seen_abandoned}; killed at entry: {killed}");
     assert_eq!(
         unavailable,
         Vec::<String>::new(),
         "a thread killed at a stop it was never resumed from made no call"
+    );
+    assert!(
+        killed > 0,
+        "no kill landed at an unresumed entry stop in {runs} races: the window was never tested"
     );
 }
 
@@ -1319,4 +1552,462 @@ fn j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_tool() {
 #[test]
 fn j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_none() {
     inflight_through_the_product("none");
+}
+
+// ===========================================================================
+// J4 wave 3: the loss review's findings 1, 3 and 4, the tracer review's R1
+// ===========================================================================
+
+/// The gaps of `reason`, as `(ops, count)`.
+fn gaps_of(observed: &Observed, reason: GapReason) -> Vec<(OpSet, Option<u64>)> {
+    observed
+        .gaps()
+        .into_iter()
+        .filter(|(r, _, _)| *r == reason)
+        .map(|(_, ops, count)| (ops, count))
+        .collect()
+}
+
+/// Where in the event stream the first event matching `pick` is.
+fn position(observed: &Observed, pick: impl Fn(&TracerEvent) -> bool) -> Option<usize> {
+    observed.events.iter().position(pick)
+}
+
+/// Loss review finding 1 (honesty), at the tracer seam. The leader parks in
+/// `openat(FIFO, O_WRONLY)`; a worker `execve`s, which destroys the leader
+/// with its open in flight and gives the worker the leader's id. The open
+/// never returns — the fixture never prints `leader_open_returned`.
+///
+/// With an in-flight bound of one the worker's own `execve` entry cannot be
+/// followed (the leader's open holds the slot). On the base the leader's
+/// stale open was then left on the thread that now bears its id and paired
+/// with the `execve`'s own syscall exit: an invented `openat = 0`. The rule:
+/// at a non-leader exec the leader's entry can no longer return, whatever
+/// the worker carried, so it is one `entry_abandoned` gap of its own classes,
+/// never a result. The unbounded run is the control.
+#[test]
+fn j4_w3_a_leaders_entry_is_never_paired_with_a_non_leader_execs_exit() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    let (helper, _) = build().expect("built");
+    for inflight in [1usize, 16_384] {
+        let w = work();
+        let observed = observe(
+            &[&"leader-exec", &w.fifo, helper],
+            TracerConfig {
+                inflight_max: inflight,
+                ..TracerConfig::default()
+            },
+        );
+        let label = format!("in-flight bound {inflight}");
+        let out = &observed.out;
+        assert_eq!(line(out, "leader_parked").raw, 1, "{label}: {out:#?}");
+        assert!(
+            out.iter().all(|l| l.label != "leader_open_returned"),
+            "{label}: the leader's open never returned: {out:#?}"
+        );
+        assert_eq!(
+            observed.results_on(&s(&w.fifo)),
+            vec![],
+            "{label}: an open that never returned has no result:\n  {}",
+            observed.describe()
+        );
+        assert_eq!(
+            gaps_of(&observed, GapReason::EntryAbandoned),
+            vec![(OpSet::of(ClosedOp::Open), Some(1))],
+            "{label}: the leader's open is one entry_abandoned gap of its classes:\n  {}",
+            observed.describe()
+        );
+        let refused = gaps_of(&observed, GapReason::InflightExhausted);
+        if inflight == 1 {
+            assert_eq!(
+                refused,
+                vec![(OpSet::of(ClosedOp::Exec), Some(1))],
+                "{label}: the worker's execve could not be followed:\n  {}",
+                observed.describe()
+            );
+        } else {
+            assert_eq!(refused, vec![], "{label}");
+        }
+        assert_eq!(observed.exit_status(), Some(0), "{label}: exit0 ran");
+        assert_eq!(
+            observed.summary.ops.open, 0,
+            "{label}: {:?}",
+            observed.summary
+        );
+    }
+}
+
+/// Finding 1 through the product: `tool` and `none` with the shrink-only
+/// in-flight seam at one. On the base the settled receipt carried an
+/// `fs.write` result `ok: true` on the FIFO for an open that never returned.
+fn leader_exec_through_the_product(profile: &str) {
+    let _serial = serial();
+    if !live(profile) {
+        return;
+    }
+    let Some(c) = case_on(
+        Jail::new()
+            .unwrap()
+            .env("OURO_JAIL_TEST_TRACER_INFLIGHT", "1"),
+        profile,
+        "best-effort",
+    ) else {
+        return;
+    };
+    let argv = c.argv("leader-exec", &[&c.fifo, &c.helper]);
+    let run = c.jail.target(argv).run().unwrap();
+    let out = lines(&run.stdout_text());
+    let settled = receipt(&run, "settled");
+    assert_eq!(line(&out, "leader_parked").raw, 1, "{profile}: {out:#?}");
+    assert!(
+        out.iter().all(|l| l.label != "leader_open_returned"),
+        "{profile}: {out:#?}"
+    );
+    assert_eq!(
+        results_on(&run, "fifo"),
+        Vec::<&Value>::new(),
+        "{profile}: no result for an open that never returned"
+    );
+    for class in ["fs.write", "fs.deny"] {
+        let gap = assert_degraded(&settled, class, "entry_abandoned");
+        assert_eq!(gap["lost_count"], 1, "{profile}/{class}: {gap:#}");
+    }
+    let gap = assert_degraded(&settled, "exec", "inflight_exhausted");
+    assert_eq!(
+        gap["lost_count"], 1,
+        "{profile}: the worker's execve: {gap:#}"
+    );
+    assert_active(&settled, "net", 0);
+    assert_eq!(
+        run.code(),
+        Some(1),
+        "{profile}: best-effort exits 1 for the loss: {}",
+        run.stderr_text()
+    );
+}
+
+#[test]
+fn j4_w3_a_non_leader_exec_invents_no_result_through_the_product_tool() {
+    leader_exec_through_the_product("tool");
+}
+
+#[test]
+fn j4_w3_a_non_leader_exec_invents_no_result_through_the_product_none() {
+    leader_exec_through_the_product("none");
+}
+
+/// Loss review finding 3, the listener. A thread's open holds the only
+/// in-flight slot while the main thread asks for its own notification
+/// listener: the request cannot be followed to its return, so the observer
+/// cannot know whether a listener now exists, and must assume one does —
+/// the open-ended `child_notification_listener` gap in every class, with no
+/// count. On the base it was a one-count `inflight_exhausted` gap with an
+/// end, although the listener then hid both `mkdir`s (continued with no
+/// stop). The unbounded run is the control.
+#[test]
+fn j4_w3_a_listener_refused_a_slot_is_the_open_ended_gap_of_its_kind() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    for inflight in [1usize, 16_384] {
+        let w = work();
+        let observed = observe(
+            &[&"hide", &w.fifo, &w.root, &"listener"],
+            TracerConfig {
+                inflight_max: inflight,
+                ..TracerConfig::default()
+            },
+        );
+        let label = format!("in-flight bound {inflight}");
+        let out = &observed.out;
+        assert_eq!(line(out, "parked").raw, 0, "{label}: {out:#?}");
+        assert!(line(out, "listener").raw >= 0, "{label}: {out:#?}");
+        assert_eq!(line(out, "hidden1").raw, 0, "{label}: {out:#?}");
+        assert_eq!(line(out, "hidden2").raw, 0, "{label}: {out:#?}");
+        assert_eq!(line(out, "released").errno, libc::EINTR, "{label}");
+        for hidden in ["hidden1", "hidden2"] {
+            assert_eq!(
+                observed.results_on(&s(&w.root.join(hidden))),
+                vec![],
+                "{label}: the listener continued {hidden} with no stop"
+            );
+        }
+        assert_eq!(
+            observed.gaps(),
+            vec![(GapReason::ChildNotificationListener, OpSet::ALL, None)],
+            "{label}: one open-ended listener gap, and no bounded gap in its place:\n  {}",
+            observed.describe()
+        );
+        assert_eq!(
+            observed.results_on(&s(&w.fifo)),
+            vec![(ClosedOp::Open, "openat", -i64::from(libc::EINTR))],
+            "{label}"
+        );
+    }
+}
+
+/// Finding 3, `clone(CLONE_UNTRACED)`: refused a slot, the clone runs
+/// unfollowed and makes a task nothing traces. It is the open-ended
+/// `untraced_descendant` gap, as when it is followed; on the base it was a
+/// one-count `inflight_exhausted` gap with an end.
+#[test]
+fn j4_w3_an_untraced_clone_refused_a_slot_is_the_open_ended_gap_of_its_kind() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    for inflight in [1usize, 16_384] {
+        let w = work();
+        let observed = observe(
+            &[&"hide", &w.fifo, &w.root, &"untraced"],
+            TracerConfig {
+                inflight_max: inflight,
+                ..TracerConfig::default()
+            },
+        );
+        let label = format!("in-flight bound {inflight}");
+        let out = &observed.out;
+        assert_eq!(line(out, "parked").raw, 0, "{label}: {out:#?}");
+        assert!(line(out, "clone").raw > 0, "{label}: {out:#?}");
+        assert_eq!(
+            line(out, "untraced_mkdir").errno,
+            libc::ENOSYS,
+            "{label}: the untraced child fails closed: {out:#?}"
+        );
+        assert_eq!(
+            observed.gaps(),
+            vec![(GapReason::UntracedDescendant, OpSet::ALL, None)],
+            "{label}: one open-ended untraced-descendant gap:\n  {}",
+            observed.describe()
+        );
+        assert_eq!(
+            observed.results_on(&s(&w.root.join("hidden2"))),
+            vec![(ClosedOp::Mkdir, "mkdir", 0)],
+            "{label}: the slot came back"
+        );
+    }
+}
+
+/// Loss review finding 4, at the tracer seam: the §11.4 queue budget
+/// (`queue_bytes_max`, which the observer plan records) must bound what the
+/// observer holds on behalf of a consumer that is not reading — the
+/// critical facts (`Exit`, `Gap`, `Finished`) aside, which §11.4 exempts.
+/// Two hundred execs, each carrying a ~2.8 KiB pathname, while nothing
+/// reads; then everything is read. On the base the 66-slot handoff channel
+/// sat outside the budget: with a 16 KiB budget the observer held
+/// ~200 KiB of `Exec` events.
+#[test]
+fn j4_w3_the_queue_budget_bounds_what_is_held_for_a_consumer_not_reading() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    const BUDGET: usize = 16_384;
+    let (helper, _) = build().expect("built");
+    let dir = common::private_tempdir();
+    let image = dir.path().join("j4-precision");
+    std::fs::copy(helper, &image).unwrap();
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A long pathname to the same image: many "./" components.
+    let mut long = dir.path().to_path_buf().into_os_string();
+    for _ in 0..1400 {
+        long.push("/.");
+    }
+    long.push("/j4-precision");
+    let long = PathBuf::from(long);
+    let config = TracerConfig {
+        queue_bytes_max: BUDGET,
+        ..TracerConfig::default()
+    };
+    let observed = observe_image(
+        &long,
+        &[&"reexec", &"200", &long],
+        config,
+        Duration::from_millis(500),
+    );
+    assert_eq!(line(&observed.out, "done").raw, 0, "{:#?}", observed.out);
+    let mut held = 0usize;
+    let mut execs = 0usize;
+    for event in &observed.events {
+        let snapshots = match event {
+            TracerEvent::Exec { path, .. } => {
+                execs += 1;
+                path.as_ref().map_or(0, |p| p.bytes.len())
+            }
+            TracerEvent::Syscall { args, .. } => {
+                args.path.as_ref().map_or(0, |p| p.bytes.len())
+                    + args.path2.as_ref().map_or(0, |p| p.bytes.len())
+            }
+            // Exempt from every queue bound (§11.4, J4 D6).
+            TracerEvent::Exit { .. }
+            | TracerEvent::Gap { .. }
+            | TracerEvent::UntracedChildExit { .. }
+            | TracerEvent::Finished => continue,
+            TracerEvent::Attached { .. } | TracerEvent::Fork { .. } => 0,
+        };
+        held += ouro_jail::platform::linux::tracer::EVENT_FIXED_BYTES + snapshots;
+    }
+    println!(
+        "{execs} Exec events delivered, {held} bytes held, {} dropped",
+        observed.summary.loss.lifecycle_dropped
+    );
+    assert!(
+        held <= BUDGET,
+        "the observer held {held} bytes for a consumer that was not reading, \
+         over the {BUDGET}-byte budget it records"
+    );
+    assert!(
+        observed.summary.loss.lifecycle_dropped > 0
+            && !gaps_of(&observed, GapReason::LifecycleDropped).is_empty(),
+        "the budget was reached, and what it could not hold is a gap: {:?}",
+        observed.summary
+    );
+}
+
+/// Tracer review R1, at the tracer seam. A handler installed with
+/// `SA_SIGINFO | SA_RESTART` interrupts a parked call; the kernel prepares
+/// the restart in the handler's frame (`rax` = the call's number, `rip` back
+/// on the `syscall` instruction), and the observer reads exactly that at the
+/// handler's entry. The handler then rewrites its own frame so the thread
+/// sees `EINTR` and the call is never re-entered — as a sibling rewriting the
+/// frame the other way before the observer reads it can make a real `EINTR`
+/// look like a restart. On the base the observer took the frame at its word:
+/// no result and no gap for a call the program saw fail. The rule: a restart
+/// read from a handler's frame is settled only by the re-entry itself; the
+/// thread's next covered call, when it is another, or the thread's end,
+/// settles it as a `restart_unresolved` gap of the call's classes.
+fn rewritten_restart_is_a_gap(how: &str, kind: &str) -> (Work, Observed) {
+    let (w, observed) = interrupt(how, kind);
+    let label = format!("{how}/{kind}");
+    let out = &observed.out;
+    assert_eq!(line(out, "parked").raw, 0, "{label}: {out:#?}");
+    assert_eq!(line(out, "rewrote").raw, 1, "{label}: {out:#?}");
+    assert_eq!(
+        line(out, "call").errno,
+        libc::EINTR,
+        "{label}: the program saw EINTR: {out:#?}"
+    );
+    let ops = OpSet::of(if kind == "open" {
+        ClosedOp::Open
+    } else {
+        ClosedOp::Connect
+    });
+    assert_eq!(
+        parked_results(kind, &w, &observed),
+        Vec::<i64>::new(),
+        "{label}: no re-entry, so no result was observed:\n  {}",
+        observed.describe()
+    );
+    assert_eq!(
+        observed.gaps(),
+        vec![(GapReason::RestartUnresolved, ops, Some(1))],
+        "{label}: one gap of the call's classes, never silence:\n  {}",
+        observed.describe()
+    );
+    assert_eq!(
+        observed.summary.restarts, 0,
+        "{label}: {:?}",
+        observed.summary
+    );
+    (w, observed)
+}
+
+#[test]
+fn j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_open() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    rewritten_restart_is_a_gap("rewrite", "open");
+}
+
+#[test]
+fn j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_connect() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    rewritten_restart_is_a_gap("rewrite", "connect");
+}
+
+/// R1, the next covered call: the thread's `mkdir` after the rewritten
+/// `EINTR` settles the call as a gap at its own entry, so the gap comes
+/// before the `mkdir`'s result.
+#[test]
+fn j4_w3_r1_a_restart_the_handler_rewrote_then_another_call_is_a_gap_first() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    let (w, observed) = rewritten_restart_is_a_gap("rewrite-mkdir", "open");
+    assert_eq!(line(&observed.out, "after").raw, 0, "{:#?}", observed.out);
+    let after = s(&w.root.join("after"));
+    assert_eq!(
+        observed.results_on(&after),
+        vec![(ClosedOp::Mkdir, "mkdir", 0)]
+    );
+    let gap = position(&observed, |event| {
+        matches!(
+            event,
+            TracerEvent::Gap {
+                reason: GapReason::RestartUnresolved,
+                ..
+            }
+        )
+    });
+    let mkdir = position(&observed, |event| {
+        matches!(
+            event,
+            TracerEvent::Syscall {
+                op: ClosedOp::Mkdir,
+                ..
+            }
+        )
+    });
+    assert!(
+        gap.is_some() && gap < mkdir,
+        "the gap is settled at the mkdir's entry:\n  {}",
+        observed.describe()
+    );
+}
+
+/// What R1's rule costs, pinned so it stays visible: a handler installed
+/// with `SA_RESTART` that makes a covered call of its own. That call is the
+/// thread's next covered call, and it is not the re-entry, so the
+/// interrupted call is a `restart_unresolved` gap — conservative: the
+/// observer cannot tell a call inside the handler from one after a frame the
+/// handler rewrote. The re-entry that follows is then an ordinary entry with
+/// its own result, and the handler's `mkdir` is a result.
+#[test]
+fn j4_w3_r1_a_covered_call_inside_an_sa_restart_handler_costs_one_gap() {
+    let _serial = serial();
+    if !common::live() || build().is_none() {
+        return;
+    }
+    let (w, observed) = interrupt("restart-mkdir", "open");
+    let out = &observed.out;
+    assert_eq!(line(out, "reparked").raw, 0, "{out:#?}");
+    assert!(line(out, "call").raw >= 0, "the call completed: {out:#?}");
+    assert_eq!(line(out, "handler_mkdir").raw, 1, "{out:#?}");
+    let results = parked_results("open", &w, &observed);
+    assert_eq!(results.len(), 1, "\n  {}", observed.describe());
+    assert!(results[0] >= 0, "{results:?}");
+    assert_eq!(
+        observed.results_on(&s(&w.root.join("h"))),
+        vec![(ClosedOp::Mkdir, "mkdir", 0)]
+    );
+    assert_eq!(
+        observed.gaps(),
+        vec![(
+            GapReason::RestartUnresolved,
+            OpSet::of(ClosedOp::Open),
+            Some(1)
+        )],
+        "\n  {}",
+        observed.describe()
+    );
 }

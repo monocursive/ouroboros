@@ -86,8 +86,16 @@ impl ObserverPlan {
     /// The ptrace observer has no kernel ring: the §11.4 ring bound is
     /// recorded as `null`, and its two user-space counterparts are the
     /// in-flight bound ("map exhaustion") and the queue ("ring loss").
+    ///
+    /// The queue's figures are the bounds in force, from the same
+    /// [`TracerConfig::queue_bounds`] the tracer applies (J4 W3, loss review
+    /// finding 4): `queue_bytes_max` bounds everything held for the
+    /// consumer, the handoff channel included, and is never below one
+    /// fixed-size event; `queue_result_bytes_max` is what results may bring
+    /// it to, short of `queue_lifecycle_reserve_bytes`.
     #[must_use]
     pub fn details(&self) -> Value {
+        let bounds = self.config.queue_bounds();
         let mut plan = Map::new();
         plan.insert("backend".to_owned(), Value::from("ptrace"));
         plan.insert("kernel_ring_bytes".to_owned(), Value::Null);
@@ -95,9 +103,14 @@ impl ObserverPlan {
             "in_flight_max".to_owned(),
             Value::from(self.config.inflight_max),
         );
+        plan.insert("queue_bytes_max".to_owned(), Value::from(bounds.bytes_max));
         plan.insert(
-            "queue_bytes_max".to_owned(),
-            Value::from(self.config.queue_bytes_max),
+            "queue_result_bytes_max".to_owned(),
+            Value::from(bounds.result_bytes_max),
+        );
+        plan.insert(
+            "queue_lifecycle_reserve_bytes".to_owned(),
+            Value::from(bounds.lifecycle_reserve),
         );
         plan.insert(
             "queue_events_max".to_owned(),
@@ -538,6 +551,43 @@ mod tests {
             (name == INFLIGHT_SEAM).then(|| OsString::from_vec(vec![b'1', 0xff]))
         });
         assert_eq!(plan.tracer_config(0).inflight_max, defaults.inflight_max);
+    }
+
+    /// J4 W3 (loss review finding 4): the plan records the queue bounds in
+    /// force, not the figure they were derived from. The byte budget bounds
+    /// everything the observer holds for its consumer, the handoff channel
+    /// included, and cannot be smaller than one fixed-size event; results
+    /// stop short of the lifecycle reserve, which below about 64 KiB leaves
+    /// them room for one fixed-size event and no pathname — and the plan
+    /// says so rather than leave it to be inferred.
+    #[test]
+    fn j4_w3_the_plan_records_the_queue_bounds_in_force() {
+        for (value, bytes, results) in [
+            (None, 4 * 1024 * 1024, 4 * 1024 * 1024 - 64 * 1024),
+            (Some("1048576"), 1024 * 1024, 1024 * 1024 - 64 * 1024),
+            (Some("65536"), 65_536, 256),
+            (Some("16384"), 16_384, 256),
+            (Some("1"), 256, 256),
+        ] {
+            let plan = match value {
+                Some(value) => plan_with(&[(QUEUE_BYTES_SEAM, value)]),
+                None => plan_with(&[]),
+            };
+            let details = plan.details();
+            assert_eq!(details["queue_bytes_max"], bytes, "{value:?}: {details:#}");
+            assert_eq!(
+                details["queue_result_bytes_max"], results,
+                "{value:?}: {details:#}"
+            );
+            assert_eq!(
+                details["queue_lifecycle_reserve_bytes"],
+                64 * 1024,
+                "{value:?}: {details:#}"
+            );
+            let bounds = plan.tracer_config(0).queue_bounds();
+            assert_eq!(details["queue_bytes_max"], bounds.bytes_max);
+            assert_eq!(details["queue_result_bytes_max"], bounds.result_bytes_max);
+        }
     }
 
     fn syscall(op: ClosedOp, name: &'static str, path: &[u8], ret: i64) -> TracerEvent {
