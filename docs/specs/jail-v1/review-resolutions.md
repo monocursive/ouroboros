@@ -165,7 +165,7 @@ it can be tested); per-pid birth identity on audit events (J4).
 |---|---|---|
 | §8.2 said `refused` is sent only before release, while §8.1 counts a failed target exec after release as a pre-exec failure (refused) | `refused` is sent while the target has not executed, including a failed exec after release; after a target exec the terminal message is `settled` or `unsettled` | §§8.1, 8.2; X04 |
 
-## Revision 14 decisions (2026-09-23, J4 record defects)
+## Revision 14 decisions (2026-09-23, J4 record and observer defects)
 
 Found by reading the code; each was reproduced by a failing test before the fix.
 
@@ -175,3 +175,6 @@ Found by reading the code; each was reproduced by a failing test before the fix.
 | A receipt revision became visible before its number was spent, so a failed extra copy or directory sync reused it | The revision is spent before the canonical rename; revisions increase strictly and may skip | §13.2; R02 (`j4_d4_*`) |
 | A later wall expiry or strict evidence loss overwrote `outcome.cause`, while the platform kept the first stop reason | The first stop reason the supervisor acted on stays the cause; later ones are recorded as limit hits and errors | §6.4; R04 (`j4_d5_*`) |
 | Credentials kept the resolver's `id` order and environment bindings their name order, while canonicalization sorts every array by canonical bytes | Keyed collections sort by their elements' canonical bytes; no golden digest moved (the P01 fixture has no launch group and its binding names sort the same either way; the bundled launch profiles' id order equals their dest order) | canonicalization.md; P01 (`j4_d7_keyed_collections_sort_by_their_canonical_bytes`) |
+| A child could install its own seccomp notification listener in `tool`, `build` or `none`; it outranks the observer's trace stop, so a continued closed-set call ran with no event while coverage read active | `tool` and `build` refuse a listener (EPERM); in every observed profile the observer stops on a listener request and a granted one is a `child_notification_listener` gap in every class; filters that only refuse are a named exclusion; a trace stop another filter requested is continued, not a loss | §§9.2, 11.4; O01, O03 (`j4_d1_*`, live and unit); the `tool` baseline digest moves to `3d2fc443…` |
+| In `none` the observer's filter let other ABIs (i386, x32) through, so their closed-set calls went unobserved while coverage read active | The observer stops on every call under another ABI, never decodes it, and records a `foreign_abi` gap unless the kernel answered ENOSYS | §11.2; O01 (`j4_d2_*`); r27 now expects the foreign label |
+| The observer's queue checked its count cap before the exemption for critical facts, so a full backlog dropped a target's exit | Exit, untraced-child exit and observer-end facts pass every cap; gaps past a cap merge into one summary per reason | §11.4; O03 (`j4_d6_*`) |

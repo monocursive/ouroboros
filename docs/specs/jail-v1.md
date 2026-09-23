@@ -2,7 +2,8 @@
 
 Status: implementation specification, revision 14, 2026-09-23. No implementation
 or backend conformance is claimed by this document. Revision 14 records the
-first J4 record fixes (§§6.4, 13.2, 14.2; canonicalization.md). Revision 13 opens J4 and
+first J4 fixes to records and observation (§§6.4, 9.2, 11.2, 11.4, 13.2, 14.2;
+canonicalization.md). Revision 13 opens J4 and
 resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
 the first real agent run required (§§6.2, 10, 12;
 [agent compatibility](jail-v1/agent-compatibility.md)). Revision 11 records what
@@ -973,6 +974,10 @@ Because seccomp cannot safely dereference `clone3`'s argument structure, the
 initial tool/build policy returns `ENOSYS` for `clone3` and tests the normal
 thread-creation fallback; it does not pretend to inspect that pointer. Deny
 `AF_UNIX` creation through both `socket` and `socketpair` for those profiles.
+They also refuse `seccomp(2)` whose flags contain
+`SECCOMP_FILTER_FLAG_NEW_LISTENER` (EPERM), because a child's own notification
+listener outranks the observer (§11.4); a filter without a listener stays
+permitted.
 Their network namespace and absence of inherited sockets remain the boundary.
 The reference conformance toolchain uses glibc. Other runtimes must pass their
 own threading fixture; a runtime that cannot fall back is incompatible, not
@@ -1275,7 +1280,11 @@ artifacts from the test runner.
 
 Attach supported native ABI variants of the operations below. The implementation
 must publish its exact hook/syscall table. Calls absent on an architecture are
-identified as absent; equivalent variants that exist must be tested.
+identified as absent; equivalent variants that exist must be tested. A call
+under another ABI (a non-native architecture, or the x32 bit) is never decoded
+from the native table. Contained baselines refuse those ABIs; in `none` the
+observer stops on each, and one the kernel did not reject as nonexistent
+(ENOSYS) is a `foreign_abi` gap in every audit class.
 
 | Operation | Native evidence | Meaning of a result |
 |---|---|---|
@@ -1400,6 +1409,16 @@ that attempt. It does not say a kernel probe remains live after settlement.
 Coverage intervals state when observation was active; finishing the observer
 does not erase the historical active interval.
 
+A child's own seccomp filter can outrank the observer's trace stop. Only a
+filter installed with a notification listener can let a call take effect
+without that stop: when the kernel grants a child a listener, record a
+`child_notification_listener` gap in every audit class with a null count and
+no end. A call the child's own filter refuses (errno, trap or kill) before the
+observer's stop had no effect; it is a named exclusion, neither a result nor a
+gap. A trace stop the observer did not request, identified by trace data that
+is not the observer's, is continued (the call then runs, as under any tracer)
+and is neither a result nor a loss.
+
 Initial bounds: 8 MiB kernel ring, 16,384 in-flight syscall entries, 4 KiB path
 snapshots, 4 MiB user-space event queue accounted in bytes (an event's size is
 chosen by the child, so a count is not a bound), 64 KiB serialized event
@@ -1415,7 +1434,10 @@ allows reservation failure; a quiet ring is not proof that no event occurred.
 Read loss counters continuously and once more after tree death and drain.
 Bound the affected interval conservatively from the last known healthy point
 to recovery. Counts/ranges are null when exact loss cannot be established.
-Coalesce repeated losses into bounded interval summaries. Coverage cannot
+Coalesce repeated losses into bounded interval summaries. Exit,
+untraced-child exit and observer-end facts are exempt from every queue bound;
+a gap past a bound is merged into one summary per reason, delivered ahead of
+the next fact. Coverage cannot
 return to fully active for the entire run after a historical gap.
 
 On loss under `strict`, stop the attempt and preserve the gap. Under
