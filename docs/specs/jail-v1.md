@@ -1,7 +1,8 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 12, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 12 records what
+Status: implementation specification, revision 13, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 13 opens J4 and
+resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
 the first real agent run required (§§6.2, 10, 12;
 [agent compatibility](jail-v1/agent-compatibility.md)). Revision 11 records what
 the J3 implementation and its reviews settled (§§6.2, 8.1, 9.2, 9.3, 10, 11.4,
@@ -849,8 +850,11 @@ lifetime limit; there is no new watchdog.
 
 Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id,
 monotonically increasing message number, and kind `prepared`, `exec_confirmed`,
-`refused`, `settled`, or `unsettled`. `refused` is sent only before release;
-`unsettled` is the terminal message after exec when tree death could not be
+`refused`, `settled`, or `unsettled`. `refused` is sent only while the target
+has not executed: before release, or when the released target's `exec` fails,
+which §8.1 counts as a pre-exec failure; once the target has executed, the
+terminal message is `settled` or `unsettled`. `unsettled` is the terminal
+message after exec when tree death could not be
 verified, and the receipt then keeps its last nonsettled phase with
 `tree_empty: null` and the `tree_unknown` error. Messages carry receipt phase/digest and safe outcome,
 never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or

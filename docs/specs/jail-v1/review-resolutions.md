@@ -158,3 +158,9 @@ it can be tested); per-pid birth identity on audit events (J4).
 | The unix-peer mediator refused every connect from a worker thread (`seccomp_notif.pid` is a thread; `pidfd_open` refuses a non-leader) | Open the notifying thread itself (`PIDFD_THREAD`); on older kernels use the leader only when `kcmp` shows a shared descriptor table, else refuse | §10; N05 (`n05_connects_from_worker_threads_are_mediated_like_any_other`) |
 | Stock Ubuntu homes (umask 002, user private groups) made the default state root and credential sources look shared-writable | Group write is "others" only when the group is not the owner's private group | §§6.2, 12 |
 | No real agent run was recorded | OpenCode 1.18.32 under `agent` on the stock reference host, recorded with its receipt | A01; agent-compatibility.md |
+
+## Revision 13 decisions (2026-09-23, opening J4)
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| §8.2 said `refused` is sent only before release, while §8.1 counts a failed target exec after release as a pre-exec failure (refused) | `refused` is sent while the target has not executed, including a failed exec after release; after a target exec the terminal message is `settled` or `unsettled` | §§8.1, 8.2; X04 |
