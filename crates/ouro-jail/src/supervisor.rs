@@ -1160,25 +1160,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     };
 
-    // J3-agent begin: the proxy socket node the platform bound, recorded so
-    // `gc` can remove exactly it after a crash (§14.2)
-    if let Some(socket) = proxy_handoff
-        .as_ref()
-        .and_then(|handoff| handoff.socket.get())
-        && let Err(error) = state::record_proxy_socket(&attempt_dir, socket)
-    {
-        let teardown = prepared.abort();
-        record_teardown(&mut record, &teardown);
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
-    }
-    // J3-agent end
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
     // J4-R: §13.2 row 4 — the application is part of the boundary's facts:
@@ -1197,6 +1178,30 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             .details
             .insert("test_seams".to_owned(), seams.clone());
     }
+    // J3-agent begin: the proxy socket node the platform bound, recorded so
+    // `gc` can remove exactly it after a crash (§14.2). J4 W3, P2: recorded
+    // once the boundary and its application are in the record, as for the
+    // registration below: a failure here is a refusal after setup (§13.2 row
+    // 4), whose receipt names the boundary its teardown verified. It used to
+    // come first, so the refused receipt carried the verified tree with the
+    // boundary still `pending`, which the receipt schema rejects.
+    if let Some(socket) = proxy_handoff
+        .as_ref()
+        .and_then(|handoff| handoff.socket.get())
+        && let Err(error) = state::record_proxy_socket(&attempt_dir, socket)
+    {
+        let teardown = prepared.abort();
+        record_teardown(&mut record, &teardown);
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
+    // J3-agent end
     // §7: the state file names the registered execution boundary once it
     // exists, so crash reconciliation and GC can identify resources without
     // parsing a receipt.

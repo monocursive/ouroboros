@@ -388,9 +388,11 @@ struct Stall {
 /// records on disk before every step.
 struct Faults {
     /// `(site, fault, target name)`: the target filter limits the fault to
-    /// replacements of that record (`None`: the first replacement at the
-    /// site, whatever its target).
+    /// replacements of that record (`None`: every replacement at the site,
+    /// whatever its target).
     fault: Option<(Site, Fault, Option<String>)>,
+    /// Which of the replacements the filter admits fails: 0 is the first.
+    nth: usize,
     stall: Option<Stall>,
     watch: Watch,
     state: Mutex<FaultState>,
@@ -400,6 +402,11 @@ struct Faults {
 struct FaultState {
     /// The target of the replacement in progress, and its site.
     current: Option<(Site, String)>,
+    /// The ordinal of the replacement in progress among those the fault's
+    /// site and target filter admit, when it is one of them.
+    current_nth: Option<usize>,
+    /// How many replacements the fault's filter has admitted so far.
+    admitted: usize,
     /// A short write happened; the next write of this replacement fails.
     short_pending: bool,
     /// The last rename/link published this target; its directory sync makes
@@ -480,6 +487,7 @@ impl Faults {
     fn new(watch: Watch) -> Faults {
         Faults {
             fault: None,
+            nth: 0,
             stall: None,
             watch,
             state: Mutex::default(),
@@ -488,6 +496,13 @@ impl Faults {
 
     fn failing(mut self, site: Site, fault: Fault, target: Option<&str>) -> Faults {
         self.fault = Some((site, fault, target.map(str::to_owned)));
+        self
+    }
+
+    /// Fails the `nth` replacement the fault's filter admits instead of the
+    /// first.
+    fn at_nth(mut self, nth: usize) -> Faults {
+        self.nth = nth;
         self
     }
 
@@ -529,6 +544,9 @@ impl Faults {
         {
             return false;
         }
+        if state.current_nth != Some(self.nth) {
+            return false;
+        }
         state.seen.fired = true;
         state.seen.phase_at_fault = phase;
         true
@@ -548,7 +566,16 @@ impl PersistIo for Faults {
     fn create_new(&self, site: Site, path: &Path) -> std::io::Result<std::fs::File> {
         {
             let mut state = self.state.lock().unwrap();
-            state.current = Some((site, target_of(path)));
+            let target = target_of(path);
+            state.current_nth = None;
+            if let Some((fault_site, _, filter)) = &self.fault
+                && *fault_site == site
+                && filter.as_ref().is_none_or(|filter| *filter == target)
+            {
+                state.current_nth = Some(state.admitted);
+                state.admitted += 1;
+            }
+            state.current = Some((site, target));
             state.short_pending = false;
         }
         self.step(site, "create", |_| false);
@@ -697,8 +724,12 @@ impl Fixture {
     }
 
     fn context(&self, sim: Sim) -> supervisor::Context {
+        self.context_on(Box::new(sim))
+    }
+
+    fn context_on(&self, platform: Box<dyn Platform>) -> supervisor::Context {
         supervisor::Context {
-            platform: Box::new(sim),
+            platform,
             env_settings: EnvSettings {
                 config_dir: Some(self.config.clone()),
                 data_dir: Some(self.data.clone()),
@@ -728,6 +759,26 @@ impl Fixture {
     fn run_with(
         &self,
         sim: Sim,
+        flags: &[&str],
+        io: Arc<dyn PersistIo + Send + Sync>,
+        control: Control,
+    ) -> Outcome {
+        self.run_full(Box::new(sim), flags, io, control)
+    }
+
+    /// Runs on `platform` with a control pipe drained from the start.
+    fn run_on(
+        &self,
+        platform: Box<dyn Platform>,
+        flags: &[&str],
+        io: Arc<dyn PersistIo + Send + Sync>,
+    ) -> Outcome {
+        self.run_full(platform, flags, io, Control::Drained)
+    }
+
+    fn run_full(
+        &self,
+        platform: Box<dyn Platform>,
         flags: &[&str],
         io: Arc<dyn PersistIo + Send + Sync>,
         control: Control,
@@ -791,7 +842,7 @@ impl Fixture {
                 (lines, pending)
             })
         });
-        let ctx = self.context(sim);
+        let ctx = self.context_on(platform);
         let report = state::with_persist_io(io, || supervisor::run(&ctx, &args));
         let finished_at = Instant::now();
         done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1752,6 +1803,184 @@ fn j4_w3_p1b_the_lease_is_kept_while_persistence_is_in_flight() {
     faults.finish("p1b at the end");
     let violations = faults.seen(|seen| seen.violations.clone());
     assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// The simulated platform, binding a proxy socket as the Linux platform does
+/// for a proxy-mode profile (it records the node's identity in the hand-off).
+#[derive(Clone)]
+struct SockSim(Sim);
+
+impl Platform for SockSim {
+    fn owner_identity(&self) -> Option<OwnerIdentity> {
+        self.0.owner_identity()
+    }
+    fn identity(&self) -> PlatformIdentity {
+        self.0.identity()
+    }
+    fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
+        self.0.probe(plan)
+    }
+    fn prepare(
+        &self,
+        plan: PreparedPlan,
+        _: Sinks,
+    ) -> Result<Box<dyn PreparedExecution>, JailError> {
+        let proxy = plan
+            .proxy
+            .as_ref()
+            .expect("a proxy-mode profile has a proxy directory");
+        let _ = proxy.socket.set(state::ProxySocketIdentity {
+            dev: 1,
+            ino: 2,
+            ctime: (3, 4),
+        });
+        Ok(Box::new(SimPrepared(self.0.clone())))
+    }
+}
+
+/// P2. A failed proxy-socket record (P3, `agent`) refused before the
+/// boundary was applied to the record, but the teardown's verified tree was
+/// copied in: a refused receipt with boundary `pending` and a verified tree,
+/// which the receipt schema rejects. The refusal after setup reports the
+/// boundary it tore down (§13.2 row 4).
+#[test]
+fn j4_w3_p2_a_failed_proxy_socket_record_writes_a_valid_refused_receipt() {
+    let fixture = Fixture::new();
+    // The proxy directory's registration and identity come first (0, 1).
+    let faults = Arc::new(
+        Faults::new(fixture.watch())
+            .failing(Site::LaunchState, Fault::Enospc, None)
+            .at_nth(2),
+    );
+    let ctx = supervisor::Context {
+        platform: Box::new(SockSim(Sim::new(Scenario::Plain))),
+        ..fixture.context(Sim::new(Scenario::Plain))
+    };
+    let args = fixture.args(&["--profile".to_owned(), "agent".to_owned()]);
+    let report = state::with_persist_io(faults.clone(), || supervisor::run(&ctx, &args));
+    assert!(
+        faults.seen(|seen| seen.fired),
+        "the socket record never failed"
+    );
+    let state_file: Value =
+        serde_json::from_slice(&std::fs::read(fixture.attempt().join("jail-state.json")).unwrap())
+            .unwrap();
+    assert!(
+        state_file["proxy_dir"]["socket"].is_null(),
+        "the failed write was the socket record: {state_file:#}"
+    );
+    assert_eq!(report.exit_code, 125, "{:?}", report.error);
+    let receipt: Value =
+        serde_json::from_slice(&std::fs::read(fixture.attempt().join("jail.json")).unwrap())
+            .unwrap();
+    if let Err(error) = common::check_receipt(&receipt) {
+        panic!("the refused receipt fails its contract: {error}\n{receipt:#}");
+    }
+    assert_eq!(receipt["phase"], "refused");
+    assert_eq!(receipt["outcome"]["error"]["code"], "state_write_failed");
+    assert_eq!(
+        receipt["lifetime"]["boundary"], "pid_namespace",
+        "the refusal came after setup, and names the boundary it tore down: {:#}",
+        receipt["lifetime"]
+    );
+    assert_eq!(receipt["lifetime"]["tree_empty"], true);
+    faults.finish("p2 at the end");
+    let violations = faults.seen(|seen| seen.violations.clone());
+    assert!(violations.is_empty(), "{violations:#?}");
+}
+
+/// P2, the fault matrix extended to every P3 write, not only the first:
+/// vendor state's registration, its identity and the staged credentials
+/// (`--launch`), and the proxy directory's registration, its identity, the
+/// socket node and the removal record (`agent`). Each is failed under every
+/// fault, and the replacement after the last is checked never to happen, so
+/// a P3 write added later is noticed here.
+#[test]
+fn j4_w3_p2_every_launch_state_write_under_every_fault_leaves_valid_records() {
+    // (proxy, the writes before exec, the writes after it)
+    let mut problems = Vec::new();
+    for (proxy, before_exec, after_exec) in [(false, 3, 0), (true, 3, 1)] {
+        let writes = before_exec + after_exec;
+        for nth in 0..=writes {
+            for fault in Fault::ALL {
+                let label = format!(
+                    "j4_w3_launch_state_{}_{nth}_{}",
+                    if proxy { "proxy" } else { "vendor" },
+                    fault.name()
+                );
+                let fixture = Fixture::new();
+                let faults = Arc::new(
+                    Faults::new(fixture.watch())
+                        .failing(Site::LaunchState, fault, None)
+                        .at_nth(nth),
+                );
+                let extra = fixture.extra.display().to_string();
+                let mut flags = vec!["--receipt", extra.as_str()];
+                flags.extend(if proxy {
+                    ["--profile", "agent"]
+                } else {
+                    ["--launch", "plain"]
+                });
+                let sim = Sim::new(Scenario::Plain);
+                let platform: Box<dyn Platform> = if proxy {
+                    Box::new(SockSim(sim.clone()))
+                } else {
+                    Box::new(sim.clone())
+                };
+                let outcome = fixture.run_on(platform, &flags, faults.clone());
+                faults.finish(&format!("{label} at the end"));
+                let (fired, phase_at_fault, violations) = faults.seen(|seen| {
+                    (
+                        seen.fired,
+                        seen.phase_at_fault.clone(),
+                        seen.violations.clone(),
+                    )
+                });
+                if nth == writes {
+                    if fired {
+                        problems.push(format!(
+                            "{label}: a P3 write after the {writes} this test knows"
+                        ));
+                    }
+                    // One fault is enough to show the list is complete.
+                    break;
+                }
+                if !fired {
+                    problems.push(format!("{label}: the fault was never injected"));
+                }
+                problems.extend(violations);
+                let exit_code = if nth < before_exec { 125 } else { 1 };
+                if nth < before_exec && rank(phase_at_fault.as_deref()) > 0 {
+                    problems.push(format!(
+                        "{label}: jail.json was already {phase_at_fault:?} at a write before \
+                         preparation completed"
+                    ));
+                }
+                if outcome.report.exit_code != exit_code {
+                    problems.push(format!(
+                        "{label}: exit code {} (error {:?}), S5 wants {exit_code}",
+                        outcome.report.exit_code,
+                        outcome.report.error.as_ref().map(ToString::to_string),
+                    ));
+                }
+                problems.extend(acknowledged_only_what_persisted(&label, &outcome, &faults));
+                for dir in fixture.watch().attempt_dirs() {
+                    let leftover =
+                        state::leftover_temp_files(&state::AttemptDir::from_root(dir)).unwrap();
+                    if !leftover.is_empty() {
+                        problems.push(format!("{label}: temporary files left: {leftover:?}"));
+                    }
+                }
+                problems.extend(gc_keeps_everything(&label, &fixture, &faults));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
 }
 
 /// Loss review, finding 5: a seam set twice in the environment was recorded
