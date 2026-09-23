@@ -599,8 +599,9 @@ pub fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, std::io::Er
 pub mod persist;
 
 pub use persist::{
-    ABORT_AT_SEAM, CrashPoint, Durable, Fsync, Installed, PersistIo, RealIo, SharedIo, Site,
-    crash_point, current_io, install, test_seams, with_persist_io,
+    ABORT_AT_SEAM, CrashPoint, Durable, Fsync, Installed, PERSIST_BUDGET, Pending, PersistIo,
+    Persister, Progress, RealIo, SharedIo, Site, Stalled, crash_point, current_io, install,
+    test_seams, with_persist_io,
 };
 
 /// Writes every byte through the seam, one `write` at a time: a short write

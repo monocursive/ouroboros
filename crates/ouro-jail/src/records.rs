@@ -472,6 +472,33 @@ impl JailError {
         exit_code_for(self.code)
     }
 
+    // J4-R begin: S5, a persistence failure before exec is a refusal
+    /// The process exit status for this error when it ends an attempt before
+    /// the target executed (§6.4: "125 for refusal before user exec").
+    ///
+    /// J4 decision S5: failed or ambiguous persistence before exec refuses
+    /// (§7), so `state_write_failed` exits 125 there, like every other
+    /// refusal; after exec the same code is a tool error and [`exit_code`]
+    /// (1) applies. Every other code keeps its own status.
+    ///
+    /// [`exit_code`]: JailError::exit_code
+    #[must_use]
+    pub fn refusal_exit_code(&self) -> i32 {
+        match self.code {
+            ErrorCode::StateWriteFailed => 125,
+            _ => self.exit_code(),
+        }
+    }
+
+    /// The same error, raised in `stage`: a persistence step does not know
+    /// which lifecycle stage its caller is in, the caller does.
+    #[must_use]
+    pub fn in_stage(mut self, stage: ErrorStage) -> Self {
+        self.stage = stage;
+        self
+    }
+    // J4-R end
+
     /// The wire form for `errors[]` and `outcome.error`.
     #[must_use]
     pub fn to_object(&self) -> ErrorObject {

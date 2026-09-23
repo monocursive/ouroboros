@@ -411,6 +411,9 @@ pub struct VendorCleanup {
     pub status: StateCleanup,
     /// The safe reason for `pending`.
     pub reason: Option<String>,
+    /// J4-R: the failure to record the result in jail state, when there was
+    /// one. The status is then `pending` whatever the removal did.
+    pub record_error: Option<JailError>,
 }
 
 impl VendorCleanup {
@@ -420,6 +423,7 @@ impl VendorCleanup {
         VendorCleanup {
             status: StateCleanup::Pending,
             reason: Some(reason.into()),
+            record_error: None,
         }
     }
 }
@@ -438,6 +442,7 @@ pub fn remove_vendor_state(attempt_dir: &AttemptDir, limits: Limits) -> VendorCl
             return VendorCleanup {
                 status: StateCleanup::NotNeeded,
                 reason: None,
+                record_error: None,
             };
         }
         Err(error) => {
@@ -449,9 +454,10 @@ pub fn remove_vendor_state(attempt_dir: &AttemptDir, limits: Limits) -> VendorCl
     match recorded {
         Ok(()) => result,
         // A `complete` that jail state does not remember is not durable yet.
-        Err(error) => {
-            VendorCleanup::pending(format!("state_write_failed: {}", error.code.as_str()))
-        }
+        Err(error) => VendorCleanup {
+            record_error: Some(error.clone()),
+            ..VendorCleanup::pending(format!("state_write_failed: {}", error.code.as_str()))
+        },
     }
 }
 
@@ -478,6 +484,7 @@ fn remove_registered(
             Err(error) if error.kind() == io::ErrorKind::NotFound => VendorCleanup {
                 status: StateCleanup::Complete,
                 reason: None,
+                record_error: None,
             },
             _ => VendorCleanup::pending(REASON_IDENTITY_UNRECORDED),
         };
@@ -487,6 +494,7 @@ fn remove_registered(
         return VendorCleanup {
             status: StateCleanup::Pending,
             reason: removal.reason,
+            record_error: None,
         };
     }
     if let Err(error) = attempt.sync() {
@@ -495,6 +503,7 @@ fn remove_registered(
     VendorCleanup {
         status: StateCleanup::Complete,
         reason: None,
+        record_error: None,
     }
 }
 
@@ -636,6 +645,7 @@ pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailErr
                 result = VendorCleanup {
                     status: StateCleanup::Pending,
                     reason: removal.reason,
+                    record_error: None,
                 };
                 break;
             }

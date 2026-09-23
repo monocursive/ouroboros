@@ -358,3 +358,399 @@ pub fn test_seams() -> Option<serde_json::Value> {
         "abort_at": format!("{}:{}", site.as_str(), point.as_str()),
     }))
 }
+
+// ---------------------------------------------------------------------------
+// The persistence worker (§13.3)
+// ---------------------------------------------------------------------------
+
+/// §13.3: "Disk sync runs independently of the supervision loop with a
+/// 5-second progress budget."
+pub const PERSIST_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Why a persistence step did not complete: the worker made no progress for
+/// the whole budget. The step may still complete later; nothing may assume
+/// either way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Stalled {
+    /// The budget that ran out.
+    pub budget: std::time::Duration,
+}
+
+impl std::fmt::Display for Stalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "persistence made no progress within its {} second budget",
+            self.budget.as_secs()
+        )
+    }
+}
+
+impl From<Stalled> for io::Error {
+    fn from(stalled: Stalled) -> io::Error {
+        io::Error::new(io::ErrorKind::TimedOut, stalled.to_string())
+    }
+}
+
+type Work = Box<dyn FnOnce() + Send>;
+
+struct Job {
+    work: Work,
+    /// Set by a waiter that gave up: the job is skipped if it has not
+    /// started, so nothing it would have written lands later.
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What the worker and its waiters share: when it last made progress, and
+/// how many jobs are outstanding.
+struct Shared {
+    budget: std::time::Duration,
+    last_progress: std::sync::Mutex<std::time::Instant>,
+    outstanding: std::sync::atomic::AtomicUsize,
+    abandoned: std::sync::atomic::AtomicBool,
+}
+
+impl Shared {
+    fn progress(&self) {
+        if let Ok(mut last) = self.last_progress.lock() {
+            *last = std::time::Instant::now();
+        }
+    }
+
+    /// When the worker, if it makes no further progress, is stalled.
+    fn stall_at(&self) -> std::time::Instant {
+        let last = self
+            .last_progress
+            .lock()
+            .map_or_else(|_| std::time::Instant::now(), |last| *last);
+        last + self.budget
+    }
+
+    fn stalled(&self) -> bool {
+        self.outstanding.load(std::sync::atomic::Ordering::SeqCst) > 0
+            && std::time::Instant::now() >= self.stall_at()
+    }
+}
+
+/// One thread that performs persistence, so a stalled disk stalls it and not
+/// the supervision loop (§8.3: "slow disk/trace I/O must not block signal or
+/// deadline handling"; §13.3).
+///
+/// Its progress budget is a no-progress bound: a job is stalled when the
+/// worker has completed no I/O step for [`PERSIST_BUDGET`] while it is
+/// outstanding. Work a waiter gave up on is skipped if it has not started;
+/// work in progress in the kernel cannot be interrupted and may complete
+/// later, which is why a transition whose persistence stalled is never
+/// acknowledged. Dropping the persister abandons every job not yet started.
+pub struct Persister {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    jobs: std::sync::Mutex<Option<std::sync::mpsc::Sender<Job>>>,
+    shared: Arc<Shared>,
+}
+
+/// A job submitted to the worker.
+pub struct Pending<T> {
+    result: std::sync::mpsc::Receiver<T>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    shared: Arc<Shared>,
+}
+
+impl<T> Drop for Pending<T> {
+    fn drop(&mut self) {
+        // Nobody will take the result: if the job has not started, it never
+        // does, so nothing it would write lands after its waiter moved on.
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Where a submitted job stands.
+pub enum Progress<T> {
+    /// It completed with this result.
+    Done(T),
+    /// It is queued or running, and the worker is making progress.
+    Waiting,
+    /// The worker made no progress within the budget (or is gone).
+    Stalled(Stalled),
+}
+
+/// A seam that makes every step progress for the worker's budget.
+struct Progressing {
+    inner: SharedIo,
+    shared: Arc<Shared>,
+}
+
+impl Progressing {
+    fn step<T>(&self, result: io::Result<T>) -> io::Result<T> {
+        self.shared.progress();
+        result
+    }
+}
+
+impl PersistIo for Progressing {
+    fn create_new(&self, site: Site, path: &Path) -> io::Result<File> {
+        self.step(self.inner.create_new(site, path))
+    }
+    fn write(&self, site: Site, file: &mut File, bytes: &[u8]) -> io::Result<usize> {
+        self.step(self.inner.write(site, file, bytes))
+    }
+    fn sync_file(&self, site: Site, file: &File) -> io::Result<()> {
+        self.step(self.inner.sync_file(site, file))
+    }
+    fn rename(&self, site: Site, from: &Path, to: &Path) -> io::Result<()> {
+        self.step(self.inner.rename(site, from, to))
+    }
+    fn link(&self, site: Site, from: &Path, to: &Path) -> io::Result<()> {
+        self.step(self.inner.link(site, from, to))
+    }
+    fn sync_dir(&self, site: Site, dir: &Path) -> io::Result<()> {
+        self.step(self.inner.sync_dir(site, dir))
+    }
+    fn remove(&self, site: Site, path: &Path) -> io::Result<()> {
+        self.step(self.inner.remove(site, path))
+    }
+}
+
+impl Persister {
+    /// Starts the worker over this thread's seam, with the §13.3 budget.
+    ///
+    /// # Errors
+    /// The thread could not be spawned.
+    pub fn start() -> io::Result<Persister> {
+        Persister::start_with(current_io(), PERSIST_BUDGET)
+    }
+
+    /// Starts the worker over `io`. `budget` never exceeds
+    /// [`PERSIST_BUDGET`]: a caller can only shrink it.
+    ///
+    /// # Errors
+    /// The thread could not be spawned.
+    pub fn start_with(io: SharedIo, budget: std::time::Duration) -> io::Result<Persister> {
+        let shared = Arc::new(Shared {
+            budget: budget.min(PERSIST_BUDGET),
+            last_progress: std::sync::Mutex::new(std::time::Instant::now()),
+            outstanding: std::sync::atomic::AtomicUsize::new(0),
+            abandoned: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (jobs, queue) = std::sync::mpsc::channel::<Job>();
+        let worker_shared = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("ouro-persist".to_owned())
+            .spawn(move || {
+                let progressing: SharedIo = Arc::new(Progressing {
+                    inner: io,
+                    shared: Arc::clone(&worker_shared),
+                });
+                let _installed = install(progressing);
+                for job in queue {
+                    let skip = job.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                        || worker_shared
+                            .abandoned
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                    if !skip {
+                        worker_shared.progress();
+                        (job.work)();
+                    }
+                    worker_shared.progress();
+                    worker_shared
+                        .outstanding
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })?;
+        Ok(Persister {
+            inner: Arc::new(Inner {
+                jobs: std::sync::Mutex::new(Some(jobs)),
+                shared,
+            }),
+        })
+    }
+
+    /// Queues `work` on the worker; it runs with the worker's seam installed.
+    pub fn submit<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Pending<T> {
+        self.inner.submit(work)
+    }
+
+    /// Runs `work` on the worker and waits for it within the budget.
+    ///
+    /// # Errors
+    /// [`Stalled`] when the worker made no progress within the budget.
+    pub fn run<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, Stalled> {
+        self.submit(work).wait()
+    }
+
+    /// A seam for the supervisor's own thread that performs every step on
+    /// the worker and waits for it within the budget: a stalled step returns
+    /// a `TimedOut` error to the caller instead of blocking it.
+    #[must_use]
+    pub fn forwarding(&self) -> SharedIo {
+        Arc::new(Forward {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Whether the worker is stalled right now.
+    #[must_use]
+    pub fn stalled(&self) -> bool {
+        self.inner.shared.stalled()
+    }
+
+    /// The budget in force.
+    #[must_use]
+    pub fn budget(&self) -> std::time::Duration {
+        self.inner.shared.budget
+    }
+}
+
+impl Drop for Persister {
+    fn drop(&mut self) {
+        self.inner
+            .shared
+            .abandoned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut jobs) = self.inner.jobs.lock() {
+            jobs.take();
+        }
+    }
+}
+
+impl Inner {
+    fn submit<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static) -> Pending<T> {
+        let (sender, result) = std::sync::mpsc::sync_channel(1);
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let job = Job {
+            work: Box::new(move || {
+                let _ = sender.send(work());
+            }),
+            cancelled: Arc::clone(&cancelled),
+        };
+        // An idle worker's last progress is old; the budget of a new job
+        // starts when it is submitted.
+        if self
+            .shared
+            .outstanding
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            self.shared.progress();
+        }
+        let sent = self
+            .jobs
+            .lock()
+            .ok()
+            .and_then(|jobs| jobs.as_ref().map(|jobs| jobs.send(job).is_ok()))
+            .unwrap_or(false);
+        if !sent {
+            // No worker: the job's sender is dropped with it, so the waiter
+            // sees a disconnected result, which is reported as stalled.
+            self.shared
+                .outstanding
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Pending {
+            result,
+            cancelled,
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl<T> Pending<T> {
+    fn stalled(&self) -> Stalled {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Stalled {
+            budget: self.shared.budget,
+        }
+    }
+
+    /// Where the job stands, without waiting.
+    pub fn poll(&self) -> Progress<T> {
+        match self.result.try_recv() {
+            Ok(value) => Progress::Done(value),
+            Err(std::sync::mpsc::TryRecvError::Empty) if !self.shared.stalled() => {
+                Progress::Waiting
+            }
+            Err(_) => Progress::Stalled(self.stalled()),
+        }
+    }
+
+    /// Waits for the job while the worker makes progress.
+    ///
+    /// # Errors
+    /// [`Stalled`] when it made none within the budget.
+    pub fn wait(&self) -> Result<T, Stalled> {
+        loop {
+            let remaining = self
+                .shared
+                .stall_at()
+                .saturating_duration_since(std::time::Instant::now());
+            match self
+                .result
+                .recv_timeout(remaining.max(std::time::Duration::from_millis(1)))
+            {
+                Ok(value) => return Ok(value),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !self.shared.stalled() => {}
+                Err(_) => return Err(self.stalled()),
+            }
+        }
+    }
+}
+
+/// The supervisor thread's seam while a [`Persister`] runs: every step is
+/// performed on the worker, and a step that stalls returns `TimedOut`.
+struct Forward {
+    inner: Arc<Inner>,
+}
+
+impl Forward {
+    fn call<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&dyn PersistIo) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        self.inner
+            .submit(move || work(&*current_io()))
+            .wait()
+            .map_err(io::Error::from)?
+    }
+}
+
+impl PersistIo for Forward {
+    fn create_new(&self, site: Site, path: &Path) -> io::Result<File> {
+        let path = path.to_path_buf();
+        self.call(move |io| io.create_new(site, &path))
+    }
+    fn write(&self, site: Site, file: &mut File, bytes: &[u8]) -> io::Result<usize> {
+        let mut file = file.try_clone()?;
+        let bytes = bytes.to_vec();
+        self.call(move |io| io.write(site, &mut file, &bytes))
+    }
+    fn sync_file(&self, site: Site, file: &File) -> io::Result<()> {
+        let file = file.try_clone()?;
+        self.call(move |io| io.sync_file(site, &file))
+    }
+    fn rename(&self, site: Site, from: &Path, to: &Path) -> io::Result<()> {
+        let (from, to) = (from.to_path_buf(), to.to_path_buf());
+        self.call(move |io| io.rename(site, &from, &to))
+    }
+    fn link(&self, site: Site, from: &Path, to: &Path) -> io::Result<()> {
+        let (from, to) = (from.to_path_buf(), to.to_path_buf());
+        self.call(move |io| io.link(site, &from, &to))
+    }
+    fn sync_dir(&self, site: Site, dir: &Path) -> io::Result<()> {
+        let dir = dir.to_path_buf();
+        self.call(move |io| io.sync_dir(site, &dir))
+    }
+    fn remove(&self, site: Site, path: &Path) -> io::Result<()> {
+        let path = path.to_path_buf();
+        self.call(move |io| io.remove(site, &path))
+    }
+}
