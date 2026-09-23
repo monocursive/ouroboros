@@ -1983,6 +1983,181 @@ fn j4_w3_p2_every_launch_state_write_under_every_fault_leaves_valid_records() {
     );
 }
 
+/// When the simulated target ended and when the supervisor went after the
+/// rest of its tree.
+#[derive(Clone, Default)]
+struct Times {
+    target_exit: Arc<Mutex<Option<Instant>>>,
+    wait_tree: Arc<Mutex<Option<Instant>>>,
+}
+
+#[derive(Clone)]
+struct ExitSim {
+    sim: Sim,
+    times: Times,
+}
+
+impl Platform for ExitSim {
+    fn owner_identity(&self) -> Option<OwnerIdentity> {
+        self.sim.owner_identity()
+    }
+    fn identity(&self) -> PlatformIdentity {
+        self.sim.identity()
+    }
+    fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
+        self.sim.probe(plan)
+    }
+    fn prepare(&self, _: PreparedPlan, _: Sinks) -> Result<Box<dyn PreparedExecution>, JailError> {
+        Ok(Box::new(ExitPrepared(self.clone())))
+    }
+}
+
+struct ExitPrepared(ExitSim);
+
+impl PreparedExecution for ExitPrepared {
+    fn boundary(&self) -> BoundaryIdentity {
+        SimPrepared(self.0.sim.clone()).boundary()
+    }
+    fn applied(&self) -> Option<ouro_jail::records::Applied> {
+        SimPrepared(self.0.sim.clone()).applied()
+    }
+    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+        Ok(Box::new(ExitRunning {
+            times: self.0.times.clone(),
+            step: 0,
+        }))
+    }
+    fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
+        Ok(Teardown {
+            tree: Some(verified_tree()),
+        })
+    }
+}
+
+/// Exec confirmed, then the target exits at once (as `none` reports a short
+/// target), leaving whatever descendants it started for `wait_tree` to end.
+struct ExitRunning {
+    times: Times,
+    step: usize,
+}
+
+impl RunningExecution for ExitRunning {
+    fn wait(&mut self, _: Deadline) -> RunEvent {
+        self.step += 1;
+        if self.step == 1 {
+            return RunEvent::ExecConfirmed;
+        }
+        *self.times.target_exit.lock().unwrap() = Some(Instant::now());
+        RunEvent::TargetExited { code: 0 }
+    }
+    fn request_stop(&mut self, _: StopReason) {}
+    fn wait_tree(&mut self, _: Duration) -> TreeObservation {
+        *self.times.wait_tree.lock().unwrap() = Some(Instant::now());
+        verified_tree()
+    }
+    fn observer_summary(&mut self) -> Option<CoverageSummary> {
+        None
+    }
+}
+
+/// A disk that makes progress, slowly: every step of the enforced receipt
+/// takes a second (never five without progress, so never a stall).
+struct SlowEnforced;
+
+impl SlowEnforced {
+    fn slow(site: Site) {
+        if site == Site::EnforcedReceipt {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+}
+
+impl PersistIo for SlowEnforced {
+    fn create_new(&self, site: Site, path: &Path) -> std::io::Result<std::fs::File> {
+        Self::slow(site);
+        state::RealIo.create_new(site, path)
+    }
+    fn write(&self, site: Site, file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<usize> {
+        Self::slow(site);
+        state::RealIo.write(site, file, bytes)
+    }
+    fn sync_file(&self, site: Site, file: &std::fs::File) -> std::io::Result<()> {
+        Self::slow(site);
+        state::RealIo.sync_file(site, file)
+    }
+    fn rename(&self, site: Site, from: &Path, to: &Path) -> std::io::Result<()> {
+        Self::slow(site);
+        state::RealIo.rename(site, from, to)
+    }
+    fn sync_dir(&self, site: Site, dir: &Path) -> std::io::Result<()> {
+        Self::slow(site);
+        state::RealIo.sync_dir(site, dir)
+    }
+}
+
+/// P3. §8.1 step 8: "Target exit triggers termination of remaining attempt
+/// descendants"; §13.3: "Do not wait forever for a writer while descendants
+/// continue running." The supervisor used to wait for the receipts still with
+/// the persistence worker before it ended the tree, so under `none` a slow
+/// disk kept the target's descendants running for as long as the enforced
+/// receipt took (30 s against a 2 s wall in the review). The tree is ended
+/// first; the receipts are still acknowledged in order before the terminal
+/// message.
+#[test]
+fn j4_w3_p3_the_tree_is_ended_without_waiting_for_persistence() {
+    let fixture = Fixture::new();
+    let times = Times::default();
+    let ctx = supervisor::Context {
+        platform: Box::new(ExitSim {
+            sim: Sim::new(Scenario::Plain),
+            times: times.clone(),
+        }),
+        ..fixture.context(Sim::new(Scenario::Plain))
+    };
+    let (reader, writer) = std::io::pipe().unwrap();
+    let args = fixture.args(&[
+        "--profile".to_owned(),
+        "tool".to_owned(),
+        "--limit".to_owned(),
+        "wall=2s".to_owned(),
+        "--control-fd".to_owned(),
+        writer.into_raw_fd().to_string(),
+    ]);
+    let collector = std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut reader = reader;
+        reader.read_to_string(&mut text).unwrap();
+        text
+    });
+    let report = state::with_persist_io(Arc::new(SlowEnforced), || supervisor::run(&ctx, &args));
+    let frames: Vec<Value> = collector
+        .join()
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let exit = times
+        .target_exit
+        .lock()
+        .unwrap()
+        .expect("the target exited");
+    let tree = times.wait_tree.lock().unwrap().expect("the tree was ended");
+    let delay = tree.saturating_duration_since(exit);
+    assert!(
+        delay < Duration::from_millis(500),
+        "the rest of the tree was left running {delay:?} after the target exited, while the \
+         supervisor waited for a receipt write"
+    );
+    assert_eq!(report.exit_code, 0, "{:?}", report.error);
+    let kinds: Vec<&Value> = frames.iter().map(|frame| &frame["kind"]).collect();
+    assert_eq!(
+        kinds,
+        ["prepared", "exec_confirmed", "settled"],
+        "the enforced receipt is still acknowledged, in order, before the terminal message"
+    );
+}
+
 /// Loss review, finding 5: a seam set twice in the environment was recorded
 /// with its last value, while `getenv` (and so every consumer) applies the
 /// first. The record says what the consumers read.

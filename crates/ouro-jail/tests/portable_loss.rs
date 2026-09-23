@@ -260,6 +260,11 @@ impl RunningExecution for Running {
         }
     }
     fn observer_summary(&mut self) -> Option<CoverageSummary> {
+        // J4 W3, P3: the tree is ended before the receipts still with the
+        // persistence worker are waited for, so the last receipt written
+        // while the target ran may land after `wait_tree`; the observer's
+        // account is read after it, and before any settlement write.
+        self.note_labels();
         Some(self.script.coverage.clone())
     }
 }

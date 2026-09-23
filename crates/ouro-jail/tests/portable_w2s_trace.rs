@@ -78,8 +78,9 @@ struct Script {
     /// `lost` leaves the attempt unsettled.
     integrity: &'static str,
     data: PathBuf,
-    /// `jail.json` as it was on disk when tree verification began: the
-    /// last receipt written while the target ran.
+    /// `jail.json` as it was on disk when the observer's final account was
+    /// read (after the tree's end and the receipts still in flight, before
+    /// any settlement write): the last receipt written while the target ran.
     before_settlement: Arc<Mutex<Option<Value>>>,
 }
 
@@ -205,12 +206,6 @@ impl RunningExecution for Running {
     }
     fn request_stop(&mut self, _: StopReason) {}
     fn wait_tree(&mut self, _: Duration) -> TreeObservation {
-        let receipt = std::fs::read_dir(self.script.data.join("attempts"))
-            .ok()
-            .and_then(|mut listing| listing.next())
-            .and_then(|entry| std::fs::read(entry.ok()?.path().join("jail.json")).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        *self.script.before_settlement.lock().unwrap() = receipt;
         let settled = self.script.integrity == "verified";
         TreeObservation {
             tree_empty: settled.then_some(true),
@@ -220,6 +215,15 @@ impl RunningExecution for Running {
         }
     }
     fn observer_summary(&mut self) -> Option<ouro_jail::observer::CoverageSummary> {
+        // J4 W3: taken here, not when tree verification begins: since P3 the
+        // tree is ended before the receipts still with the persistence worker
+        // are waited for, and the observer's account is read after them.
+        let receipt = std::fs::read_dir(self.script.data.join("attempts"))
+            .ok()
+            .and_then(|mut listing| listing.next())
+            .and_then(|entry| std::fs::read(entry.ok()?.path().join("jail.json")).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        *self.script.before_settlement.lock().unwrap() = receipt;
         // Observation off: the audit classes unsupported, the wrapper's own
         // `limits` class active with no hit (what the Linux platforms report).
         let mut summary = ouro_jail::observer::CoverageSummary::unobserved();

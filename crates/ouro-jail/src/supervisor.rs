@@ -1536,6 +1536,14 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     }
 
+    // Step 9: verify tree death, drain observations, persist settlement.
+    // J4 W3, P3: the rest of the tree is ended first. §8.1 step 8: "Target
+    // exit triggers termination of remaining attempt descendants", and
+    // §13.3: "Do not wait forever for a writer while descendants continue
+    // running"; the receipts still with the worker used to be waited for
+    // first, so under `none` a slow disk kept the target's descendants
+    // running for as long as the enforced receipt took.
+    let tree = running.wait_tree(TREE_BUDGET);
     // J4-R: whatever the worker still holds is waited for within its budget
     // and acknowledged in order before any terminal message. The loop is
     // over, so a failure here stopped nothing: it is a tool error (S5), not a
@@ -1549,15 +1557,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     ) {
         persistence_failed_after(&mut record, &mut outcome_error, error);
     }
-    // Step 9: verify tree death, drain observations, persist settlement.
-    // A sink loss that arrived after the last loop iteration still belongs
-    // in the settled receipt's errors (§13.3: the receipt is the bounded
-    // summary of what was lost).
-    if let Some(error) = journal.take_new_loss() {
-        record.errors.push(error.to_object());
-        outcome_error.get_or_insert(error);
-    }
-    let tree = running.wait_tree(TREE_BUDGET);
     for limit in running.final_limits() {
         if let Some(recorded) = record
             .applied
@@ -1571,7 +1570,17 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     if let Some(cause) = running.limit_cause() {
         record.outcome.cause.get_or_insert(cause);
     }
-    if let Some(summary) = running.observer_summary() {
+    let summary = running.observer_summary();
+    // A sink loss that arrived after the last loop iteration, including one
+    // the observer's own drain caused while the tree was verified, still
+    // belongs in the settled receipt's errors (§13.3: the receipt is the
+    // bounded summary of what was lost). Taken after the observer stopped,
+    // so the check below knows about it.
+    if let Some(error) = journal.take_new_loss() {
+        record.errors.push(error.to_object());
+        outcome_error.get_or_insert(error);
+    }
+    if let Some(summary) = summary {
         record.observer = summary.to_observer_record();
         record.coverage = summary.to_coverage();
         // J4 W2-S: R-1 — a loss the platform queued while the tree was being
