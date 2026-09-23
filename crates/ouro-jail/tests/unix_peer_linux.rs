@@ -57,7 +57,7 @@ fn pathname_and_abstract_addresses_classify() {
 
     assert_eq!(classify(&[2u8, 0]), PeerAddr::NonUnix(2));
     assert_eq!(base_for(9, b"/a"), "/proc/9/root");
-    assert_eq!(base_for(9, b"a"), "/proc/9/cwd");
+    assert_eq!(base_for(9, b"a"), "/proc/9/root");
     assert_eq!(relative_bytes(b"/a/b"), b"a/b");
 }
 
@@ -307,7 +307,7 @@ int main(int argc, char **argv) {
             dprintf(coord,"done %d", done); continue;
         }
         /* "C <t> <arg>" : p stream / s seqpacket / a abstract / d dgram / r raw
-           / t tcp(port) / b bind-nolisten / x x32 / i i386 */
+           / t tcp(port) / b bind-nolisten / w cwd-relative / x x32 / i i386 */
         char t=buf[2];
         char *path = buf+4;
         int e;
@@ -315,6 +315,10 @@ int main(int argc, char **argv) {
         else if (t=='r') { int s=socket(AF_UNIX,SOCK_RAW|SOCK_CLOEXEC,0); e=s<0?errno:0; if(s>=0)close(s); }
         else if (t=='a') e=connect_un_type(SOCK_STREAM,path,1);
         else if (t=='s') e=connect_un_type(SOCK_SEQPACKET,path,0);
+        else if (t=='w') {
+            if (chdir("/attempt/sub") != 0) e=errno;
+            else { e=connect_stream(path); if (chdir("/") != 0) return 1; }
+        }
         else if (t=='t') { int port=atoi(path); int s=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0);
             struct sockaddr_in d; memset(&d,0,sizeof d); d.sin_family=AF_INET; d.sin_addr.s_addr=htonl(INADDR_LOOPBACK); d.sin_port=htons(port);
             int r=connect(s,(void*)&d,sizeof d); e=r==0?0:errno; close(s); }
@@ -877,6 +881,31 @@ fn host_pathname_sockets_and_aliases_are_unreachable_but_attempt_sockets_work() 
     assert!(
         verdicts.contains(&Verdict::Denied(libc::EACCES)),
         "expected a Denied(EACCES) for a host pathname: {verdicts:?}"
+    );
+}
+
+#[test]
+fn relative_parent_and_absolute_symlink_reach_the_same_attempt_socket() {
+    if !common::live() {
+        return;
+    }
+    let rig = start_rig().expect("rig");
+    std::fs::create_dir(rig.attempt_host("sub")).unwrap();
+    std::os::unix::fs::symlink(
+        "/attempt/attempt.sock",
+        rig.attempt_host("sub/absolute.sock"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        rig.run('w', "../attempt.sock"),
+        "0",
+        "relative .. must ascend from cwd within the child root"
+    );
+    assert_eq!(
+        rig.run('w', "absolute.sock"),
+        "0",
+        "an absolute symlink must restart at the child root"
     );
 }
 

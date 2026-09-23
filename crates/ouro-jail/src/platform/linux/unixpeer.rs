@@ -25,10 +25,10 @@
 //!    bridge. See [`NON_UNIX_NOTE`] for the S03 caveat this carries.
 //! 4. Abstract AF_UNIX: connect the duplicate directly; abstract names are
 //!    scoped by the socket's own netns.
-//! 5. Pathname AF_UNIX: resolve the path in the child's view (`/proc/<pid>/root`
-//!    for absolute, `/proc/<pid>/cwd` for relative) with `RESOLVE_IN_ROOT` so it
-//!    cannot escape, pin the node `O_PATH`, require `S_ISSOCK`, and allow it
-//!    only when a *listening* socket bound to that node's filesystem identity
+//! 5. Pathname AF_UNIX: resolve the path beneath `/proc/<pid>/root`, using a
+//!    verified cwd prefix for relative paths. `RESOLVE_IN_ROOT` keeps `..` and
+//!    absolute symlinks within the child's root. Pin the node `O_PATH`, require
+//!    `S_ISSOCK`, and allow it only when a *listening* socket bound to its identity
 //!    exists in the attempt's netns (`sock_diag` with `UDIAG_SHOW_VFS`). Then
 //!    connect the duplicate through `/proc/self/fd/<pinned>`, so the kernel
 //!    reaches exactly the checked node and not a path the child could swap.
@@ -184,17 +184,11 @@ pub fn classify(sockaddr: &[u8]) -> PeerAddr {
     }
 }
 
-/// The base directory to resolve a peer path against, in the child's view.
-///
-/// Absolute paths resolve under the child's root, relative under its cwd, and
-/// neither may escape that view (`openat2` with `RESOLVE_IN_ROOT` enforces it).
+/// The child's root, which is the root for both absolute and relative lookups.
+/// A relative lookup first adds a verified cwd prefix beneath this root.
 #[must_use]
-pub fn base_for(pid: libc::pid_t, path: &[u8]) -> String {
-    if path.first() == Some(&b'/') {
-        format!("/proc/{pid}/root")
-    } else {
-        format!("/proc/{pid}/cwd")
-    }
+pub fn base_for(pid: libc::pid_t, _path: &[u8]) -> String {
+    format!("/proc/{pid}/root")
 }
 
 /// The path relative to [`base_for`]'s directory (a leading slash removed, so
@@ -208,18 +202,20 @@ pub fn relative_bytes(path: &[u8]) -> Vec<u8> {
     }
 }
 
-/// A verdict the mediator delivered, for the wave-2 evidence sink.
+/// A response delivery status for the wave-2 evidence sink.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// The connect was allowed; the kernel result was returned to the child.
+    /// The connected result was accepted by the notification listener.
     Allowed,
-    /// The connect was denied with this errno and a safe reason code.
+    /// The errno result was accepted by the notification listener.
     Denied(i32),
+    /// The listener did not accept the response; no child return is known.
+    Undelivered,
 }
 
-/// One mediation decision, delivered to the sink so the platform can emit
-/// the `net.connect` evidence honestly (the tracer never sees a mediated
-/// connect).
+/// One mediation decision and its delivery status, sent to the sink so the
+/// platform can emit `net.connect` evidence or a gap honestly (the tracer
+/// never sees a mediated connect).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediationRecord {
     /// The connecting task's host pid (a thread id).
@@ -325,9 +321,9 @@ mod tests {
     }
 
     #[test]
-    fn absolute_and_relative_paths_pick_root_and_cwd() {
+    fn absolute_and_relative_paths_use_the_child_root() {
         assert_eq!(base_for(42, b"/a/b"), "/proc/42/root");
-        assert_eq!(base_for(42, b"a/b"), "/proc/42/cwd");
+        assert_eq!(base_for(42, b"a/b"), "/proc/42/root");
         assert_eq!(relative_bytes(b"/a/b"), b"a/b");
         assert_eq!(relative_bytes(b"a/b"), b"a/b");
     }

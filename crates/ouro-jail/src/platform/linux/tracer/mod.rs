@@ -224,6 +224,8 @@ impl OpSet {
 pub enum GapReason {
     /// The consumer did not drain the queue and events were dropped.
     QueueFull,
+    /// A seccomp notification response was not accepted by the kernel.
+    MediationResponseUndelivered,
     /// A syscall return arrived for a thread with no matching entry.
     UnmatchedExit,
     /// An entry can no longer return: the thread was destroyed by another
@@ -269,6 +271,7 @@ impl GapReason {
     pub fn as_str(self) -> &'static str {
         match self {
             GapReason::QueueFull => "queue_full",
+            GapReason::MediationResponseUndelivered => "mediation_response_undelivered",
             GapReason::UnmatchedExit => "unmatched_exit",
             GapReason::EntryAbandoned => "entry_abandoned",
             GapReason::InflightExhausted => "inflight_exhausted",

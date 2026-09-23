@@ -3,6 +3,7 @@
 
 use std::io;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt as _;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -450,15 +451,27 @@ fn service_one(w: &Workers) -> io::Result<()> {
     };
     // J3-agent end
     let Ok(child_pidfd) = pidfd_open(pid) else {
-        deny(listener, id, libc::ESRCH);
-        record(sink, &facts, "task_gone", Verdict::Denied(libc::ESRCH));
+        respond_and_record(
+            listener,
+            id,
+            sink,
+            &facts,
+            "task_gone",
+            Verdict::Denied(libc::ESRCH),
+        );
         return Ok(());
     };
     let dup = match pidfd_getfd(child_pidfd.as_fd(), sockfd) {
         Ok(fd) => fd,
         Err(_) => {
-            deny(listener, id, libc::EBADF);
-            record(sink, &facts, "fd_unavailable", Verdict::Denied(libc::EBADF));
+            respond_and_record(
+                listener,
+                id,
+                sink,
+                &facts,
+                "fd_unavailable",
+                Verdict::Denied(libc::EBADF),
+            );
             return Ok(());
         }
     };
@@ -473,16 +486,11 @@ fn service_one(w: &Workers) -> io::Result<()> {
     // J3-agent end
 
     let (verdict, reason) = decide(w, pid, &dup, &sockaddr, ualen);
-    match verdict {
-        Ok(()) => {
-            notif_send(listener, id, 0, 0);
-            record(sink, &facts, reason, Verdict::Allowed);
-        }
-        Err(errno) => {
-            notif_send(listener, id, 0, -errno);
-            record(sink, &facts, reason, Verdict::Denied(errno));
-        }
-    }
+    let verdict = match verdict {
+        Ok(()) => Verdict::Allowed,
+        Err(errno) => Verdict::Denied(errno),
+    };
+    respond_and_record(listener, id, sink, &facts, reason, verdict);
     Ok(())
 }
 
@@ -525,13 +533,15 @@ fn mediate_pathname(
     dup: &OwnedFd,
     path: &[u8],
 ) -> (Result<(), i32>, &'static str) {
-    let base = base_for(pid, path);
-    let Ok(base_fd) = open_o_path(&base) else {
+    let root = base_for(pid, path);
+    let Ok(root_fd) = open_o_path(&root) else {
         return (Err(libc::EACCES), "base_unopenable");
     };
-    let rel = relative_bytes(path);
+    let Ok(rel) = path_beneath_child_root(pid, root_fd.as_raw_fd(), path) else {
+        return (Err(libc::EACCES), "cwd_unresolved");
+    };
     // Pin the node without escaping the child's view.
-    let node = match openat2_in_root(base_fd.as_raw_fd(), &rel) {
+    let node = match openat2_in_root(root_fd.as_raw_fd(), &rel) {
         Ok(fd) => fd,
         Err(_) => return (Err(libc::EACCES), "path_unresolved"),
     };
@@ -698,8 +708,30 @@ fn record(sink: &dyn MediationSink, facts: &Facts, reason: &'static str, verdict
     });
 }
 
-fn deny(listener: RawFd, id: u64, errno: i32) {
-    notif_send(listener, id, 0, -errno);
+fn respond_and_record(
+    listener: RawFd,
+    id: u64,
+    sink: &dyn MediationSink,
+    facts: &Facts,
+    reason: &'static str,
+    verdict: Verdict,
+) {
+    let error = match verdict {
+        Verdict::Allowed => 0,
+        Verdict::Denied(errno) => -errno,
+        Verdict::Undelivered => unreachable!("a response requires a decision"),
+    };
+    let delivered = notif_send(listener, id, 0, error).is_ok();
+    record(
+        sink,
+        facts,
+        reason,
+        if delivered {
+            verdict
+        } else {
+            Verdict::Undelivered
+        },
+    );
 }
 
 fn last_errno() -> i32 {
@@ -750,7 +782,7 @@ fn notif_id_valid(listener: RawFd, id: u64) -> bool {
     }
 }
 
-fn notif_send(listener: RawFd, id: u64, val: i64, error: i32) {
+fn notif_send(listener: RawFd, id: u64, val: i64, error: i32) -> io::Result<()> {
     let mut resp = libc::seccomp_notif_resp {
         id,
         val,
@@ -758,13 +790,17 @@ fn notif_send(listener: RawFd, id: u64, val: i64, error: i32) {
         flags: 0,
     };
     // SAFETY: `resp` is a live seccomp_notif_resp the ioctl reads.
-    unsafe {
+    let rc = unsafe {
         libc::ioctl(
             listener,
             libc::SECCOMP_IOCTL_NOTIF_SEND,
             std::ptr::from_mut(&mut resp),
-        );
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
     }
+    Ok(())
 }
 
 fn read_child_mem(pid: libc::pid_t, addr: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -824,11 +860,75 @@ fn open_o_path(path: &str) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// Express a relative address from the child's cwd beneath its *root*, not
+/// beneath the cwd as a new root. `RESOLVE_IN_ROOT` then gives `..` and absolute
+/// symlinks the same root boundary as the child has. The proc links supply only
+/// a candidate prefix: reopening it beneath the pinned root and comparing both
+/// the inode and mount ID to the pinned cwd rejects stale or aliased paths.
+fn path_beneath_child_root(pid: libc::pid_t, root: RawFd, path: &[u8]) -> io::Result<Vec<u8>> {
+    if path.first() == Some(&b'/') {
+        return Ok(relative_bytes(path));
+    }
+    let cwd = open_o_path(&format!("/proc/{pid}/cwd"))?;
+    let root_link = std::fs::read_link(format!("/proc/{pid}/root"))?;
+    let cwd_link = std::fs::read_link(format!("/proc/{pid}/cwd"))?;
+    if !root_link.is_absolute() || !cwd_link.is_absolute() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let prefix = cwd_link
+        .strip_prefix(&root_link)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?
+        .as_os_str()
+        .as_bytes();
+    let same = if prefix.is_empty() {
+        same_location(root, cwd.as_raw_fd())?
+    } else {
+        let reopened = openat2_in_root(root, prefix)?;
+        same_location(reopened.as_raw_fd(), cwd.as_raw_fd())?
+    };
+    if !same {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let mut full = Vec::with_capacity(prefix.len() + 1 + path.len());
+    full.extend_from_slice(prefix);
+    if !full.is_empty() {
+        full.push(b'/');
+    }
+    full.extend_from_slice(path);
+    Ok(full)
+}
+
+fn same_location(left: RawFd, right: RawFd) -> io::Result<bool> {
+    fn identity(fd: RawFd) -> io::Result<(u64, u64)> {
+        // SAFETY: `statx` writes only to the live result, and AT_EMPTY_PATH
+        // describes the supplied O_PATH directory descriptor itself.
+        let mut st: libc::statx = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::statx(
+                fd,
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+                libc::STATX_INO | libc::STATX_MNT_ID,
+                &raw mut st,
+            )
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if st.stx_mask & (libc::STATX_INO | libc::STATX_MNT_ID)
+            != libc::STATX_INO | libc::STATX_MNT_ID
+        {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        Ok((st.stx_mnt_id, st.stx_ino))
+    }
+    Ok(identity(left)? == identity(right)?)
+}
+
 /// `openat2(base, rel, O_PATH, RESOLVE_IN_ROOT|RESOLVE_NO_MAGICLINKS)`.
 ///
-/// `RESOLVE_IN_ROOT` treats `base` as the root, so `..` and absolute symlinks
-/// cannot escape the child's view — the mediator can never be walked out of the
-/// attempt through a crafted path (§3.4 step 3).
+/// `base` is always the child's root, so `..` and absolute symlinks cannot
+/// escape the child's view (§3.4 step 3).
 fn openat2_in_root(base: RawFd, rel: &[u8]) -> io::Result<OwnedFd> {
     let c =
         std::ffi::CString::new(rel).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
@@ -877,4 +977,26 @@ fn sockaddr_un(name: &[u8]) -> (libc::sockaddr_un, libc::socklen_t) {
     }
     let len = u32::try_from(2 + n + 1).unwrap_or(2);
     (a, len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::linux::unixpeer::CollectingSink;
+
+    #[test]
+    fn a_failed_notification_send_never_records_a_delivered_return() {
+        let sink = CollectingSink::default();
+        let facts = Facts {
+            pid: 1,
+            tgid: Some(1),
+            tgid_start: None,
+            family: Some(libc::AF_UNIX as u16),
+            address_complete: true,
+        };
+        respond_and_record(-1, 1, &sink, &facts, "attempt_listener", Verdict::Allowed);
+        let records = sink.drain();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].verdict, Verdict::Undelivered);
+    }
 }

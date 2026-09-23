@@ -1130,8 +1130,11 @@ socket inside the attempt's network namespace; the supervisor takes both from
 the blocked launcher by descriptor before release. For each notification the
 supervisor reads the address, revalidates the notification, and takes a
 duplicate of the child's socket. A pathname address is resolved in the
-child's own view without leaving it, pinned by an `O_PATH` handle, and
-allowed only when a listener bound to that node's filesystem identity lives
+child's own view without leaving it: absolute paths begin at the child's
+root, while relative paths begin at its cwd and may ascend only as far as
+that root; absolute symlinks also restart there. The resolved node is pinned
+by an `O_PATH` handle and allowed only when a listener bound to that node's
+filesystem identity lives
 in the attempt's network namespace; the supervisor then connects the child's
 socket through the pinned handle, so the kernel reaches exactly the node that
 was checked. A node whose inode number does not fit the kernel's 32-bit
@@ -1339,7 +1342,11 @@ boot/birth identity and namespace mapping.
 For `agent`, `connect` results come from the unix-peer mediator, not a ptrace
 stop (`fields.observation = seccomp_user_notification`), and count under the
 same classes below. A mediation-queue overflow is evidence loss for those
-classes, handled exactly as tracer loss: strict stops the attempt.
+classes, handled exactly as tracer loss: strict stops the attempt. The mediator
+records a syscall result only when the kernel accepts its notification reply.
+If the reply fails, no target return is established: emit no result, record a
+`mediation_response_undelivered` gap for both `net` and `fs.deny`, and apply
+the same strict/best-effort loss rule.
 
 Each class has exactly the following source and operation assignment:
 
