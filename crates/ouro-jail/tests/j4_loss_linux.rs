@@ -845,8 +845,25 @@ static int mode_wrap(int argc, char **argv, int selective) {
     return code;
 }
 
+/* dupenv PROG ARGS...: exec PROG with this environment plus two entries of
+   the in-flight seam, "1" first and "16384" second (J4 W3, loss review 5). */
+extern char **environ;
+static int mode_dupenv(int argc, char **argv) {
+    static char *envp[4096];
+    int n = 0, i;
+    if (argc < 3) return 2;
+    for (i = 0; environ[i] && n < 4090; i++) envp[n++] = environ[i];
+    envp[n++] = "OURO_JAIL_TEST_TRACER_INFLIGHT=1";
+    envp[n++] = "OURO_JAIL_TEST_TRACER_INFLIGHT=16384";
+    envp[n] = NULL;
+    execve(argv[2], &argv[2], envp);
+    report("dupenv_execve", -1, errno, argv[2]);
+    return 127;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
+    if (!strcmp(argv[1], "dupenv")) return mode_dupenv(argc, argv);
     if (!strcmp(argv[1], "exit0")) return 0;
     if (!strcmp(argv[1], "r04")) return mode_r04(argc, argv);
     if (!strcmp(argv[1], "sleep")) return mode_sleep(argc, argv);
@@ -1680,6 +1697,47 @@ fn j4_o03_exhaustion_through_the_product() {
         audit_events(&run)
     );
     assert_eq!(run.code(), Some(1), "best-effort exits 1 for the loss");
+}
+
+/// J4 W3, loss review finding 5: a seam set twice in the jail's
+/// environment. `getenv`, and so the tracer that applies the seam, takes the
+/// first entry; the record used to take the last, so the receipt said
+/// 16384 while one in-flight slot was in force. The record names what the
+/// consumers read.
+#[test]
+fn j4_w3_a_seam_set_twice_is_recorded_as_applied() {
+    let _serial = serial();
+    if !live("tool") {
+        return;
+    }
+    let Some((built, _)) = build() else {
+        return;
+    };
+    let jail = Jail::with_program(built)
+        .unwrap()
+        .arg("dupenv")
+        .arg(harness::jail_path());
+    let Some(c) = case_on(jail, "tool", "strict") else {
+        return;
+    };
+    let argv = c.argv("exit0", &[]);
+    let run = c.jail.target(argv).run().unwrap();
+    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+    let settled = receipt(&run, "settled");
+    let details = details(&settled);
+    assert_eq!(
+        details["observer_plan"]["in_flight_max"], 1,
+        "getenv applied the first entry: {details:#}"
+    );
+    assert_eq!(
+        details["test_seams"],
+        serde_json::json!({"OURO_JAIL_TEST_TRACER_INFLIGHT": "1"}),
+        "the record names the value in force, not the second entry: {details:#}"
+    );
+    assert_eq!(
+        details["observer_plan"]["test_seams"]["OURO_JAIL_TEST_TRACER_INFLIGHT"], 1,
+        "{details:#}"
+    );
 }
 
 // ===========================================================================

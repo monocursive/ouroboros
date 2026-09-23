@@ -1753,3 +1753,27 @@ fn j4_w3_p1b_the_lease_is_kept_while_persistence_is_in_flight() {
     let violations = faults.seen(|seen| seen.violations.clone());
     assert!(violations.is_empty(), "{violations:#?}");
 }
+
+/// Loss review, finding 5: a seam set twice in the environment was recorded
+/// with its last value, while `getenv` (and so every consumer) applies the
+/// first. The record says what the consumers read.
+#[test]
+fn j4_w3_a_seam_set_twice_is_recorded_with_the_value_getenv_returns() {
+    let recorded = state::test_seams_in([
+        (
+            "OURO_JAIL_TEST_TRACER_INFLIGHT".into(),
+            std::ffi::OsString::from("1"),
+        ),
+        ("PATH".into(), "/usr/bin".into()),
+        (
+            "OURO_JAIL_TEST_TRACER_INFLIGHT".into(),
+            std::ffi::OsString::from("16384"),
+        ),
+    ])
+    .expect("a seam is set");
+    assert_eq!(
+        recorded,
+        serde_json::json!({"OURO_JAIL_TEST_TRACER_INFLIGHT": "1"}),
+        "the first entry is the one getenv returns"
+    );
+}

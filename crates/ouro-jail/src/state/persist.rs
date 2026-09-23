@@ -377,22 +377,27 @@ pub const TEST_SEAM_PREFIX: &str = "OURO_JAIL_TEST_";
 /// no build uses) is still recorded as set: the record says what the
 /// environment asked for, not what each consumer made of it. A value that is
 /// not UTF-8 is recorded lossily.
+///
+/// J4 W3 (loss review, finding 5): a name the environment holds twice is
+/// recorded with its first value, the one `getenv` returns and so the one
+/// every consumer applies; `vars` is in environment order. It used to keep
+/// the last, which named a value nothing had applied.
 #[must_use]
 pub fn test_seams_in(
     vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> Option<serde_json::Value> {
-    let seams: serde_json::Map<String, serde_json::Value> = vars
-        .into_iter()
-        .filter_map(|(name, value)| {
-            let name = name.to_str()?.to_owned();
-            name.starts_with(TEST_SEAM_PREFIX).then(|| {
-                (
-                    name,
-                    serde_json::Value::from(value.to_string_lossy().into_owned()),
-                )
-            })
-        })
-        .collect();
+    let mut seams = serde_json::Map::new();
+    for (name, value) in vars {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(TEST_SEAM_PREFIX) && !seams.contains_key(name) {
+            seams.insert(
+                name.to_owned(),
+                serde_json::Value::from(value.to_string_lossy().into_owned()),
+            );
+        }
+    }
     (!seams.is_empty()).then_some(serde_json::Value::Object(seams))
 }
 
