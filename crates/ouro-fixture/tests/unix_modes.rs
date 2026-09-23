@@ -214,15 +214,26 @@ fn a_spawned_client_inherits_no_socket_of_the_listener() {
     let l = lines(&out);
     let listener_fd = l[0]["ret"].as_i64().unwrap();
     assert_eq!(l[0]["op"], "socket");
+    // The claim is exact, by number, not "no socket at all": a runner can
+    // hand the whole process tree sockets of its own that no exec closes
+    // (GitHub's macOS runner does, above fd 100), and the fixture is not a
+    // jail; closing what it inherited is not its job. The listener's
+    // authority that can cross this exec is exactly the two descriptors it
+    // created and names: the listening socket and the exec error pipe.
+    let exec_line = l
+        .iter()
+        .find(|v| v["op"] == "execve")
+        .expect("the spawn reported itself");
+    let error_pipe = exec_line["args"]["error_pipe_fd"]
+        .as_i64()
+        .expect("the spawn names the descriptor it created");
     let fds = last(&l, "fds")["args"]["fds"].as_array().unwrap().clone();
-    assert!(
-        fds.iter().all(|f| f["kind"] != "socket"),
-        "the client inherited a socket: {fds:?}"
-    );
-    assert!(
-        fds.iter().all(|f| f["fd"] != listener_fd),
-        "the listener's descriptor {listener_fd} reached the client: {fds:?}"
-    );
+    for ours in [listener_fd, error_pipe] {
+        assert!(
+            fds.iter().all(|f| f["fd"] != ours),
+            "descriptor {ours} reached the client: {fds:?}"
+        );
+    }
 }
 
 #[test]
