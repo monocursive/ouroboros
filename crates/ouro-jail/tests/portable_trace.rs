@@ -860,16 +860,9 @@ fn j4_r03_a_consumer_that_resumes_after_its_deadline_reads_the_gap_note() {
     }
     std::thread::sleep(Duration::from_millis(120));
     // The supervision loop's poll finds the stall: loss, and the note is
-    // queued in the reserve for a consumer that comes back.
+    // queued in the reserve for a consumer that comes back, with no further
+    // event needed to trigger it.
     assert!(trace.lock().unwrap().poll().is_err());
-    assert!(
-        trace
-            .lock()
-            .unwrap()
-            .write_event(&lifecycle("after"), Priority::Normal)
-            .is_err(),
-        "the sink is marked lost"
-    );
     let mut received = Vec::new();
     for _ in 0..1000 {
         received.extend(read_available(&mut reader));
@@ -886,6 +879,14 @@ fn j4_r03_a_consumer_that_resumes_after_its_deadline_reads_the_gap_note() {
     assert_eq!(readback.state, TraceState::Complete);
     assert_eq!(readback.frames.len(), accepted + 1);
     assert!(is_transport_gap(readback.frames.last().unwrap()));
+    assert!(
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&lifecycle("after"), Priority::Normal)
+            .is_err(),
+        "the sink stays marked lost after the consumer resumed"
+    );
 }
 
 #[test]
