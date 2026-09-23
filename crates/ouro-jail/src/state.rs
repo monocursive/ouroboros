@@ -6,8 +6,10 @@
 //! A successful rename alone is not a durable acknowledgment (§7), so a
 //! replacement is: create a new temporary file in the same directory, write,
 //! `fsync` the file, rename, then `fsync` the parent directory. The temporary
-//! file is only ever renamed by [`TempWrite::commit`], so an abandoned write
-//! leaves the previous file untouched.
+//! file is only ever renamed by [`TempWrite::commit`] (or linked by
+//! [`TempWrite::publish_new`] for the exclusive claim), so an abandoned write
+//! leaves the previous file untouched. Every step goes through the persistence
+//! seam of [`persist`], and every write names its site (R02).
 
 use std::fs::{File, OpenOptions};
 use std::io::Read as _;
