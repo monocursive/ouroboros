@@ -21,7 +21,9 @@
 #
 # With no credential OpenCode uses OpenCode Zen's free models. For another
 # provider, run `opencode auth login` outside the jail, uncomment the
-# credential below, and add that provider's API host to `network.allow`.
+# credential below, and add that provider's API host to `network.allow`
+# (measured: Z.AI Coding Plan uses `api.z.ai`). A first run without the host
+# names it: the proxy records the denied destination.
 
 name = "opencode"
 jail = "agent"

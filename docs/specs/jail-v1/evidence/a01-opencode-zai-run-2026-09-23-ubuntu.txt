@@ -1,0 +1,56 @@
+collected_at: 2026-09-23 (UTC afternoon) as ubuntu (the operator's own account) on the reference host
+host, vendor and ouro-jail: as in a01-opencode-run-2026-09-23-ubuntu.txt (Ubuntu 26.04.1,
+  Linux 7.0.0-31 x86_64, bubblewrap 0.11.1, stock host; OpenCode 1.18.32; ouro-jail
+  built from 3c3638c4)
+credential: the operator ran `opencode auth login` on the host themselves and chose
+  Z.AI Coding Plan; ~/.local/share/opencode/auth.json, mode 0600, one link, one
+  `api`-type entry for provider `zai-coding-plan`. Nobody but the operator saw the key.
+launch profile: the bundled `opencode` profile with its commented `auth` input enabled
+  (copy_rw, dest data/opencode/auth.json) and `api.z.ai` added to network.allow, saved
+  as ~/.config/ouro/launch/opencode-zai.toml (mode 0600)
+
+=== host discovery
+The first runs with the credential and without Z.AI's host allowed ended with OpenCode's
+"Forbidden: host_not_allowed"; the proxy recorded deny api.z.ai:443 host_not_allowed.
+The host was added from that record, not guessed.
+
+=== the run
+workspace: ~/a01ws (git repository)
+command (inside the delegated user scope):
+  ouro-jail run --launch opencode-zai --ro ~/.opencode/bin --limit wall=150s \
+    --receipt ~/a01-zai-receipt.json -- ~/.opencode/bin/opencode run \
+    --model zai-coding-plan/glm-5.3 \
+    "Create a file named greeting-zai.txt in the current directory containing exactly the word hello. Then stop."
+OpenCode output (tail):
+  > build · glm-5.3
+  ← Write greeting-zai.txt
+  Wrote file successfully.
+  Created greeting-zai.txt containing "hello".
+ouro-jail exit: 0
+workspace afterwards: greeting-zai.txt, "hello"
+receipt: a01-opencode-zai-receipt-2026-09-23-ubuntu.json (attempt
+  att_9a0facb4-1c54-4952-8e8a-3f19c811852a): phase settled, outcome exited 0, coverage
+  exec/fs.write/fs.deny/net/limits/proxy.net all active, credentials
+  [{id auth, mode copy_rw, digest present}], state_cleanup complete, errors [].
+  The credential digest is redacted in the checked-in copy because the repository is
+  public; the host's own receipt carries it.
+proxy destinations: registry.npmjs.org:443 allow 28, api.z.ai:443 allow 2,
+  models.opencode.ai:443 allow 1; nothing denied; opencode.ai not used by this run
+the file OpenCode wrote, as the audit source saw it:
+  fs.create path {"kind":"workspace_relative","value":"greeting-zai.txt"} ok
+
+=== credential hygiene, checked after the run
+- the attempt's vendor-state directory (holding the private copy of auth.json) was
+  removed at settlement;
+- the key's value was searched for, without printing it, in the attempt's receipt,
+  trace, jail state and policy, the --receipt copy and OpenCode's output: found in
+  none of the 7 files.
+
+=== repeatability with the credential
+The first run with this profile, before api.z.ai was allowed, stalled after OpenCode's
+start-up package installs until the wall limit (the open item in the first record).
+The next 4 runs reached the provider promptly (and were denied, before the host was
+allowed), and the recorded run completed after the same 28-request install. Directly on
+the host, with fresh OpenCode directories and a copy of the same credential, 3 of 3
+runs completed in 5-9 s, one of them after the same install, so the stall is not
+OpenCode's alone; its trigger inside the jail is still not established.
