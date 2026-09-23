@@ -62,6 +62,8 @@ const HELPER_C: &str = r##"
 
 struct ouro_open_how { unsigned long long flags, mode, resolve; };
 
+extern char **environ;
+
 static void report(const char *label, long r, const char *p1, const char *p2) {
     printf("%s\t%ld\t%d\t%s\t%s\n", label, r, r < 0 ? errno : 0, p1 ? p1 : "", p2 ? p2 : "");
     fflush(stdout);
@@ -214,6 +216,37 @@ static int mode_closed_set(int argc, char **argv) {
     report("mknodat", r, n2, "");
     r = syscall(SYS_ftruncate, 0, 0L);
     report("ftruncate", r, "", "");
+
+    /* J4 N8: the rows no tracer-level comparison reached before. A failed
+       execve and execveat, a renameat, and a connect that succeeds (to a
+       listener this process holds). */
+    {
+        char *av[2];
+        char prog[512], r4[512], sp[512];
+        struct sockaddr_un la;
+        int ls, cs;
+        snprintf(prog, sizeof prog, "%s/absent-program", base);
+        snprintf(r4, sizeof r4, "%s/r4", base);
+        snprintf(sp, sizeof sp, "%s/listen.sock", base);
+        av[0] = prog;
+        av[1] = NULL;
+        r = syscall(SYS_execve, prog, av, environ);
+        report("execve_enoent", r, prog, "");
+        r = syscall(SYS_execveat, AT_FDCWD, prog, av, environ, 0);
+        report("execveat_enoent", r, prog, "");
+        r = syscall(SYS_renameat, AT_FDCWD, a4, AT_FDCWD, r4);
+        report("renameat", r, a4, r4);
+        ls = socket(AF_UNIX, SOCK_STREAM, 0);
+        memset(&la, 0, sizeof la);
+        la.sun_family = AF_UNIX;
+        strncpy(la.sun_path, sp, sizeof la.sun_path - 1);
+        if (ls < 0 || bind(ls, (struct sockaddr *) &la, sizeof la) || listen(ls, 1)) return 5;
+        cs = socket(AF_UNIX, SOCK_STREAM, 0);
+        r = syscall(SYS_connect, cs, &la, (long) sizeof la);
+        report("connect_ok", r, sp, "");
+        close(cs);
+        close(ls);
+    }
     return 0;
 }
 
@@ -897,7 +930,19 @@ fn o01_every_closed_set_result_matches_the_fixture() {
         // `ftruncate` mutates through a descriptor, like `write`, and is
         // named in §11.2 as excluded.
         ("ftruncate", None),
+        // J4 N8: the four rows below completed the one-to-one comparison of
+        // all 22 x86_64 rows.
+        ("execve_enoent", Some(("execve", ClosedOp::Exec))),
+        ("execveat_enoent", Some(("execveat", ClosedOp::Exec))),
+        ("renameat", Some(("renameat", ClosedOp::Rename))),
+        ("connect_ok", Some(("connect", ClosedOp::Connect))),
     ];
+    // Every row of the closed set is compared here, one-to-one.
+    let rows: std::collections::BTreeSet<&str> = expected
+        .iter()
+        .filter_map(|(_, e)| e.map(|(syscall, _)| syscall))
+        .collect();
+    assert_eq!(rows.len(), 22, "{rows:?}");
     let labels: Vec<&str> = reports.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(
         labels,
@@ -936,6 +981,10 @@ fn o01_every_closed_set_result_matches_the_fixture() {
         by_label["open_rdonly"].errno, 0,
         "the read-only open must succeed"
     );
+    assert_eq!(by_label["execve_enoent"].errno, libc::ENOENT);
+    assert_eq!(by_label["execveat_enoent"].errno, libc::ENOENT);
+    assert_eq!(by_label["renameat"].raw, 0, "the renameat succeeds");
+    assert_eq!(by_label["connect_ok"].raw, 0, "the connect succeeds");
 
     // Only the events about this test's files. Nothing else reaches the
     // fixture's own paths, so this drops the loader's read-only opens
@@ -1385,6 +1434,28 @@ fn o02_a_non_leader_exec_keeps_the_birth_identity() {
         "{:?}",
         observed.summary.loss
     );
+    // J4 O02: the birth the events name is the one the process was attached
+    // with — the kernel gives the exec'ing worker the leader's start time —
+    // on both transitions and on the exit.
+    let attached = observed
+        .events
+        .iter()
+        .find_map(|e| match e {
+            TracerEvent::Attached { start_ticks, .. } => *start_ticks,
+            _ => None,
+        })
+        .expect("the attach names the launcher's birth");
+    let births: Vec<Option<u64>> = observed
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            TracerEvent::Exec { start_ticks, .. } | TracerEvent::Exit { start_ticks, .. } => {
+                Some(*start_ticks)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(births, vec![Some(attached); 3], "{:?}", observed.events);
 }
 
 /// The fail-closed property the supervisor relies on: with the narrowing
@@ -2035,7 +2106,7 @@ fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
 
     assert_eq!(
         reports.len(),
-        27,
+        31,
         "the fixture still runs: the bound is ours, not the tracee's"
     );
     assert!(
@@ -2044,7 +2115,7 @@ fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
     );
     assert_eq!(observed.summary.ops.total(), 0);
     assert!(
-        observed.summary.loss.inflight_rejected >= 26,
+        observed.summary.loss.inflight_rejected >= 30,
         "every closed-set entry was refused: {}",
         observed.summary.loss.inflight_rejected
     );

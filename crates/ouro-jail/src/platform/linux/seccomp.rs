@@ -143,6 +143,11 @@ pub const CLONE_NS_MASK: u32 = CLONE_NEWTIME
     | CLONE_NEWPID
     | CLONE_NEWNET;
 
+/// `CLONE_UNTRACED`, checked in argument 0 of `clone` by every contained
+/// baseline (J4 S4): a task the kernel does not attach to the observer's
+/// tracer would be a descendant nothing observes.
+pub const CLONE_UNTRACED: u32 = 0x0080_0000;
+
 const CLONE_NEWTIME: u32 = 0x0000_0080;
 const CLONE_NEWNS: u32 = 0x0002_0000;
 const CLONE_NEWCGROUP: u32 = 0x0200_0000;
@@ -167,8 +172,9 @@ const L_IOCTL: &str = "ioctl_arg";
 const L_SECCOMP_FLAGS: &str = "seccomp_flags";
 
 /// What distinguishes one contained baseline from another. Every baseline
-/// shares the architecture check, the x32 denial, `clone3` as `ENOSYS` and
-/// the terminal-injection rule; the shape says which of the rest apply.
+/// shares the architecture check, the x32 denial, `clone3` as `ENOSYS`,
+/// `clone` with `CLONE_UNTRACED` as `EPERM` and the terminal-injection
+/// rule; the shape says which of the rest apply.
 struct Shape {
     /// Syscalls denied outright with `EPERM`.
     deny: Vec<(&'static str, u32)>,
@@ -225,9 +231,7 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
         asm.jeq(*nr, Some(L_DENY_EPERM), None);
     }
     asm.jeq(NR_CLONE3, Some(L_DENY_ENOSYS), None);
-    if shape.clone_namespaces_denied {
-        asm.jeq(NR_CLONE, Some(L_CLONE_FLAGS), None);
-    }
+    asm.jeq(NR_CLONE, Some(L_CLONE_FLAGS), None);
     asm.jeq(NR_SOCKET, Some(L_SOCKET), None);
     asm.jeq(NR_SOCKETPAIR, Some(L_SOCKET), None);
     asm.jeq(NR_IOCTL, Some(L_IOCTL), None);
@@ -236,14 +240,18 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
     }
     asm.ja(L_ALLOW);
 
+    // clone: deny CLONE_UNTRACED in every contained profile (J4 S4) — the
+    // observer's ptrace attachment is how every descendant is seen, and the
+    // kernel skips it for that flag — and any namespace bit where the shape
+    // says so. Every clone flag lives in the low 32 bits, so the low word is
+    // the whole question.
+    asm.label(L_CLONE_FLAGS)
+        .ld_w_abs(sd_arg_low(0))
+        .jset(CLONE_UNTRACED, Some(L_DENY_EPERM), None);
     if shape.clone_namespaces_denied {
-        // clone: deny when any namespace bit is set. Every namespace flag
-        // lives in the low 32 bits, so the low word is the whole question.
-        asm.label(L_CLONE_FLAGS)
-            .ld_w_abs(sd_arg_low(0))
-            .jset(CLONE_NS_MASK, Some(L_DENY_EPERM), None)
-            .ja(L_ALLOW);
+        asm.jset(CLONE_NS_MASK, Some(L_DENY_EPERM), None);
     }
+    asm.ja(L_ALLOW);
 
     // socket/socketpair: an allow-list of address families. AF_UNIX as the
     // profile says (tool: EPERM; agent: the mediation filter decides),
@@ -513,6 +521,11 @@ syscall                nr     action
         "{:<22} {:<6} ENOSYS  (argument struct not inspectable)",
         "clone3", NR_CLONE3
     );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} EPERM when args[0] & 0x{CLONE_UNTRACED:08x} != 0 (CLONE_UNTRACED)",
+        "clone", NR_CLONE
+    );
     if variant == AgentVariant::UnprivilegedInner {
         let _ = writeln!(
             out,
@@ -522,7 +535,7 @@ syscall                nr     action
     } else {
         let _ = writeln!(
             out,
-            "{:<22} {:<6} ALLOW   (namespace flags permitted)",
+            "{:<22} {:<6} ALLOW   otherwise (namespace flags permitted)",
             "clone", NR_CLONE
         );
     }
@@ -611,6 +624,11 @@ pub fn tool_baseline_table() -> String {
         out,
         "{:<22} {:<6} ENOSYS  (argument struct not inspectable)",
         "clone3", NR_CLONE3
+    );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} EPERM when args[0] & 0x{CLONE_UNTRACED:08x} != 0 (CLONE_UNTRACED)",
+        "clone", NR_CLONE
     );
     let _ = writeln!(
         out,
@@ -932,6 +950,27 @@ mod tests {
         assert_eq!(tool_baseline_table(), checked_in);
     }
 
+    /// J4 S4 moved both `agent` baselines; their tables are now kept as
+    /// evidence beside the `tool` one and pinned the same way, so the next
+    /// change to either digest is a visible diff.
+    #[test]
+    fn the_agent_baselines_are_byte_for_byte_the_checked_in_ones() {
+        let unprivileged = include_str!(
+            "../../../../../docs/specs/jail-v1/evidence/seccomp-table-agent-x86_64.txt"
+        );
+        let namespace = include_str!(
+            "../../../../../docs/specs/jail-v1/evidence/seccomp-table-agent-namespace-x86_64.txt"
+        );
+        assert_eq!(
+            agent_baseline_table(AgentVariant::UnprivilegedInner),
+            unprivileged
+        );
+        assert_eq!(
+            agent_baseline_table(AgentVariant::NamespaceInner),
+            namespace
+        );
+    }
+
     #[test]
     fn both_agent_variants_and_the_mediation_filter_assemble_and_differ() {
         let unpriv = agent_baseline(AgentVariant::UnprivilegedInner).unwrap();
@@ -1234,6 +1273,74 @@ mod tests {
         );
     }
 
+    /// J4 S4: every contained baseline refuses `clone` with
+    /// `CLONE_UNTRACED` (EPERM), whatever else the flags carry, in both
+    /// `agent` variants too: `agent` is observed by the same ptrace tracer.
+    /// The flags glibc uses for threads, `fork` and `posix_spawn` stay
+    /// allowed, and the namespace variant keeps its namespace flags.
+    #[test]
+    fn j4_s4_every_contained_baseline_refuses_an_untraced_clone() {
+        const SIGCHLD: u32 = 17;
+        const THREAD: u32 = 0x003d_0f00;
+        const VFORK: u32 = 0x0000_4100 | SIGCHLD;
+        let baselines = [
+            ("tool", tool_baseline().unwrap()),
+            (
+                "agent",
+                agent_baseline(AgentVariant::UnprivilegedInner).unwrap(),
+            ),
+            (
+                "agent-namespace",
+                agent_baseline(AgentVariant::NamespaceInner).unwrap(),
+            ),
+        ];
+        for (name, prog) in &baselines {
+            for flags in [
+                CLONE_UNTRACED,
+                CLONE_UNTRACED | SIGCHLD,
+                CLONE_UNTRACED | THREAD,
+                CLONE_UNTRACED | VFORK,
+            ] {
+                assert_eq!(
+                    run(prog, X86, NR_CLONE, [flags, 0]),
+                    EPERM,
+                    "{name}: clone {flags:#x}"
+                );
+            }
+            for flags in [SIGCHLD, THREAD, VFORK] {
+                assert_eq!(
+                    run(prog, X86, NR_CLONE, [flags, 0]),
+                    SECCOMP_RET_ALLOW,
+                    "{name}: clone {flags:#x}"
+                );
+            }
+            assert_eq!(run(prog, X86, NR_CLONE3, [0, 0]), ENOSYS, "{name}");
+            // The flag means nothing to another call.
+            assert_eq!(
+                run(prog, X86, 57, [CLONE_UNTRACED, 0]),
+                SECCOMP_RET_ALLOW,
+                "{name}"
+            );
+        }
+        let ns = &baselines[2].1;
+        assert_eq!(
+            run(ns, X86, NR_CLONE, [CLONE_NS_MASK, 0]),
+            SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            run(ns, X86, NR_CLONE, [CLONE_NS_MASK | CLONE_UNTRACED, 0]),
+            EPERM
+        );
+        assert_eq!(CLONE_NS_MASK & CLONE_UNTRACED, 0);
+        for table in [
+            tool_baseline_table(),
+            agent_baseline_table(AgentVariant::UnprivilegedInner),
+            agent_baseline_table(AgentVariant::NamespaceInner),
+        ] {
+            assert!(table.contains("CLONE_UNTRACED"), "{table}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn the_spelled_out_errnos_match_this_kernel() {
@@ -1244,6 +1351,8 @@ mod tests {
             u32::try_from(libc::EAFNOSUPPORT).unwrap()
         );
         assert_eq!(i64::from(NR_SECCOMP), libc::SYS_seccomp);
+        assert_eq!(i64::from(NR_CLONE), libc::SYS_clone);
+        assert_eq!(CLONE_UNTRACED, u32::try_from(libc::CLONE_UNTRACED).unwrap());
         assert_eq!(
             u64::from(SECCOMP_FILTER_FLAG_NEW_LISTENER),
             libc::SECCOMP_FILTER_FLAG_NEW_LISTENER

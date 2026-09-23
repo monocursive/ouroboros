@@ -107,6 +107,32 @@ pub(super) struct Handles {
     pub tid: Arc<AtomicI32>,
 }
 
+/// The two `/proc` reads that name a task: its thread group and its birth.
+///
+/// A seam, so a unit test can play what the kernel will not hand an
+/// unprivileged test on the reference host: a tid recycled for a new task
+/// (J4 S1). The live implementation is [`LiveProc`].
+pub(super) trait ProcView: Send {
+    /// The thread group `tid` belongs to, in this process's pid namespace.
+    fn tgid(&self, tid: pid_t) -> Option<pid_t>;
+    /// Field 22 of `/proc/<tid>/stat`: the task's start time in clock ticks
+    /// since boot.
+    fn start_ticks(&self, tid: pid_t) -> Option<u64>;
+}
+
+/// `/proc`, read now.
+pub(super) struct LiveProc;
+
+impl ProcView for LiveProc {
+    fn tgid(&self, tid: pid_t) -> Option<pid_t> {
+        proc::tgid(tid)
+    }
+
+    fn start_ticks(&self, tid: pid_t) -> Option<u64> {
+        proc::start_ticks(tid)
+    }
+}
+
 /// A traced thread.
 struct Task {
     tgid: pid_t,
@@ -124,6 +150,9 @@ enum InFlight {
     /// `seccomp(2)` asking for a notification listener (J4 D1): its return
     /// says whether the child now holds one.
     Listener,
+    /// `clone(2)` with `CLONE_UNTRACED` (J4 S4): its return says whether a
+    /// task now exists that the kernel did not attach to this tracer.
+    Untraced,
 }
 
 impl InFlight {
@@ -133,7 +162,7 @@ impl InFlight {
     fn ops(&self) -> OpSet {
         match self {
             InFlight::Closed(pending) => OpSet::of(pending.entry.op),
-            InFlight::Foreign | InFlight::Listener => OpSet::ALL,
+            InFlight::Foreign | InFlight::Listener | InFlight::Untraced => OpSet::ALL,
         }
     }
 }
@@ -147,6 +176,10 @@ struct Process {
     /// False when `/proc` would not say which thread group this task belongs
     /// to. Such a group never gets an `Exit`: the gap was already recorded.
     identity_known: bool,
+    /// The process's birth: its leader's start time, read when the group was
+    /// first registered (§11.3). Every event about the group carries it, so
+    /// a later process given the same number is never confused with it.
+    birth: Option<u64>,
 }
 
 /// A closed-set call that has entered the kernel and not yet returned.
@@ -174,7 +207,7 @@ pub(super) fn run(
 ) -> TracerSummary {
     handles.tid.store(sys::gettid(), Ordering::Release);
     let epoch_boottime_ns = config.epoch_boottime_ns;
-    let mut session = Session::new(config, tx, epoch_boottime_ns);
+    let mut session = Session::new(config, tx, epoch_boottime_ns, Box::new(LiveProc));
     match seize_and_confirm(launcher) {
         Ok(()) => {
             if ready.send(Ok(())).is_err() {
@@ -190,9 +223,10 @@ pub(super) fn run(
     }
     // Attached is the first event, before any bookkeeping that could itself
     // produce one.
+    let start_ticks = session.procfs.start_ticks(launcher);
     session.emit(TracerEvent::Attached {
         pid: launcher,
-        start_ticks: proc::start_ticks(launcher),
+        start_ticks,
         monotonic_ns: clock::boottime_ns(),
     });
     session.register(launcher);
@@ -295,10 +329,17 @@ struct Session {
     tracee_deaths: HashMap<pid_t, Instant>,
     inflight: usize,
     scratch: Vec<u8>,
+    /// Where task identity comes from: `/proc`, or a test's script.
+    procfs: Box<dyn ProcView>,
 }
 
 impl Session {
-    fn new(config: TracerConfig, tx: SyncSender<TracerEvent>, epoch_boottime_ns: u64) -> Self {
+    fn new(
+        config: TracerConfig,
+        tx: SyncSender<TracerEvent>,
+        epoch_boottime_ns: u64,
+        procfs: Box<dyn ProcView>,
+    ) -> Self {
         let scratch = vec![0u8; config.path_snapshot_max.max(128)];
         // §11.4 budgets the whole user-space queue. What the consumer has
         // already taken from the channel, and what the allocator rounded up,
@@ -331,6 +372,7 @@ impl Session {
             tracee_deaths: HashMap::new(),
             inflight: 0,
             scratch,
+            procfs,
         }
     }
 
@@ -758,8 +800,8 @@ impl Session {
             return;
         }
         self.summary.tracees += 1;
-        let start_ticks = proc::start_ticks(tid);
-        let (tgid, identity_known) = match proc::tgid(tid) {
+        let start_ticks = self.procfs.start_ticks(tid);
+        let (tgid, identity_known) = match self.procfs.tgid(tid) {
             Some(tgid) => (tgid, true),
             None => {
                 self.summary.loss.identity_unavailable += 1;
@@ -775,17 +817,37 @@ impl Session {
                 pending: None,
             },
         );
-        let process = self.procs.entry(tgid).or_insert_with(|| Process {
-            threads: HashSet::new(),
-            witnessed_exec: false,
-            identity_known,
-        });
+        // A new group's birth is its leader's start time: the task itself
+        // when it is the leader (a fork child), else the leader read now.
+        // An existing group keeps the birth it was registered with.
+        if !self.procs.contains_key(&tgid) {
+            let birth = if tgid == tid {
+                start_ticks
+            } else {
+                self.procfs.start_ticks(tgid)
+            };
+            self.procs.insert(
+                tgid,
+                Process {
+                    threads: HashSet::new(),
+                    witnessed_exec: false,
+                    identity_known,
+                    birth,
+                },
+            );
+        }
+        let process = self.procs.get_mut(&tgid).expect("just inserted");
         process.identity_known &= identity_known;
         process.threads.insert(tid);
     }
 
     fn tgid_of(&self, tid: pid_t) -> pid_t {
         self.tasks.get(&tid).map_or(tid, |task| task.tgid)
+    }
+
+    /// The birth of the process `tgid` names now.
+    fn birth_of(&self, tgid: pid_t) -> Option<u64> {
+        self.procs.get(&tgid).and_then(|process| process.birth)
     }
 
     /// Forget expired retirement and fork-race entries. Both are time-bounded,
@@ -812,7 +874,7 @@ impl Session {
         // recording the dead pid would be false loss plus an entry nothing
         // would ever reap (§11.4: only what was seen is ever claimed).
         let raced_death = self.tracee_deaths.remove(&child).is_some();
-        if proc::tgid(child).is_none() {
+        if self.procfs.tgid(child).is_none() {
             if !raced_death {
                 self.summary.late_fork_races += 1;
             }
@@ -899,6 +961,7 @@ impl Session {
         }
         let mut path = None;
         let mut dirfd = None;
+        let mut syscall = None;
         if let Some(task) = self.tasks.get_mut(&tid) {
             if let Some(pending) = carried {
                 task.pending = Some(pending);
@@ -909,10 +972,14 @@ impl Session {
                 pending.exec_confirmed = true;
                 path = pending.args.path.clone();
                 dirfd = pending.args.dirfd;
+                syscall = Some(pending.entry.name);
             }
         }
+        let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Exec {
             pid: tgid,
+            start_ticks,
+            syscall,
             path,
             dirfd,
             monotonic_ns: clock::boottime_ns(),
@@ -950,6 +1017,17 @@ impl Session {
         {
             if self.admit(OpSet::ALL) {
                 self.begin(tid, InFlight::Listener);
+            }
+            return;
+        }
+        // J4 S4: a clone the kernel will not attach to this tracer. The flags
+        // are the register the kernel reads. Contained baselines refuse the
+        // flag (EPERM outranks the trace), so only `none` stops here.
+        if info.nr == u64::from(super::filter::CLONE_SYSCALL.1)
+            && info.args[0] & u64::from(super::filter::CLONE_UNTRACED) != 0
+        {
+            if self.admit(OpSet::ALL) {
+                self.begin(tid, InFlight::Untraced);
             }
             return;
         }
@@ -1107,6 +1185,20 @@ impl Session {
                 }
                 return;
             }
+            InFlight::Untraced => {
+                if rval > 0 {
+                    // The return is the new task's id. Nothing traces it: not
+                    // its calls (they fail with ENOSYS, a trace stop with no
+                    // tracer), not its lifetime. §11.2 makes an untracked
+                    // descendant a gap; how much it hides is unknown and the
+                    // interval has no end.
+                    self.summary.loss.untraced_descendants += 1;
+                    self.gap(GapReason::UntracedDescendant, OpSet::ALL, None);
+                } else {
+                    self.summary.untraced_clone_refused += 1;
+                }
+                return;
+            }
         };
         if pending.exec_confirmed {
             // `Exec` was already emitted for this call at the confirmed
@@ -1156,8 +1248,10 @@ impl Session {
             return;
         }
         self.summary.ops.bump(op);
+        let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Syscall {
             pid: tgid,
+            start_ticks,
             tid,
             op,
             syscall: pending.entry.name,
@@ -1173,7 +1267,7 @@ impl Session {
                 // A thread the kernel destroyed at a non-leader exec.
                 return;
             }
-            if proc::tgid(pid).is_some() {
+            if self.procfs.tgid(pid).is_some() {
                 // A tracee reported dead before its first stop: under ptrace
                 // it stays in /proc as a zombie only its real parent can
                 // reap, while a genuinely untraced direct child was reaped
@@ -1245,6 +1339,7 @@ impl Session {
         self.summary.exits += 1;
         self.emit(TracerEvent::Exit {
             pid: task.tgid,
+            start_ticks: process.birth,
             status,
             monotonic_ns: clock::boottime_ns(),
         });
@@ -1515,7 +1610,7 @@ mod tests {
             queue_bytes_max: 64 * 1024 * 1024,
             ..TracerConfig::default()
         };
-        (Session::new(config, tx, 0), rx)
+        (Session::new(config, tx, 0, Box::new(LiveProc)), rx)
     }
 
     fn fork(child: pid_t) -> TracerEvent {
@@ -1566,6 +1661,7 @@ mod tests {
         );
         session.emit(TracerEvent::Exit {
             pid: 1,
+            start_ticks: None,
             status: 0,
             monotonic_ns: 0,
         });
@@ -1602,7 +1698,7 @@ mod tests {
             queue_bytes_max: 4 * EVENT_FIXED_BYTES,
             ..TracerConfig::default()
         };
-        let mut session = Session::new(config, tx, 0);
+        let mut session = Session::new(config, tx, 0, Box::new(LiveProc));
         for child in 2..100 {
             session.emit(fork(child));
         }
@@ -1614,6 +1710,7 @@ mod tests {
         session.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
         session.emit(TracerEvent::Exit {
             pid: 1,
+            start_ticks: None,
             status: 0,
             monotonic_ns: 0,
         });
@@ -1630,6 +1727,179 @@ mod tests {
                 .pending
                 .iter()
                 .any(|queued| matches!(queued.event, TracerEvent::Exit { pid: 1, .. }))
+        );
+    }
+
+    /// `/proc` as a test scripts it: `tid -> (tgid, start ticks)`.
+    struct ScriptedProc(std::sync::Arc<std::sync::Mutex<HashMap<pid_t, (pid_t, u64)>>>);
+
+    impl ProcView for ScriptedProc {
+        fn tgid(&self, tid: pid_t) -> Option<pid_t> {
+            self.0.lock().unwrap().get(&tid).map(|(tgid, _)| *tgid)
+        }
+        fn start_ticks(&self, tid: pid_t) -> Option<u64> {
+            self.0.lock().unwrap().get(&tid).map(|(_, ticks)| *ticks)
+        }
+    }
+
+    /// A pid no real task can have (above `PID_MAX_LIMIT`), so the ptrace
+    /// calls the handlers make on it fail with ESRCH and touch nothing.
+    const RECYCLED: pid_t = 5_000_001;
+    const WORKER: pid_t = 5_000_002;
+
+    fn pend(session: &mut Session, tid: pid_t, nr: u64, path: &str) {
+        let entry = closed_set::lookup(nr).expect("a closed-set row");
+        let task = session.tasks.get_mut(&tid).expect("a registered task");
+        task.pending = Some(InFlight::Closed(Pending {
+            entry,
+            args: Args {
+                path: Some(PathSnapshot {
+                    bytes: path.as_bytes().to_vec(),
+                    complete: true,
+                }),
+                ..Args::default()
+            },
+            exec_confirmed: false,
+            path_unreadable: false,
+            path2_unreadable: false,
+            sockaddr_unreadable: false,
+            flags_unavailable: false,
+        }));
+        session.inflight += 1;
+    }
+
+    fn drained(
+        rx: &std::sync::mpsc::Receiver<TracerEvent>,
+        session: &mut Session,
+    ) -> Vec<TracerEvent> {
+        session.flush();
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+            session.flush();
+        }
+        out
+    }
+
+    /// J4 O02, S1: a tid the kernel recycles for a new task after the old
+    /// one was reaped. The stock reference host will not let an
+    /// unprivileged test choose a pid (`ns_last_pid`, `clone3 set_tid` and a
+    /// namespace's `pid_max` all need `CAP_SYS_ADMIN` there), so the seam
+    /// over the two `/proc` reads plays it. Every event names the birth its
+    /// process had when the tracer took it on: a worker's result names its
+    /// leader's birth, not the worker's own, even when the worker is the
+    /// first task of the group the tracer sees; the old process's exec, result
+    /// and exit name the old birth; the new task under the same number names
+    /// its own, inherits no witnessed exec (so its death is no `Exit`) and
+    /// no entry in flight.
+    #[test]
+    fn j4_o02_recycled_tid_carries_nothing_over() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (tx, rx) = std::sync::mpsc::sync_channel(1024);
+        let mut session = Session::new(
+            TracerConfig::default(),
+            tx,
+            0,
+            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+        );
+        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 1000));
+        table.lock().unwrap().insert(WORKER, (RECYCLED, 1500));
+        // The worker's first stop arrives before anything of its leader's:
+        // the group is taken on through the worker, and is still named by
+        // its leader's birth, not by the worker's own.
+        session.register(WORKER);
+        session.register(RECYCLED);
+        pend(&mut session, WORKER, 83, "/w/by-worker");
+        session.handle_exit(WORKER, 0);
+        session.handle_death(WORKER, 0);
+        session.handle_exec(RECYCLED);
+        pend(&mut session, RECYCLED, 83, "/w/old");
+        session.handle_exit(RECYCLED, 0);
+        session.handle_death(RECYCLED, 0);
+        // Reaped: the kernel may now give the number to a new task.
+        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 2000));
+        session.register(RECYCLED);
+        pend(&mut session, RECYCLED, 87, "/w/new");
+        session.handle_exit(RECYCLED, -i64::from(libc::ENOENT));
+        session.handle_death(RECYCLED, libc::SIGKILL);
+        let events = drained(&rx, &mut session);
+        let seen: Vec<(String, Option<u64>)> = events
+            .iter()
+            .map(|event| match event {
+                TracerEvent::Exec {
+                    pid, start_ticks, ..
+                } => (format!("exec {pid}"), *start_ticks),
+                TracerEvent::Syscall {
+                    pid,
+                    tid,
+                    syscall,
+                    start_ticks,
+                    ..
+                } => (format!("{syscall} {pid}/{tid}"), *start_ticks),
+                TracerEvent::Exit {
+                    pid, start_ticks, ..
+                } => (format!("exit {pid}"), *start_ticks),
+                other => (format!("{other:?}"), None),
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (format!("mkdir {RECYCLED}/{WORKER}"), Some(1000)),
+                (format!("exec {RECYCLED}"), Some(1000)),
+                (format!("mkdir {RECYCLED}/{RECYCLED}"), Some(1000)),
+                (format!("exit {RECYCLED}"), Some(1000)),
+                (format!("unlink {RECYCLED}/{RECYCLED}"), Some(2000)),
+            ],
+            "the new task under the old number never execed: no second exit"
+        );
+        assert_eq!(
+            session.summary.loss.total(),
+            0,
+            "{:?}",
+            session.summary.loss
+        );
+        assert_eq!(session.inflight, 0, "no entry carried over");
+        assert!(session.tasks.is_empty() && session.procs.is_empty());
+    }
+
+    /// J4 S4 at the session: a `clone(CLONE_UNTRACED)` that created a task
+    /// is a gap in every class with no count; one that failed is nothing.
+    #[test]
+    fn j4_s4_an_untraced_descendant_is_a_gap_and_a_failed_clone_is_not() {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 1000));
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let mut session = Session::new(
+            TracerConfig::default(),
+            tx,
+            0,
+            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+        );
+        session.register(RECYCLED);
+        session.begin(RECYCLED, InFlight::Untraced);
+        session.handle_exit(RECYCLED, -i64::from(libc::EPERM));
+        assert_eq!(session.summary.untraced_clone_refused, 1);
+        session.begin(RECYCLED, InFlight::Untraced);
+        session.handle_exit(RECYCLED, 4242);
+        let gaps: Vec<(GapReason, OpSet, Option<u64>)> = drained(&rx, &mut session)
+            .into_iter()
+            .filter_map(|event| match event {
+                TracerEvent::Gap {
+                    reason, ops, count, ..
+                } => Some((reason, ops, count)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            gaps,
+            vec![(GapReason::UntracedDescendant, OpSet::ALL, None)]
+        );
+        assert_eq!(session.summary.loss.untraced_descendants, 1);
+        assert!(GapReason::UntracedDescendant.is_open_ended());
+        assert_eq!(
+            GapReason::UntracedDescendant.as_str(),
+            "untraced_descendant"
         );
     }
 

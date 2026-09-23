@@ -70,18 +70,27 @@ pub fn is_target_image(images: &[Vec<u8>], path: Option<&PathSnapshot>) -> bool 
 /// Records `event` in `audit` and returns the fact it establishes.
 pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent) -> Fact {
     match event {
+        // J4-O begin: the birth identity and the exec's own call (slice O)
         TracerEvent::Exec {
-            pid, path, dirfd, ..
+            pid,
+            start_ticks,
+            syscall,
+            path,
+            dirfd,
+            ..
         } => {
-            audit.record_exec(*pid, path.as_ref(), *dirfd);
+            audit.record_exec(*pid, *start_ticks, *syscall, path.as_ref(), *dirfd);
+            // J4-O end
             if *pid == target.launcher && is_target_image(target.images, path.as_ref()) {
                 Fact::TargetExec
             } else {
                 Fact::Nothing
             }
         }
+        // J4-O begin: the birth identity (slice O)
         TracerEvent::Syscall {
             pid,
+            start_ticks,
             tid,
             op,
             syscall,
@@ -89,11 +98,17 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             ret,
             ..
         } => {
-            audit.record_syscall(*pid, *tid, *op, syscall, args, *ret);
+            audit.record_syscall(*pid, *start_ticks, *tid, *op, syscall, args, *ret);
             Fact::Nothing
         }
-        TracerEvent::Exit { pid, status, .. } => {
-            audit.record_exit(*pid, *status);
+        TracerEvent::Exit {
+            pid,
+            start_ticks,
+            status,
+            ..
+        } => {
+            audit.record_exit(*pid, *start_ticks, *status);
+            // J4-O end
             if *pid == target.launcher {
                 Fact::TargetExit(*status)
             } else {
@@ -227,6 +242,10 @@ mod tests {
     fn exec(pid: pid_t, path: Option<PathSnapshot>) -> TracerEvent {
         TracerEvent::Exec {
             pid,
+            // J4-O begin
+            start_ticks: None,
+            syscall: None,
+            // J4-O end
             path,
             dirfd: None,
             monotonic_ns: 1,
@@ -273,6 +292,7 @@ mod tests {
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         let exit = |pid| TracerEvent::Exit {
             pid,
+            start_ticks: None, // J4-O
             status: 3 << 8,
             monotonic_ns: 1,
         };
@@ -310,6 +330,7 @@ mod tests {
         );
         let syscall = TracerEvent::Syscall {
             pid: LAUNCHER,
+            start_ticks: None, // J4-O
             tid: LAUNCHER,
             op: ClosedOp::Open,
             syscall: "openat",

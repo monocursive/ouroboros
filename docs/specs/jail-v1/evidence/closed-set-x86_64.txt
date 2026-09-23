@@ -1,0 +1,75 @@
+ouro-jail observer closed set `linux-closed-v1` (x86_64, ptrace backend)
+jail-v1 §11.2, §11.4; generated from the observer's CLOSED_SET and the narrowing
+filter the launcher installs (every verdict below is the program's own, run on
+that input)
+
+precondition                 verdict  meaning
+arch != 0xc000003e          TRACE    another ABI: stopped, labelled foreign, never decoded
+nr & 0x40000000             TRACE    x32: stopped, labelled foreign, never decoded
+
+closed-set rows (a stop, then one result per return; EACCES or EPERM is
+one fs.deny naming the operation below as attempted_operation)
+
+syscall      nr   verdict audit operation                                        arguments read
+execve       59   TRACE   proc.exec (confirmed transition, or failed return)     path=a0
+execveat     322  TRACE   proc.exec (confirmed transition, or failed return)     dirfd=a0 path=a1 flags=a4
+open         2    TRACE   fs.create if O_CREAT, else fs.write; none if read-only path=a0 flags=a1
+openat       257  TRACE   fs.create if O_CREAT, else fs.write; none if read-only dirfd=a0 path=a1 flags=a2
+openat2      437  TRACE   fs.create if O_CREAT, else fs.write; none if read-only dirfd=a0 path=a1 flags=open_how(a2).flags if a3>=24
+creat        85   TRACE   fs.create                                              path=a0 flags=O_CREAT|O_WRONLY|O_TRUNC
+truncate     76   TRACE   fs.write (action truncated)                            path=a0
+rename       82   TRACE   fs.rename                                              path=a0 path2=a1
+renameat     264  TRACE   fs.rename                                              dirfd=a0 path=a1 dirfd2=a2 path2=a3
+renameat2    316  TRACE   fs.rename                                              dirfd=a0 path=a1 dirfd2=a2 path2=a3 flags=a4
+unlink       87   TRACE   fs.unlink                                              path=a0
+unlinkat     263  TRACE   fs.unlink                                              dirfd=a0 path=a1 flags=a2
+rmdir        84   TRACE   fs.unlink                                              path=a0
+mkdir        83   TRACE   fs.create                                              path=a0
+mkdirat      258  TRACE   fs.create                                              dirfd=a0 path=a1
+mknod        133  TRACE   fs.create                                              path=a0
+mknodat      259  TRACE   fs.create                                              dirfd=a0 path=a1
+link         86   TRACE   fs.create                                              path=a0 path2=a1
+linkat       265  TRACE   fs.create                                              dirfd=a0 path=a1 dirfd2=a2 path2=a3 flags=a4
+symlink      88   TRACE   fs.create                                              path=a1 path2=a0
+symlinkat    266  TRACE   fs.create                                              dirfd=a1 path=a2 path2=a0
+connect      42   TRACE   net.connect                                            sockaddr=a1 len=a2 (family only)
+rows: 22
+
+other stops the narrowing filter asks for (not results)
+
+seccomp      317  TRACE   when a1 & 0x00000008 (SECCOMP_FILTER_FLAG_NEW_LISTENER); a granted listener is a child_notification_listener gap, a refused one nothing
+seccomp      317  ALLOW   otherwise
+clone        56   TRACE   when a0 & 0x00800000 (CLONE_UNTRACED); a created task is an untraced_descendant gap, a failed call nothing
+clone        56   ALLOW   otherwise (fork, vfork, threads: followed by ptrace events)
+clone3       435  ENOSYS  its flags are in memory seccomp cannot read; glibc falls back to clone
+everything else   ALLOW
+
+excluded by name (§11.2): read, write, mmap, ftruncate and every other
+descriptor-based mutation, io_uring, payloads and file contents; a read-only
+open is outside the set (no event, not a loss)
+
+per profile
+tool, build  the baseline answers other ABIs, x32, a notification listener and
+             clone(CLONE_UNTRACED) with EPERM and clone3 with ENOSYS; ERRNO
+             outranks TRACE, so none of these ever stops here; AF_UNIX sockets
+             are refused, so connect is AF_INET or AF_INET6
+agent        the same baseline refusals except the listener, which the jail's
+             own mediation listener makes fail with EBUSY; connect is mediated
+             (USER_NOTIF outranks TRACE) and its result carries
+             fields.observation = seccomp_user_notification
+none         no baseline: every stop above can happen
+
+notes
+- The trace data is 0x4f4a. A stop on a number this filter never traces, with
+  other data, was asked for by a child's own SECCOMP_RET_TRACE and is continued:
+  the call then runs, where with no tracer it would have returned ENOSYS. It is
+  neither a result nor a loss. The same stop with this filter's data means the
+  installed program is not this one: an unexpected_trace_stop gap.
+- prctl(PR_SET_SECCOMP) is not traced: it cannot create a notification listener.
+- A child's own filter that refuses a call (errno, trap, kill) before this one
+  stops it hides a call that had no effect: a named exclusion, not a gap.
+- With no tracer attached, every TRACE verdict fails the call with ENOSYS: the
+  observer's death, and a CLONE_UNTRACED descendant, fail closed.
+
+narrowing filter instructions: 36
+narrowing filter digest: sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66

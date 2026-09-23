@@ -2236,6 +2236,39 @@ fn r6_path_reporting_by_class() {
         !raw.contains(workspace.to_str().unwrap()),
         "a raw host path appears in the trace"
     );
+    // J4 N9: each class, as §11.3 reports it, not only the absence of the
+    // raw path. The four opens are the four closed-set results, in order.
+    let opens: Vec<&Value> = audit_events(&run)
+        .into_iter()
+        .filter(|e| e.pointer("/fields/syscall").and_then(Value::as_str) == Some("openat"))
+        .collect();
+    let paths: Vec<Value> = opens
+        .iter()
+        .map(|e| e.pointer("/fields/path").cloned().unwrap_or(Value::Null))
+        .collect();
+    let digest = crate_digest(b"/etc/ld.so.cache");
+    assert_eq!(
+        paths,
+        vec![
+            serde_json::json!({"kind": "workspace_relative", "value": "abs.txt"}),
+            serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"}),
+            serde_json::json!({"kind": "scratch_relative", "value": "scr.txt"}),
+            serde_json::json!({"kind": "digest", "digest": digest, "reason": "outside_known_roots"}),
+        ],
+        "one result per open, each path in its class"
+    );
+    for event in &opens {
+        assert_eq!(
+            event.pointer("/fields/path_basis").and_then(Value::as_str),
+            Some("argument_snapshot"),
+            "{event}"
+        );
+    }
+}
+
+/// The digest §11.3 emits for a path outside every known root.
+fn crate_digest(bytes: &[u8]) -> String {
+    ouro_jail::canonical::sha256_prefixed(bytes)
 }
 
 /// §11.2/§11.4: a denied `connect` is counted once, under `fs.deny`.
@@ -2303,13 +2336,24 @@ fn r6_a_foreign_dirfd_is_not_resolved_against_a_cwd() {
     let workspace = c.workspace.clone();
     std::fs::create_dir_all(workspace.join("sub")).unwrap();
     let ops = workspace.join("dirfd.json");
+    let sub = workspace.join("sub");
     std::fs::write(
         &ops,
         serde_json::to_vec(&serde_json::json!([
             ["open", "sub", "--expect", "ok"],
-            // `--via openat` with a dirfd: the fixture opens the directory
-            // first and uses its descriptor.
-            ["mkdir", "sub/made", "--via", "mkdirat"]
+            // A relative name against AT_FDCWD: the cwd is not observed.
+            ["mkdir", "sub/made", "--via", "mkdirat"],
+            // J4 N9: a relative name against a real directory descriptor,
+            // which the fixture opens (read-only, so outside the set) and
+            // reports before the call that uses it.
+            [
+                "mkdir",
+                "made2",
+                "--via",
+                "mkdirat",
+                "--dirfd",
+                sub.to_str().unwrap()
+            ]
         ]))
         .unwrap(),
     )
@@ -2330,6 +2374,53 @@ fn r6_a_foreign_dirfd_is_not_resolved_against_a_cwd() {
             serde_json::to_string(event.get("fields").unwrap_or(&Value::Null)).unwrap()
         );
     }
+    // J4 N9: what the two results say, not only that the run happened.
+    assert!(workspace.join("sub/made").is_dir() && workspace.join("sub/made2").is_dir());
+    let lines = fixture_lines(&run);
+    let dirfd = lines
+        .iter()
+        .filter(|l| l["op"] == "mkdirat")
+        .nth(1)
+        .and_then(|l| l.pointer("/args/dirfd"))
+        .and_then(Value::as_i64)
+        .expect("the fixture reports the descriptor it used");
+    let mkdirs: Vec<&Value> = audit_events(&run)
+        .into_iter()
+        .filter(|e| e.pointer("/fields/syscall").and_then(Value::as_str) == Some("mkdirat"))
+        .collect();
+    assert_eq!(mkdirs.len(), 2, "{mkdirs:?}");
+    assert_eq!(
+        mkdirs[0].pointer("/fields/path"),
+        Some(&serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"})),
+        "{}",
+        mkdirs[0]
+    );
+    assert!(
+        mkdirs[0].pointer("/fields/path_dirfd").is_none(),
+        "AT_FDCWD is not a descriptor"
+    );
+    assert_eq!(
+        mkdirs[1].pointer("/fields/path"),
+        Some(&serde_json::json!({"kind": "unavailable", "reason": "relative_to_dirfd"})),
+        "{}",
+        mkdirs[1]
+    );
+    assert_eq!(
+        mkdirs[1]
+            .pointer("/fields/path_dirfd")
+            .and_then(Value::as_i64),
+        Some(dirfd),
+        "the event names the descriptor, never the directory it resolved to"
+    );
+    // The read-only open of `sub` and the descriptor's own open are
+    // outside the set: two results in all, both of them the mkdirs.
+    assert_eq!(
+        audit_events(&run)
+            .iter()
+            .filter(|e| e["fields"]["syscall"] == "openat")
+            .count(),
+        0
+    );
 }
 
 /// I03/§6.2: the contained child must not be able to reach the supervisor's
