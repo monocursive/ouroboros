@@ -261,6 +261,7 @@ fn m01_run_refuses_before_exec_and_the_marker_never_appears() {
     receipt_validator()
         .validate(receipt)
         .expect("the refusal receipt satisfies the checked-in schema");
+    common::assert_semantic_receipt(receipt);
     assert_refusal_tuple(receipt, "pending", "pending");
     assert!(
         receipt["argv_digest"]
@@ -296,6 +297,7 @@ fn m01_none_also_refuses_and_stays_unprotected() {
     receipt_validator()
         .validate(receipt)
         .expect("the refusal receipt satisfies the checked-in schema");
+    common::assert_semantic_receipt(receipt);
     // I08: `none` is unprotected in every receipt, including this refusal.
     assert_refusal_tuple(receipt, "none", "unprotected");
     assert_eq!(
@@ -1687,6 +1689,7 @@ fn a2_explicit_operator_grants_reach_the_receipt() {
     receipt_validator()
         .validate(receipt)
         .expect("the receipt with grants still satisfies the schema");
+    common::assert_semantic_receipt(receipt);
 
     // A run with no operator flags records none.
     let harness = Harness::new();
