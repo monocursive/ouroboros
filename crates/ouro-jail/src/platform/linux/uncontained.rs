@@ -89,7 +89,7 @@ use super::launch;
 use super::observed::{self, Fact};
 use super::platform::shared;
 use super::probe::ProbeResult;
-use super::tracer::{self, Tracer, TracerConfig, TracerEvent, TracerSummary};
+use super::tracer::{self, Tracer, TracerEvent, TracerSummary};
 use super::watch;
 
 /// The descriptor the launcher blocks reading.
@@ -323,6 +323,9 @@ struct Uncontained {
     attempt_id: String,
     trace: Option<SharedTrace>,
     observe_on: bool,
+    /// The §11.4 bounds the observer runs with, decided once; `None` with
+    /// observation off.
+    observer_plan: Option<observed::ObserverPlan>,
     /// The launcher's pid: the target's once it execs.
     pid: libc::pid_t,
     /// The launcher as a child, for the wait status when no observer owns
@@ -591,6 +594,7 @@ impl Uncontained {
             attempt_id: plan.attempt_id,
             trace: sinks.trace,
             observe_on,
+            observer_plan: observe_on.then(observed::ObserverPlan::from_env),
             pid,
             child: Some(child),
             launcher: identity::ProcessIdentity {
@@ -743,24 +747,19 @@ impl Uncontained {
                 )
             })?;
 
-        if self.observe_on {
+        if let Some(plan) = self.observer_plan.as_ref() {
             // §13.1: gap intervals count from supervisor start on the same
-            // CLOCK_BOOTTIME base as every other monotonic_ns.
-            let tracer = Tracer::attach(
-                pid,
-                TracerConfig {
-                    epoch_boottime_ns: clock::mark_supervisor_start(),
-                    ..TracerConfig::default()
-                },
-            )
-            .map_err(|err| {
-                // §11.4: an observer that cannot attach refuses before exec,
-                // whatever the evidence mode says.
-                host_setup(
-                    ErrorCode::ObserverUnavailable,
-                    format!("the closed-set observer could not attach: {err}"),
-                )
-            })?;
+            // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
+            // bounds are the plan's, which the receipt records.
+            let tracer = Tracer::attach(pid, plan.tracer_config(clock::mark_supervisor_start()))
+                .map_err(|err| {
+                    // §11.4: an observer that cannot attach refuses before exec,
+                    // whatever the evidence mode says.
+                    host_setup(
+                        ErrorCode::ObserverUnavailable,
+                        format!("the closed-set observer could not attach: {err}"),
+                    )
+                })?;
             self.tracer = Some(tracer);
             self.tracer_attached = true;
         }
@@ -837,6 +836,13 @@ impl Uncontained {
             } else {
                 Value::Null
             },
+        );
+        // §11.4: "Record actual values in the observer plan."
+        details.insert(
+            "observer_plan".to_owned(),
+            self.observer_plan
+                .as_ref()
+                .map_or(Value::Null, observed::ObserverPlan::details),
         );
         details.insert("child_subreaper".to_owned(), Value::from(true));
         let mut identity_value = Map::new();
@@ -2024,6 +2030,7 @@ mod tests {
             attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
             trace: None,
             observe_on: false,
+            observer_plan: None,
             pid,
             child: Some(child),
             launcher: identity::ProcessIdentity {
