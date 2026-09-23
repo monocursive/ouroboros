@@ -1,7 +1,9 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 11, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 11 records what
+Status: implementation specification, revision 12, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 12 records what
+the first real agent run required (§§6.2, 10, 12;
+[agent compatibility](jail-v1/agent-compatibility.md)). Revision 11 records what
 the J3 implementation and its reviews settled (§§6.2, 8.1, 9.2, 9.3, 10, 11.4,
 12, 14; [J3 authority](jail-v1/j3-authority.md)). Revision 10 names the
 host-peer isolation mechanism for `agent` (§10) and records the decisions the
@@ -532,7 +534,11 @@ and runtime state to `~/.local/share/ouro`. `OURO_CONFIG_DIR` and `OURO_DATA_DIR
 override these locations. Runtime state must be a private local directory owned
 by the operator and outside every child-visible grant. Files are mode 0600,
 directories 0700. Reject symlinked state roots, foreign ownership, unsafe parent
-replacement and network filesystems whose required durability is unproved.
+replacement and network filesystems whose required durability is unproved. An
+ancestor writable by others without the sticky bit is unsafe; group write
+counts as others unless the group is the owner's private group (the owner's
+primary group, listing no other member, and no other account's primary
+group), as stock Debian and Ubuntu create with a umask of 002.
 
 Apply configuration in this order:
 
@@ -1129,7 +1135,10 @@ installs the filter with its own listener and opens a `NETLINK_SOCK_DIAG`
 socket inside the attempt's network namespace; the supervisor takes both from
 the blocked launcher by descriptor before release. For each notification the
 supervisor reads the address, revalidates the notification, and takes a
-duplicate of the child's socket. A pathname address is resolved in the
+duplicate of the child's socket through a pidfd for the notifying thread
+itself (`PIDFD_THREAD`), because multi-threaded runtimes connect from worker
+threads; on a kernel without it, through the thread group leader's pidfd only
+when both share one descriptor table, and otherwise the connect is refused. A pathname address is resolved in the
 child's own view without leaving it, pinned by an `O_PATH` handle, and
 allowed only when a listener bound to that node's filesystem identity lives
 in the attempt's network namespace; the supervisor then connects the child's
@@ -1446,7 +1455,8 @@ dependency/source test enforces this boundary without banning documentation.
 `copy_rw` takes a point-in-time private copy; it never writes refreshed tokens
 back. `bind_ro` exposes the exact granted source file read-only; it may prevent
 credential refresh. Copy regular files through no-follow handles, validate
-owner and mode, and reject special files. Initial total credential-copy budget:
+owner and mode (the private-group rule of §6.2 applies to the source and its
+directories), and reject special files. Initial total credential-copy budget:
 16 MiB per attempt; larger inputs refuse before exec. File identity and digest
 are computed from the same bytes copied. A readonly bind records source
 identity; if stable content cannot be established, its digest is unavailable
