@@ -819,7 +819,9 @@ fn j4_r03_a_coverage_gap_note_follows_the_prefix_with_reserve_priority() {
     assert_eq!(gap["fields"]["lost_count"], serde_json::Value::Null);
     assert_eq!(
         gap["fields"]["classes"],
-        serde_json::json!(["exec", "fs.write", "fs.deny", "net", "proxy.net", "limits"])
+        // The evidence classes: `limits` is counted from the cgroup, not
+        // carried by the trace, so a transport loss does not touch it.
+        serde_json::json!(["exec", "fs.write", "fs.deny", "net", "proxy.net"])
     );
     assert_eq!(
         frames

@@ -77,11 +77,12 @@ fn evidence_lost(reason: &str) -> JailError {
 pub type SharedTrace = Arc<Mutex<TraceWriter>>;
 
 /// The classes a trace stream carries events for, which a transport loss can
-/// therefore affect (§11.4). The writer cannot know which later events a lost
-/// sink will refuse, so its note names them all; the receipt narrows the
-/// statement per class (`degrade_trace_coverage` leaves unsupported classes
-/// alone).
-pub const STREAM_CLASSES: [&str; 6] = ["exec", "fs.write", "fs.deny", "net", "proxy.net", "limits"];
+/// therefore affect (§11.4): the evidence classes. `limits` is not among
+/// them: its count comes from the cgroup counters, never from the trace. The
+/// writer cannot know which later events a lost sink will refuse, so its note
+/// names them all; the receipt narrows the statement per class
+/// (`degrade_trace_coverage` leaves unsupported classes alone).
+pub const STREAM_CLASSES: [&str; 5] = ["exec", "fs.write", "fs.deny", "net", "proxy.net"];
 
 /// The gap reason for a trace transport loss, in the stream and the receipt.
 pub const TRANSPORT_LOSS_REASON: &str = "trace_transport_loss";
