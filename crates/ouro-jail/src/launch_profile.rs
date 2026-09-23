@@ -669,7 +669,7 @@ fn check_launch_directory(stat: &anchored::Stat, path: &Path) -> Result<(), Jail
             stat.uid
         )));
     }
-    if stat.mode & 0o022 != 0 && stat.mode & 0o1000 == 0 {
+    if crate::state::writable_by_others(stat.mode, stat.uid, stat.gid) && stat.mode & 0o1000 == 0 {
         return Err(unsafe_launch(format!(
             "{} has mode {:04o}: writable by others without the sticky bit",
             path.display(),
