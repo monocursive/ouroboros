@@ -566,6 +566,10 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
     if let Some(error) = &report.error {
         eprintln!("{error}");
     }
+    // J4 W3, P5: every error no durable receipt carries reaches stderr.
+    for error in &report.unrecorded {
+        eprintln!("{error}");
+    }
     // I05: evidence health is a separate fact from the attempt's outcome, so a
     // trace failure gets its own diagnostic line rather than replacing one.
     if let Some(error) = &report.trace_error {

@@ -91,6 +91,12 @@ pub struct RunReport {
     pub trace_error: Option<JailError>,
     /// Control messages the consumer never took. Reported, never waited on.
     pub control_dropped: u64,
+    /// J4 W3, P5: errors this attempt raised that no durable receipt carries
+    /// and that `error` and `trace_error` do not name (a terminal receipt
+    /// that failed to persist, and whatever it would have recorded), in the
+    /// order they were raised. The caller prints each one on stderr: an
+    /// error that cannot reach the receipt still reaches the operator.
+    pub unrecorded: Vec<crate::records::ErrorObject>,
 }
 
 /// What `explain` established, without probing anything.
@@ -1754,13 +1760,20 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             // on disk stays the last one that persisted. S5: a tool error
             // after exec, and the first cause is the reported error.
             let error = error.in_stage(ErrorStage::Reconciling);
+            // J4 W3, P5: the failure, and every error the last durable
+            // receipt does not carry, reach stderr instead.
+            record.errors.push(error.to_object());
             let reported = tree_error.or(outcome_error).unwrap_or(error);
+            let trace_error = journal.loss.clone();
+            let unrecorded =
+                unrecorded(&record, &journal, &[Some(&reported), trace_error.as_ref()]);
             return Ok(RunReport {
                 exit_code: 1,
                 error: Some(reported),
                 receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error: journal.loss.clone(),
+                trace_error,
                 control_dropped: finish_control(control.as_mut()),
+                unrecorded,
                 ..RunReport::default()
             });
         }
@@ -2331,12 +2344,17 @@ fn refuse(
                 "{}; the refused receipt was not persisted: {}",
                 reported.message, write_error.message
             );
+            let trace_error = journal.loss.clone();
+            // J4 W3, P5: the refusal and the failed write are in `error`;
+            // any other error no durable receipt carries reaches stderr too.
+            let unrecorded = unrecorded(record, journal, &[Some(error), trace_error.as_ref()]);
             RunReport {
                 exit_code,
                 error: Some(reported),
                 receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error: journal.loss.clone(),
+                trace_error,
                 control_dropped: finish_control(control),
+                unrecorded,
                 ..RunReport::default()
             }
         }
@@ -2369,6 +2387,30 @@ fn persistence_failed_after(
 ) {
     record.errors.push(error.to_object());
     outcome_error.get_or_insert(error);
+}
+
+/// J4 W3, P5: the errors of this attempt that no durable receipt carries and
+/// that the report does not already name (`printed`: its `error` and
+/// `trace_error`), in the order they were raised. `errors[]` only grows, and
+/// every durable receipt carries a prefix of it, so what the last one lacks
+/// is exactly the tail after its length.
+fn unrecorded(
+    record: &AttemptRecord,
+    journal: &Journal,
+    printed: &[Option<&JailError>],
+) -> Vec<crate::records::ErrorObject> {
+    let printed: Vec<crate::records::ErrorObject> = printed
+        .iter()
+        .flatten()
+        .map(|error| error.to_object())
+        .collect();
+    record
+        .errors
+        .iter()
+        .skip(journal.durable_errors)
+        .filter(|error| !printed.contains(error))
+        .cloned()
+        .collect()
 }
 
 /// A receipt handed to the persistence worker, and what it acknowledges once
@@ -2827,6 +2869,10 @@ struct Journal {
     loss: Option<JailError>,
     /// True while `loss` has not yet been surfaced to the supervision loop.
     loss_pending: bool,
+    /// J4 W3, P5: how many `errors[]` entries the latest durable receipt
+    /// carries. Every durable receipt passes [`Journal::receipt`] (or
+    /// [`Journal::durable`]), so the rest never reached a receipt.
+    durable_errors: usize,
 }
 
 impl Journal {
@@ -2836,7 +2882,13 @@ impl Journal {
             trace,
             loss: None,
             loss_pending: false,
+            durable_errors: 0,
         }
+    }
+
+    /// Notes that `receipt` is durable, without a trace note.
+    fn durable(&mut self, receipt: &Receipt) {
+        self.durable_errors = self.durable_errors.max(receipt.errors.len());
     }
 
     /// The sink loss that has not been handled yet, if any (§13.3).
@@ -2920,6 +2972,7 @@ impl Journal {
     /// which no receipt field is) gets no note with an invented digest: the
     /// missing note is recorded as trace loss.
     fn receipt(&mut self, phase: Phase, receipt: &Receipt, terminal: bool) {
+        self.durable(receipt);
         let canonical = serde_json::to_value(receipt)
             .map_err(|error| error.to_string())
             .and_then(|value| crate::canonical::to_jcs(&value).map_err(|error| error.to_string()));
@@ -3110,14 +3163,16 @@ fn persist_terminal(
         record.errors.push(error.to_object());
         degrade_trace_coverage(record);
         let io = state::current_io();
-        return write_receipt_at(
+        let corrected = write_receipt_at(
             site,
             attempt_dir,
             record,
             phase,
             args.receipt.as_deref(),
             &*io,
-        );
+        )?;
+        journal.durable(&corrected);
+        return Ok(corrected);
     }
     Ok(receipt)
 }

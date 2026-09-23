@@ -514,19 +514,52 @@ impl JailError {
 
 impl fmt::Display for JailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
+        write_error_line(
             f,
-            "ouro-jail: error {} at {} [{}]: {}",
             self.code.as_str(),
             self.stage.as_str(),
-            remediation_str(self.remediation),
-            self.message
-        )?;
-        if let Some(path) = &self.key_path {
-            write!(f, " (key: {path})")?;
-        }
-        Ok(())
+            self.remediation,
+            &self.message,
+            self.key_path.as_deref(),
+        )
     }
+}
+
+// J4 W3 begin: P5, an error that reached no receipt is printed like any other
+/// The same one-line diagnostic as [`JailError`]'s, for an error known only
+/// in its wire form.
+impl fmt::Display for ErrorObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_error_line(
+            f,
+            &self.code,
+            &self.stage,
+            self.remediation_category,
+            &self.message,
+            self.key_path.as_deref(),
+        )
+    }
+}
+// J4 W3 end
+
+/// §6.1: one line per error on stderr.
+fn write_error_line(
+    f: &mut fmt::Formatter<'_>,
+    code: &str,
+    stage: &str,
+    remediation: Remediation,
+    message: &str,
+    key_path: Option<&str>,
+) -> fmt::Result {
+    write!(
+        f,
+        "ouro-jail: error {code} at {stage} [{}]: {message}",
+        remediation_str(remediation),
+    )?;
+    if let Some(path) = key_path {
+        write!(f, " (key: {path})")?;
+    }
+    Ok(())
 }
 
 impl std::error::Error for JailError {}

@@ -2158,6 +2158,68 @@ fn j4_w3_p3_the_tree_is_ended_without_waiting_for_persistence() {
     );
 }
 
+/// P5. With an earlier error in hand, a failed terminal receipt write was
+/// reported nowhere: not in the receipt (it did not persist), not in the
+/// reported error (the first cause wins), not on stderr. Every error that
+/// cannot reach a durable receipt reaches stderr (`RunReport::unrecorded`,
+/// one line each), and none is printed twice.
+#[test]
+fn j4_w3_p5_an_error_no_receipt_carries_reaches_stderr() {
+    let fixture = Fixture::new();
+    let faults = Arc::new(Faults::new(fixture.watch()).failing(
+        Site::TerminalReceipt,
+        Fault::RenameError,
+        None,
+    ));
+    let outcome = fixture.run(
+        Sim::new(Scenario::Script(vec![
+            RunEvent::ExecConfirmed,
+            lost("the loss"),
+            RunEvent::TargetExited { code: 0 },
+        ])),
+        &["--profile", "tool", "--evidence", "best-effort"],
+        faults.clone(),
+    );
+    assert!(faults.seen(|seen| seen.fired));
+    assert_eq!(outcome.report.exit_code, 1);
+    let (_, phase, bytes) = jail_json(&fixture.attempt());
+    assert_eq!(
+        phase, "enforced",
+        "the receipt stays at its last persisted phase"
+    );
+    let on_disk: Value = serde_json::from_slice(&bytes).unwrap();
+    let reported = outcome.report.error.as_ref().expect("the first cause");
+    assert_eq!(
+        reported.message, "the loss",
+        "the first cause is the reported error"
+    );
+    let unrecorded: Vec<String> = outcome
+        .report
+        .unrecorded
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let everything = format!(
+        "{reported} {:?} {} {unrecorded:?}",
+        outcome.report.trace_error.as_ref().map(ToString::to_string),
+        on_disk["errors"]
+    );
+    assert!(
+        everything.contains("state_write_failed"),
+        "the terminal receipt's persistence failure is in no output: {everything}"
+    );
+    assert_eq!(
+        unrecorded.len(),
+        1,
+        "exactly the terminal failure: the loss is the reported error, printed once: \
+         {unrecorded:#?}"
+    );
+    assert!(
+        unrecorded[0].contains("state_write_failed"),
+        "{unrecorded:#?}"
+    );
+}
+
 /// Loss review, finding 5: a seam set twice in the environment was recorded
 /// with its last value, while `getenv` (and so every consumer) applies the
 /// first. The record says what the consumers read.
