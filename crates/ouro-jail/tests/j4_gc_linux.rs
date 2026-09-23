@@ -1451,3 +1451,151 @@ fn j4_w3_zombie_leader_helper() {
         std::thread::sleep(Duration::from_secs(60));
     }
 }
+
+/// Writes the launch profile `fixture` (a `tool` jail with vendor state)
+/// into a harness's private config directory.
+fn vendor_state_profile(jail: &Jail) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let launch = jail.config_dir().join("launch");
+    std::fs::create_dir(&launch).unwrap();
+    std::fs::set_permissions(&launch, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = launch.join("fixture.toml");
+    std::fs::write(
+        &profile,
+        "name = \"fixture\"\njail = \"tool\"\nstate_var = \"FIX_HOME\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// G3 (gc review, CORRECTNESS), live. A `tool` supervisor with vendor state
+/// dies before its `prepared` receipt (`prepared_receipt:temp_written`): its
+/// leaf is registered and emptied by the lifetime watcher, and managed
+/// scratch and vendor state stay. gc is then aborted at each point of its
+/// first record. The removal deleted the leaf before recording anything, so
+/// on the base a crash there stranded the attempt: the next passes found the
+/// leaf absent and kept scratch and vendor state for good, exiting 0. Now
+/// the intent (`gc_removing_cgroup`) is the first record and precedes the
+/// `rmdir`, so a crash at it never removed the leaf, and the next pass
+/// completes everything: the leaf, the scratch, the vendor state, and a
+/// `gc_finished` record.
+#[test]
+fn j4_w3_g3_a_crash_at_gcs_first_record_never_strands_the_attempt() {
+    if !common::live() || !live() {
+        return;
+    }
+    let mut problems = Vec::new();
+    for point in ["temp_written", "temp_synced", "renamed", "dir_synced"] {
+        let label = format!("gc_record:{point}");
+        let jail = Jail::with_program("/bin/sh")
+            .expect("harness")
+            .args(["-c", "ulimit -c 0 && exec \"$0\" \"$@\""])
+            .arg(harness::jail_path());
+        vendor_state_profile(&jail);
+        let workspace = jail.root().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("the workspace");
+        let run = jail
+            .arg("run")
+            .args(["--launch", "fixture", "--workspace"])
+            .arg(&workspace)
+            .env(
+                ouro_jail::state::ABORT_AT_SEAM,
+                "prepared_receipt:temp_written",
+            )
+            .timeout(Duration::from_secs(60))
+            .target(["/bin/true"])
+            .run()
+            .expect("the run");
+        if run.signal() != Some(libc::SIGABRT) {
+            problems.push(format!(
+                "{label}: the supervisor was not aborted (exit {:?}): {}",
+                run.code(),
+                run.stderr_text().trim()
+            ));
+            continue;
+        }
+        let attempt = attempt_of(&run.data_dir);
+        let state = read_json(&attempt.join("jail-state.json"));
+        let Some(leaf) = state["execution_cgroup"]["path"]
+            .as_str()
+            .map(PathBuf::from)
+        else {
+            problems.push(format!("{label}: no leaf registered: {state:#}"));
+            continue;
+        };
+        let _guard = inode(&leaf).map(|now| LeafGuard::new(&leaf, now));
+        wait_for("the dead supervisor's leaf to empty", || {
+            inode(&leaf).is_none() || !populated(&leaf)
+        });
+        let scratch = attempt.join("scratch");
+        let vendor = attempt.join("vendor-state");
+        if !scratch.is_dir() || !vendor.is_dir() {
+            problems.push(format!(
+                "{label}: scratch present {}, vendor state present {}",
+                scratch.is_dir(),
+                vendor.is_dir()
+            ));
+            continue;
+        }
+        std::fs::write(scratch.join("left-behind"), b"x").unwrap();
+
+        let crashed = Command::new("/bin/sh")
+            .args(["-c", "ulimit -c 0 && exec \"$0\" \"$@\""])
+            .arg(harness::jail_path())
+            .args(["gc", "--json"])
+            .env("OURO_DATA_DIR", &run.data_dir)
+            .env("OURO_CONFIG_DIR", run.data_dir.with_file_name("config"))
+            .env(ouro_jail::state::ABORT_AT_SEAM, &label)
+            .output()
+            .unwrap();
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            crashed.status.signal()
+        };
+        if signal != Some(libc::SIGABRT) {
+            problems.push(format!(
+                "{label}: gc was not aborted at its record ({:?})",
+                crashed.status
+            ));
+        }
+        let first = gc_actions(&attempt);
+        eprintln!(
+            "{label}: after the crash, leaf present {}, records {first:?}",
+            inode(&leaf).is_some()
+        );
+        if inode(&leaf).is_none() && !first.iter().any(|action| action == "gc_removing_cgroup") {
+            problems.push(format!(
+                "{label}: the crashed gc removed the leaf before recording anything"
+            ));
+        }
+        let (code, report, stderr) = gc(&run, &[]);
+        let after = gc_actions(&attempt);
+        if code != Some(0) {
+            problems.push(format!("{label}: the next gc exited {code:?}: {stderr}"));
+        }
+        if inode(&leaf).is_some() || scratch.exists() || vendor.exists() {
+            problems.push(format!(
+                "{label}: stranded after the next pass: leaf present {}, scratch present {}, \
+                 vendor state present {}; records {after:?}; {:?}",
+                inode(&leaf).is_some(),
+                scratch.exists(),
+                vendor.exists(),
+                report["entries"][0]["reason"]
+            ));
+        }
+        if read_json(&attempt.join("jail-state.json"))["state_cleanup"] != "complete" {
+            problems.push(format!(
+                "{label}: vendor-state cleanup not recorded complete"
+            ));
+        }
+        if !after.iter().any(|action| action == "gc_finished") {
+            problems.push(format!("{label}: not finished: {after:?}"));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
