@@ -15,8 +15,9 @@
 //! - [`crash_point`] is the one test seam the release binary honours:
 //!   `OURO_JAIL_TEST_ABORT_AT=<site>:<point>` aborts the process at that named
 //!   point of the first replacement at that site, which is how a crash between
-//!   two steps is produced without timing (S9). When it is set, it is recorded
-//!   in jail state and in every receipt that has native lifetime details.
+//!   two steps is produced without timing (S9). Every `OURO_JAIL_TEST_*`
+//!   variable set, this one included, is recorded in jail state and in every
+//!   receipt that has native lifetime details ([`test_seams`]).
 
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -348,15 +349,42 @@ pub fn crash_point(site: Site, point: CrashPoint) {
     }
 }
 
-/// The test seams in force, for jail state and the receipt's native details
-/// (S9: "each recorded in the receipt when set"), or `None` when there are
-/// none.
+/// The prefix of every test seam's environment name (S9).
+pub const TEST_SEAM_PREFIX: &str = "OURO_JAIL_TEST_";
+
+/// Every `OURO_JAIL_TEST_*` variable set in `vars`, as an object of name to
+/// value, or `None` when none is (S9: "each recorded in the receipt when
+/// set").
+///
+/// The record is a prefix scan, not a list of the seams this build knows, so
+/// a seam added later is recorded without anyone remembering to add it here,
+/// and a variable that happens to be ignored (an out-of-range value, a name
+/// no build uses) is still recorded as set: the record says what the
+/// environment asked for, not what each consumer made of it. A value that is
+/// not UTF-8 is recorded lossily.
+#[must_use]
+pub fn test_seams_in(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Option<serde_json::Value> {
+    let seams: serde_json::Map<String, serde_json::Value> = vars
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let name = name.to_str()?.to_owned();
+            name.starts_with(TEST_SEAM_PREFIX).then(|| {
+                (
+                    name,
+                    serde_json::Value::from(value.to_string_lossy().into_owned()),
+                )
+            })
+        })
+        .collect();
+    (!seams.is_empty()).then_some(serde_json::Value::Object(seams))
+}
+
+/// [`test_seams_in`] over this process's environment.
 #[must_use]
 pub fn test_seams() -> Option<serde_json::Value> {
-    let (site, point) = abort_at()?;
-    Some(serde_json::json!({
-        "abort_at": format!("{}:{}", site.as_str(), point.as_str()),
-    }))
+    test_seams_in(std::env::vars_os())
 }
 
 // ---------------------------------------------------------------------------

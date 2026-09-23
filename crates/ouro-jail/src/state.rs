@@ -602,8 +602,8 @@ pub mod persist;
 
 pub use persist::{
     ABORT_AT_SEAM, CrashPoint, Durable, Fsync, Installed, PERSIST_BUDGET, Pending, PersistIo,
-    Persister, Progress, RealIo, SharedIo, Site, Stalled, crash_point, current_io, install,
-    test_seams, with_persist_io,
+    Persister, Progress, RealIo, SharedIo, Site, Stalled, TEST_SEAM_PREFIX, crash_point,
+    current_io, install, test_seams, test_seams_in, with_persist_io,
 };
 
 /// Writes every byte through the seam, one `write` at a time: a short write

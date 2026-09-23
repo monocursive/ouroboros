@@ -1125,7 +1125,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         )
     })?;
     let _forwarding = state::install(persister.forwarding());
-    claim_attempt(&attempt_dir, &attempt_id, ctx)?;
+    // J4-R: S9 — every OURO_JAIL_TEST_* variable in force, read once at the
+    // attempt's start and recorded in jail state and in every receipt that
+    // has native details (lifetime.native.details.test_seams).
+    let test_seams = state::test_seams();
+    claim_attempt(&attempt_dir, &attempt_id, ctx, test_seams.as_ref())?;
     // J4-R: N6 — a failed policy.json write is a refusal like every other
     // failure before exec: it is reported through `refuse` below, once the
     // record and the sinks that carry a refusal exist.
@@ -1324,10 +1328,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     if let Some(applied) = prepared.applied() {
         record.applied = applied;
     }
-    // J4-R: S9 — a test seam in force is recorded in every receipt that has
-    // native details.
-    if let (Some(seams), Some(native)) = (state::test_seams(), record.lifetime.native.as_mut()) {
-        native.details.insert("test_seams".to_owned(), seams);
+    // J4-R: S9 — the test seams in force are recorded in every receipt that
+    // has native details (a receipt before any boundary has none; jail state
+    // records them from the claim on).
+    if let (Some(seams), Some(native)) = (test_seams.as_ref(), record.lifetime.native.as_mut()) {
+        native
+            .details
+            .insert("test_seams".to_owned(), seams.clone());
     }
     // §7: the state file names the registered execution boundary once it
     // exists, so crash reconciliation and GC can identify resources without
@@ -3127,6 +3134,7 @@ fn claim_attempt(
     attempt_dir: &AttemptDir,
     attempt_id: &AttemptId,
     ctx: &Context,
+    test_seams: Option<&serde_json::Value>,
 ) -> Result<(), JailError> {
     let identity = ctx.platform.identity();
     let owner = ctx.platform.owner_identity();
@@ -3163,8 +3171,8 @@ fn claim_attempt(
     // J4-R: S9 — a test seam in force is recorded where gc and a reader of
     // jail state see it, from the claim on.
     let mut state = state;
-    if let Some(seams) = state::test_seams() {
-        state["test_seams"] = seams;
+    if let Some(seams) = test_seams {
+        state["test_seams"] = seams.clone();
     }
     let path = attempt_dir.state_path();
     // J4-R: §7, R02 — the claim is written and synced under a temporary name

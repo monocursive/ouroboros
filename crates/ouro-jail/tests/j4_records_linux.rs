@@ -255,7 +255,8 @@ fn crash(site: &Site, point: Point) -> Vec<String> {
         }
         // S9: the seam in force is recorded wherever native details exist.
         if receipt["lifetime"]["native"].is_object()
-            && receipt["lifetime"]["native"]["details"]["test_seams"]["abort_at"] != label.as_str()
+            && receipt["lifetime"]["native"]["details"]["test_seams"][state::ABORT_AT_SEAM]
+                != label.as_str()
         {
             problems.push(format!(
                 "{label}: the receipt does not record the abort seam: {}",
@@ -277,7 +278,7 @@ fn crash(site: &Site, point: Point) -> Vec<String> {
         ));
     }
     if let Some(claim) = record("jail-state.json")
-        && claim["test_seams"]["abort_at"] != label.as_str()
+        && claim["test_seams"][state::ABORT_AT_SEAM] != label.as_str()
     {
         problems.push(format!(
             "{label}: jail state does not record the abort seam"

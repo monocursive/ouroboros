@@ -1449,3 +1449,96 @@ fn j4_d5_a_later_persistence_failure_does_not_replace_the_reported_error() {
     );
     assert_eq!(outcome.report.exit_code, 1);
 }
+
+// ---------------------------------------------------------------------------
+// S9: every test seam in force is recorded
+// ---------------------------------------------------------------------------
+
+/// Set in the environment of the child that runs [`seam_child_helper`].
+const SEAM_HELPER: &str = "OURO_J4_SEAM_HELPER";
+
+/// Runs one simulated `tool` attempt in this (child) process, whose
+/// environment the parent chose, and prints its receipt and jail state.
+#[test]
+#[ignore = "child helper invoked by j4_s9_every_test_seam_in_force_is_recorded"]
+fn seam_child_helper() {
+    if std::env::var_os(SEAM_HELPER).is_none() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let outcome = fixture.run(Sim::new(Scenario::Plain), &["--profile", "tool"], real());
+    let receipt = serde_json::to_value(outcome.report.receipt.expect("a receipt")).unwrap();
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(fixture.attempt().join("jail-state.json")).unwrap())
+            .unwrap();
+    println!(
+        "SEAM-RESULT {}",
+        serde_json::json!({"receipt": receipt, "state": state})
+    );
+}
+
+fn seam_child(seams: &[(&str, &str)]) -> Value {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", "seam_child_helper", "--ignored", "--nocapture"]);
+    command.env(SEAM_HELPER, "1");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("OURO_JAIL_TEST_") {
+            command.env_remove(name);
+        }
+    }
+    for (name, value) in seams {
+        command.env(name, value);
+    }
+    let output = command.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("SEAM-RESULT "))
+        .unwrap_or_else(|| {
+            panic!(
+                "the helper printed no result: {stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    serde_json::from_str(line).unwrap()
+}
+
+#[test]
+fn j4_s9_every_test_seam_in_force_is_recorded() {
+    // Values that change nothing in this run: the mediation queue only
+    // matters to `agent`, the trace cap can only shrink and this one does
+    // not, and the last name is one no build knows yet: the record must not
+    // depend on a list of known seams.
+    let seams = [
+        ("OURO_JAIL_TEST_MEDIATION_QUEUE", "7"),
+        ("OURO_JAIL_TEST_TRACE_CAP", "67108864"),
+        ("OURO_JAIL_TEST_NOT_YET_INVENTED", "any value"),
+    ];
+    let expected: serde_json::Map<String, Value> = seams
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), Value::from(*value)))
+        .collect();
+    let with = seam_child(&seams);
+    assert_eq!(
+        with["receipt"]["lifetime"]["native"]["details"]["test_seams"],
+        Value::Object(expected.clone()),
+        "S9: the receipt names every OURO_JAIL_TEST_* variable set: {:#}",
+        with["receipt"]["lifetime"]["native"]
+    );
+    assert_eq!(
+        with["state"]["test_seams"],
+        Value::Object(expected),
+        "and so does jail state"
+    );
+    common::check_receipt(&with["receipt"]).unwrap();
+
+    let without = seam_child(&[]);
+    assert!(
+        without["receipt"]["lifetime"]["native"]["details"]
+            .get("test_seams")
+            .is_none(),
+        "a run with no seam records none: {:#}",
+        without["receipt"]["lifetime"]["native"]
+    );
+    assert!(without["state"].get("test_seams").is_none());
+}
