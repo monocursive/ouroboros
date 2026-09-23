@@ -287,12 +287,17 @@ fn write_json(path: &Path, value: &Value) {
 
 /// The real `gc --json` over a run's state root: exit code, report, stderr.
 fn gc(run: &Run, extra: &[&str]) -> (Option<i32>, Value, String) {
+    gc_at(&run.data_dir, extra)
+}
+
+/// The real `gc --json` over a state root.
+fn gc_at(data: &Path, extra: &[&str]) -> (Option<i32>, Value, String) {
     let output = Command::new(harness::jail_path())
         .arg("gc")
         .args(extra)
         .arg("--json")
-        .env("OURO_DATA_DIR", &run.data_dir)
-        .env("OURO_CONFIG_DIR", run.data_dir.with_file_name("config"))
+        .env("OURO_DATA_DIR", data)
+        .env("OURO_CONFIG_DIR", data.with_file_name("config"))
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -370,11 +375,16 @@ fn j4_c03_a_populated_orphan_leaf_of_this_boot_is_killed_verified_and_removed() 
         [
             "gc_terminating_orphan",
             "gc_terminated_orphan",
-            "gc_removed_cgroup"
+            "gc_removing_cgroup",
+            "gc_removed_cgroup",
+            "gc_finished"
         ]
     );
     let state = read_json(&attempt.join("jail-state.json"));
     for action in state["gc_actions"].as_array().unwrap() {
+        if action["action"] == "gc_finished" {
+            continue;
+        }
         assert_eq!(
             action["execution_cgroup"]["inode"], orphan.inode,
             "{state:#}"
@@ -389,10 +399,10 @@ fn j4_c03_a_populated_orphan_leaf_of_this_boot_is_killed_verified_and_removed() 
     let (code, report, stderr) = gc(&orphan.run, &[]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
     assert!(
-        text(&report, "cgroup").contains("removed by gc"),
+        text(&report, "reason").starts_with("finished"),
         "{report:#}"
     );
-    assert_eq!(gc_actions(&attempt).len(), 3, "nothing more to record");
+    assert_eq!(gc_actions(&attempt).len(), 5, "nothing more to record");
 }
 
 /// §14.2: "Never ... delete a directory solely because its name looks like"
@@ -683,7 +693,7 @@ fn j4_c03_child_cgroups_inside_an_orphan_leaf_are_ended_and_removed() {
         None,
         "the leaf and its children are removed"
     );
-    assert_eq!(gc_actions(&attempt).len(), 3);
+    assert_eq!(gc_actions(&attempt).len(), 5, "{:?}", gc_actions(&attempt));
 }
 
 // ===========================================================================
@@ -754,7 +764,12 @@ fn j4_c03_contained_crash_leaves_an_empty_leaf_that_gc_removes() {
     assert!(!scratch.exists());
     assert_eq!(
         gc_actions(&attempt),
-        ["gc_removed_cgroup", "gc_removed_scratch"]
+        [
+            "gc_removing_cgroup",
+            "gc_removed_cgroup",
+            "gc_removed_scratch",
+            "gc_finished"
+        ]
     );
     assert_eq!(std::fs::read(attempt.join("jail.json")).unwrap(), receipt);
 }
@@ -962,7 +977,9 @@ fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let attempt_id = ouro_jail::state::AttemptId::generate();
-        let attempt = root.path().join("attempt");
+        // J4 wave 3 (G2): an attempt root is named by its attempt id, and
+        // the leaf carries it.
+        let attempt = root.path().join(attempt_id.as_str());
         std::fs::create_dir(&attempt).unwrap();
         write_json(
             &attempt.join("jail-state.json"),
@@ -1014,8 +1031,9 @@ fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
             serde_json::from_slice(&seam.asked.lock().unwrap().clone().expect("the write"))
                 .unwrap();
         let path = PathBuf::from(asked["execution_cgroup"]["path"].as_str().unwrap());
-        assert!(
-            ouro_jail::platform::linux::cgroup::is_leaf_name(path.file_name().unwrap()),
+        assert_eq!(
+            path.file_name().unwrap().to_str(),
+            Some(ouro_jail::gc::leaf_name_of(attempt_id.as_str()).as_str()),
             "{label}: {}",
             path.display()
         );
@@ -1033,4 +1051,551 @@ fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
         };
         assert_eq!(state["execution_cgroup"], expected, "{label}");
     }
+}
+
+// ===========================================================================
+// J4 wave 3: the gc review's findings, live (each red on 191bdb7b first)
+// ===========================================================================
+
+/// The attempt id of the only attempt under a run's state root.
+fn attempt_id_of(attempt: &Path) -> String {
+    attempt.file_name().unwrap().to_str().unwrap().to_owned()
+}
+
+/// Whether the process with this pid exists and is not a zombie.
+fn running(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|raw| identity::parse_state(&raw).ok())
+        .is_some_and(|state| state != 'Z' && state != 'X')
+}
+
+/// G2 (gc review): the execution leaf carries its attempt. Both call sites
+/// (the contained platform and `none`) register and create
+/// `ouro-<attempt id>.leaf`, and the receipt names the same leaf.
+#[test]
+fn j4_w3_g2_each_execution_leaf_is_named_for_its_attempt() {
+    if !live() {
+        return;
+    }
+    let mut profiles = vec!["none"];
+    if common::live() {
+        profiles.push("tool");
+    }
+    for profile in profiles {
+        let jail = Jail::new().expect("a private harness");
+        let workspace = jail.root().join("workspace");
+        std::fs::create_dir(&workspace).expect("the workspace");
+        let mut jail = jail
+            .arg("run")
+            .args(["--profile", profile])
+            .arg("--workspace")
+            .arg(&workspace);
+        if profile == "none" {
+            jail = jail.args(["--observe", "off"]);
+        }
+        let run = jail
+            .receipt()
+            .timeout(Duration::from_secs(60))
+            .target(["/bin/true"])
+            .run()
+            .expect("the run");
+        assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
+        let attempt = attempt_of(&run.data_dir);
+        let id = attempt_id_of(&attempt);
+        let state = read_json(&attempt.join("jail-state.json"));
+        let path = PathBuf::from(
+            state["execution_cgroup"]["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{profile}: no leaf registered: {state:#}")),
+        );
+        assert_eq!(
+            path.file_name().unwrap().to_str(),
+            Some(format!("ouro-{id}.leaf").as_str()),
+            "{profile}: the registered leaf does not carry its attempt"
+        );
+        let receipt = read_json(&attempt.join("jail.json"));
+        assert_eq!(
+            receipt["lifetime"]["native"]["details"]["execution_cgroup"]["path"],
+            json!(path),
+            "{profile}"
+        );
+    }
+}
+
+/// G2 (gc review, SAFETY, C03; reproduced live on 17a0533c). Attempt A's
+/// jail state, as a same-uid `none` child can write it, registers ANOTHER,
+/// live attempt B's execution leaf with its real path, device and inode. gc,
+/// run on the dead attempt A, pinned B's leaf (right name shape, place,
+/// device, inode) and killed B's tree while B's supervisor was alive and
+/// held its own lease. Now the leaf is not A's (its name carries B), so gc
+/// retains and reports it; B's run ends on its own, untouched.
+#[test]
+fn j4_w3_g2_a_forged_registration_of_a_live_attempts_leaf_is_never_acted_on() {
+    if !live() {
+        return;
+    }
+    let jail = Jail::new().expect("a private harness");
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir(&workspace).expect("the workspace");
+    let data = jail.data_dir();
+    let mut spawned = jail
+        .arg("run")
+        .args(["--profile", "none", "--observe", "off", "--workspace"])
+        .arg(&workspace)
+        .receipt()
+        .timeout(Duration::from_secs(90))
+        .target(["/bin/sleep", "30"])
+        .spawn()
+        .expect("attempt B starts");
+    let enforced = receipt_in_phase(&spawned, "enforced");
+    let (leaf, leaf_inode) = leaf_of(&enforced);
+    let _guard = LeafGuard::new(&leaf, leaf_inode);
+    wait_for("B's leaf to be populated", || populated(&leaf));
+    let b = attempt_of(&data);
+    let b_state = read_json(&b.join("jail-state.json"));
+    let supervisor = spawned.pid() as i32;
+
+    // A: a claimed attempt whose owner is dead, registering B's leaf.
+    let a_id = ouro_jail::state::AttemptId::generate();
+    let a = data.join("attempts").join(a_id.as_str());
+    std::fs::create_dir(&a).unwrap();
+    std::fs::set_permissions(&a, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    std::fs::write(a.join("jail.lock"), b"").unwrap();
+    std::fs::set_permissions(
+        a.join("jail.lock"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let dead = {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    };
+    write_json(
+        &a.join("jail-state.json"),
+        &json!({
+            "schema": "ouro.jail.state/1",
+            "attempt_id": a_id.as_str(),
+            "os": b_state["os"],
+            "arch": b_state["arch"],
+            "owner": {"pid": dead, "boot_id": identity::boot_id().unwrap(), "start_time_ticks": 1},
+            "execution_cgroup": b_state["execution_cgroup"],
+        }),
+    );
+
+    let mut problems = Vec::new();
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let (code, report, stderr) = gc_at(&data, extra);
+        let entry = report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["attempt_id"] == a_id.as_str())
+            .cloned()
+            .unwrap_or(Value::Null);
+        if code != Some(0) {
+            problems.push(format!("{extra:?}: gc exited {code:?}: {stderr}"));
+        }
+        let cgroup = entry["cgroup"].as_str().unwrap_or_default();
+        if !(cgroup.starts_with("retained") && cgroup.contains("not this attempt's")) {
+            problems.push(format!("{extra:?}: A's entry: {entry:#}"));
+        }
+        if !running(supervisor) {
+            problems.push(format!("{extra:?}: B's supervisor died"));
+        }
+        if inode(&leaf) != Some(leaf_inode) {
+            problems.push(format!("{extra:?}: B's leaf was removed"));
+        } else if !populated(&leaf) {
+            problems.push(format!("{extra:?}: B's tree was killed"));
+        }
+        if !gc_actions(&a).is_empty() {
+            problems.push(format!("{extra:?}: A recorded {:?}", gc_actions(&a)));
+        }
+    }
+    spawned
+        .kill()
+        .expect("the harness kills its own supervisor");
+    let run = spawned.wait();
+    assert!(
+        problems.is_empty(),
+        "{}\nB: {:?}",
+        problems.join("\n"),
+        run.map(|run| (run.code(), run.signal(), run.stderr_text()))
+    );
+}
+
+/// G1 (gc review, HONESTY; reproduced live on 17a0533c). A `tool` run with
+/// vendor state whose supervisor is SIGKILLed after release leaves an
+/// `enforced` receipt. gc verifies the leaf empty itself, which permits the
+/// vendor-state cleanup; the resumption then rewrote the `enforced` receipt
+/// with `state_cleanup = complete` at the next revision, which the schema
+/// rejects. Now gc completes the cleanup, records it in jail state and its
+/// report, and leaves the receipt byte for byte.
+#[test]
+fn j4_w3_g1_gc_never_rewrites_a_dead_supervisors_enforced_receipt() {
+    if !common::live() || !live() {
+        return;
+    }
+    let jail = Jail::new().expect("a private harness");
+    let launch = jail.config_dir().join("launch");
+    std::fs::create_dir(&launch).unwrap();
+    std::fs::set_permissions(&launch, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    std::fs::write(
+        launch.join("fixture.toml"),
+        "name = \"fixture\"\njail = \"tool\"\nstate_var = \"FIX_HOME\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        launch.join("fixture.toml"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir(&workspace).expect("the workspace");
+    let data = jail.data_dir();
+    let mut spawned = jail
+        .arg("run")
+        .args(["--launch", "fixture", "--workspace"])
+        .arg(&workspace)
+        .receipt()
+        .timeout(Duration::from_secs(60))
+        .target(["/bin/sleep", "60"])
+        .spawn()
+        .expect("the jail starts");
+    let enforced = receipt_in_phase(&spawned, "enforced");
+    let (leaf, leaf_inode) = leaf_of(&enforced);
+    let _guard = LeafGuard::new(&leaf, leaf_inode);
+    let attempt = attempt_of(&data);
+    let vendor = attempt.join("vendor-state");
+    assert!(vendor.is_dir(), "the launch profile made vendor state");
+    spawned
+        .kill()
+        .expect("the harness kills its own supervisor");
+    let run = spawned.wait().expect("the dead supervisor is collected");
+    assert_eq!(run.signal(), Some(libc::SIGKILL), "{}", run.stderr_text());
+    wait_for("the contained tree to die with its supervisor", || {
+        !populated(&leaf)
+    });
+    let before = std::fs::read(attempt.join("jail.json")).unwrap();
+    let receipt: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(receipt["phase"], "enforced");
+    common::check_receipt(&receipt).expect("the supervisor's last receipt is valid");
+
+    let (code, report, stderr) = gc(&run, &[]);
+    assert_eq!(code, Some(0), "{stderr}\n{report:#}");
+    assert!(
+        !vendor.exists(),
+        "gc's verified end permits the cleanup: {report:#}"
+    );
+    assert_eq!(
+        read_json(&attempt.join("jail-state.json"))["state_cleanup"],
+        "complete"
+    );
+    let after = std::fs::read(attempt.join("jail.json")).unwrap();
+    let value: Value = serde_json::from_slice(&after).unwrap();
+    assert!(
+        common::check_receipt(&value).is_ok(),
+        "gc left a schema-invalid receipt: {:?}",
+        common::check_receipt(&value)
+    );
+    assert_eq!(
+        after, before,
+        "S6: gc rewrote the supervisor's enforced receipt"
+    );
+    assert!(text(&report, "reason").contains("jail state"), "{report:#}");
+}
+
+/// P1 (c) (records review, HONESTY/SAFETY). A thread stuck in a D-state
+/// `fsync` or `rename` keeps the thread-group leader a zombie (`Z`) while
+/// the thread may still write, and gc took a zombie for a dead owner, so it
+/// could remove a temporary file the living thread was about to rename (or
+/// act on the leaf while it still wrote). A zombie leader whose thread group
+/// still has another thread is alive. The helper below makes one: its
+/// leader thread exits, one thread lives on.
+#[test]
+fn j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive() {
+    let tmp = common::private_tempdir();
+    let ready = tmp.path().join("ready");
+    let mut helper = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "j4_w3_zombie_leader_helper",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("OURO_W3G_ZOMBIE_READY", &ready)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = helper.id() as i32;
+    let state = || {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|raw| identity::parse_state(&raw).ok())
+    };
+    wait_for("the helper's leader to exit alone", || {
+        ready.exists() && state() == Some('Z')
+    });
+    let threads = std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .count();
+    assert!(threads >= 2, "{threads} task(s)");
+    let owner = ouro_jail::gc::OwnerRecord {
+        pid: pid as u32,
+        boot_id: identity::boot_id().unwrap(),
+        start_time_ticks: identity::start_time_ticks(pid).unwrap(),
+    };
+    let liveness = ouro_jail::platform::linux::reconcile::owner_liveness(&owner);
+
+    // Through the product: an attempt this zombie owns, with a temporary
+    // file a living thread may still rename, is retained whole.
+    let data = tmp.path().join("data");
+    let id = ouro_jail::state::AttemptId::generate();
+    let root = data.join("attempts").join(id.as_str());
+    std::fs::create_dir_all(&root).unwrap();
+    for dir in [&data, &data.join("attempts"), &root] {
+        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(root.join("jail.lock"), b"").unwrap();
+    std::fs::set_permissions(
+        root.join("jail.lock"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    write_json(
+        &root.join("jail-state.json"),
+        &json!({
+            "schema": "ouro.jail.state/1",
+            "attempt_id": id.as_str(),
+            "os": "linux",
+            "arch": std::env::consts::ARCH,
+            "owner": {"pid": owner.pid, "boot_id": owner.boot_id, "start_time_ticks": owner.start_time_ticks},
+        }),
+    );
+    let temp = root.join(format!(
+        ".jail.json.{}.tmp",
+        ouro_jail::state::AttemptId::generate()
+            .as_str()
+            .trim_start_matches("att_")
+    ));
+    std::fs::write(&temp, b"{\"partial\": ").unwrap();
+    let output = Command::new(harness::jail_path())
+        .args(["gc", "--json"])
+        .env("OURO_DATA_DIR", &data)
+        .env("OURO_CONFIG_DIR", tmp.path().join("config"))
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    let temp_kept = temp.exists();
+    // SAFETY: the helper is this test's own unreaped child; SIGKILL to its
+    // pid ends its whole thread group.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let _ = helper.wait();
+
+    assert_eq!(
+        liveness,
+        ouro_jail::gc::Liveness::Alive,
+        "a zombie leader with {threads} tasks"
+    );
+    assert_eq!(report["entries"][0]["action"], "retained", "{report:#}");
+    assert!(
+        report["entries"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("alive")),
+        "{report:#}"
+    );
+    assert!(
+        temp_kept,
+        "gc removed a temporary file a living thread may rename: {report:#}"
+    );
+}
+
+/// The helper of [`j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive`]:
+/// the thread-group leader exits alone (`exit`, not `exit_group`) and one
+/// thread lives on, as a thread in a long D-state `fsync` does.
+#[test]
+#[ignore = "a helper process of j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive"]
+fn j4_w3_zombie_leader_helper() {
+    extern "C" fn leave(_: libc::c_int) {
+        // SAFETY: exit(2) of the calling thread only; async-signal-safe.
+        unsafe { libc::syscall(libc::SYS_exit, 0) };
+    }
+    let Some(ready) = std::env::var_os("OURO_W3G_ZOMBIE_READY") else {
+        return;
+    };
+    // SAFETY: getpid and gettid take no arguments and cannot fail.
+    let (pid, tid) = unsafe { (libc::getpid(), libc::gettid()) };
+    if tid == pid {
+        std::thread::spawn(move || {
+            std::fs::write(&ready, pid.to_string()).unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        // SAFETY: exit(2) of this (leader) thread only.
+        unsafe { libc::syscall(libc::SYS_exit, 0) };
+    } else {
+        // SAFETY: a zeroed sigaction with a plain handler is valid; the
+        // handler only calls exit(2) of the thread it interrupts, and
+        // tgkill targets the leader thread of this very process.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = leave as *const () as usize;
+            libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut());
+            libc::syscall(libc::SYS_tgkill, pid, pid, libc::SIGUSR1);
+        }
+        std::fs::write(&ready, pid.to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// Writes the launch profile `fixture` (a `tool` jail with vendor state)
+/// into a harness's private config directory.
+fn vendor_state_profile(jail: &Jail) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let launch = jail.config_dir().join("launch");
+    std::fs::create_dir(&launch).unwrap();
+    std::fs::set_permissions(&launch, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = launch.join("fixture.toml");
+    std::fs::write(
+        &profile,
+        "name = \"fixture\"\njail = \"tool\"\nstate_var = \"FIX_HOME\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// G3 (gc review, CORRECTNESS), live. A `tool` supervisor with vendor state
+/// dies before its `prepared` receipt (`prepared_receipt:temp_written`): its
+/// leaf is registered and emptied by the lifetime watcher, and managed
+/// scratch and vendor state stay. gc is then aborted at each point of its
+/// first record. The removal deleted the leaf before recording anything, so
+/// on the base a crash there stranded the attempt: the next passes found the
+/// leaf absent and kept scratch and vendor state for good, exiting 0. Now
+/// the intent (`gc_removing_cgroup`) is the first record and precedes the
+/// `rmdir`, so a crash at it never removed the leaf, and the next pass
+/// completes everything: the leaf, the scratch, the vendor state, and a
+/// `gc_finished` record.
+#[test]
+fn j4_w3_g3_a_crash_at_gcs_first_record_never_strands_the_attempt() {
+    if !common::live() || !live() {
+        return;
+    }
+    let mut problems = Vec::new();
+    for point in ["temp_written", "temp_synced", "renamed", "dir_synced"] {
+        let label = format!("gc_record:{point}");
+        let jail = Jail::with_program("/bin/sh")
+            .expect("harness")
+            .args(["-c", "ulimit -c 0 && exec \"$0\" \"$@\""])
+            .arg(harness::jail_path());
+        vendor_state_profile(&jail);
+        let workspace = jail.root().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("the workspace");
+        let run = jail
+            .arg("run")
+            .args(["--launch", "fixture", "--workspace"])
+            .arg(&workspace)
+            .env(
+                ouro_jail::state::ABORT_AT_SEAM,
+                "prepared_receipt:temp_written",
+            )
+            .timeout(Duration::from_secs(60))
+            .target(["/bin/true"])
+            .run()
+            .expect("the run");
+        if run.signal() != Some(libc::SIGABRT) {
+            problems.push(format!(
+                "{label}: the supervisor was not aborted (exit {:?}): {}",
+                run.code(),
+                run.stderr_text().trim()
+            ));
+            continue;
+        }
+        let attempt = attempt_of(&run.data_dir);
+        let state = read_json(&attempt.join("jail-state.json"));
+        let Some(leaf) = state["execution_cgroup"]["path"]
+            .as_str()
+            .map(PathBuf::from)
+        else {
+            problems.push(format!("{label}: no leaf registered: {state:#}"));
+            continue;
+        };
+        let _guard = inode(&leaf).map(|now| LeafGuard::new(&leaf, now));
+        wait_for("the dead supervisor's leaf to empty", || {
+            inode(&leaf).is_none() || !populated(&leaf)
+        });
+        let scratch = attempt.join("scratch");
+        let vendor = attempt.join("vendor-state");
+        if !scratch.is_dir() || !vendor.is_dir() {
+            problems.push(format!(
+                "{label}: scratch present {}, vendor state present {}",
+                scratch.is_dir(),
+                vendor.is_dir()
+            ));
+            continue;
+        }
+        std::fs::write(scratch.join("left-behind"), b"x").unwrap();
+
+        let crashed = Command::new("/bin/sh")
+            .args(["-c", "ulimit -c 0 && exec \"$0\" \"$@\""])
+            .arg(harness::jail_path())
+            .args(["gc", "--json"])
+            .env("OURO_DATA_DIR", &run.data_dir)
+            .env("OURO_CONFIG_DIR", run.data_dir.with_file_name("config"))
+            .env(ouro_jail::state::ABORT_AT_SEAM, &label)
+            .output()
+            .unwrap();
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            crashed.status.signal()
+        };
+        if signal != Some(libc::SIGABRT) {
+            problems.push(format!(
+                "{label}: gc was not aborted at its record ({:?})",
+                crashed.status
+            ));
+        }
+        let first = gc_actions(&attempt);
+        eprintln!(
+            "{label}: after the crash, leaf present {}, records {first:?}",
+            inode(&leaf).is_some()
+        );
+        if inode(&leaf).is_none() && !first.iter().any(|action| action == "gc_removing_cgroup") {
+            problems.push(format!(
+                "{label}: the crashed gc removed the leaf before recording anything"
+            ));
+        }
+        let (code, report, stderr) = gc(&run, &[]);
+        let after = gc_actions(&attempt);
+        if code != Some(0) {
+            problems.push(format!("{label}: the next gc exited {code:?}: {stderr}"));
+        }
+        if inode(&leaf).is_some() || scratch.exists() || vendor.exists() {
+            problems.push(format!(
+                "{label}: stranded after the next pass: leaf present {}, scratch present {}, \
+                 vendor state present {}; records {after:?}; {:?}",
+                inode(&leaf).is_some(),
+                scratch.exists(),
+                vendor.exists(),
+                report["entries"][0]["reason"]
+            ));
+        }
+        if read_json(&attempt.join("jail-state.json"))["state_cleanup"] != "complete" {
+            problems.push(format!(
+                "{label}: vendor-state cleanup not recorded complete"
+            ));
+        }
+        if !after.iter().any(|action| action == "gc_finished") {
+            problems.push(format!("{label}: not finished: {after:?}"));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
 }

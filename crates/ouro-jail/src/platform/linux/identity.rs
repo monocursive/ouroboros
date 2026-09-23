@@ -96,6 +96,34 @@ pub fn parse_state(raw: &str) -> io::Result<char> {
 }
 // J4-G end
 
+// J4 wave 3 begin: P1 (c), a zombie leader is not a dead thread group
+/// The thread ids of the thread group led by `pid` other than `pid` itself,
+/// from `/proc/<pid>/task`: a leader that has exited is a zombie (`Z`) for
+/// as long as any of these lives, and each of them may still be inside a
+/// system call (a D-state `fsync` or `rename`) that completes.
+///
+/// # Errors
+/// `ENOENT` when the thread group is gone; any other listing failure.
+pub fn other_threads(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(format!("/proc/{pid}/task"))? {
+        names.push(entry?.file_name());
+    }
+    Ok(threads_besides(pid, &names))
+}
+
+/// The numeric names in `names` other than `pid` (a `/proc/<pid>/task`
+/// listing).
+#[must_use]
+pub fn threads_besides(pid: libc::pid_t, names: &[std::ffi::OsString]) -> Vec<libc::pid_t> {
+    names
+        .iter()
+        .filter_map(|name| name.to_str()?.parse::<libc::pid_t>().ok())
+        .filter(|tid| *tid != pid)
+        .collect()
+}
+// J4 wave 3 end
+
 fn stat_path(pid: libc::pid_t) -> PathBuf {
     PathBuf::from(format!("/proc/{pid}/stat"))
 }

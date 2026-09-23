@@ -11,9 +11,10 @@
 //!
 //! How a recorded leaf is pinned ([`pin`]):
 //! 1. The path must be a direct child of this user's delegated subtree
-//!    (`user@<uid>.service`) and have the name `ExecutionCgroup::create`
-//!    gives (`ouro-<token>.leaf`): gc never follows a registration anywhere
-//!    else in cgroupfs.
+//!    (`user@<uid>.service`) and have an execution leaf's name
+//!    (`ouro-<attempt id>.leaf`): gc never follows a registration anywhere
+//!    else in cgroupfs. (J4 wave 3, G2: `gc::decide` has already refused a
+//!    registration whose leaf is not its own attempt's.)
 //! 2. The parent is opened `O_DIRECTORY | O_NOFOLLOW` and must be cgroup v2.
 //! 3. The name is looked up in that parent (`fstatat`, no follow) and must be
 //!    a directory with the recorded `(device, inode)`; it is then opened
@@ -57,7 +58,10 @@ const POLL: Duration = Duration::from_millis(10);
 /// Whether the recorded owner, of this boot, is alive (§7, §9.3).
 ///
 /// Reads `/proc/<pid>/stat` once and compares the birth time: a different
-/// one means the kernel reused the pid for another process. Signals nothing.
+/// one means the kernel reused the pid for another process. A zombie is the
+/// leader of a thread group; it is dead only when no other thread of the
+/// group lives (J4 wave 3, P1 (c): a thread in a D-state `fsync` or `rename`
+/// keeps the leader `Z` while its write may still land). Signals nothing.
 #[must_use]
 pub fn owner_liveness(owner: &OwnerRecord) -> Liveness {
     let Ok(pid) = libc::pid_t::try_from(owner.pid) else {
@@ -67,7 +71,12 @@ pub fn owner_liveness(owner: &OwnerRecord) -> Liveness {
         return Liveness::Unknown(format!("pid {pid} names no process"));
     }
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(raw) => classify(&raw, owner.start_time_ticks),
+        Ok(raw) => match classify(&raw, owner.start_time_ticks) {
+            Liveness::Exited if identity::parse_state(&raw).ok() == Some('Z') => {
+                zombie_liveness(identity::other_threads(pid))
+            }
+            other => other,
+        },
         Err(error)
             if error.kind() == io::ErrorKind::NotFound
                 || error.raw_os_error() == Some(libc::ESRCH) =>
@@ -78,8 +87,22 @@ pub fn owner_liveness(owner: &OwnerRecord) -> Liveness {
     }
 }
 
+/// What a zombie leader's thread group says: alive while any other thread
+/// of it is listed, exited when none is, gone when the group was reaped
+/// between the two reads, unknown when the listing fails otherwise.
+#[must_use]
+pub fn zombie_liveness(others: io::Result<Vec<libc::pid_t>>) -> Liveness {
+    match others {
+        Ok(others) if others.is_empty() => Liveness::Exited,
+        Ok(_) => Liveness::Alive,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Liveness::Gone,
+        Err(error) => Liveness::Unknown(format!("the zombie leader's threads: {error}")),
+    }
+}
+
 /// What a `/proc/<pid>/stat` line says about a process recorded with
-/// `recorded_start` as its birth time.
+/// `recorded_start` as its birth time (a zombie reads `Exited` here; see
+/// [`owner_liveness`] for its threads).
 #[must_use]
 pub fn classify(raw: &str, recorded_start: u64) -> Liveness {
     let start = match identity::parse_start_time_ticks(raw) {
@@ -589,6 +612,26 @@ mod tests {
         assert_eq!(classify(&stat_line('Z', 900), 900), Liveness::Exited);
         assert_eq!(classify(&stat_line('X', 900), 900), Liveness::Exited);
         assert!(matches!(classify("garbage", 900), Liveness::Unknown(_)));
+    }
+
+    #[test]
+    fn a_zombie_leader_is_dead_only_without_other_threads() {
+        assert_eq!(zombie_liveness(Ok(Vec::new())), Liveness::Exited);
+        assert_eq!(zombie_liveness(Ok(vec![4243])), Liveness::Alive);
+        assert_eq!(
+            zombie_liveness(Err(io::Error::from(io::ErrorKind::NotFound))),
+            Liveness::Gone
+        );
+        assert!(matches!(
+            zombie_liveness(Err(io::Error::from(io::ErrorKind::PermissionDenied))),
+            Liveness::Unknown(_)
+        ));
+        let names: Vec<std::ffi::OsString> = ["4242", "4243", "x", "4244"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        assert_eq!(identity::threads_besides(4242, &names), [4243, 4244]);
+        assert!(identity::threads_besides(4242, &["4242".into()]).is_empty());
     }
 
     #[test]

@@ -312,6 +312,18 @@ fn register_leaf(dir: &AttemptDir, leaf: &gc_leaf::Leaf, identified: bool) {
     json_file(&dir.state_path(), &state);
 }
 
+/// The execution leaf of the attempt at `dir`, named for it as the platform
+/// names it (J4 wave 3, G2: `ouro-<attempt id>.leaf`).
+fn leaf_of(dir: &AttemptDir) -> gc_leaf::Leaf {
+    gc_leaf::Leaf {
+        path: format!(
+            "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-{}.leaf",
+            dir.root().file_name().unwrap().to_str().unwrap()
+        ),
+        ..gc_leaf::sample()
+    }
+}
+
 mod gc_leaf {
     /// A recorded execution leaf, as the receipt's native details name it.
     pub struct Leaf {
@@ -907,8 +919,9 @@ mod scripted {
         let dir = fixture.root_of(&id);
         free_lock(&dir);
         claim_dead_owner(&dir, boot);
-        register_leaf(&dir, &gc_leaf::sample(), true);
-        enforced_receipt_with_leaf(&dir, boot, &gc_leaf::sample());
+        let leaf = leaf_of(&dir);
+        register_leaf(&dir, &leaf, true);
+        enforced_receipt_with_leaf(&dir, boot, &leaf);
         (id, dir)
     }
 
@@ -927,7 +940,7 @@ mod scripted {
         let dir = fixture.root_of(&id);
         free_lock(&dir);
         claim_dead_owner(&dir, HOST_BOOT);
-        register_leaf(&dir, &gc_leaf::sample(), true);
+        register_leaf(&dir, &leaf_of(&dir), true);
         assert!(!dir.receipt_path().exists());
         let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
         let report = run(&fixture, &host, false);
@@ -955,7 +968,7 @@ mod scripted {
         let dir = fixture.root_of(&id);
         free_lock(&dir);
         claim_dead_owner(&dir, HOST_BOOT);
-        enforced_receipt_with_leaf(&dir, HOST_BOOT, &gc_leaf::sample());
+        enforced_receipt_with_leaf(&dir, HOST_BOOT, &leaf_of(&dir));
         let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
         let report = run(&fixture, &host, false);
         let entry = only(&report, &id);
@@ -981,13 +994,13 @@ mod scripted {
             let dir = fixture.root_of(&id);
             free_lock(&dir);
             claim_dead_owner(&dir, HOST_BOOT);
-            register_leaf(&dir, &gc_leaf::sample(), false);
+            register_leaf(&dir, &leaf_of(&dir), false);
             (id, dir)
         };
-        let path = gc_leaf::sample().path;
 
         let fixture = Fixture::new();
         let (id, dir) = named(&fixture);
+        let path = leaf_of(&dir).path;
         let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: false });
         let report = run(&fixture, &host, true);
         assert_eq!(
@@ -1004,17 +1017,27 @@ mod scripted {
         let entry = only(&report, &id);
         assert_eq!(entry.cgroup.as_deref(), Some("removed"), "{entry:?}");
         let actions = read_json(&dir.state_path())["gc_actions"].clone();
-        assert_eq!(actions[0]["action"], "gc_removed_cgroup", "{actions:#}");
+        // J4 wave 3 (G3): the intent, by name, before the rmdir; then the
+        // identity it removed.
+        assert_eq!(actions[0]["action"], "gc_removing_cgroup", "{actions:#}");
         assert_eq!(actions[0]["registered"], "name_only", "{actions:#}");
-        assert_eq!(actions[0]["execution_cgroup"]["inode"], 5151, "{actions:#}");
-        // The next pass knows it is gone.
+        assert_eq!(
+            actions[0]["execution_cgroup"]["inode"],
+            Value::Null,
+            "{actions:#}"
+        );
+        assert_eq!(actions[1]["action"], "gc_removed_cgroup", "{actions:#}");
+        assert_eq!(actions[1]["registered"], "name_only", "{actions:#}");
+        assert_eq!(actions[1]["execution_cgroup"]["inode"], 5151, "{actions:#}");
+        // The next pass knows it is gone: nothing was left (J4 wave 3, G4).
         let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: false });
         let report = run(&fixture, &host, false);
-        assert_eq!(
-            only(&report, &id).cgroup.as_deref(),
-            Some("removed by gc earlier")
+        assert!(
+            only(&report, &id).reason.starts_with("finished"),
+            "{:?}",
+            only(&report, &id)
         );
-        assert_eq!(cgroup_calls(&host.calls()), Vec::<&String>::new());
+        assert_eq!(host.calls(), Vec::<String>::new());
 
         for probe in [
             LeafProbe::Identified { populated: true },
@@ -1023,6 +1046,7 @@ mod scripted {
         ] {
             let fixture = Fixture::new();
             let (id, dir) = named(&fixture);
+            let path = leaf_of(&dir).path;
             let host = Scripted::new(Liveness::Gone, probe.clone());
             let report = run(&fixture, &host, false);
             let entry = only(&report, &id);
@@ -1033,8 +1057,16 @@ mod scripted {
             );
             assert!(entry.cgroup.is_some(), "{probe:?}: the report says why");
             assert!(report.incomplete.is_empty(), "{probe:?}");
-            assert!(
-                read_json(&dir.state_path())["gc_actions"].is_null(),
+            // Nothing done, nothing recorded; a leaf that never existed
+            // leaves nothing for a later pass (J4 wave 3, G4).
+            let actions = read_json(&dir.state_path())["gc_actions"].clone();
+            let expected = if probe == LeafProbe::Absent {
+                json!([{"action": "gc_finished", "at": actions[0]["at"]}])
+            } else {
+                Value::Null
+            };
+            assert_eq!(
+                actions, expected,
                 "{probe:?}: nothing done, nothing recorded"
             );
         }
@@ -1088,7 +1120,7 @@ mod scripted {
         let dir = fixture.root_of(&id);
         free_lock(&dir);
         claim_dead_owner(&dir, HOST_BOOT);
-        register_leaf(&dir, &gc_leaf::sample(), true);
+        register_leaf(&dir, &leaf_of(&dir), true);
         let vendor = vendor_state_pending(&dir);
         let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: false });
         let report = run(&fixture, &host, false);
@@ -1100,7 +1132,7 @@ mod scripted {
         let fixture = Fixture::new();
         let (id, dir) = orphan(&fixture, HOST_BOOT);
         let vendor = vendor_state_pending(&dir);
-        let mut other = gc_leaf::sample();
+        let mut other = leaf_of(&dir);
         other.inode += 7;
         let mut state = read_json(&dir.state_path());
         state["gc_actions"] = json!([{
@@ -1159,7 +1191,7 @@ mod scripted {
     fn j4_n7_state_and_receipt_naming_different_leaves_are_retained() {
         let fixture = Fixture::new();
         let (id, dir) = orphan(&fixture, HOST_BOOT);
-        let mut other = gc_leaf::sample();
+        let mut other = leaf_of(&dir);
         other.inode += 1;
         register_leaf(&dir, &other, true);
         let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
@@ -1279,7 +1311,9 @@ mod scripted {
             [
                 "gc_terminating_orphan",
                 "gc_terminated_orphan",
-                "gc_removed_cgroup"
+                "gc_removing_cgroup",
+                "gc_removed_cgroup",
+                "gc_finished"
             ]
         );
         assert_eq!(
@@ -1441,7 +1475,7 @@ fn j4_n7_a_leaf_registered_by_name_only_is_not_corrupt_state() {
     let dir = fixture.root_of(&id);
     free_lock(&dir);
     claim(&dir, "linux", SIM_ARCH, Some((dead_pid(), HOST_BOOT, 1)));
-    register_leaf(&dir, &gc_leaf::sample(), false);
+    register_leaf(&dir, &leaf_of(&dir), false);
     let report = fixture.gc(false).expect("gc scans");
     let entry = entry(&report, &id);
     assert!(
@@ -1618,4 +1652,710 @@ fn j4_w2s_vendor_state_cleanup_is_charged_to_the_per_invocation_bound() {
     }
     assert!(!vendor.exists(), "the next invocations finish it");
     assert_eq!(read_json(&dir.state_path())["state_cleanup"], "complete");
+}
+
+// ===========================================================================
+// J4 wave 3: the gc review's findings (G1–G6), each red on 191bdb7b first
+// ===========================================================================
+
+mod w3 {
+    use super::*;
+    use std::sync::Arc;
+
+    use ouro_jail::gc::{
+        self, Host, HostIdentity, LeafProbe, LeafRecord, Liveness, Options, OwnerRecord,
+    };
+
+    /// The execution leaf of the attempt named `id`, named for it as the
+    /// platform names it (G2: `ouro-<attempt id>.leaf`).
+    pub fn own_leaf(id: &str) -> gc_leaf::Leaf {
+        gc_leaf::Leaf {
+            path: format!(
+                "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-{id}.leaf"
+            ),
+            device: 30,
+            inode: 4242,
+        }
+    }
+
+    /// What is at a leaf's path on the simulated host.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Cgroup {
+        Populated,
+        Empty,
+        Gone,
+    }
+
+    /// A host whose one leaf behaves as a real one does: a kill that works
+    /// empties it, a removal of an empty one makes it gone, and what the
+    /// next pass probes is what the last one left. The owner is dead. It
+    /// also notes, at each `rmdir`, whether jail state already recorded the
+    /// removal's intent (G3).
+    pub struct Stateful {
+        pub cgroup: Mutex<Cgroup>,
+        pub kill_works: bool,
+        pub calls: Mutex<Vec<String>>,
+        pub intent_before_rmdir: Mutex<Vec<bool>>,
+        pub state_path: PathBuf,
+    }
+
+    impl Stateful {
+        pub fn new(dir: &AttemptDir, cgroup: Cgroup) -> Stateful {
+            Stateful {
+                cgroup: Mutex::new(cgroup),
+                kill_works: true,
+                calls: Mutex::new(Vec::new()),
+                intent_before_rmdir: Mutex::new(Vec::new()),
+                state_path: dir.state_path(),
+            }
+        }
+        pub fn now(&self) -> Cgroup {
+            *self.cgroup.lock().unwrap()
+        }
+        fn log(&self, call: &str, path: &Path) {
+            self.calls.lock().unwrap().push(format!(
+                "{call} {}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+        }
+        fn intent_recorded(&self, path: &Path) -> bool {
+            let state = read_json(&self.state_path);
+            state["gc_actions"].as_array().is_some_and(|actions| {
+                actions.iter().any(|action| {
+                    action["action"] == "gc_removing_cgroup"
+                        && action["execution_cgroup"]["path"] == json!(path)
+                })
+            })
+        }
+        fn probe(&self) -> LeafProbe {
+            match self.now() {
+                Cgroup::Populated => LeafProbe::Identified { populated: true },
+                Cgroup::Empty => LeafProbe::Identified { populated: false },
+                Cgroup::Gone => LeafProbe::Absent,
+            }
+        }
+        fn rmdir(&self, path: &Path) -> Result<(), String> {
+            match self.now() {
+                Cgroup::Populated => Err("populated; an occupied cgroup is never removed".into()),
+                Cgroup::Gone => Err("the recorded leaf no longer exists".into()),
+                Cgroup::Empty => {
+                    let first = self.intent_recorded(path);
+                    self.intent_before_rmdir.lock().unwrap().push(first);
+                    *self.cgroup.lock().unwrap() = Cgroup::Gone;
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    impl Host for Stateful {
+        fn identity(&self) -> HostIdentity {
+            HostIdentity {
+                os: Os::Linux,
+                arch: SIM_ARCH.to_owned(),
+                boot_id: Some(HOST_BOOT.to_owned()),
+            }
+        }
+        fn owner(&self, _: &OwnerRecord) -> Liveness {
+            Liveness::Gone
+        }
+        fn probe_leaf(&self, leaf: &LeafRecord) -> LeafProbe {
+            self.log("probe_leaf", &leaf.path);
+            self.probe()
+        }
+        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), String> {
+            self.log("terminate_leaf", &leaf.path);
+            if !self.kill_works {
+                return Err("still populated 5000 ms after cgroup.kill".into());
+            }
+            if self.now() == Cgroup::Populated {
+                *self.cgroup.lock().unwrap() = Cgroup::Empty;
+            }
+            Ok(())
+        }
+        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), String> {
+            self.log("remove_leaf", &leaf.path);
+            self.rmdir(&leaf.path)
+        }
+        fn probe_named_leaf(&self, path: &Path) -> LeafProbe {
+            self.log("probe_named_leaf", path);
+            self.probe()
+        }
+        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+            self.log("remove_named_leaf", path);
+            self.rmdir(path).map(|()| (30, 4242))
+        }
+    }
+
+    pub fn pass(fixture: &Fixture, host: &dyn Host, max_entries: usize) -> gc::Report {
+        gc::gc_with(
+            &fixture.context(),
+            &gc_args(false),
+            host,
+            Options {
+                max_entries,
+                ..Options::DEFAULT
+            },
+        )
+        .unwrap_or_else(|error| panic!("gc scans: {error}"))
+    }
+
+    fn only<'a>(report: &'a gc::Report, id: &str) -> &'a gc::Entry {
+        report
+            .entries
+            .iter()
+            .find(|entry| entry.attempt_id == id)
+            .unwrap_or_else(|| panic!("no entry for {id}"))
+    }
+
+    /// A claimed attempt of this boot whose owner is dead, with its own leaf
+    /// registered (identity included) in jail state.
+    fn dead_with_own_leaf(fixture: &Fixture) -> (String, AttemptDir, gc_leaf::Leaf) {
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, HOST_BOOT);
+        let leaf = own_leaf(&id);
+        register_leaf(&dir, &leaf, true);
+        (id, dir, leaf)
+    }
+
+    fn actions(dir: &AttemptDir) -> Vec<Value> {
+        read_json(&dir.state_path())["gc_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------------
+    // G1: gc never rewrites a receipt whose phase is not refused or settled
+    // -----------------------------------------------------------------------
+
+    /// G1 (gc review, HONESTY; live on the VPS before the fix). Since wave 2,
+    /// gc's own verified kill permits the pending vendor-state cleanup even
+    /// when the dead supervisor's last receipt is `enforced` or `prepared`;
+    /// the resumption then set that receipt's `state_cleanup` to `complete`
+    /// at the next revision, which the schema rejects ("enforced is not one
+    /// of refused or settled"). S6: gc never rewrites such a receipt; the
+    /// completion is recorded in jail state and gc's report only. The J3
+    /// path is unchanged: a settled receipt that proves the tree's end still
+    /// has its `state_cleanup` completed, at the next revision, and stays
+    /// valid.
+    #[test]
+    fn j4_w3_g1_gc_never_rewrites_a_receipt_that_is_not_refused_or_settled() {
+        for phase in ["enforced", "prepared"] {
+            let fixture = Fixture::new();
+            let (id, dir, leaf) = dead_with_own_leaf(&fixture);
+            let mut receipt = enforced_receipt_with_leaf(&dir, HOST_BOOT, &leaf);
+            receipt["phase"] = json!(phase);
+            if phase == "prepared" {
+                receipt["exec_observed"] = json!(false);
+            }
+            receipt["state_cleanup"] = json!("pending");
+            json_file(&dir.receipt_path(), &receipt);
+            common::check_receipt(&receipt)
+                .unwrap_or_else(|error| panic!("{phase}: the receipt gc starts from: {error}"));
+            let before = std::fs::read(dir.receipt_path()).unwrap();
+            let vendor = vendor_state_pending(&dir);
+            let host = Stateful::new(&dir, Cgroup::Populated);
+            let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+            let entry = only(&report, &id);
+            assert!(
+                !vendor.exists(),
+                "{phase}: gc's verified kill permits the cleanup: {} / {}",
+                entry.action,
+                entry.reason
+            );
+            assert_eq!(
+                read_json(&dir.state_path())["state_cleanup"],
+                "complete",
+                "{phase}: jail state records the completion"
+            );
+            let after = std::fs::read(dir.receipt_path()).unwrap();
+            let value: Value = serde_json::from_slice(&after).unwrap();
+            assert!(
+                common::check_receipt(&value).is_ok(),
+                "{phase}: gc left a schema-invalid receipt: {:?} (revision {}, state_cleanup {})",
+                common::check_receipt(&value),
+                value["revision"],
+                value["state_cleanup"]
+            );
+            assert_eq!(
+                after, before,
+                "{phase}: S6, gc never rewrites a receipt that is not refused or settled"
+            );
+            assert!(
+                entry.reason.contains("jail state")
+                    && !entry.reason.contains("the receipt records"),
+                "{phase}: the report says where the completion is recorded: {}",
+                entry.reason
+            );
+            assert!(
+                report.incomplete.is_empty(),
+                "{phase}: {:?}",
+                report.incomplete
+            );
+            // The next pass has nothing pending and still leaves the receipt.
+            let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+            assert!(
+                report.incomplete.is_empty(),
+                "{phase}: {:?}",
+                report.incomplete
+            );
+            assert_eq!(
+                std::fs::read(dir.receipt_path()).unwrap(),
+                before,
+                "{phase}"
+            );
+        }
+
+        // J3 (C02), unchanged: a settled receipt proving the tree's end gets
+        // its pending cleanup completed at the next revision, and is valid.
+        let fixture = Fixture::new();
+        let (_, dir, _) = dead_with_own_leaf(&fixture);
+        let receipt = settled_receipt(&dir, HOST_BOOT);
+        let vendor = vendor_state_pending(&dir);
+        let host = Stateful::new(&dir, Cgroup::Gone);
+        let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+        assert!(!vendor.exists());
+        let after = read_json(&dir.receipt_path());
+        assert_eq!(after["state_cleanup"], "complete", "{after:#}");
+        assert_eq!(
+            after["revision"].as_u64(),
+            receipt["revision"].as_u64().map(|revision| revision + 1)
+        );
+        common::check_receipt(&after).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // G2: the leaf carries its attempt
+    // -----------------------------------------------------------------------
+
+    /// A host that logs every call by leaf name and would kill or remove
+    /// whatever it is asked to.
+    struct Obliging {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Host for Obliging {
+        fn identity(&self) -> HostIdentity {
+            HostIdentity {
+                os: Os::Linux,
+                arch: SIM_ARCH.to_owned(),
+                boot_id: Some(HOST_BOOT.to_owned()),
+            }
+        }
+        fn owner(&self, _: &OwnerRecord) -> Liveness {
+            Liveness::Gone
+        }
+        fn probe_leaf(&self, leaf: &LeafRecord) -> LeafProbe {
+            self.log("probe_leaf", &leaf.path);
+            LeafProbe::Identified { populated: true }
+        }
+        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), String> {
+            self.log("terminate_leaf", &leaf.path);
+            Ok(())
+        }
+        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), String> {
+            self.log("remove_leaf", &leaf.path);
+            Ok(())
+        }
+        fn probe_named_leaf(&self, path: &Path) -> LeafProbe {
+            self.log("probe_named_leaf", path);
+            LeafProbe::Identified { populated: false }
+        }
+        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+            self.log("remove_named_leaf", path);
+            Ok((30, 4242))
+        }
+    }
+
+    impl Obliging {
+        fn log(&self, call: &str, path: &Path) {
+            self.calls.lock().unwrap().push(format!(
+                "{call} {}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+        }
+    }
+
+    /// G2 (gc review, SAFETY, C03; live on the VPS before the fix). Leaf
+    /// names carried a random token, and pinning checked only name shape,
+    /// place and device/inode, so attempt A's (same-uid forged) registration
+    /// of live attempt B's leaf made gc kill B's tree and remove B's leaf.
+    /// The leaf's name now carries its attempt (`ouro-<attempt id>.leaf`, the
+    /// §9.3 attempt association), and gc never acts on a registration that
+    /// names another attempt's leaf, by identity or by name only. The
+    /// control attempt's own leaf is acted on, so the scan did run.
+    #[test]
+    fn j4_w3_g2_a_registration_of_another_attempts_leaf_is_never_acted_on() {
+        let fixture = Fixture::new();
+        // B: live (its supervisor holds the lease), its own leaf.
+        let b = fresh_id();
+        let b_dir = fixture.root_of(&b);
+        let b_lease = state::Lease::acquire(&b_dir.lock_path())
+            .unwrap()
+            .expect("B's lease");
+        claim(
+            &b_dir,
+            "linux",
+            SIM_ARCH,
+            Some((std::process::id(), HOST_BOOT, 1)),
+        );
+        let b_leaf = own_leaf(&b);
+        register_leaf(&b_dir, &b_leaf, true);
+        // A: dead, registering B's leaf with its identity; D: dead,
+        // registering it by name only; C: dead, its own leaf.
+        let (a, a_dir, _) = dead_with_own_leaf(&fixture);
+        register_leaf(&a_dir, &b_leaf, true);
+        let (d, d_dir, _) = dead_with_own_leaf(&fixture);
+        register_leaf(&d_dir, &b_leaf, false);
+        let (c, _, _) = dead_with_own_leaf(&fixture);
+        let host = Obliging {
+            calls: Mutex::new(Vec::new()),
+        };
+        let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+        let calls = host.calls.lock().unwrap().clone();
+        let on_b: Vec<&String> = calls.iter().filter(|call| call.contains(&b)).collect();
+        assert!(
+            on_b.is_empty(),
+            "gc acted on live attempt B's leaf through another attempt's registration: \
+             {on_b:?}\nA: {:?}\nD: {:?}",
+            only(&report, &a),
+            only(&report, &d)
+        );
+        for (id, dir) in [(&a, &a_dir), (&d, &d_dir)] {
+            let entry = only(&report, id);
+            assert!(
+                entry
+                    .cgroup
+                    .as_deref()
+                    .is_some_and(|cgroup| cgroup.starts_with("retained")
+                        && cgroup.contains("not this attempt's")),
+                "{entry:?}"
+            );
+            assert!(actions(dir).is_empty(), "{id}: {:?}", actions(dir));
+        }
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.starts_with("terminate_leaf") && call.contains(&c)),
+            "the control attempt's own leaf is acted on: {calls:?}"
+        );
+        assert_eq!(only(&report, &b).action, "retained");
+        drop(b_lease);
+    }
+
+    // -----------------------------------------------------------------------
+    // G3: the removal's intent is durable before `rmdir`
+    // -----------------------------------------------------------------------
+
+    /// Fails, with ENOSPC, the first gc record that adds `action` to jail
+    /// state (the record written right after the `rmdir` it follows).
+    struct FailRecordOf {
+        action: &'static str,
+        state_path: PathBuf,
+        fired: Mutex<bool>,
+    }
+
+    impl state::PersistIo for FailRecordOf {
+        fn write(
+            &self,
+            site: state::Site,
+            file: &mut std::fs::File,
+            bytes: &[u8],
+        ) -> std::io::Result<usize> {
+            let contains = |haystack: &[u8]| {
+                haystack
+                    .windows(self.action.len())
+                    .any(|window| window == self.action.as_bytes())
+            };
+            let mut fired = self.fired.lock().unwrap();
+            if site == state::Site::GcRecord
+                && !*fired
+                && contains(bytes)
+                && !std::fs::read(&self.state_path).is_ok_and(|now| contains(&now))
+            {
+                *fired = true;
+                return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+            }
+            std::io::Write::write(file, bytes)
+        }
+    }
+
+    /// G3 (gc review, CORRECTNESS). The removal deleted the leaf before
+    /// recording anything, so a crash or a failed record right after the
+    /// `rmdir` stranded the attempt: every later pass found the leaf absent,
+    /// retained scratch (and vendor state, for the empty leaf) and exited 0.
+    /// The intent is now durable before the `rmdir`, and a later pass
+    /// finishes from it (or from `gc_terminated_orphan`): the leaf gc
+    /// verified empty is gone, so the tree's end is verified.
+    #[test]
+    fn j4_w3_g3_a_failed_record_after_rmdir_never_strands_the_attempt() {
+        let mut problems = Vec::new();
+        for (label, start) in [("empty leaf", Cgroup::Empty), ("orphan", Cgroup::Populated)] {
+            let fixture = Fixture::new();
+            let (id, dir, leaf) = dead_with_own_leaf(&fixture);
+            enforced_receipt_with_leaf(&dir, HOST_BOOT, &leaf);
+            let vendor = vendor_state_pending(&dir);
+            let scratch = managed_scratch(&dir, 3);
+            let host = Stateful::new(&dir, start);
+            let seam = Arc::new(FailRecordOf {
+                action: "gc_removed_cgroup",
+                state_path: dir.state_path(),
+                fired: Mutex::new(false),
+            });
+            let first = state::with_persist_io(seam.clone(), || {
+                pass(&fixture, &host, Options::DEFAULT.max_entries)
+            });
+            assert!(
+                *seam.fired.lock().unwrap(),
+                "{label}: the record was never written"
+            );
+            assert_eq!(host.now(), Cgroup::Gone, "{label}: the rmdir happened");
+            if first.incomplete.is_empty() {
+                problems.push(format!("{label}: a failed record left a complete pass"));
+            }
+            let intents = host.intent_before_rmdir.lock().unwrap().clone();
+            if intents != [true] {
+                problems.push(format!(
+                    "{label}: the removal's intent was not durable before the rmdir: {intents:?}"
+                ));
+            }
+            let mut last = None;
+            for _ in 0..3 {
+                last = Some(pass(&fixture, &host, Options::DEFAULT.max_entries));
+            }
+            let last = last.unwrap();
+            let entry = only(&last, &id);
+            if scratch.exists() || vendor.exists() {
+                problems.push(format!(
+                    "{label}: stranded after 3 more passes: scratch kept {}, vendor state kept \
+                     {}, incomplete {:?}: {entry:?}",
+                    scratch.exists(),
+                    vendor.exists(),
+                    last.incomplete
+                ));
+            }
+            let cleanup = read_json(&dir.state_path())["state_cleanup"].clone();
+            if cleanup != "complete" {
+                problems.push(format!("{label}: state_cleanup {cleanup}"));
+            }
+            if !last.incomplete.is_empty() {
+                problems.push(format!("{label}: {:?}", last.incomplete));
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    // -----------------------------------------------------------------------
+    // G4: a finished attempt costs O(1) per pass and is not listed again
+    // -----------------------------------------------------------------------
+
+    /// G4 (gc review, CORRECTNESS, an S7 regression). Every non-retained
+    /// attempt root was listed and charged on every pass (about six entries
+    /// per finished attempt), so beyond about 16,600 finished attempts gc
+    /// exited 1 forever and the attempts sorting last were never cleaned.
+    /// Reproduction (bound 13): four finished attempts of another boot use
+    /// 5 + 4 x 2 entries each pass, and the last attempt's scratch was never
+    /// reached in 10 passes. A finished attempt now costs its one name.
+    #[test]
+    fn j4_w3_g4_a_finished_attempt_costs_its_name_only() {
+        let fixture = Fixture::new();
+        let mut ids: Vec<String> = (0..5).map(|_| fresh_id()).collect();
+        ids.sort();
+        for id in &ids {
+            let dir = fixture.root_of(id);
+            free_lock(&dir);
+            claim_dead_owner(&dir, OTHER_BOOT);
+        }
+        let last = AttemptDir::new(
+            &fixture.data,
+            &AttemptId::parse(ids.last().unwrap()).unwrap(),
+        );
+        let scratch = managed_scratch(&last, 1);
+        let host = Stateful::new(&last, Cgroup::Gone);
+        let mut passes = Vec::new();
+        for _ in 0..10 {
+            let report = pass(&fixture, &host, 13);
+            passes.push((report.budget.charged, report.incomplete.len()));
+            if !scratch.exists() {
+                break;
+            }
+        }
+        assert!(
+            !scratch.exists(),
+            "the last attempt was never reached: (charged, incomplete) per pass {passes:?}"
+        );
+        assert!(passes.len() <= 2, "{passes:?}");
+        // Every attempt is finished: one entry each, nothing incomplete.
+        let report = pass(&fixture, &host, 13);
+        assert_eq!(report.budget.charged, 5, "{:?}", report.budget);
+        assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+        for id in &ids {
+            assert!(
+                only(&report, id).reason.starts_with("finished"),
+                "{:?}",
+                only(&report, id)
+            );
+        }
+    }
+
+    /// G4's other half: only an attempt with nothing left is finished. A leaf
+    /// gc could not verify (it may be verifiable later: a gc run outside the
+    /// delegated scope), an owner whose liveness is unknown, pending vendor
+    /// state the records do not permit removing yet, retained managed
+    /// scratch, or a temporary file gc does not remove keeps the attempt
+    /// visited and reported; a dry run records nothing.
+    /// The retained leaf is acted on as soon as a later pass can verify it.
+    #[test]
+    fn j4_w3_g4_an_attempt_with_something_left_is_never_finished() {
+        use super::scripted::Scripted;
+        let finished = |dir: &AttemptDir| {
+            actions(dir)
+                .iter()
+                .any(|action| action["action"] == "gc_finished")
+        };
+        // A leaf gc cannot verify yet.
+        let fixture = Fixture::new();
+        let (id, dir, _) = dead_with_own_leaf(&fixture);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Unverifiable("no scope".into()));
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(!finished(&dir), "an unverifiable leaf: {:?}", actions(&dir));
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Identified { populated: true });
+        let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert_eq!(
+            only(&report, &id).cgroup.as_deref(),
+            Some("terminated_orphan_and_removed"),
+            "{:?}",
+            only(&report, &id)
+        );
+        // An owner whose liveness is unknown.
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, HOST_BOOT);
+        let host = Scripted::new(Liveness::Unknown("no /proc".into()), LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(!finished(&dir), "an unknown owner: {:?}", actions(&dir));
+        // Vendor state the records do not permit removing yet.
+        let fixture = Fixture::new();
+        let (_, dir, leaf) = dead_with_own_leaf(&fixture);
+        enforced_receipt_with_leaf(&dir, HOST_BOOT, &leaf);
+        let vendor = vendor_state_pending(&dir);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(vendor.exists());
+        assert!(!finished(&dir), "pending vendor state: {:?}", actions(&dir));
+        // Managed scratch kept because nothing verifies the tree's end (the
+        // leaf is gone, and gc never saw it empty): reported every pass.
+        let fixture = Fixture::new();
+        let (_, dir, _) = dead_with_own_leaf(&fixture);
+        let scratch = managed_scratch(&dir, 1);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(scratch.exists());
+        assert!(!finished(&dir), "retained scratch: {:?}", actions(&dir));
+        // A temporary file gc does not remove.
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, OTHER_BOOT);
+        private_file(&dir.root().join(".planted.tmp"), b"x");
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(
+            !finished(&dir),
+            "a planted temporary file: {:?}",
+            actions(&dir)
+        );
+        std::fs::remove_file(dir.root().join(".planted.tmp")).unwrap();
+        // A dry run records nothing; the real pass then finishes it.
+        gc::gc_with(&fixture.context(), &gc_args(true), &host, Options::DEFAULT).unwrap();
+        assert!(!finished(&dir), "a dry run: {:?}", actions(&dir));
+        pass(&fixture, &host, Options::DEFAULT.max_entries);
+        assert!(finished(&dir), "nothing left: {:?}", actions(&dir));
+    }
+
+    // -----------------------------------------------------------------------
+    // G5: a record gc repeats is kept once, with a count
+    // -----------------------------------------------------------------------
+
+    /// G5 (gc review, CORRECTNESS). While a leaf could not be emptied, every
+    /// pass appended another `gc_terminating_orphan` (~300 bytes), until
+    /// jail-state.json passed gc's 1 MiB read cap and the attempt read as
+    /// corrupt. A repeated record is now kept once with a count and its
+    /// first and last time, so jail state stops growing.
+    #[test]
+    fn j4_w3_g5_a_repeated_gc_record_is_kept_once_with_a_count() {
+        let fixture = Fixture::new();
+        let (_, dir, leaf) = dead_with_own_leaf(&fixture);
+        enforced_receipt_with_leaf(&dir, HOST_BOOT, &leaf);
+        let mut host = Stateful::new(&dir, Cgroup::Populated);
+        host.kill_works = false;
+        let passes = 30;
+        let mut sizes = Vec::new();
+        for _ in 0..passes {
+            let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+            assert!(
+                !report.incomplete.is_empty(),
+                "an unverified kill is incomplete"
+            );
+            sizes.push(std::fs::metadata(dir.state_path()).unwrap().len());
+        }
+        let recorded = actions(&dir);
+        assert_eq!(
+            recorded.len(),
+            1,
+            "jail-state.json grew from {} to {} bytes over {passes} passes: {} records",
+            sizes[0],
+            sizes[passes - 1],
+            recorded.len()
+        );
+        assert_eq!(recorded[0]["action"], "gc_terminating_orphan");
+        assert_eq!(recorded[0]["count"], passes);
+        assert!(recorded[0]["at"].as_str() <= recorded[0]["last_at"].as_str());
+        assert!(
+            sizes[passes - 1] - sizes[1] < 16,
+            "jail state keeps growing: {sizes:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G6: lost integrity retains managed scratch in every boot
+    // -----------------------------------------------------------------------
+
+    /// G6 (gc review, CORRECTNESS/SPEC). Lost boundary integrity keeps the
+    /// leaf and the scratch for explicit recovery in the same boot, but the
+    /// other-boot rule ran first, so after a reboot the same records lost
+    /// their managed scratch. Lost integrity retains it in every boot.
+    #[test]
+    fn j4_w3_g6_lost_integrity_retains_managed_scratch_in_every_boot() {
+        let mut removed = Vec::new();
+        for boot in [HOST_BOOT, OTHER_BOOT] {
+            let fixture = Fixture::new();
+            let id = fresh_id();
+            let dir = fixture.root_of(&id);
+            free_lock(&dir);
+            claim_dead_owner(&dir, boot);
+            let leaf = own_leaf(&id);
+            register_leaf(&dir, &leaf, true);
+            let mut receipt = enforced_receipt_with_leaf(&dir, boot, &leaf);
+            receipt["lifetime"]["integrity"] = json!("lost");
+            json_file(&dir.receipt_path(), &receipt);
+            let scratch = managed_scratch(&dir, 1);
+            let host = Stateful::new(&dir, Cgroup::Empty);
+            let report = pass(&fixture, &host, Options::DEFAULT.max_entries);
+            let entry = only(&report, &id);
+            removed.push((boot, !scratch.exists(), entry.scratch.clone()));
+            assert_eq!(host.now(), Cgroup::Empty, "{boot}: the leaf is kept");
+        }
+        assert!(
+            removed.iter().all(|(_, gone, _)| !gone),
+            "managed scratch removed despite lost integrity: {removed:?}"
+        );
+    }
 }

@@ -463,7 +463,8 @@ fn gc_run(data: &Path, env: &[(&str, &str)]) -> std::process::Output {
 /// P14 (J4 wave 2): gc records what it did in jail state (S6) through its
 /// own persistence site, crashed at each point of its first record. The
 /// supervisor of a `tool` attempt dies before its `prepared` receipt, so its
-/// empty leaf is gc's to remove and to record (`gc_removed_cgroup`); gc is
+/// empty leaf is gc's to remove, and its first record is the removal's
+/// intent (`gc_removing_cgroup`, before the `rmdir`, J4 wave 3 G3); gc is
 /// aborted at that record. Afterwards jail state parses and shows the record
 /// exactly when the crash came after the rename, the temporary file is left
 /// exactly before it, and the next gc pass finishes with exit 0, keeping
@@ -538,11 +539,11 @@ fn gc_crash(point: Point) -> Vec<String> {
             let recorded = state["gc_actions"].as_array().is_some_and(|actions| {
                 actions
                     .iter()
-                    .any(|action| action["action"] == "gc_removed_cgroup")
+                    .any(|action| action["action"] == "gc_removing_cgroup")
             });
             if recorded != point.published {
                 problems.push(format!(
-                    "{label}: gc_removed_cgroup recorded={recorded}, a crash here leaves {}",
+                    "{label}: gc_removing_cgroup recorded={recorded}, a crash here leaves {}",
                     point.published
                 ));
             }
@@ -582,6 +583,30 @@ fn gc_crash(point: Point) -> Vec<String> {
             "{label}: the leaf {} is still there",
             leaf.display()
         ));
+    }
+    // J4 wave 3 (G3): the follow-up pass completes the cleanup: the removal
+    // is recorded, the managed scratch is gone, and nothing is left.
+    let actions: Vec<String> = parse(&dir.join("jail-state.json"))
+        .ok()
+        .flatten()
+        .and_then(|state| {
+            state["gc_actions"].as_array().map(|actions| {
+                actions
+                    .iter()
+                    .filter_map(|action| action["action"].as_str().map(str::to_owned))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    for expected in ["gc_removed_cgroup", "gc_finished"] {
+        if !actions.iter().any(|action| action == expected) {
+            problems.push(format!(
+                "{label}: after the next pass, no {expected}: {actions:?}"
+            ));
+        }
+    }
+    if dir.join("scratch").exists() {
+        problems.push(format!("{label}: the managed scratch is still there"));
     }
     for name in ["jail-state.json", "policy.json", "trace.ndjson"] {
         if !dir.join(name).exists() {
