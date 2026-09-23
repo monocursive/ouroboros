@@ -616,8 +616,13 @@ pub enum Resume {
     Retained(String),
     /// A dry run: cleanup is permitted and would run.
     WouldRemove,
-    /// This pass completed the cleanup and recorded it.
-    Completed,
+    /// This pass completed the cleanup and recorded it: in jail state, and
+    /// in the receipt only when the receipt itself permits the cleanup (a
+    /// `refused` or `settled` receipt, [`permitted_by`]); J4 wave 3, G1.
+    Completed {
+        /// Whether the receipt was replaced with `state_cleanup = complete`.
+        receipt_updated: bool,
+    },
     /// This pass ran and stopped again; the reason says why.
     StillPending(String),
 }
@@ -658,12 +663,16 @@ fn scratch_is_managed(attempt_dir: &AttemptDir) -> bool {
 ///
 /// The caller holds the attempt's lease, so no live supervisor owns it. The
 /// records must prove cleanup is permitted ([`permitted`]); the removal is
-/// the same anchored, idempotent traversal the supervisor uses. On success the
-/// receipt is replaced with `state_cleanup = complete` at the next revision,
-/// then jail state records `complete`: a crash between the two is found and
-/// finished by the next pass, because either record still saying `pending`
-/// keeps the attempt pending. Without any receipt (permitted by gc's own
-/// verification), only jail state records it.
+/// the same anchored, idempotent traversal the supervisor uses. On success a
+/// receipt that itself permits the cleanup (refused or settled,
+/// [`permitted_by`]) is replaced with `state_cleanup = complete` at the next
+/// revision, then jail state records `complete`: a crash between the two is
+/// found and finished by the next pass, because either record still saying
+/// `pending` keeps the attempt pending. Permitted only by gc's own
+/// verification (no receipt, or one whose phase is not refused or settled),
+/// only jail state records it: gc never rewrites such a receipt (S6; J4 wave
+/// 3, G1: `complete` in a `prepared` or `enforced` receipt is
+/// schema-invalid).
 ///
 /// For a settled attempt the supervisor's `complete` also covers managed
 /// scratch and placeholder directories, so those are removed here too, with
@@ -715,10 +724,16 @@ fn resume_within(
         return Ok(Resume::NothingPending);
     };
     let mut receipt = read_receipt(attempt_dir)?;
+    // J4 wave 3 (G1): only a receipt that itself permits the cleanup ever
+    // records its completion; any other is the supervisor's and stays as it
+    // was, so jail state alone says `complete`.
+    let receipt_records = receipt
+        .as_ref()
+        .is_some_and(|receipt| permitted_by(receipt).is_ok());
     if registration.state_cleanup == StateCleanup::Complete
-        && receipt
-            .as_ref()
-            .is_none_or(|receipt| receipt.state_cleanup == StateCleanup::Complete)
+        && receipt.as_ref().is_none_or(|receipt| {
+            !receipt_records || receipt.state_cleanup == StateCleanup::Complete
+        })
     {
         return Ok(Resume::NothingPending);
     }
@@ -764,7 +779,7 @@ fn resume_within(
             result.reason.unwrap_or_else(|| "unknown".to_owned()),
         ));
     }
-    if let Some(receipt) = receipt.as_mut()
+    if let Some(receipt) = receipt.as_mut().filter(|_| receipt_records)
         && receipt.state_cleanup != StateCleanup::Complete
     {
         receipt.state_cleanup = StateCleanup::Complete;
@@ -787,7 +802,9 @@ fn resume_within(
         StateCleanup::Complete,
         None,
     )?;
-    Ok(Resume::Completed)
+    Ok(Resume::Completed {
+        receipt_updated: receipt_records,
+    })
 }
 
 /// Whether `path` names nothing (used by tests and diagnostics only).

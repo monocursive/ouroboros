@@ -1106,8 +1106,321 @@ fn gc_case(site: Site, fault: Fault) -> Vec<String> {
             problems.push(format!("{label}: gc removed {name}"));
         }
     }
+    // J4 wave 3 (G8): P14 is also where gc records what it does to an
+    // execution cgroup; each of those records under each fault.
+    if site == Site::GcRecord {
+        problems.extend(gc_cgroup_cases(fault));
+    }
     problems
 }
+
+// J4 wave 3 begin: G8, gc's cgroup records at P14
+/// gc's records, in the order one pass over a dead supervisor's populated
+/// leaf and managed scratch writes them (P14).
+const GC_CGROUP_RECORDS: [&str; 6] = [
+    "gc_terminating_orphan",
+    "gc_terminated_orphan",
+    "gc_removing_cgroup",
+    "gc_removed_cgroup",
+    "gc_removed_scratch",
+    "gc_finished",
+];
+
+fn gc_cgroup_cases(fault: Fault) -> Vec<String> {
+    GC_CGROUP_RECORDS
+        .into_iter()
+        .flat_map(|action| gc_cgroup_case(action, fault))
+        .collect()
+}
+
+/// What is at the simulated leaf's path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SimCgroup {
+    Populated,
+    Empty,
+    Gone,
+}
+
+/// The simulated host gc asks about the dead supervisor's leaf: its owner is
+/// dead, a kill empties the leaf, a removal of an empty one makes it gone,
+/// and the next pass sees what the last one left.
+struct SimHost {
+    cgroup: Mutex<SimCgroup>,
+}
+
+impl SimHost {
+    fn now(&self) -> SimCgroup {
+        *self.cgroup.lock().unwrap()
+    }
+    fn probe(&self) -> ouro_jail::gc::LeafProbe {
+        match self.now() {
+            SimCgroup::Populated => ouro_jail::gc::LeafProbe::Identified { populated: true },
+            SimCgroup::Empty => ouro_jail::gc::LeafProbe::Identified { populated: false },
+            SimCgroup::Gone => ouro_jail::gc::LeafProbe::Absent,
+        }
+    }
+}
+
+impl ouro_jail::gc::Host for SimHost {
+    fn identity(&self) -> ouro_jail::gc::HostIdentity {
+        ouro_jail::gc::HostIdentity {
+            os: Os::Linux,
+            arch: "simulation".into(),
+            boot_id: Some("00000000-0000-4000-8000-000000000001".into()),
+        }
+    }
+    fn owner(&self, _: &ouro_jail::gc::OwnerRecord) -> ouro_jail::gc::Liveness {
+        ouro_jail::gc::Liveness::Gone
+    }
+    fn probe_leaf(&self, _: &ouro_jail::gc::LeafRecord) -> ouro_jail::gc::LeafProbe {
+        self.probe()
+    }
+    fn terminate_leaf(&self, _: &ouro_jail::gc::LeafRecord, _: Duration) -> Result<(), String> {
+        if self.now() == SimCgroup::Populated {
+            *self.cgroup.lock().unwrap() = SimCgroup::Empty;
+        }
+        Ok(())
+    }
+    fn remove_leaf(&self, _: &ouro_jail::gc::LeafRecord, _: &mut usize) -> Result<(), String> {
+        match self.now() {
+            SimCgroup::Empty => {
+                *self.cgroup.lock().unwrap() = SimCgroup::Gone;
+                Ok(())
+            }
+            other => Err(format!("{other:?}")),
+        }
+    }
+}
+
+/// Fails one step (`fault`) of the gc record that first adds `action` to
+/// jail state, checking every record before every step.
+struct RecordFault {
+    action: &'static str,
+    fault: Fault,
+    state_path: PathBuf,
+    watch: Watch,
+    inner: Mutex<RecordFaultState>,
+}
+
+#[derive(Default)]
+struct RecordFaultState {
+    target: bool,
+    fired: bool,
+    short_pending: bool,
+    seen: Seen,
+}
+
+impl RecordFault {
+    fn check(&self, step: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        self.watch.check(&format!("before {step}"), &mut inner.seen);
+    }
+
+    fn fire(&self, site: Site, fault: Fault) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if site == Site::GcRecord && inner.target && !inner.fired && self.fault == fault {
+            inner.fired = true;
+            return true;
+        }
+        false
+    }
+}
+
+impl PersistIo for RecordFault {
+    fn create_new(&self, site: Site, path: &Path) -> std::io::Result<std::fs::File> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.target = false;
+            inner.short_pending = false;
+        }
+        self.check("create");
+        state::RealIo.create_new(site, path)
+    }
+
+    fn write(&self, site: Site, file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<usize> {
+        let contains = |haystack: &[u8]| {
+            haystack
+                .windows(self.action.len())
+                .any(|window| window == self.action.as_bytes())
+        };
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if std::mem::take(&mut inner.short_pending) {
+                return Err(eio());
+            }
+            if site == Site::GcRecord
+                && !inner.fired
+                && !inner.target
+                && contains(bytes)
+                && !std::fs::read(&self.state_path).is_ok_and(|now| contains(&now))
+            {
+                inner.target = true;
+            }
+        }
+        self.check("write");
+        if self.fire(site, Fault::Enospc) {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+        }
+        if self.fire(site, Fault::ShortWriteThenEio) {
+            self.inner.lock().unwrap().short_pending = true;
+            return state::RealIo.write(site, file, &bytes[..(bytes.len() / 2).max(1)]);
+        }
+        state::RealIo.write(site, file, bytes)
+    }
+
+    fn sync_file(&self, site: Site, file: &std::fs::File) -> std::io::Result<()> {
+        self.check("file sync");
+        if self.fire(site, Fault::FsyncError) {
+            return Err(eio());
+        }
+        state::RealIo.sync_file(site, file)
+    }
+
+    fn rename(&self, site: Site, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.check("rename");
+        if self.fire(site, Fault::RenameError) {
+            return Err(eio());
+        }
+        state::RealIo.rename(site, from, to)
+    }
+
+    fn link(&self, site: Site, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.check("link");
+        if self.fire(site, Fault::RenameError) {
+            return Err(eio());
+        }
+        state::RealIo.link(site, from, to)
+    }
+
+    fn sync_dir(&self, site: Site, dir: &Path) -> std::io::Result<()> {
+        self.check("directory sync");
+        if self.fire(site, Fault::DirSyncError) {
+            return Err(eio());
+        }
+        state::RealIo.sync_dir(site, dir)
+    }
+}
+
+/// One of gc's cgroup records (P14) under one fault (G8). A `tool`
+/// supervisor that died before its first receipt left its leaf registered
+/// in jail state and populated, and managed scratch: gc terminates the
+/// orphan, verifies the leaf empty, removes it, removes the scratch and
+/// records each step. With the record that first adds `action` failing at
+/// `fault`, that pass is incomplete (§6.4), every record stays valid, and
+/// the next passes finish: the leaf is gone and the scratch removed, never
+/// stranded (G3).
+fn gc_cgroup_case(action: &'static str, fault: Fault) -> Vec<String> {
+    let label = format!("j4_w3_g8_{action}_{}", fault.name());
+    let fixture = Fixture::new();
+    let run = fixture.run(Sim::new(Scenario::Plain), &["--profile", "tool"], real());
+    assert_eq!(run.report.exit_code, 0, "{label}: {:?}", run.report.error);
+    let dir = fixture.attempt();
+    let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let attempt = state::AttemptDir::new(
+        &fixture.data,
+        &state::AttemptId::parse(&id).expect("an attempt id"),
+    );
+    std::fs::remove_file(dir.join("jail.json")).unwrap();
+    let mut state: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("jail-state.json")).unwrap()).unwrap();
+    state["execution_cgroup"] = serde_json::json!({
+        "path": format!(
+            "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-{id}.leaf"
+        ),
+        "device": 30,
+        "inode": 4242,
+    });
+    std::fs::write(
+        dir.join("jail-state.json"),
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
+    let scratch = dir.join("scratch");
+    private_dir(&scratch);
+    std::fs::write(scratch.join("left"), b"x").unwrap();
+    let mut problems = Vec::new();
+    let policy: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("policy.json")).unwrap()).unwrap();
+    if policy["snapshot"]["roots"]["scratch"]["kind"] != "managed" {
+        problems.push(format!(
+            "{label}: the run's scratch is not managed: {policy:#}"
+        ));
+        return problems;
+    }
+
+    let host = SimHost {
+        cgroup: Mutex::new(SimCgroup::Populated),
+    };
+    let io = Arc::new(RecordFault {
+        action,
+        fault,
+        state_path: dir.join("jail-state.json"),
+        watch: fixture.watch(),
+        inner: Mutex::default(),
+    });
+    let ctx = fixture.context(Sim::new(Scenario::Plain));
+    let gc = |io: Arc<RecordFault>| {
+        state::with_persist_io(io, || {
+            ouro_jail::gc::gc_with(
+                &ctx,
+                &cli::GcArgs {
+                    dry_run: false,
+                    json: false,
+                },
+                &host,
+                ouro_jail::gc::Options::DEFAULT,
+            )
+            .unwrap_or_else(|error| panic!("{label}: gc must scan: {error}"))
+        })
+    };
+    let failed = gc(io.clone());
+    if !io.inner.lock().unwrap().fired {
+        problems.push(format!(
+            "{label}: the fault was never injected: no gc record added {action}"
+        ));
+    }
+    if failed.incomplete.is_empty() {
+        problems.push(format!(
+            "{label}: gc reported a complete pass although its write failed (§6.4: exit 1)"
+        ));
+    }
+    let mut again = failed;
+    for _ in 0..2 {
+        again = gc(io.clone());
+    }
+    io.check("the end");
+    if !again.incomplete.is_empty() {
+        problems.push(format!(
+            "{label}: the next gc passes did not finish: {:?}",
+            again.incomplete
+        ));
+    }
+    if host.now() != SimCgroup::Gone {
+        problems.push(format!("{label}: the leaf is {:?}", host.now()));
+    }
+    if scratch.exists() {
+        problems.push(format!(
+            "{label}: the attempt is stranded: managed scratch kept after gc verified the \
+             leaf's end: {:?}",
+            again
+                .entries
+                .first()
+                .map(|entry| (&entry.action, &entry.reason))
+        ));
+    }
+    problems.extend(io.inner.lock().unwrap().seen.violations.clone());
+    let leftover = state::leftover_temp_files(&attempt).unwrap();
+    if !leftover.is_empty() {
+        problems.push(format!("{label}: temporary files left: {leftover:?}"));
+    }
+    for name in ["jail-state.json", "policy.json"] {
+        if !dir.join(name).exists() {
+            problems.push(format!("{label}: gc removed {name}"));
+        }
+    }
+    problems
+}
+// J4 wave 3 end
 
 #[test]
 fn j4_r02_every_site_under_every_fault_leaves_valid_records() {

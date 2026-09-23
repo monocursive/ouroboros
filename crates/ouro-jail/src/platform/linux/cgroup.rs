@@ -361,15 +361,28 @@ pub fn parse_populated(raw: &str) -> io::Result<bool> {
 }
 
 /// The first component of an execution leaf's name.
-pub const LEAF_PREFIX: &str = "ouro-";
+pub const LEAF_PREFIX: &str = crate::gc::LEAF_PREFIX;
 /// The last component of an execution leaf's name.
-pub const LEAF_SUFFIX: &str = ".leaf";
+pub const LEAF_SUFFIX: &str = crate::gc::LEAF_SUFFIX;
 
-/// The name [`ExecutionCgroup::create`] gives a leaf: `ouro-<id>.leaf`, with
-/// a fresh random attempt-id-shaped token (not the attempt's own id).
+/// The name an attempt's execution leaf has: `ouro-<attempt id>.leaf`
+/// (J4 wave 3, G2: the leaf carries its attempt association, §9.3, and `gc`
+/// never acts on a registration naming another attempt's leaf).
 #[must_use]
-pub fn leaf_name(token: &crate::state::AttemptId) -> String {
-    format!("{LEAF_PREFIX}{}{LEAF_SUFFIX}", token.as_str())
+pub fn leaf_name(attempt: &crate::state::AttemptId) -> String {
+    crate::gc::leaf_name_of(attempt.as_str())
+}
+
+/// The name of a leaf that belongs to no attempt (a `doctor` probe's, a
+/// test's): `ouro-probe-<random>.leaf`, which is never an execution leaf's
+/// name, so no attempt's registration can make `gc` act on it.
+#[must_use]
+pub fn probe_leaf_name() -> String {
+    let token = crate::state::AttemptId::generate();
+    format!(
+        "{LEAF_PREFIX}probe-{}{LEAF_SUFFIX}",
+        token.as_str().trim_start_matches("att_")
+    )
 }
 
 /// Whether `name` has exactly the shape [`leaf_name`] produces. `gc` acts
@@ -433,10 +446,12 @@ pub type Register<'a> = &'a mut dyn FnMut(LeafStep<'_>) -> io::Result<()>;
 // J4 W2-S end
 
 impl ExecutionCgroup {
-    /// Create and configure an empty leaf. Missing preferred controllers are
-    /// recorded unapplied; a required controller always makes preparation fail.
+    /// Create and configure an empty leaf that belongs to no attempt (a
+    /// probe's): its name is [`probe_leaf_name`]. Missing preferred
+    /// controllers are recorded unapplied; a required controller always makes
+    /// preparation fail.
     pub fn create(limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
-        Self::create_registered(limits, &mut |_| Ok(()))
+        Self::create_named(limits, &probe_leaf_name(), &mut |_| Ok(()))
     }
 
     // J4 W2-S begin: N7
@@ -445,6 +460,11 @@ impl ExecutionCgroup {
     /// and inode right after (P16), before anything is placed in it, so a
     /// supervisor that dies at any point leaves either no leaf or one that
     /// jail state names for `gc` (§7, §14.2).
+    ///
+    /// J4 wave 3 (G2): the leaf is `ouro-<attempt id>.leaf`, the attempt id
+    /// being the attempt root's name (`<data>/attempts/<attempt id>`), so the
+    /// leaf carries its attempt; `mkdir` is exclusive, so a directory of that
+    /// name made by anyone else fails the creation rather than being adopted.
     ///
     /// The outer `Err` is a registration that failed: a persistence failure
     /// before exec, which refuses (S5), and no leaf is left behind unless
@@ -457,9 +477,25 @@ impl ExecutionCgroup {
         limits: &crate::policy::LimitsSnapshot,
         attempt_root: &Path,
     ) -> Result<io::Result<Self>, crate::records::JailError> {
+        let Some(attempt_id) = attempt_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| crate::state::AttemptId::parse(name).ok())
+        else {
+            return Err(crate::records::JailError::new(
+                crate::records::ErrorCode::InternalError,
+                crate::records::ErrorStage::Preparing,
+                crate::records::Remediation::InspectState,
+                format!(
+                    "the attempt root {} is not named by an attempt id, so its execution leaf \
+                     cannot carry the attempt",
+                    attempt_root.display()
+                ),
+            ));
+        };
         let attempt = crate::state::AttemptDir::from_root(attempt_root.to_path_buf());
         let mut unregistered = None;
-        let created = Self::create_registered(limits, &mut |step| {
+        let created = Self::create_named(limits, &leaf_name(&attempt_id), &mut |step| {
             let (path, identity) = match step {
                 LeafStep::Named(path) => (path, None),
                 LeafStep::Created {
@@ -480,9 +516,11 @@ impl ExecutionCgroup {
         }
     }
 
-    /// [`ExecutionCgroup::create`], telling `register` each step first.
-    pub fn create_registered(
+    /// [`ExecutionCgroup::create`] with the leaf named `name`, telling
+    /// `register` each step first.
+    pub fn create_named(
         limits: &crate::policy::LimitsSnapshot,
+        name: &str,
         register: Register<'_>,
     ) -> io::Result<Self> {
         // J4 W2-S end
@@ -496,22 +534,23 @@ impl ExecutionCgroup {
                 "supervisor is outside the delegated subtree; launch it in a delegated user scope",
             ));
         }
-        Self::create_beneath_registered(&root, limits, register)
+        Self::create_beneath_registered(&root, limits, name, register)
     }
 
     /// Low-level delegated-root entry point, also used to exercise controller
     /// absence under an owned, isolated subtree without changing host settings.
     pub fn create_beneath(root: &Path, limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
-        Self::create_beneath_registered(root, limits, &mut |_| Ok(()))
+        Self::create_beneath_registered(root, limits, &probe_leaf_name(), &mut |_| Ok(()))
     }
 
-    /// [`ExecutionCgroup::create_beneath`], telling `register` each step
-    /// first (N7): the name before `mkdir`, the identity before the leaf is
-    /// returned. A failed registration of the identity removes the empty
-    /// leaf again.
+    /// [`ExecutionCgroup::create_beneath`] with the leaf named `name`,
+    /// telling `register` each step first (N7): the name before `mkdir`, the
+    /// identity before the leaf is returned. A failed registration of the
+    /// identity removes the empty leaf again.
     pub fn create_beneath_registered(
         root: &Path,
         limits: &crate::policy::LimitsSnapshot,
+        name: &str,
         register: Register<'_>,
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(root)?;
@@ -532,10 +571,17 @@ impl ExecutionCgroup {
         if unsafe { filesystem.assume_init() }.f_type != libc::CGROUP2_SUPER_MAGIC {
             return Err(io::Error::other("execution root is not cgroup v2"));
         }
-        // J4-G: one spelling of the leaf name, which `gc` checks back.
-        let path = root.join(leaf_name(&crate::state::AttemptId::generate()));
+        // J4 wave 3 (G2): the name is given (an attempt's own, or a probe's);
+        // one path component, never a path.
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err(io::Error::other(
+                "an execution leaf's name is one component",
+            ));
+        }
+        let path = root.join(name);
         // J4 W2-S: N7 — named durably before it exists.
         register(LeafStep::Named(&path))?;
+        // Exclusive: an existing directory of this name is never adopted.
         fs::create_dir(&path)?;
         let leaf = match Self::open_created(&path, limits) {
             Ok(leaf) => leaf,
