@@ -1,7 +1,12 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 16, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 16 records J4's
+Status: implementation specification, revision 17, 2026-09-24. No implementation
+or backend conformance is claimed by this document. Revision 17 records J4's
+third wave, the fixes its adversarial reviews forced: the lease held while
+persistence may be in flight, one loss one error, the attempt-named execution
+leaf and gc's association check, gc's intent records and finished attempts, the
+control digest, and the tracer's exec pairing and restart re-entry (§§6.2, 6.4,
+7, 8.1, 8.2, 9.3, 11.2, 11.4, 13.3, 14.2). Revision 16 records J4's
 second wave and its reviews: loss reported whatever its timing, the execution
 leaf registered before it exists, gc's own records and leftovers, syscall
 restarts, the receipt digest's preimage, trace framing and the no-leaf limit
@@ -530,7 +535,9 @@ execute anything, and distinguishes requested policy from measured capability.
 Its output carries environment names, never values (canonicalization.md).
 `--label-only` rejects `--gate-fd` and `--attempt-id` as usage errors.
 Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
-stdout/stderr byte streams and has no `--json` stdout mode.
+stdout/stderr byte streams and has no `--json` stdout mode. An error that
+reaches no durable receipt (a terminal receipt that failed to persist, and
+what only it would have recorded) is printed on stderr, one line per error.
 
 `--control-fd` carries structured control messages instead of textual launch
 diagnostics. `--trace-fd` carries events. Each supplied fd must be open, have the
@@ -561,7 +568,8 @@ Apply configuration in this order:
    Every `OURO_JAIL_TEST_*` variable is a test-only knob: it can only shrink
    a bound or end an attempt early, never widens authority, and leaves the
    policy digest unchanged. At attempt start every such variable set is
-   recorded, name to value, in `jail-state.json` `test_seams` and in
+   recorded, name to value (a name set more than once with its first value,
+   the one `getenv` returns and every consumer applies), in `jail-state.json` `test_seams` and in
    `lifetime.native.details.test_seams` of every receipt that has native
    details (a refusal before a boundary exists has none, so there only jail
    state records them). The knobs: `OURO_JAIL_TEST_MEDIATION_QUEUE` (the
@@ -766,7 +774,9 @@ Local attempts are not deduplicated operator requests.
   scratch/              default child-writable scratch, not the state parent
 ```
 
-The supervisor holds `jail.lock` through settlement/cleanup. A future owner
+The supervisor holds `jail.lock` through settlement/cleanup, and while any of
+its persistence steps may still be in flight: after a stalled step it never
+unlocks it, and only the end of the supervisor process releases it. A future owner
 uses its own lease, not this lock. An existing attempt root is acceptable only
 with validated ownership/permissions and no previous jail state or jail-owned
 artifacts. Claim it while holding the lock: `jail-state.json` is written and
@@ -778,7 +788,11 @@ after claim creation. The child cannot inherit the lock.
 Register resource ownership before populating credentials
 or launching helpers. The execution cgroup is registered in jail state by name
 before it is created (P15) and by device and inode right after, before anything
-is placed in it (P16); a failed registration refuses. State updates use create-new temporary file, write,
+is placed in it (P16); a failed registration refuses. The leaf is named
+`ouro-<attempt id>.leaf` after its attempt root, directly under the delegated
+subtree, and created exclusively; the name is the attempt association §9.3
+registers. A leaf that belongs to no attempt (a `doctor` probe's) is named
+`ouro-probe-<token>.leaf`. State updates use create-new temporary file, write,
 file sync, atomic rename, and parent-directory sync. A successful rename alone
 is not a durable acknowledgment. Platform code defines and tests its sync
 guarantee. A failed write removes its temporary file; a crash can leave one
@@ -844,7 +858,9 @@ Preparation steps, in order:
    also have closed that fd. Persist the enforced receipt after confirmed exec.
 8. Monitor child status, evidence, control, limits and lifetime independently.
    Target exit triggers termination of remaining attempt descendants; background
-   children do not become an independent service. Preserve target outcome.
+   children do not become an independent service. Preserve target outcome. The
+   remaining tree is ended as soon as the target exits, before the supervisor
+   waits for receipts still being persisted.
 9. Verify tree death, drain observations through the final boundary, persist
    settled receipt, then clean managed vendor state and update cleanup status.
 
@@ -899,8 +915,9 @@ terminal message is `settled` or `unsettled`. `unsettled` is the terminal
 message after exec when tree death could not be
 verified, and the receipt then keeps its last nonsettled phase with
 `tree_empty: null` and the `tree_unknown` error. A control message
-acknowledges only a receipt that is durable. Messages carry receipt
-phase/digest and safe outcome, never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or
+acknowledges only a receipt that is durable. Messages carry the receipt's
+phase and its digest (`sha256:` over its RFC 8785 canonical bytes, the digest
+its `jail.receipt` note names) and safe outcome, never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or
 interactive approval protocol.
 
 ### 8.3 Fds, stdio and supervision
@@ -1114,7 +1131,8 @@ subtree when one is available. A limit that requires it refuses without one;
 otherwise the run proceeds with the cgroup recorded unavailable and without
 what depends on it: preferred limits, the cgroup check of tree emptiness and
 the watcher's whole-leaf kill above. Keep the supervisor outside that execution leaf.
-Register its path, filesystem identity and attempt association; place the
+Register its path, filesystem identity and attempt association (the leaf's
+name, §7); place the
 blocked target inside before release. Delegation must permit the required
 controllers, membership operations, `cgroup.kill` and population checks.
 Do not assume the root of a user's existing service cgroup is an empty leaf.
@@ -1560,7 +1578,8 @@ On loss under `strict`, stop the attempt and preserve the gap. Under
 Loss reporting does not depend on timing: any evidence class (the audit
 classes and `proxy.net`) degraded in the observer's final account is an
 `evidence_lost` error and exit 1 in either mode, even when no run event
-carried it.
+carried it. One loss is one error: a class degraded because a lost trace sink
+refused its frames is covered by that trace loss's own `evidence_lost` error.
 An observer that cannot attach always refuses before exec, regardless of
 evidence mode. `--observe off` emits no audit-source events; wrapper lifecycle
 and optional proxy facts still exist with their own limited meaning.
@@ -1847,8 +1866,10 @@ it never retries a whole partially written JSON frame as a second event.
 Strict mode stops the tree; best-effort can continue with the sink marked lost.
 The terminal receipt's note is reserve priority whatever its phase. Once a
 trace loss is known, every later receipt records it: the wrapper source is
-degraded, with one `trace_transport_loss` gap on each covered class, extended
-on later receipts rather than repeated.
+degraded, with one `trace_transport_loss` gap on each covered evidence class
+(the audit classes and `proxy.net`), extended on later receipts rather than
+repeated; `limits` keeps what the platform reported, since its count comes from
+the cgroup counters, not the trace.
 After any evidence loss a sink keeps a prefix: it refuses and counts ordinary
 events and accepts only reserve notes (the gap and receipt notes, and at most
 one lifecycle note per `agent` helper, whose end can explain a stop). An
@@ -1878,7 +1899,10 @@ the target runs are persisted while the loop keeps enforcing deadlines,
 signals and evidence; their control message follows durability, in order. On
 failure or stall, stop the child with cause `state_write_failed`, keep the
 transition unacknowledged, leave the receipt at its last persisted phase, and
-do not start abandoned work later. Do not wait forever for a writer while
+start no further step of abandoned work: a replacement given up on during one
+step never performs the next, and its temporary file is removed; the step
+already in the kernel may still complete, which is why the lease stays held
+(§7). Do not wait forever for a writer while
 descendants continue running. No disk spool, replay daemon or
 external custody service is added to jail v1.
 
@@ -1946,28 +1970,42 @@ nothing on disk.
 
 For a dead supervisor, revalidate boot/process identity and every registered
 resource. The recorded owner is dead when its boot is not the current boot, or
-its pid names no process, a process with another birth time, or a zombie; an
+its pid names no process, a process with another birth time, or a zombie
+whose thread group has no other thread (a zombie leader with a live thread is
+alive: the thread may still be completing a write); an
 owner alive with the same boot, pid and birth time is retained whole even
 without the lease, and an owner whose liveness cannot be read keeps its
 cgroup. In the same boot, a populated, positively identified orphan execution
 cgroup may be killed by this explicit GC invocation, as permitted by the north
 star. Positive identification: the registration names a direct child of the
-operator's delegated subtree with the execution-leaf name, on cgroup v2, with
-the recorded device and inode, and every control file is opened relative to
-that pinned directory; a leaf is killed only when the supervisor did not
-verify the tree's end. gc records `gc_terminating_orphan` before `cgroup.kill`,
-verifies emptiness within §9.3's 5-second budget, records
-`gc_terminated_orphan`, then removes the leaf (`gc_removed_cgroup`) and
-managed scratch (`gc_removed_scratch`). Its reconciliation records go to jail
-state (`gc_actions`) and its report, never to the supervisor's receipt;
-finishing a pending vendor-state cleanup still completes the receipt's
-`state_cleanup`, as J3 specified. gc reads the leaf from jail state, where the
+operator's delegated subtree with this attempt's execution-leaf name
+(`ouro-<attempt id>.leaf`), on cgroup v2, with the recorded device and inode,
+and every control file is opened relative to that pinned directory; a
+registration naming another attempt's leaf or no execution leaf, by identity or
+by name only, is retained, reported and never probed. A leaf is killed only
+when the supervisor did not verify the tree's end. gc records
+`gc_terminating_orphan` before `cgroup.kill`, verifies emptiness within §9.3's
+5-second budget, records `gc_terminated_orphan`, records `gc_removing_cgroup`
+(the leaf seen empty) before its `rmdir` and `gc_removed_cgroup` after, then
+removes managed scratch (`gc_removed_scratch`). A registered leaf absent after
+an earlier `gc_terminated_orphan` or `gc_removing_cgroup` for it verifies the
+tree's end. Its reconciliation records go to jail state (`gc_actions`) and its
+report, never to the supervisor's receipt; a record gc repeats is kept once with
+`count` and `last_at`. Finishing a pending vendor-state cleanup completes the
+receipt's `state_cleanup` only when that receipt itself permits the cleanup
+(refused, or settled with a verified tree), as J3 specified; permitted only by
+gc's own verification, jail state and gc's report record it and the receipt is
+left as written. gc reads the leaf from jail state, where the
 supervisor registers it by name before creating it and by device and inode
 right after, before anything is placed in it; a receipt naming another leaf is
 a disagreement and is retained. A leaf registered by name only is removed when
 empty, identified by its name and place only, and never killed. gc's records
 go to `gc_actions` (persistence site P14). The bound includes each leased
-attempt root's listing and the vendor-state resumption. Pending vendor-state
+attempt root's listing and the vendor-state resumption. When a pass leaves
+nothing for a later one (owner established dead, cgroup settled, no managed
+scratch, temporary file, proxy directory or pending vendor state, nothing
+failed), gc records `gc_finished`, and later passes spend only the attempt's
+name on it. Pending vendor-state
 cleanup is permitted by a receipt proving tree death or by gc's own
 `gc_terminated_orphan` or `gc_removed_cgroup` record of the registered leaf;
 lost integrity refuses. gc removes a crash's temporary files of the root
@@ -1975,7 +2013,8 @@ records (`.<jail-state.json|policy.json|jail.json>.<id>.tmp`) only under the
 lease of an attempt whose owner it established dead, and reports them in
 `leftover_temp_files`. A cgroup recorded in another boot is never
 probed or touched. Records that disagree about the boot, lost integrity, and a
-replaced, absent or unverifiable leaf are retained and reported. A corrupt
+replaced, absent or unverifiable leaf are retained and reported; lost integrity
+retains the leaf and managed scratch in every boot. A corrupt
 state file or receipt is §6.4's failed state access (exit 1).
 After host reboot, the old processes cannot be alive, but any reused cgroup
 path must not be treated as the original resource. Never signal from a stale
