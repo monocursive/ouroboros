@@ -130,6 +130,19 @@ fn evidence_errors(receipt: &Value) -> Vec<String> {
         .collect()
 }
 
+/// J4 W3, P4: one trace loss is one `evidence_lost` error. The audit
+/// classes whose frames the lost sink refused are degraded by the same loss,
+/// and the settlement check used to report it a second time ("coverage was
+/// lost by settlement ... the loss reached no run event"), 3 of 3 live.
+fn assert_one_loss(receipt: &Value, what: &str) {
+    let errors = evidence_errors(receipt);
+    assert_eq!(
+        errors.len(),
+        1,
+        "{what}: one loss, one evidence_lost error: {errors:#?}"
+    );
+}
+
 fn is_transport_gap(frame: &Value) -> bool {
     frame.pointer("/fields/kind").and_then(Value::as_str) == Some("coverage_gap")
         && frame.pointer("/fields/reason").and_then(Value::as_str) == Some("trace_transport_loss")
@@ -143,10 +156,7 @@ fn assert_strict_stop(run: &Run, elapsed: Duration, what: &str) {
         "evidence_loss",
         "{what}: strict must stop on the loss: {receipt:#}"
     );
-    assert!(
-        !evidence_errors(&receipt).is_empty(),
-        "{what}: the loss is in the receipt: {receipt:#}"
-    );
+    assert_one_loss(&receipt, what);
     assert_eq!(
         field(&receipt, "/coverage/fs.write/status"),
         "degraded",
@@ -175,10 +185,7 @@ fn assert_best_effort_continued(run: &Run, what: &str) {
         &Value::Null,
         "{what}: nothing stopped the target: {receipt:#}"
     );
-    assert!(
-        !evidence_errors(&receipt).is_empty(),
-        "{what}: the loss is in the receipt: {receipt:#}"
-    );
+    assert_one_loss(&receipt, what);
     assert_eq!(field(&receipt, "/coverage/fs.write/status"), "degraded");
     assert_eq!(
         field(&receipt, "/coverage/fs.write/observed_count"),
@@ -290,10 +297,7 @@ fn j4_r03_the_wall_is_enforced_while_the_trace_is_saturated() {
         i64::from(libc::SIGTERM),
         "the cooperative stop reached the target"
     );
-    assert!(
-        !evidence_errors(&receipt).is_empty(),
-        "the trace was saturated before the wall fired: {receipt:#}"
-    );
+    assert_one_loss(&receipt, "the trace was saturated before the wall fired");
     // Startup, a 2 s wall, the stop and settlement. A supervisor waiting on
     // the trace would sit here until the target's own 30 s end.
     assert!(
@@ -322,7 +326,7 @@ fn j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full() {
         "wall_expiry",
         "{receipt:#}"
     );
-    assert!(!evidence_errors(&receipt).is_empty(), "{receipt:#}");
+    assert_one_loss(&receipt, "a full queue under the wall");
     assert!(
         elapsed < Duration::from_secs(9),
         "the wall fired late behind a full trace queue: {elapsed:?}"

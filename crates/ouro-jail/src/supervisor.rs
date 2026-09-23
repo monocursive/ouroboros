@@ -1588,7 +1588,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         // the loop. Any evidence class degraded at settlement is an
         // `evidence_lost` error and exit 1, whatever the loss's timing; it
         // is never a cause, because nothing was stopped for it.
-        if !platform_loss_reported && let Some(error) = settlement_loss(&summary) {
+        // J4 W3, P4: a trace-sink loss the journal reported is reported:
+        // the classes whose frames the lost sink refused are degraded by that
+        // same loss, which used to be reported a second time here.
+        if !platform_loss_reported
+            && journal.loss.is_none()
+            && let Some(error) = settlement_loss(&summary)
+        {
             record.errors.push(error.to_object());
             outcome_error.get_or_insert(error);
         }
@@ -1861,6 +1867,12 @@ fn wall_deadline(plan: &Plan) -> Option<Instant> {
 }
 
 /// Queued frames from any active source may have been lost in transport.
+///
+/// J4 W3 (integrator decision): every class whose results are trace frames,
+/// that is the audit classes and `proxy.net`. Not `limits`: its count comes
+/// from the cgroup counters, not from the trace (§11.4: no `limit.hit`
+/// event in v1), so no frame of it can have been lost, and it keeps what the
+/// platform reported.
 fn degrade_trace_coverage(record: &mut AttemptRecord) {
     use crate::records::{Gap, SourceStatus};
     record.observer.sources.wrapper = SourceStatus::Degraded;
@@ -1878,7 +1890,6 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
         ("fs.deny", &mut record.coverage.fs_deny),
         ("net", &mut record.coverage.net),
         ("proxy.net", &mut record.coverage.proxy_net),
-        ("limits", &mut record.coverage.limits),
     ] {
         if entry.status == SourceStatus::Unsupported {
             continue;
