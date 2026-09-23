@@ -225,6 +225,9 @@ pub fn has_listener_for(entries: &[Entry], want: VfsId) -> bool {
 mod live {
     use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+    use std::time::Duration;
+
+    use crate::platform::linux::clock::Deadline;
 
     use super::{
         Entry, NLM_F_REQUEST_DUMP, SOCK_DIAG_BY_FAMILY, VfsId, has_listener_for, parse_dump,
@@ -300,20 +303,24 @@ mod live {
         /// # Errors
         ///
         /// A send/recv failure, or a malformed dump (see [`parse_dump`]).
-        pub fn dump(&mut self, show: u32) -> io::Result<Vec<Entry>> {
+        pub fn dump(&mut self, show: u32, stop_fd: RawFd) -> io::Result<Vec<Entry>> {
+            let deadline = Deadline::after(Duration::from_secs(2));
             self.seq = self.seq.wrapping_add(1);
             let seq = self.seq;
             self.send_request(seq, show)?;
             let mut out = Vec::new();
             let mut buf = vec![0u8; 32 * 1024];
-            // Bound the read (review fix 2): a `recv` that never completes must
-            // not wedge a mediation worker, and a dump larger than this many
-            // datagrams is refused rather than read without limit. The attempt's
-            // network namespace holds few sockets, so these bounds are generous.
-            const DUMP_DEADLINE_MS: libc::c_int = 2000;
+            // One deadline covers the entire dump, including a peer which
+            // keeps sending datagrams. Stop wakes the poll immediately.
             const MAX_DATAGRAMS: usize = 4096;
             let mut datagrams = 0usize;
             loop {
+                if deadline.expired() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "sock_diag: dump timed out",
+                    ));
+                }
                 datagrams += 1;
                 if datagrams > MAX_DATAGRAMS {
                     return Err(io::Error::new(
@@ -321,13 +328,22 @@ mod live {
                         "sock_diag: dump exceeded the datagram bound",
                     ));
                 }
-                let mut pfd = libc::pollfd {
-                    fd: self.fd.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
+                let mut pfds = [
+                    libc::pollfd {
+                        fd: self.fd.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: stop_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // SAFETY: two live pollfds.
+                let p = unsafe {
+                    libc::poll(pfds.as_mut_ptr(), 2, deadline.remaining_millis_capped(2000))
                 };
-                // SAFETY: single live pollfd.
-                let p = unsafe { libc::poll(&raw mut pfd, 1, DUMP_DEADLINE_MS) };
                 if p == 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -341,18 +357,33 @@ mod live {
                     }
                     return Err(err);
                 }
+                if pfds[1].revents != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "sock_diag: mediator stopping",
+                    ));
+                }
+                if pfds[0].revents & libc::POLLIN == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "sock_diag: socket unavailable",
+                    ));
+                }
                 // SAFETY: `buf` is a live, writable slice of `buf.len()` bytes.
                 let n = unsafe {
                     libc::recv(
                         self.fd.as_raw_fd(),
                         buf.as_mut_ptr().cast::<libc::c_void>(),
                         buf.len(),
-                        0,
+                        libc::MSG_DONTWAIT,
                     )
                 };
                 if n < 0 {
                     let err = io::Error::last_os_error();
-                    if err.kind() == io::ErrorKind::Interrupted {
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) {
                         continue;
                     }
                     return Err(err);
@@ -369,8 +400,8 @@ mod live {
         /// # Errors
         ///
         /// As [`SockDiag::dump`].
-        pub fn has_listener_for(&mut self, want: VfsId) -> io::Result<bool> {
-            let entries = self.dump(super::UDIAG_SHOW_VFS | super::UDIAG_SHOW_NAME)?;
+        pub fn has_listener_for(&mut self, want: VfsId, stop_fd: RawFd) -> io::Result<bool> {
+            let entries = self.dump(super::UDIAG_SHOW_VFS | super::UDIAG_SHOW_NAME, stop_fd)?;
             Ok(has_listener_for(&entries, want))
         }
 
@@ -398,7 +429,7 @@ mod live {
                     self.fd.as_raw_fd(),
                     req.as_ptr().cast::<libc::c_void>(),
                     req.len(),
-                    0,
+                    libc::MSG_DONTWAIT,
                     std::ptr::from_ref(&nl).cast::<libc::sockaddr>(),
                     u32::try_from(std::mem::size_of::<libc::sockaddr_nl>()).unwrap(),
                 )
@@ -424,6 +455,32 @@ pub use live::SockDiag;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_signaled_stop_interrupts_a_sock_diag_dump() {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+        let mut pipe = [-1; 2];
+        // SAFETY: pipe points to two writable descriptor slots.
+        assert_eq!(
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        // SAFETY: pipe2 returned two independently owned descriptors.
+        let (read, write) =
+            unsafe { (OwnedFd::from_raw_fd(pipe[0]), OwnedFd::from_raw_fd(pipe[1])) };
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: one byte is read from a live string literal.
+        assert_eq!(
+            unsafe { libc::write(write.as_raw_fd(), b"x".as_ptr().cast(), 1) },
+            1
+        );
+        let mut diag = SockDiag::open().expect("sock_diag socket");
+        let error = diag
+            .dump(UDIAG_SHOW_VFS | UDIAG_SHOW_NAME, read.as_raw_fd())
+            .expect_err("stop must interrupt dump");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    }
 
     /// Build one `SOCK_DIAG_BY_FAMILY` message with an optional VFS attribute.
     fn unix_msg(seq: u32, state: u8, sock_ino: u32, vfs: Option<(u32, u32)>) -> Vec<u8> {

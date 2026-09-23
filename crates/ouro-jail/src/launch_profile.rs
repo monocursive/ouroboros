@@ -841,26 +841,20 @@ pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved,
 /// Refuses a launch profile inside any child-writable grant, or inside the
 /// workspace (§12, north star §4.5).
 ///
-/// Compared by identity: each root's `(dev, ino)` against every directory on
-/// the file's no-follow walk and the file itself, so neither a different
-/// spelling nor a symlinked alias hides the overlap. A root that does not
-/// exist yet (a scratch this attempt will create) cannot contain the file.
+/// Compared by identity against every directory on the file's no-follow
+/// walk, including other mountpoints of the same writable filesystem tree.
+/// A root that does not exist yet cannot contain the file.
 ///
 /// # Errors
 /// [`ErrorCode::InvalidConfig`] at key `--launch`.
 pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Result<(), JailError> {
+    let forbidden = crate::state::mount_alias::forbidden_identities(roots)
+        .map_err(|error| unsafe_launch(format!("writable grants cannot be inspected: {error}")))?;
     for root in roots {
-        let identity = match std::fs::metadata(root) {
-            Ok(metadata) => {
-                use std::os::unix::fs::MetadataExt as _;
-                Some((metadata.dev(), metadata.ino()))
-            }
-            Err(_) => None,
-        };
         let lexical = std::fs::canonicalize(root)
             .ok()
             .is_some_and(|canonical| launch.file_path.starts_with(canonical));
-        if lexical || identity.is_some_and(|identity| launch.file_chain.contains(&identity)) {
+        if lexical {
             return Err(unsafe_launch(format!(
                 "the launch profile {} lies inside the child-visible grant {}; the contained \
                  party could rewrite its own authority",
@@ -868,6 +862,17 @@ pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Resu
                 root.display()
             )));
         }
+    }
+    if launch
+        .file_chain
+        .iter()
+        .any(|identity| forbidden.contains(identity))
+    {
+        return Err(unsafe_launch(format!(
+            "the launch profile {} lies inside a child-visible writable grant, possibly through \
+             a bind mount; the contained party could rewrite its own authority",
+            launch.file_path.display()
+        )));
     }
     Ok(())
 }

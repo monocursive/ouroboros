@@ -538,7 +538,7 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         // J3 review): the child must not be able to change what it is given.
         // A source that cannot be walked now is left to staging and doctor,
         // which report it by reason.
-        let forbidden = forbidden_identities(&resolved, &workspace);
+        let forbidden = forbidden_identities(&resolved, &workspace)?;
         for credential in &launch.credentials {
             if let Ok(chain) = crate::credentials::source_chain(credential.source.as_bytes())
                 && chain.iter().any(|identity| forbidden.contains(identity))
@@ -726,6 +726,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         .all(|requirement| satisfied(requirement, &capabilities));
     // J3-launch begin: §14.1 launch readiness; a missing or unsafe source
     // makes the plan unavailable (north star §4.5: it refuses the launch).
+    let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
     let launch = args.launch.as_ref().map(|name| LaunchReadiness {
         name: name.clone(),
         support: LAUNCH_SUPPORT,
@@ -735,12 +736,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
             .snapshot
             .launch
             .as_ref()
-            .map(|launch| {
-                crate::credentials::inspect(
-                    launch,
-                    &forbidden_identities(&plan.resolved, &plan.workspace),
-                )
-            })
+            .map(|launch| crate::credentials::inspect(launch, &forbidden))
             .unwrap_or_default(),
     });
     let ready = ready
@@ -2284,7 +2280,7 @@ fn prepare_launch(
     let vendor = state::create_vendor_state(attempt_dir)?;
     // §12 and the §8.2 preparation budget: staging runs in a worker bounded
     // by what is left of it, and no source may lie in a child-writable grant.
-    let forbidden = forbidden_identities(&plan.resolved, &plan.workspace);
+    let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
     let mut staged =
         match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, deadline) {
             Ok(staged) => staged,
@@ -2340,13 +2336,18 @@ fn private_provenance(
 /// lie in: the workspace, an explicit scratch and every writable host grant.
 /// These are trusted operator roots, resolved as such; one that does not
 /// exist cannot contain a source.
-fn forbidden_identities(resolved: &Resolved, workspace: &Path) -> Vec<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt as _;
-    launch_forbidden_roots(resolved, workspace)
-        .iter()
-        .filter_map(|root| std::fs::metadata(root).ok())
-        .map(|metadata| (metadata.dev(), metadata.ino()))
-        .collect()
+fn forbidden_identities(
+    resolved: &Resolved,
+    workspace: &Path,
+) -> Result<Vec<(u64, u64)>, JailError> {
+    state::mount_alias::forbidden_identities(&launch_forbidden_roots(resolved, workspace)).map_err(
+        |error| {
+            usage(
+                "launch.credentials",
+                format!("writable grants cannot be inspected: {error}"),
+            )
+        },
+    )
 }
 
 /// Copies a tree observation into the receipt's lifetime group.

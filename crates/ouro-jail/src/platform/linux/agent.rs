@@ -655,6 +655,9 @@ impl AgentNet {
     /// counted missing), stop the mediator, and account for what it last
     /// recorded.
     pub fn stop(&mut self, audit: &mut AuditWriter, observe_on: bool, budget: Duration) {
+        if let Some(mediator) = self.mediator.as_ref() {
+            mediator.request_stop();
+        }
         // A proxy that died on its own is recorded as such before the stop
         // makes every proxy look stopped. The attempt is over: a loss found
         // now is already in the coverage and has nothing left to stop.

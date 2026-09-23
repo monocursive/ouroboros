@@ -1952,8 +1952,8 @@ fn create_private_dir(path: &Path) -> Result<(), JailError> {
         })
 }
 
-/// §8.3: reject socket or directory stdio, and regular-file stdio that
-/// resolves into protected supervisor state.
+/// §8.3 and §9.2: reject socket, directory and anonymous-inode stdio, and
+/// regular-file stdio that resolves into protected supervisor state.
 ///
 /// `state_root` is the whole runtime state directory, not just this attempt's
 /// own: a redirect into a sibling attempt's receipts is the same disclosure.
@@ -1991,14 +1991,24 @@ fn validate_stdio(state_root: &Path) -> Result<(), JailError> {
                 "{name} is a socket or a directory, which a contained run refuses"
             ));
         }
+        // An inherited io_uring ring can issue operations through the ring
+        // even when the child's io_uring syscalls are blocked. All Linux
+        // anonymous inodes are private supervisor handles, never stdio.
+        let fd_target = std::fs::read_link(format!("/proc/self/fd/{fd}")).map_err(|err| {
+            error(
+                ErrorCode::InvalidFd,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                format!("{name} descriptor target cannot be inspected: {err}"),
+            )
+        })?;
+        if fd_target.as_os_str().as_bytes().starts_with(b"anon_inode:") {
+            return refuse(format!(
+                "{name} is an anonymous inode and cannot be inherited"
+            ));
+        }
         if kind == libc::S_IFREG {
-            let Ok(target) = std::fs::read_link(format!("/proc/self/fd/{fd}")) else {
-                return refuse(format!(
-                    "{name} is a regular file whose path cannot be read, so it cannot be \
-                     shown to lie outside the state root"
-                ));
-            };
-            let target = target.canonicalize().unwrap_or(target);
+            let target = fd_target.canonicalize().unwrap_or(fd_target);
             if let Ok(state_root) = state_root.as_ref()
                 && target.starts_with(state_root)
             {

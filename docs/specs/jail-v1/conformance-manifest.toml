@@ -98,10 +98,10 @@ nested_user_namespace = "unavailable"
 
 # J3 (`agent`), measured live as ouro-ci on a stock host with no host
 # configuration changed: `ouro-jail doctor --json` inside the delegated scope,
-# evidence/j3-doctor-2026-09-23-ouro-ci.json (each row's `evidence_ref` carries
+# evidence/j3-doctor-2026-09-23-review-fixes-ouro-ci.json (each row's `evidence_ref` carries
 # the measured facts), and the live suite in
-# evidence/j3-test-log-2026-09-23-ouro-ci.txt, run
-# 20260923T094510Z-6bb5a34192ac (conformance_j3_agent, 33 tests: S03, N01-N05,
+# evidence/j3-test-log-2026-09-23-review-fixes-ouro-ci.txt, run
+# 20260923T123309Z-8a5ab780e283 (conformance_j3_agent, 33 tests: S03, N01-N05,
 # C01, X06 for agent). See j3-authority.md.
 
 # An unprivileged child installs the agent's mediation filter with

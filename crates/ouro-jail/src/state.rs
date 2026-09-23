@@ -671,6 +671,7 @@ impl Drop for Lease {
 // ---------------------------------------------------------------------------
 
 pub mod anchored;
+pub mod mount_alias;
 
 use crate::records::StateCleanup;
 

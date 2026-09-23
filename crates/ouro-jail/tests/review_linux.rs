@@ -850,6 +850,49 @@ fn r3_stdio_kinds_are_validated() {
     );
 }
 
+/// §9.2: an io_uring descriptor passed as stdio must never reach the target.
+#[test]
+fn r3_io_uring_as_stdio_refuses_before_exec() {
+    if !live() {
+        return;
+    }
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    // io_uring_params is 120 bytes; the zeroed 128-byte buffer is aligned and
+    // large enough for the kernel to fill without relying on a libc wrapper.
+    let mut params = [0u64; 16];
+    // SAFETY: the kernel writes at most the 120-byte io_uring_params struct.
+    let fd = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
+    assert!(
+        fd >= 0,
+        "reference host must permit io_uring_setup: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: successful io_uring_setup returns a newly owned descriptor.
+    let ring = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let jail = Jail::new().expect("harness");
+    let (workspace, fixture) = workspace_with_fixture(jail.root());
+    let output = Command::new(harness::jail_path())
+        .arg("run")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--")
+        .arg(&fixture)
+        .arg("exit")
+        .arg("0")
+        .env("OURO_DATA_DIR", jail.data_dir())
+        .env("OURO_CONFIG_DIR", jail.config_dir())
+        .stdin(std::process::Stdio::from(ring))
+        .output()
+        .expect("run");
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid_fd"));
+}
+
 // ===========================================================================
 // 4. Lifecycle honesty
 // ===========================================================================

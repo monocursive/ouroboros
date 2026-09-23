@@ -249,6 +249,11 @@ impl MediatorHandle {
         self.shutdown();
     }
 
+    /// Wake workers before other shutdown work consumes the stop budget.
+    pub fn request_stop(&self) {
+        self.signal_stop();
+    }
+
     fn shutdown(&mut self) {
         self.signal_stop();
         for join in self.joins.drain(..) {
@@ -572,7 +577,7 @@ fn mediate_pathname(
         let Ok(mut sd) = w.sockdiag.lock() else {
             return (Err(libc::EACCES), "sock_diag_poisoned");
         };
-        sd.has_listener_for(want)
+        sd.has_listener_for(want, w.stop_r)
     };
     match listener_present {
         Ok(true) => {}

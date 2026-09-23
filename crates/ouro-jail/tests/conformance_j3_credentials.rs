@@ -1125,6 +1125,50 @@ fn run_inner_test(name: &str, binds: &[(&str, &Path, &str)], env: &[(&str, &Path
 }
 
 #[test]
+#[ignore = "runs inside bubblewrap from c01_bind_alias_of_writable_source_refuses"]
+fn c01_inner_bind_alias_of_writable_source_refuses() {
+    let forbidden = ouro_jail::state::mount_alias::forbidden_identities(&[PathBuf::from("/w")])
+        .expect("mount aliases inspected");
+    let chain = credentials::source_chain(b"/alias/token").expect("source walks");
+    assert!(chain.iter().any(|identity| forbidden.contains(identity)));
+    let launch = launch_of(vec![decl(
+        "token",
+        Path::new("/alias/token"),
+        "token",
+        "copy_rw",
+    )]);
+    let check = credentials::inspect(&launch, &forbidden);
+    assert_eq!(check[0].reason_code, "source_in_writable_grant");
+    let profile = ouro_jail::launch_profile::load(Path::new("/alias"), "demo", None)
+        .expect("operator launch profile loads through the bind mount");
+    let error = ouro_jail::launch_profile::check_outside_writable(&profile, &[PathBuf::from("/w")])
+        .expect_err("launch profile in a writable alias must refuse");
+    assert_eq!(error.key_path.as_deref(), Some("--launch"));
+}
+
+#[test]
+fn c01_bind_alias_of_writable_source_refuses() {
+    if !common::live() {
+        return;
+    }
+    let root = common::private_tempdir();
+    let writable = root.path().join("writable");
+    let sub = writable.join("sub");
+    private_dir(&sub);
+    fixture_file(&sub.join("token"), b"private fixture");
+    private_dir(&sub.join("launch"));
+    fixture_file(
+        &sub.join("launch/demo.toml"),
+        b"name = \"demo\"\njail = \"tool\"\n",
+    );
+    run_inner_test(
+        "c01_inner_bind_alias_of_writable_source_refuses",
+        &[("--bind", &writable, "/w"), ("--ro-bind", &sub, "/alias")],
+        &[],
+    );
+}
+
+#[test]
 #[ignore = "runs inside bubblewrap from m1_a_read_only_bind_of_a_writable_filesystem_gets_no_digest"]
 fn m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem() {
     // Reviewer's R4: `/r` is a read-only bind of the writable directory that

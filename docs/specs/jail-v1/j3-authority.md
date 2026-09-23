@@ -4,25 +4,33 @@ Implemented on the named x86-64 Linux lane, 2026-09-22 to 2026-09-23, on a
 stock host: Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap 0.11.1, the
 distribution's user-namespace restriction left on, no sysctl, AppArmor
 profile, file capability or setuid helper. The unprivileged `ouro-ci` account
-runs everything. Live evidence is committed under [`evidence/`](evidence/):
+runs everything. Live evidence is recorded under [`evidence/`](evidence/):
 
-- [`j3-test-log-2026-09-23-ouro-ci.txt`](evidence/j3-test-log-2026-09-23-ouro-ci.txt):
-  the full conformance suite, run `20260923T094510Z-6bb5a34192ac` (PASS),
-  1018 passed, 0 failed, 8 ignored (subprocess helpers the live tests invoke
-  themselves, and one test gated on a Unicode data file). It includes
-  `conformance_j3_agent` (33), `conformance_j3_none` (20),
-  `conformance_j3_credentials` (17), `unix_peer_linux` (14), the portable
-  launch, proxy and network-rules suites, and every J1 and J2 suite.
-- [`j3-doctor-2026-09-23-ouro-ci.json`](evidence/j3-doctor-2026-09-23-ouro-ci.json):
+- [`j3-test-log-2026-09-23-review-fixes-ouro-ci.txt`](evidence/j3-test-log-2026-09-23-review-fixes-ouro-ci.txt):
+  the full conformance suite, run `20260923T123309Z-8a5ab780e283` (PASS),
+  1027 passed, 0 failed, 9 ignored (subprocess helpers invoked by their live
+  tests, one optional Unicode data test and one documentation example). It
+  includes every J1, J2 and J3
+  suite, plus live refusal of credential and launch files reached through a
+  writable grant's bind-mount alias, inherited io_uring stdio, and a stopped
+  sock_diag dump.
+- [`j3-doctor-2026-09-23-review-fixes-ouro-ci.json`](evidence/j3-doctor-2026-09-23-review-fixes-ouro-ci.json):
   `doctor --json` in the delegated user scope, 25 rows, including the four
   `agent` rows measured by one real run and `nested_user_namespace`
   unavailable, as a stock host should report.
-- [`j3-host-manifest-2026-09-23-ouro-ci.txt`](evidence/j3-host-manifest-2026-09-23-ouro-ci.txt):
+- [`j3-host-manifest-2026-09-23-review-fixes-ouro-ci.txt`](evidence/j3-host-manifest-2026-09-23-review-fixes-ouro-ci.txt):
   the host as measured for that run.
 - [`unixpeer-spike-2026-09-22-ouro-ci.txt`](evidence/unixpeer-spike-2026-09-22-ouro-ci.txt)
   and [`landlock-nesting-probe-2026-09-22-ouro-ci.txt`](evidence/landlock-nesting-probe-2026-09-22-ouro-ci.txt):
   the measurements behind the host-peer mechanism and the unprivileged
   nesting decision.
+
+The run name identifies the base revision. The conformance driver copied the
+working-tree review fixes into that run, including mount-alias validation,
+anonymous-inode stdio refusal and stop-aware socket diagnostics. Its remote
+run directory was removed after the passing result. The earlier J3 run
+`20260923T094510Z-6bb5a34192ac` remains archived in the original
+`j3-*-2026-09-23-ouro-ci` evidence files; it predates these fixes.
 
 Every slice was reviewed adversarially before integration, with mutation
 testing of its enforcement points; the fixes and the decisions they forced are
@@ -61,8 +69,8 @@ limits of the mechanism are in [§10](../jail-v1.md#10-network-mediation).
 | N02 | `n02_allowed_and_denied_requests_through_the_bridge_yield_one_proxy_result_each` (live); `portable_proxy` N02 cases |
 | N03 | `n03_address_and_host_rules_hold_end_to_end` (live); `portable_network_rules` (every frozen case, the full Unicode 17.0.0 IDNA conformance file) and `portable_proxy` N03 cases |
 | N04 | `n04_bridge_death_fails_closed_and_is_recorded`, proxy death, header/saturation budgets (live); `portable_proxy` N04 cases |
-| N05 | `n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable`, `n05_same_attempt_ipc_and_scm_rights_work_and_datagram_sockets_are_refused`, `n05_a_proxy_replaced_before_the_first_connect_is_never_reached`, `n05_a_proxy_replaced_after_the_first_connect_is_never_reached`, `n05_child_path_and_mount_changes_cannot_redirect_the_bridge`; `unix_peer_linux` |
-| C01 | `conformance_j3_credentials` and `portable_launch` C01 cases; `c01_an_agent_launch_profile_stages_both_credential_modes_through_run` |
+| N05 | `n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable`, `n05_same_attempt_ipc_and_scm_rights_work_and_datagram_sockets_are_refused`, `n05_a_proxy_replaced_before_the_first_connect_is_never_reached`, `n05_a_proxy_replaced_after_the_first_connect_is_never_reached`, `n05_child_path_and_mount_changes_cannot_redirect_the_bridge`; `unix_peer_linux`; the stopped `sock_diag` dump unit test |
+| C01 | `conformance_j3_credentials` and `portable_launch` C01 cases, including `c01_bind_alias_of_writable_source_refuses`; `c01_an_agent_launch_profile_stages_both_credential_modes_through_run` |
 | C02 | `conformance_j3_credentials` and `portable_launch` C02 cases, including resumable cleanup through `gc` |
 | R05 | `conformance_j3_none`: `r05_clean_none_evidence_stays_unprotected`, `r05_same_uid_tampering_is_outside_local_evidence_assurance` |
 | R06 | `conformance_j3_none`: the five `r06_*` cases (live target escape, descendant escape, zombie detection both ways, replaced leaf) |

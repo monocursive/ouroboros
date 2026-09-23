@@ -23,6 +23,14 @@ fixed tree. The nondelegated measurement predates the review fixes; in
 particular its preferred-default receipts predate the unenforced-ceiling
 reason and wrapper note, which so far have unit-test coverage only.
 
+A later full [J3 conformance run](evidence/j3-test-log-2026-09-23-review-fixes-ouro-ci.txt),
+`20260923T123309Z-8a5ab780e283` (PASS), verifies the J2 follow-up: a real
+io_uring ring passed as stdio refuses before target execution with
+`invalid_fd`. The run copied the working-tree fixes at base revision
+`8a5ab780e283`; its [doctor report](evidence/j3-doctor-2026-09-23-review-fixes-ouro-ci.json)
+and [host manifest](evidence/j3-host-manifest-2026-09-23-review-fixes-ouro-ci.txt)
+were collected in the same delegated scope.
+
 ## Operator setup
 
 J2 consumes an existing systemd user-service delegation. The reference account
@@ -101,7 +109,7 @@ exercised through x32 and int-0x80 compat calls.
 |---|---|
 | F01–F04 | Existing `conformance_j1`, `review_linux`, filesystem mechanism/unit tests; J2 build-input fixture |
 | S01–S02 | Live raw-syscall baseline, namespace/mount families, glibc clone3 fallback and AF_UNIX fixtures in `linux_mechanisms`/`conformance_j1` |
-| S04 | Denied io_uring setup/enter/register through native, x32 and compat ABIs; descriptor closure fixtures |
+| S04 | Denied io_uring setup/enter/register through native, x32 and compat ABIs; descriptor closure fixtures; inherited io_uring stdio refusal |
 | X02–X06 | Portable/live gate fault suites, owner handoff and descriptor/argv/environment regressions; bounded stalled-backend argument delivery |
 | L01 | Wall, signal, descendant and fork-storm fixtures, BOOTTIME clock tests |
 | L02 | Kill supervisor and every runtime process helper with observation on/off; synchronized bootstrap death before release and after PDEATHSIG clearing |
