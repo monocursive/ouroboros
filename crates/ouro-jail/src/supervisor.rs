@@ -170,6 +170,14 @@ pub struct GcEntry {
     /// or `None` when there was none to act on.
     pub proxy_dir: Option<String>,
     // J3-agent end
+    // J4 W2-S begin: leftovers (§7)
+    /// The temporary files a crashed durable replacement left in the
+    /// attempt root, as gc found them under its lease, sorted.
+    pub leftover_temp_files: Vec<String>,
+    /// What gc did with them (`removed <n>`, `would_remove`,
+    /// `retained: <why>`, `failed: <why>`), or `None` when there were none.
+    pub temp_files: Option<String>,
+    // J4 W2-S end
 }
 
 // ---------------------------------------------------------------------------

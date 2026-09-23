@@ -869,16 +869,74 @@ pub fn create_exclusively_at(
 /// # Errors
 /// Returns the listing failure.
 pub fn leftover_temp_files(attempt_dir: &AttemptDir) -> std::io::Result<Vec<String>> {
-    let mut found = Vec::new();
+    leftover_temp_files_within(attempt_dir, usize::MAX).map(|listing| listing.names)
+}
+
+// J4 W2-S begin: gc's leftovers (S7: the listing is charged)
+/// [`leftover_temp_files`] reading at most `max_entries` names of the
+/// attempt root.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TempListing {
+    /// The names found, sorted.
+    pub names: Vec<String>,
+    /// Names read from the attempt root (what the listing costs).
+    pub read: usize,
+    /// Whether every name was read before the bound.
+    pub complete: bool,
+}
+
+/// [`leftover_temp_files`] within a bound of `max_entries` names read.
+///
+/// # Errors
+/// Returns the listing failure.
+pub fn leftover_temp_files_within(
+    attempt_dir: &AttemptDir,
+    max_entries: usize,
+) -> std::io::Result<TempListing> {
+    let mut names = Vec::new();
+    let mut read = 0usize;
+    let mut complete = true;
     for entry in std::fs::read_dir(attempt_dir.root())? {
+        if read == max_entries {
+            complete = false;
+            break;
+        }
+        read += 1;
         let name = entry?.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') && name.ends_with(".tmp") {
-            found.push(name);
+            names.push(name);
         }
     }
-    found.sort();
-    Ok(found)
+    names.sort();
+    Ok(TempListing {
+        names,
+        read,
+        complete,
+    })
 }
+
+/// The records a durable replacement writes directly in the attempt root.
+pub const ROOT_RECORDS: [&str; 3] = ["jail-state.json", "policy.json", "jail.json"];
+
+/// Whether `name` is exactly what [`TempWrite`] names the temporary file of
+/// one of [`ROOT_RECORDS`]: `.<record>.<uuid>.tmp`, the uuid hyphenated.
+/// Only such a name is ever removed by `gc`; anything else is reported.
+#[must_use]
+pub fn is_record_temp_name(name: &str) -> bool {
+    let Some(middle) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((record, id)) = middle.rsplit_once('.') else {
+        return false;
+    };
+    ROOT_RECORDS.contains(&record)
+        && id.len() == 36
+        && uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.hyphenated().to_string() == id)
+}
+// J4 W2-S end
 // J4-R end
 
 /// An exclusive advisory lease on `jail.lock` (§7).
@@ -1744,6 +1802,30 @@ pub fn record_cleanup_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // J4 W2-S begin
+    #[test]
+    fn only_a_temporary_name_of_a_root_record_is_ours() {
+        let id = uuid::Uuid::new_v4().to_string();
+        for record in ROOT_RECORDS {
+            assert!(
+                is_record_temp_name(&format!(".{record}.{id}.tmp")),
+                "{record}"
+            );
+        }
+        for other in [
+            format!(".trace.ndjson.{id}.tmp"),
+            format!(".jail.json.{}.tmp", id.to_uppercase()),
+            format!(".jail.json.{}.tmp", id.replace('-', "")),
+            format!("jail.json.{id}.tmp"),
+            format!(".jail.json.{id}"),
+            ".jail.json..tmp".to_owned(),
+            ".planted.tmp".to_owned(),
+        ] {
+            assert!(!is_record_temp_name(&other), "{other}");
+        }
+    }
+    // J4 W2-S end
 
     #[test]
     fn world_write_always_counts_and_no_group_write_never_does() {

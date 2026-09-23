@@ -346,9 +346,14 @@ pub struct Entry {
     pub scratch: Option<String>,
     /// The actions this pass recorded in jail state (S6), in order.
     pub recorded: Vec<String>,
-    // J4-R: slice R adds the report of leftover `.tmp` files a crashed
-    // durable replacement left in the attempt directory here (and in
-    // `main.rs`'s `gc_json`).
+    // J4 W2-S begin: leftovers
+    /// The temporary files (`.<name>.tmp`) found in the attempt root when
+    /// gc held its lease, sorted: what a crashed durable replacement left.
+    pub leftover_temp_files: Vec<String>,
+    /// What became of them: `removed`, `would_remove`, `retained: <why>` or
+    /// `failed: <why>`; `None` when there were none.
+    pub temp_files: Option<String>,
+    // J4 W2-S end
 }
 
 impl From<Report> for GcReport {
@@ -362,6 +367,8 @@ impl From<Report> for GcReport {
                     action: entry.action,
                     reason: entry.reason,
                     proxy_dir: entry.proxy_dir,
+                    leftover_temp_files: entry.leftover_temp_files,
+                    temp_files: entry.temp_files,
                 })
                 .collect(),
             dry_run: report.dry_run,
@@ -727,6 +734,10 @@ pub struct Decision {
     pub retain: Option<Retention>,
     /// What was established about the owner, for the report.
     pub owner: Option<String>,
+    /// Whether the owner was established dead: another boot, no process
+    /// with its pid, a reused pid, or an exited process (J4 wave 2: what
+    /// permits removing its leftover temporary files).
+    pub owner_dead: bool,
     /// The execution cgroup.
     pub cgroup: CgroupStep,
     /// Managed scratch.
@@ -740,14 +751,21 @@ fn retained(reason: String, failed_access: bool, owner: Option<String>) -> Next 
             failed_access,
         }),
         owner,
+        owner_dead: false,
         cgroup: CgroupStep::Nothing,
         scratch: ScratchStep::NotApplicable,
     })
 }
 
+/// The owner text of every owner [`decide`] established dead starts so.
+const OWNER_DEAD: &str = "dead: ";
+
 fn decided(owner: Option<String>, cgroup: CgroupStep, scratch: ScratchStep) -> Next {
     Next::Decided(Decision {
         retain: None,
+        owner_dead: owner
+            .as_deref()
+            .is_some_and(|owner| owner.starts_with(OWNER_DEAD)),
         owner,
         cgroup,
         scratch,
@@ -866,7 +884,7 @@ pub fn decide(facts: &Facts) -> Next {
             ScratchStep::Now("the tree ended with the boot it ran in".to_owned())
         };
         return decided(
-            Some("dead: recorded in another boot".to_owned()),
+            Some(format!("{OWNER_DEAD}recorded in another boot")),
             keep_leaf(
                 "recorded in another boot: a cgroup at that path now is not the original \
                  resource and is never touched"
@@ -899,11 +917,11 @@ pub fn decide(facts: &Facts) -> Next {
                 keep_scratch("the tree's end is not verified"),
             );
         }
-        Liveness::Gone => "dead: no process has its pid",
-        Liveness::Reused => "dead: its pid was reused (another birth time)",
-        Liveness::Exited => "dead: exited, not yet reaped",
+        Liveness::Gone => "no process has its pid",
+        Liveness::Reused => "its pid was reused (another birth time)",
+        Liveness::Exited => "exited, not yet reaped",
     };
-    let owner_text = Some(owner_text.to_owned());
+    let owner_text = Some(format!("{OWNER_DEAD}{owner_text}"));
 
     let leaf = match source {
         LeafSource::Recorded(leaf) => leaf,
@@ -1125,14 +1143,12 @@ impl Meter {
         self.charged = self.charged.saturating_add(entries).min(self.max);
     }
 
-    /// Charges a removal that was given `given` entries. `Removal` reports
-    /// what it removed, not what it visited; a completed pass visits each
-    /// entry at most twice (`cleanup`'s termination argument), so twice the
-    /// removals bounds it, and a pass that stopped is charged all it was
-    /// given.
+    /// Charges a removal that was given `given` entries: what it visited
+    /// (J4 wave 2: `Removal::visited`), and all it was given when it
+    /// stopped.
     fn charge_removal(&mut self, removal: &cleanup::Removal, given: usize) {
         self.charge(if removal.complete {
-            removal.removed.saturating_mul(2).min(given)
+            removal.visited.min(given)
         } else {
             given
         });
@@ -1391,8 +1407,34 @@ fn visit(
     if let Some(failure) = &done.failure {
         incomplete.push(format!("{display} ({failure})"));
     }
+    // J4 W2-S: what crashed durable replacements left, removed only because
+    // the owner is dead and this pass holds the lease.
+    if let Some(failure) = leftovers(&dir, decision.owner_dead, dry_run, meter, &mut entry) {
+        incomplete.push(format!("{display} ({failure})"));
+    }
+    // J4 W2-S: gc's own verification of the registered leaf (this pass's or
+    // an earlier one's) proves the tree dead for the vendor-state cleanup.
+    let gc_verified = match done.action {
+        Some("would_terminate_orphan" | "would_remove_cgroup") if dry_run => true,
+        _ => verified_by_gc(&dir),
+    };
     // J3: the dead supervisor's proxy directory, then vendor state.
-    let (action, reason) = proxy_then_resume(&dir, &display, dry_run, incomplete, &mut entry);
+    let (action, reason, visited) = proxy_then_resume(
+        &dir,
+        &display,
+        dry_run,
+        incomplete,
+        &mut entry,
+        Resumption {
+            limits: cleanup::Limits {
+                max_entries: meter.remaining(),
+                max_depth: options.max_depth,
+            },
+            gc_verified,
+        },
+    );
+    // S7: what the resumption visited is charged to this invocation.
+    meter.charge(visited);
     let (action, reason) = combine(action, reason, &done);
     entry.action = action;
     entry.reason = reason;
@@ -1747,7 +1789,8 @@ fn proxy_then_resume(
     dry_run: bool,
     incomplete: &mut Vec<String>,
     entry: &mut Entry,
-) -> (String, String) {
+    resumption: Resumption,
+) -> (String, String, usize) {
     entry.proxy_dir = match state::gc_proxy_dir(dir, dry_run) {
         Ok(outcome) => {
             if let state::ProxyDirGc::Failed(reason) = &outcome {
@@ -1763,7 +1806,15 @@ fn proxy_then_resume(
     // J3-agent end
     // J3-launch begin: §12, §14.2 — resume a pending vendor-state cleanup the
     // terminal receipt permits.
-    match cleanup::resume(dir, dry_run) {
+    // J4 W2-S: or gc's own verification of the registered leaf permits (see
+    // `cleanup::permitted`); within what is left of this invocation's bound
+    // (S7), which the caller charges with what it visited.
+    let (outcome, visited) =
+        match cleanup::resume_with(dir, dry_run, resumption.limits, resumption.gc_verified) {
+            Ok(resumed) => (Ok(resumed.outcome), resumed.visited),
+            Err(error) => (Err(error), 0),
+        };
+    let (action, reason) = match outcome {
         Ok(cleanup::Resume::NothingPending) => (
             "retained".to_owned(),
             "no vendor-state cleanup is pending; receipts, policy and trace are retained"
@@ -1792,9 +1843,125 @@ fn proxy_then_resume(
             incomplete.push(format!("{name} ({})", error.code.as_str()));
             ("skipped".to_owned(), error.message)
         }
-    }
+    };
     // J3-launch end
+    (action, reason, visited)
 }
+
+// J4 W2-S begin: leftovers and gc's verification
+/// What [`proxy_then_resume`] may spend, and what permits the resumption.
+struct Resumption {
+    /// What is left of this invocation's bound (S7).
+    limits: cleanup::Limits,
+    /// gc verified the registered leaf empty ([`verified_by_gc`]).
+    gc_verified: bool,
+}
+
+/// Whether jail state records that gc verified the registered execution
+/// leaf empty (`gc_terminated_orphan` or `gc_removed_cgroup` of that leaf).
+fn verified_by_gc(dir: &AttemptDir) -> bool {
+    let name = dir
+        .root()
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Ok(Some(state)) = read_view(&dir.state_path(), STATE_MAX, |bytes| {
+        parse_state(bytes, &name)
+    }) else {
+        return false;
+    };
+    state.leaf.as_ref().is_some_and(|registered| {
+        state
+            .gc_verified
+            .iter()
+            .any(|verified| registered.is(verified))
+    })
+}
+
+/// Lists the temporary files crashed durable replacements left in the
+/// attempt root (charged to the bound, S7), and removes those of this
+/// tool's records when the owner is dead: the caller holds the lease, so no
+/// supervisor can be writing one. Records what it removed (S6, P14).
+/// Returns a failure that leaves the cleanup incomplete.
+fn leftovers(
+    dir: &AttemptDir,
+    owner_dead: bool,
+    dry_run: bool,
+    meter: &mut Meter,
+    entry: &mut Entry,
+) -> Option<String> {
+    let listing = match state::leftover_temp_files_within(dir, meter.remaining()) {
+        Ok(listing) => listing,
+        Err(error) => {
+            let failure = format!("temporary files: the attempt root cannot be listed: {error}");
+            entry.temp_files = Some(format!("failed: {error}"));
+            return Some(failure);
+        }
+    };
+    meter.charge(listing.read);
+    entry.leftover_temp_files.clone_from(&listing.names);
+    if !listing.complete {
+        entry.temp_files =
+            Some("pending: the per-invocation entry bound ended the listing".to_owned());
+        return Some("temporary files: the listing is incomplete".to_owned());
+    }
+    if listing.names.is_empty() {
+        return None;
+    }
+    let ours: Vec<&String> = listing
+        .names
+        .iter()
+        .filter(|name| state::is_record_temp_name(name))
+        .collect();
+    if !owner_dead {
+        entry.temp_files = Some("retained: the attempt's owner is not established dead".to_owned());
+        return None;
+    }
+    if ours.is_empty() {
+        entry.temp_files =
+            Some("retained: none is a temporary file of this tool's records".to_owned());
+        return None;
+    }
+    if dry_run {
+        entry.temp_files = Some("would_remove".to_owned());
+        return None;
+    }
+    let mut removed = Vec::new();
+    for name in ours {
+        let path = dir.root().join(name);
+        // Only a regular file: a link of that name is not what a crash left.
+        let regular = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_file());
+        if !regular {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            entry.temp_files = Some(format!("failed: {name}: {error}"));
+            return Some(format!("temporary files: {name}: {error}"));
+        }
+        removed.push(name.clone());
+    }
+    if removed.is_empty() {
+        entry.temp_files =
+            Some("retained: none is a regular file of this tool's records".to_owned());
+        return None;
+    }
+    match record(
+        dir,
+        "gc_removed_temp_files",
+        serde_json::json!({ "names": removed }),
+        &mut entry.recorded,
+    ) {
+        Ok(()) => {
+            entry.temp_files = Some(format!("removed {}", removed.len()));
+            None
+        }
+        Err(failure) => {
+            entry.temp_files = Some(format!("removed; {failure}"));
+            Some(failure)
+        }
+    }
+}
+// J4 W2-S end
 
 /// The entry's action and reason: a failed gc step makes it `pending`; a gc
 /// step that did something names the action when the J3 resumption had

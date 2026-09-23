@@ -125,6 +125,11 @@ pub struct Removal {
     pub removed: usize,
     /// The most directory descriptors the traversal held at once.
     pub peak_held: usize,
+    // J4 W2-S begin: S7
+    /// Entries this pass charged against its bound (`Limits::max_entries`):
+    /// every name it read and looked at, which is what the bound counts.
+    pub visited: usize,
+    // J4 W2-S end
 }
 
 impl Removal {
@@ -134,6 +139,7 @@ impl Removal {
             reason: Some(reason.into()),
             removed,
             peak_held: 0,
+            visited: 0,
         }
     }
 }
@@ -272,6 +278,21 @@ pub fn remove_tree_at(
     expected: Option<(u64, u64)>,
     limits: Limits,
 ) -> Removal {
+    // J4 W2-S: S7 — what the pass charged against its bound, however it ends.
+    let mut budget = limits.max_entries;
+    let mut removal = remove_tree_within(anchor, name, expected, limits, &mut budget);
+    removal.visited = limits.max_entries - budget;
+    removal
+}
+
+/// [`remove_tree_at`], spending `budget`.
+fn remove_tree_within(
+    anchor: &Dir,
+    name: &Name,
+    expected: Option<(u64, u64)>,
+    limits: Limits,
+    budget: &mut usize,
+) -> Removal {
     let root_stat = match anchor.stat_at(name) {
         Ok(stat) => stat,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -280,6 +301,7 @@ pub fn remove_tree_at(
                 reason: None,
                 removed: 0,
                 peak_held: 0,
+                visited: 0,
             };
         }
         Err(error) => return Removal::stopped(io_reason("inspect", &error), 0),
@@ -303,7 +325,6 @@ pub fn remove_tree_at(
     };
     // A bound of one would hoist a directory into the directory it is in.
     let max_depth = limits.max_depth.max(2);
-    let mut budget = limits.max_entries;
     let mut removed = 0usize;
     let mut hoisted = 0u64;
     let mut stack: Vec<Frame> = vec![Frame {
@@ -334,6 +355,7 @@ pub fn remove_tree_at(
                     reason: None,
                     removed,
                     peak_held,
+                    visited: 0,
                 };
             }
             continue;
@@ -341,10 +363,10 @@ pub fn remove_tree_at(
 
         let mut descend: Option<Frame> = None;
         for entry in names {
-            if budget == 0 {
+            if *budget == 0 {
                 return Removal::stopped(REASON_BUDGET, removed);
             }
-            budget -= 1;
+            *budget -= 1;
             let stat = match top.dir.stat_at(&entry) {
                 Ok(stat) => stat,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -401,6 +423,7 @@ pub fn remove_tree_at(
         reason: Some("traversal_ended_unexpectedly".to_owned()),
         removed,
         peak_held,
+        visited: 0,
     }
 }
 
@@ -449,7 +472,7 @@ pub fn remove_vendor_state(attempt_dir: &AttemptDir, limits: Limits) -> VendorCl
             return VendorCleanup::pending(format!("state_unreadable: {}", error.code.as_str()));
         }
     };
-    let result = remove_registered(attempt_dir, registration.identity, limits);
+    let result = remove_registered(attempt_dir, registration.identity, limits, &mut 0);
     let recorded = state::record_cleanup(attempt_dir, result.status, result.reason.as_deref());
     match recorded {
         Ok(()) => result,
@@ -461,10 +484,13 @@ pub fn remove_vendor_state(attempt_dir: &AttemptDir, limits: Limits) -> VendorCl
     }
 }
 
+/// Removes the registered vendor-state directory; adds to `visited` the
+/// entries the removal charged against `limits` (S7).
 fn remove_registered(
     attempt_dir: &AttemptDir,
     identity: Option<(u64, u64)>,
     limits: Limits,
+    visited: &mut usize,
 ) -> VendorCleanup {
     let attempt = match state::open_attempt_dir(attempt_dir) {
         Ok(dir) => dir,
@@ -490,6 +516,7 @@ fn remove_registered(
         };
     };
     let removal = remove_tree_at(&attempt, &name, Some(identity), limits);
+    *visited += removal.visited;
     if !removal.complete {
         return VendorCleanup {
             status: StateCleanup::Pending,
@@ -525,10 +552,38 @@ pub fn remove_managed_dir(attempt_dir: &AttemptDir, name: &str, limits: Limits) 
     if removal.complete
         && let Err(error) = attempt.sync()
     {
-        return Removal::stopped(io_reason("sync", &error), removal.removed);
+        return Removal {
+            visited: removal.visited,
+            ..Removal::stopped(io_reason("sync", &error), removal.removed)
+        };
     }
     removal
 }
+
+// J4 W2-S begin: permitted by gc's own verification
+/// The reason recorded when no receipt proves anything and gc did not verify
+/// the registered leaf either (a crash before any terminal receipt).
+pub const REASON_NO_TERMINAL_RECEIPT: &str = "no_terminal_receipt";
+
+/// Whether the records prove that vendor state may be deleted (§12, §14.2):
+/// the receipt ([`permitted_by`]), or else `gc`'s own record that it verified
+/// the registered execution leaf empty (`gc_terminated_orphan` after
+/// `cgroup.kill`, or `gc_removed_cgroup`): the tree that could use the state
+/// is then known dead, whatever the dead supervisor's last receipt says, and
+/// even when it wrote none. Lost integrity still refuses.
+///
+/// # Errors
+/// Returns the safe reason cleanup must wait.
+pub fn permitted(receipt: Option<&Receipt>, gc_verified_leaf: bool) -> Result<(), &'static str> {
+    match receipt.map(permitted_by) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(REASON_INTEGRITY_LOST)) => Err(REASON_INTEGRITY_LOST),
+        Some(Err(_)) | None if gc_verified_leaf => Ok(()),
+        Some(Err(reason)) => Err(reason),
+        None => Err(REASON_NO_TERMINAL_RECEIPT),
+    }
+}
+// J4 W2-S end
 
 /// Whether a receipt proves that vendor state may be deleted (§12, §14.2).
 ///
@@ -602,12 +657,13 @@ fn scratch_is_managed(attempt_dir: &AttemptDir) -> bool {
 /// Resumes an interrupted vendor-state cleanup from jail state (§12, §14.2).
 ///
 /// The caller holds the attempt's lease, so no live supervisor owns it. The
-/// receipt must prove cleanup is permitted ([`permitted_by`]); the removal is
+/// records must prove cleanup is permitted ([`permitted`]); the removal is
 /// the same anchored, idempotent traversal the supervisor uses. On success the
 /// receipt is replaced with `state_cleanup = complete` at the next revision,
 /// then jail state records `complete`: a crash between the two is found and
 /// finished by the next pass, because either record still saying `pending`
-/// keeps the attempt pending.
+/// keeps the attempt pending. Without any receipt (permitted by gc's own
+/// verification), only jail state records it.
 ///
 /// For a settled attempt the supervisor's `complete` also covers managed
 /// scratch and placeholder directories, so those are removed here too, with
@@ -617,30 +673,75 @@ fn scratch_is_managed(attempt_dir: &AttemptDir) -> bool {
 /// Returns [`ErrorCode::StateWriteFailed`] when jail state or the receipt
 /// cannot be read or replaced.
 pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailError> {
+    resume_with(attempt_dir, dry_run, Limits::DEFAULT, false).map(|resumed| resumed.outcome)
+}
+
+// J4 W2-S begin: S7 and gc's verification
+/// What [`resume_with`] did, and what it spent.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Resumed {
+    /// The outcome.
+    pub outcome: Resume,
+    /// Entries the removals charged against the given bound (S7).
+    pub visited: usize,
+}
+
+/// [`resume`] within `limits` (S7: gc passes what is left of its
+/// per-invocation bound, and charges `visited` to it), and with gc's own
+/// verification of the registered leaf (`gc_verified_leaf`, see
+/// [`permitted`]).
+///
+/// # Errors
+/// As [`resume`].
+pub fn resume_with(
+    attempt_dir: &AttemptDir,
+    dry_run: bool,
+    limits: Limits,
+    gc_verified_leaf: bool,
+) -> Result<Resumed, JailError> {
+    let mut visited = 0usize;
+    let outcome = resume_within(attempt_dir, dry_run, limits, gc_verified_leaf, &mut visited)?;
+    Ok(Resumed { outcome, visited })
+}
+
+fn resume_within(
+    attempt_dir: &AttemptDir,
+    dry_run: bool,
+    limits: Limits,
+    gc_verified_leaf: bool,
+    visited: &mut usize,
+) -> Result<Resume, JailError> {
     let Some(registration) = state::vendor_registration(attempt_dir)? else {
         return Ok(Resume::NothingPending);
     };
-    let Some(mut receipt) = read_receipt(attempt_dir)? else {
-        return Ok(Resume::Retained("no_terminal_receipt".to_owned()));
-    };
+    let mut receipt = read_receipt(attempt_dir)?;
     if registration.state_cleanup == StateCleanup::Complete
-        && receipt.state_cleanup == StateCleanup::Complete
+        && receipt
+            .as_ref()
+            .is_none_or(|receipt| receipt.state_cleanup == StateCleanup::Complete)
     {
         return Ok(Resume::NothingPending);
     }
-    if let Err(reason) = permitted_by(&receipt) {
+    if let Err(reason) = permitted(receipt.as_ref(), gc_verified_leaf) {
         return Ok(Resume::Retained(reason.to_owned()));
     }
     if dry_run {
         return Ok(Resume::WouldRemove);
     }
-    let mut result = remove_registered(attempt_dir, registration.identity, Limits::DEFAULT);
+    let left = |visited: usize| Limits {
+        max_entries: limits.max_entries.saturating_sub(visited),
+        ..limits
+    };
+    let mut result = remove_registered(attempt_dir, registration.identity, limits, visited);
     if result.status == StateCleanup::Complete
-        && receipt.phase == Phase::Settled
+        && receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.phase == Phase::Settled)
         && scratch_is_managed(attempt_dir)
     {
         for name in ["scratch", "placeholders"] {
-            let removal = remove_managed_dir(attempt_dir, name, Limits::DEFAULT);
+            let removal = remove_managed_dir(attempt_dir, name, left(*visited));
+            *visited += removal.visited;
             if !removal.complete {
                 result = VendorCleanup {
                     status: StateCleanup::Pending,
@@ -651,6 +752,7 @@ pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailErr
             }
         }
     }
+    // J4 W2-S end
     if result.status != StateCleanup::Complete {
         state::record_cleanup_at(
             state::Site::GcResume,
@@ -662,12 +764,14 @@ pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailErr
             result.reason.unwrap_or_else(|| "unknown".to_owned()),
         ));
     }
-    if receipt.state_cleanup != StateCleanup::Complete {
+    if let Some(receipt) = receipt.as_mut()
+        && receipt.state_cleanup != StateCleanup::Complete
+    {
         receipt.state_cleanup = StateCleanup::Complete;
         receipt.cleanup_error = None;
         receipt.revision += 1;
         receipt.updated_at = crate::records::rfc3339_utc(std::time::SystemTime::now());
-        let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
+        let bytes = serde_json::to_vec_pretty(&*receipt).map_err(|error| {
             JailError::new(
                 ErrorCode::InternalError,
                 ErrorStage::Reconciling,
@@ -1189,6 +1293,25 @@ mod tests {
         receipt.phase = Phase::Prepared;
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
     }
+
+    // J4 W2-S begin
+    #[test]
+    fn gcs_verification_of_the_leaf_is_proof_enough_except_after_lost_integrity() {
+        let mut receipt = sample_receipt();
+        receipt.phase = Phase::Enforced;
+        receipt.lifetime.tree_empty = None;
+        receipt.lifetime.integrity = "verified".into();
+        assert_eq!(
+            permitted(Some(&receipt), false),
+            Err(REASON_TREE_UNVERIFIED)
+        );
+        assert_eq!(permitted(Some(&receipt), true), Ok(()));
+        assert_eq!(permitted(None, false), Err(REASON_NO_TERMINAL_RECEIPT));
+        assert_eq!(permitted(None, true), Ok(()));
+        receipt.lifetime.integrity = "lost".into();
+        assert_eq!(permitted(Some(&receipt), true), Err(REASON_INTEGRITY_LOST));
+    }
+    // J4 W2-S end
 
     fn sample_receipt() -> Receipt {
         use crate::observer::CoverageSummary;
