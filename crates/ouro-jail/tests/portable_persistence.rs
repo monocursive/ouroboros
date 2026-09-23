@@ -698,7 +698,7 @@ impl Fixture {
         io: Arc<dyn PersistIo + Send + Sync>,
         control: Control,
     ) -> Outcome {
-        let (mut reader, writer) = std::io::pipe().unwrap();
+        let (reader, writer) = std::io::pipe().unwrap();
         if control == Control::FullNeverRead || matches!(control, Control::FullReadAfter(_)) {
             fill(&writer);
         }
@@ -716,8 +716,15 @@ impl Fixture {
         // is empty: a run that refused before it adopted the descriptor never
         // closes it, and everything the run will ever write is in the pipe by
         // the time it returns (its final drain is inside the run).
+        // A reader that never reads is still there: the pipe stays full and
+        // open (backpressure), rather than closed (a broken pipe).
+        let (reader, kept_reader) = if drain.is_some() {
+            (Some(reader), None)
+        } else {
+            (None, Some(reader))
+        };
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let collector = drain.map(|delay| {
+        let collector = drain.zip(reader).map(|(delay, mut reader)| {
             use std::os::fd::AsRawFd as _;
             let done = Arc::clone(&done);
             std::thread::spawn(move || {
@@ -758,6 +765,7 @@ impl Fixture {
             Some(handle) => handle.join().unwrap(),
             None => (Vec::new(), Vec::new()),
         };
+        drop(kept_reader);
         let mut frames = Vec::new();
         let mut arrivals = Vec::new();
         for (line, at) in lines {

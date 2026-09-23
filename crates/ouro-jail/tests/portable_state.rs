@@ -184,3 +184,35 @@ fn the_attempt_directory_has_the_layout_of_section_seven() {
         assert_eq!(mode, 0o700, "{} is private", path.display());
     }
 }
+
+// J4-R: §7's claim is an exclusive publication of a complete file.
+#[test]
+fn j4_r02_an_exclusive_publication_never_replaces_an_existing_file() {
+    let temp = common::private_tempdir();
+    let data = private_dir(temp.path(), "data");
+    let target = data.join("jail-state.json");
+    assert_eq!(
+        state::create_exclusively_at(state::Site::Claim, &target, b"{\"first\":true}").unwrap(),
+        state::Published::Created
+    );
+    assert_eq!(
+        state::create_exclusively_at(state::Site::Claim, &target, b"{\"second\":true}").unwrap(),
+        state::Published::Exists,
+        "a second claim is refused"
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"{\"first\":true}",
+        "the existing claim is untouched"
+    );
+    let leftover: Vec<String> = std::fs::read_dir(&data)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "no temporary file is left: {leftover:?}"
+    );
+}

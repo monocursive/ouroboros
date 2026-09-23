@@ -608,6 +608,9 @@ fn r01_the_semantic_checks_reject_what_the_schema_accepts() {
             record["policy"]["grants"][0]["value"]["data"] = "L3dvcms=".into();
         }),
         ("noncanonical base64", &native, |record| {
+            // Nonzero trailing bits: the schema's pattern accepts it; Python's
+            // lenient decoder needs the re-encoding comparison to reject it,
+            // the strict Rust decoder already refuses it.
             record["policy"]["grants"][0]["value"]["data"] = "L3dvcmsv/x==".into();
         }),
         ("a NUL in a native string", &native, |record| {
