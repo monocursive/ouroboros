@@ -6,9 +6,16 @@
 //! a one-second no-progress deadline.
 //!
 //! Every failure here is evidence loss, never silence: the sink records the
-//! reason and the caller decides what strict or best-effort evidence mode
-//! means. The external writer keeps a byte queue, so a partially written frame
-//! resumes at its own offset and is never re-sent as a second event.
+//! reason and counts every frame it could not deliver, and the caller decides
+//! what strict or best-effort evidence mode means. After a loss a sink keeps
+//! a prefix of the stream and accepts only reserve notes (the gap and receipt
+//! notes), so a reader never finds ordinary frames after a silent hole.
+//!
+//! The external writer queues whole frames and resumes a partially written
+//! one at its own offset, never re-sending it as a second event. The local
+//! writer truncates a failed write back to the last frame boundary, so a torn
+//! frame is never followed by another. [`read_frames`] recognises what is
+//! left at readback.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -148,13 +155,58 @@ pub trait TraceSink {
     fn loss(&self) -> Option<&Loss>;
 }
 
+/// The file operations the local sink needs.
+///
+/// Both take explicit offsets, so a failed write never moves a file position
+/// that the next frame would inherit. Separate from [`File`] so a unit test
+/// can make the truncation itself fail.
+trait LocalFile: Send + std::fmt::Debug {
+    /// Writes all of `bytes` at `offset`, or fails having written a prefix.
+    fn write_at(&mut self, bytes: &[u8], offset: u64) -> std::io::Result<()>;
+    /// Sets the file length to `len`.
+    fn truncate(&mut self, len: u64) -> std::io::Result<()>;
+}
+
+impl LocalFile for File {
+    fn write_at(&mut self, bytes: &[u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::write_all_at(self, bytes, offset)
+    }
+    fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_len(len)
+    }
+}
+
+/// Where a local sink stands after a loss (§13.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileState {
+    /// Every frame within budget is written.
+    Open,
+    /// Evidence was lost. Ordinary frames are refused, so the file stays a
+    /// prefix of the stream; reserve notes (the gap and receipt notes) are
+    /// still written. This is "best-effort keeps a prefix and coalesced gap
+    /// summaries".
+    Lost,
+    /// Nothing more is written: the reserve is exhausted or a reserve note
+    /// failed, so the trace stays visibly incomplete (its last frame is not
+    /// the final receipt note), or a failed write could not be truncated back
+    /// to its frame boundary, so its torn bytes stay the last line.
+    Closed,
+}
+
 /// The bounded local `trace.ndjson` sink (§13.3).
+///
+/// A write that fails part-way is truncated back to the last frame boundary,
+/// so a torn frame is never followed by another one; when even that
+/// truncation fails, the sink closes and the torn bytes stay the last line,
+/// which readback recognises as visibly incomplete.
 #[derive(Debug)]
 pub struct FileSink {
-    file: File,
+    file: Box<dyn LocalFile>,
+    /// Bytes of complete frames: the offset of the next frame.
     written: u64,
     cap: u64,
     reserve: u64,
+    state: FileState,
     loss: Option<Loss>,
     lost_frames: u64,
 }
@@ -172,36 +224,72 @@ impl FileSink {
     /// [`LOCAL_CAP`] and [`LOCAL_RESERVE`] are pinned separately by a test.
     #[must_use]
     pub fn with_bounds(file: File, cap: u64, reserve: u64) -> Self {
+        Self::over(Box::new(file), cap, reserve)
+    }
+
+    fn over(file: Box<dyn LocalFile>, cap: u64, reserve: u64) -> Self {
         FileSink {
             file,
             written: 0,
             cap,
             reserve,
+            state: FileState::Open,
             loss: None,
             lost_frames: 0,
         }
     }
 
-    /// Bytes written so far.
+    /// Bytes of complete frames written so far.
     #[must_use]
     pub fn written(&self) -> u64 {
         self.written
     }
 
-    fn record_loss(&mut self, reason: &str) -> JailError {
+    /// Records one more lost frame. The first reason is kept: later losses
+    /// follow from it, and a later message would hide its cause.
+    fn lose(&mut self, reason: &str) -> JailError {
         self.lost_frames += 1;
+        let first = self
+            .loss
+            .as_ref()
+            .map_or_else(|| reason.to_owned(), |loss| loss.reason.clone());
         self.loss = Some(Loss {
-            reason: reason.to_owned(),
+            reason: first,
             lost_frames: Some(self.lost_frames),
         });
         evidence_lost(reason)
+    }
+
+    /// Latches at least `state`; a sink never reopens.
+    fn latch(&mut self, state: FileState) {
+        self.state = match (self.state, state) {
+            (FileState::Closed, _) | (_, FileState::Closed) => FileState::Closed,
+            (FileState::Lost, _) | (_, FileState::Lost) => FileState::Lost,
+            _ => FileState::Open,
+        };
     }
 }
 
 impl TraceSink for FileSink {
     fn write_frame(&mut self, frame: &[u8], priority: Priority) -> Result<(), JailError> {
+        match (self.state, priority) {
+            (FileState::Closed, _) => {
+                return Err(self.lose("the local trace is closed after an earlier loss"));
+            }
+            (FileState::Lost, Priority::Normal) => {
+                return Err(self.lose("the local trace keeps only its prefix after a loss"));
+            }
+            _ => {}
+        }
+        // A note that cannot be written closes the sink, so the notes after
+        // a loss stay a prefix too; an ordinary frame only marks it lost.
+        let on_failure = match priority {
+            Priority::Normal => FileState::Lost,
+            Priority::Reserve => FileState::Closed,
+        };
         if frame.len() > EVENT_MAX {
-            return Err(self.record_loss("serialized event exceeds the 64 KiB maximum"));
+            self.latch(on_failure);
+            return Err(self.lose("serialized event exceeds the 64 KiB maximum"));
         }
         let needed = frame.len() as u64 + 1;
         let budget = match priority {
@@ -209,7 +297,8 @@ impl TraceSink for FileSink {
             Priority::Reserve => self.cap,
         };
         if self.written + needed > budget {
-            return Err(self.record_loss(match priority {
+            self.latch(on_failure);
+            return Err(self.lose(match priority {
                 Priority::Normal => "local trace payload budget is exhausted",
                 Priority::Reserve => "local trace reserve is exhausted",
             }));
@@ -217,14 +306,25 @@ impl TraceSink for FileSink {
         let mut bytes = Vec::with_capacity(frame.len() + 1);
         bytes.extend_from_slice(frame);
         bytes.push(b'\n');
-        // The budget is charged before the write: a `write_all` that fails
-        // part-way has still consumed file space, and a cap that forgot those
-        // bytes would let a failing sink grow past 64 MiB.
-        self.written += needed;
-        if let Err(error) = self.file.write_all(&bytes) {
-            return Err(self.record_loss(&format!("local trace write failed: {error}")));
+        match self.file.write_at(&bytes, self.written) {
+            Ok(()) => {
+                self.written += needed;
+                Ok(())
+            }
+            Err(error) => {
+                // A short write followed by a failure (disk full, EFBIG) left
+                // part of this frame in the file. Cut it off, so the file ends
+                // on the last frame boundary; if that fails too, write nothing
+                // more, so the torn bytes stay the visibly incomplete last line.
+                // The cap stays bounded either way: `written` never advances
+                // past a frame that did not land.
+                match self.file.truncate(self.written) {
+                    Ok(()) => self.latch(on_failure),
+                    Err(_) => self.latch(FileState::Closed),
+                }
+                Err(self.lose(&format!("local trace write failed: {error}")))
+            }
         }
-        Ok(())
     }
 
     fn loss(&self) -> Option<&Loss> {
@@ -232,17 +332,52 @@ impl TraceSink for FileSink {
     }
 }
 
+/// Reserve inside the external queue for the final gap and receipt notes.
+///
+/// §13.3 bounds the external queue at 4 MiB and reserves 256 KiB of the local
+/// cap for "bounded final gap/receipt notes". The same reserve inside the
+/// external bound means the note that records a transport loss, and the final
+/// receipt note, can still reach a consumer that resumes reading, while the
+/// queue as a whole never exceeds its 4 MiB.
+pub const EXTERNAL_RESERVE: usize = 256 * 1024;
+
+/// Where an external sink stands (§13.3: "best-effort can continue with the
+/// sink marked lost").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FdState {
+    /// Every frame is queued and delivered.
+    Open,
+    /// Evidence was lost. Only reserve notes are still queued, so what the
+    /// consumer reads stays a prefix of the stream followed by final notes,
+    /// never a stream with a silent hole in the middle.
+    Lost,
+    /// The descriptor failed (a consumer that closed its end, or any other
+    /// write error). Nothing more can be delivered; every frame is counted.
+    Broken,
+}
+
 /// The external `--trace-fd` sink (§13.3).
 ///
-/// Nonblocking with a byte queue: a write that would block is queued, and the
-/// queue drains on later writes and on [`FdSink::flush_now`].
+/// Nonblocking, with a queue of whole frames: a write that would block leaves
+/// the frame queued, and a frame the pipe took in part stays at the front with
+/// its written offset. A flush writes straight from the front frame at that
+/// offset, so its cost is one `write` per frame it moves, whatever the queue
+/// holds, and a partially written frame is resumed, never re-sent.
 #[derive(Debug)]
 pub struct FdSink {
     file: File,
-    queue: VecDeque<u8>,
+    /// Whole frames, each ending in its LF; the front one may be partly
+    /// written.
+    frames: VecDeque<Vec<u8>>,
+    /// Bytes of the front frame already written.
+    front_written: usize,
+    /// Bytes still to write, over all queued frames.
+    queued: usize,
     queue_max: usize,
+    reserve: usize,
     no_progress: Duration,
     last_progress: Instant,
+    state: FdState,
     loss: Option<Loss>,
     lost_frames: u64,
 }
@@ -264,19 +399,25 @@ impl FdSink {
         set_nonblocking(file.as_raw_fd())?;
         Ok(FdSink {
             file,
-            queue: VecDeque::new(),
+            frames: VecDeque::new(),
+            front_written: 0,
+            queued: 0,
             queue_max: EXTERNAL_QUEUE_MAX,
+            reserve: EXTERNAL_RESERVE,
             no_progress: EXTERNAL_NO_PROGRESS,
             last_progress: Instant::now(),
+            state: FdState::Open,
             loss: None,
             lost_frames: 0,
         })
     }
 
-    /// Overrides the bounds, for tests that must reach them quickly.
+    /// Overrides the bounds, for tests that must reach them quickly. The
+    /// reserve shrinks with the queue: at most a quarter of it.
     #[must_use]
     pub fn with_bounds(mut self, queue_max: usize, no_progress: Duration) -> Self {
         self.queue_max = queue_max;
+        self.reserve = EXTERNAL_RESERVE.min(queue_max / 4);
         self.no_progress = no_progress;
         self
     }
@@ -284,71 +425,111 @@ impl FdSink {
     /// Bytes currently waiting in the queue.
     #[must_use]
     pub fn queued(&self) -> usize {
-        self.queue.len()
+        self.queued
     }
 
     /// Drains what the descriptor will accept right now.
     ///
     /// # Errors
-    /// Returns [`ErrorCode::EvidenceLost`] on a broken pipe or when the queue
-    /// has made no progress for the no-progress deadline.
+    /// Returns [`ErrorCode::EvidenceLost`] when this call records a loss: a
+    /// write error (a broken pipe included), or a queue that has made no
+    /// progress for the no-progress deadline. A loss already recorded is not
+    /// reported again; [`TraceSink::loss`] keeps it.
     pub fn flush_now(&mut self) -> Result<(), JailError> {
-        while !self.queue.is_empty() {
-            let (front, _) = self.queue.as_slices();
-            let chunk = front.to_vec();
-            match self.file.write(&chunk) {
+        while let Some(front) = self.frames.front() {
+            let front_len = front.len();
+            match (&self.file).write(&front[self.front_written..]) {
                 Ok(0) => break,
                 Ok(written) => {
-                    self.queue.drain(..written);
+                    self.front_written += written;
+                    self.queued -= written;
                     self.last_progress = Instant::now();
+                    if self.front_written == front_len {
+                        self.frames.pop_front();
+                        self.front_written = 0;
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => {
-                    return Err(self.record_loss(&format!("trace fd write failed: {error}")));
+                    return Err(self.break_down(&format!("trace fd write failed: {error}")));
                 }
             }
         }
-        if !self.queue.is_empty() && self.last_progress.elapsed() > self.no_progress {
-            return Err(self.record_loss("trace fd made no progress within its deadline"));
+        if self.state == FdState::Open
+            && !self.frames.is_empty()
+            && self.last_progress.elapsed() > self.no_progress
+        {
+            self.state = FdState::Lost;
+            return Err(self.lose("trace fd made no progress within its deadline", 0));
         }
         Ok(())
     }
 
     /// Terminal drain, bounded by the no-progress deadline (§13.3).
     ///
-    /// Waits for the external consumer to accept the queued bytes, records
-    /// anything still undelivered when the budget ends, and never blocks the
-    /// supervisor past the deadline. Called once at settlement; after it, the
-    /// queue is either empty or counted as evidence loss.
+    /// Waits for the external consumer to accept the queued frames, and
+    /// counts whatever is still undelivered when the budget ends as lost
+    /// instead of dropping it when the descriptor closes. A consumer that
+    /// already ran out its deadline without resuming gets no second one, so
+    /// a saturated trace never delays settlement by more than one deadline.
+    /// After it, the queue is empty: delivered or counted.
     pub fn drain_final(&mut self) {
-        if self.queue.is_empty() {
+        if self.frames.is_empty() {
             return;
         }
-        let deadline = Instant::now() + self.no_progress;
-        while !self.queue.is_empty() {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
-            wait_writable(self.file.as_raw_fd(), remaining);
-            // A hard write failure is recorded inside flush_now; a slow but
-            // progressing consumer keeps last_progress fresh, and the loop's
-            // overall deadline bounds the total wait.
-            self.last_progress = Instant::now();
-            if self.flush_now().is_err() {
-                break;
+        let stalled =
+            self.state == FdState::Lost && self.last_progress.elapsed() > self.no_progress;
+        if self.state != FdState::Broken && !stalled {
+            let deadline = Instant::now() + self.no_progress;
+            while !self.frames.is_empty() && self.state != FdState::Broken {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                wait_writable(self.file.as_raw_fd(), remaining);
+                // A loss found here is recorded by flush_now itself; the
+                // loop's own deadline bounds the wait either way.
+                let _ = self.flush_now();
             }
         }
-        if !self.queue.is_empty() {
-            let _ =
-                self.record_loss("trace fd could not deliver its queued frames before settlement");
+        if !self.frames.is_empty() {
+            let undelivered = self.frames.len() as u64;
+            self.clear_queue();
+            if self.state == FdState::Open {
+                self.state = FdState::Lost;
+            }
+            let _ = self.lose(
+                "trace fd could not deliver its queued frames before settlement",
+                undelivered,
+            );
         }
     }
 
-    fn record_loss(&mut self, reason: &str) -> JailError {
-        self.lost_frames += 1;
+    fn clear_queue(&mut self) {
+        self.frames.clear();
+        self.front_written = 0;
+        self.queued = 0;
+    }
+
+    /// The descriptor failed: every queued frame, a partly written one
+    /// included, is lost, and nothing more will be written.
+    fn break_down(&mut self, reason: &str) -> JailError {
+        let undelivered = self.frames.len() as u64;
+        self.clear_queue();
+        self.state = FdState::Broken;
+        self.lose(reason, undelivered)
+    }
+
+    /// Records `frames` more lost frames. The first reason is kept: later
+    /// losses follow from it, and a later message would hide its cause.
+    fn lose(&mut self, reason: &str, frames: u64) -> JailError {
+        self.lost_frames += frames;
+        let first = self
+            .loss
+            .as_ref()
+            .map_or_else(|| reason.to_owned(), |loss| loss.reason.clone());
         self.loss = Some(Loss {
-            reason: reason.to_owned(),
+            reason: first,
             lost_frames: Some(self.lost_frames),
         });
         evidence_lost(reason)
@@ -356,18 +537,46 @@ impl FdSink {
 }
 
 impl TraceSink for FdSink {
-    fn write_frame(&mut self, frame: &[u8], _priority: Priority) -> Result<(), JailError> {
+    fn write_frame(&mut self, frame: &[u8], priority: Priority) -> Result<(), JailError> {
         if frame.len() > EVENT_MAX {
-            return Err(self.record_loss("serialized event exceeds the 64 KiB maximum"));
+            if self.state == FdState::Open {
+                self.state = FdState::Lost;
+            }
+            return Err(self.lose("serialized event exceeds the 64 KiB maximum", 1));
         }
-        if self.queue.len() + frame.len() + 1 > self.queue_max {
-            return Err(self.record_loss("trace fd queue overflowed its 4 MiB bound"));
+        match (self.state, priority) {
+            (FdState::Broken, _) => {
+                return Err(self.lose("the trace fd consumer is gone", 1));
+            }
+            (FdState::Lost, Priority::Normal) => {
+                return Err(self.lose("the trace fd sink is marked lost", 1));
+            }
+            _ => {}
         }
-        if self.queue.is_empty() {
+        let budget = match priority {
+            Priority::Normal => self.queue_max.saturating_sub(self.reserve),
+            Priority::Reserve => self.queue_max,
+        };
+        if self.queued + frame.len() + 1 > budget {
+            if self.state == FdState::Open {
+                self.state = FdState::Lost;
+            }
+            return Err(self.lose(
+                match priority {
+                    Priority::Normal => "trace fd queue overflowed its 4 MiB bound",
+                    Priority::Reserve => "trace fd queue reserve is exhausted",
+                },
+                1,
+            ));
+        }
+        if self.frames.is_empty() {
             self.last_progress = Instant::now();
         }
-        self.queue.extend(frame.iter().copied());
-        self.queue.push_back(b'\n');
+        let mut owned = Vec::with_capacity(frame.len() + 1);
+        owned.extend_from_slice(frame);
+        owned.push(b'\n');
+        self.queued += owned.len();
+        self.frames.push_back(owned);
         self.flush_now()
     }
 
@@ -476,6 +685,135 @@ mod tests {
             2,
             "only the two accepted frames reached the file"
         );
+    }
+
+    /// A file whose writes stop at `limit` bytes, like `RLIMIT_FSIZE` or a
+    /// full disk, and whose truncation can be made to fail.
+    #[derive(Debug, Default)]
+    struct Scripted {
+        data: Vec<u8>,
+        limit: usize,
+        writes: usize,
+        truncate_fails: bool,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct Shared(Arc<Mutex<Scripted>>);
+
+    impl LocalFile for Shared {
+        fn write_at(&mut self, bytes: &[u8], offset: u64) -> std::io::Result<()> {
+            let mut file = self.0.lock().unwrap();
+            file.writes += 1;
+            let offset = usize::try_from(offset).unwrap();
+            let len = offset.max(file.data.len());
+            file.data.resize(len, 0);
+            let room = file.limit.saturating_sub(offset);
+            let taken = bytes.len().min(room);
+            file.data.truncate(offset);
+            file.data.extend_from_slice(&bytes[..taken]);
+            if taken < bytes.len() {
+                return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
+            }
+            Ok(())
+        }
+        fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+            let mut file = self.0.lock().unwrap();
+            if file.truncate_fails {
+                return Err(std::io::Error::from_raw_os_error(libc::EIO));
+            }
+            file.data.truncate(usize::try_from(len).unwrap());
+            Ok(())
+        }
+    }
+
+    fn scripted(limit: usize, truncate_fails: bool) -> (Shared, FileSink) {
+        let file = Shared(Arc::new(Mutex::new(Scripted {
+            limit,
+            truncate_fails,
+            ..Scripted::default()
+        })));
+        let sink = FileSink::over(Box::new(file.clone()), LOCAL_CAP, LOCAL_RESERVE);
+        (file, sink)
+    }
+
+    fn frame(index: u8) -> Vec<u8> {
+        let mut frame = format!("{{\"seq\":{index},\"pad\":\"").into_bytes();
+        frame.resize(148, b'x');
+        frame.extend(b"\"}");
+        frame
+    }
+
+    #[test]
+    fn a_failed_write_is_cut_back_to_its_frame_boundary() {
+        let (file, mut sink) = scripted(500, false);
+        for index in 0..3 {
+            sink.write_frame(&frame(index), Priority::Normal).unwrap();
+        }
+        // The fourth frame is written in part, then the file refuses more.
+        assert!(sink.write_frame(&frame(3), Priority::Normal).is_err());
+        assert_eq!(
+            file.0.lock().unwrap().data.len(),
+            453,
+            "the torn bytes are gone"
+        );
+        assert!(sink.write_frame(&frame(4), Priority::Normal).is_err());
+        file.0.lock().unwrap().limit = 10_000;
+        sink.write_frame(&frame(5), Priority::Reserve)
+            .expect("a note after the loss lands on the frame boundary");
+        let data = file.0.lock().unwrap().data.clone();
+        let readback = read_frames(&data);
+        assert_eq!(readback.state, TraceState::Complete);
+        assert_eq!(readback.frames.len(), 4);
+        assert_eq!(sink.loss().unwrap().lost_frames, Some(2));
+    }
+
+    #[test]
+    fn a_failed_write_that_cannot_be_cut_back_closes_the_sink() {
+        let (file, mut sink) = scripted(500, true);
+        for index in 0..3 {
+            sink.write_frame(&frame(index), Priority::Normal).unwrap();
+        }
+        assert!(sink.write_frame(&frame(3), Priority::Normal).is_err());
+        file.0.lock().unwrap().limit = 10_000;
+        let writes = file.0.lock().unwrap().writes;
+        assert!(
+            sink.write_frame(&frame(5), Priority::Reserve).is_err(),
+            "nothing may follow torn bytes that could not be removed"
+        );
+        assert_eq!(
+            file.0.lock().unwrap().writes,
+            writes,
+            "a closed sink does not even try to write"
+        );
+        let data = file.0.lock().unwrap().data.clone();
+        assert_eq!(data.len(), 500);
+        let readback = read_frames(&data);
+        assert_eq!(
+            readback.state,
+            TraceState::Incomplete,
+            "the torn frame stays the visibly incomplete last line"
+        );
+        assert_eq!(readback.frames.len(), 3);
+        assert_eq!(sink.loss().unwrap().lost_frames, Some(2));
+    }
+
+    #[test]
+    fn an_exhausted_reserve_closes_the_sink() {
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        let handle = file.reopen().expect("a writable handle");
+        let mut sink = FileSink::with_bounds(handle, 420, 250);
+        sink.write_frame(&frame(0), Priority::Normal).unwrap();
+        assert!(sink.write_frame(&frame(1), Priority::Normal).is_err());
+        sink.write_frame(&frame(2), Priority::Reserve).unwrap();
+        // 302 of 420 bytes are used; this note does not fit.
+        assert!(sink.write_frame(&frame(3), Priority::Reserve).is_err());
+        // A smaller note would, but it would follow a missing one.
+        assert!(
+            sink.write_frame(b"{\"n\":1}", Priority::Reserve).is_err(),
+            "after the reserve is exhausted the trace stays visibly incomplete"
+        );
+        assert_eq!(sink.written(), 302);
+        assert_eq!(sink.loss().unwrap().lost_frames, Some(3));
     }
 
     #[test]

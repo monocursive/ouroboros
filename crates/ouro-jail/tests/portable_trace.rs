@@ -17,14 +17,34 @@ use std::time::Duration;
 use ouro_jail::records::ErrorCode;
 use ouro_jail::trace::{EXTERNAL_NO_PROGRESS, EXTERNAL_QUEUE_MAX, FdSink, Priority, TraceSink};
 
+/// Serialises every test here that creates a pipe or spawns a process.
+///
+/// Measured on macOS 27 (a standalone loop of 3000 pipes beside a thread that
+/// spawns children, with pipe creation and spawning under one lock): a child
+/// can still hold a close-on-exec pipe end that existed while it was spawned,
+/// for a moment after `spawn` returns. A test that closes its reader to play
+/// a consumer that left then sees its write succeed about once per concurrent
+/// spawn. Running these tests one at a time removes the overlap.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn spawn(command: &mut Command) -> Child {
+    command.spawn().expect("the helper program is available")
+}
+
 /// A child that never reads its stdin, so the pipe fills and stays full.
 fn blocked_reader() -> (Child, FdSink) {
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg("exec sleep 30")
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("/bin/sh is available");
+    let mut child = spawn(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exec sleep 30")
+            .stdin(Stdio::piped()),
+    );
     let stdin = child.stdin.take().expect("a piped stdin");
     let fd = stdin.into_raw_fd();
     // SAFETY: the descriptor came from this process's own `Stdio::piped`
@@ -39,11 +59,12 @@ fn frame(index: usize) -> Vec<u8> {
 
 #[test]
 fn frames_reach_a_draining_reader_in_order_and_exactly_once() {
-    let mut child = Command::new("/bin/cat")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("/bin/cat is available");
+    let _serial = serial();
+    let mut child = spawn(
+        Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped()),
+    );
     let stdin = child.stdin.take().expect("a piped stdin");
     let fd = stdin.into_raw_fd();
     // SAFETY: as above, the sink is the only owner of this descriptor.
@@ -79,6 +100,7 @@ fn frames_reach_a_draining_reader_in_order_and_exactly_once() {
 
 #[test]
 fn a_full_pipe_queues_and_the_queue_bound_is_evidence_loss() {
+    let _serial = serial();
     let (mut child, mut sink) = blocked_reader();
     let payload = vec![b'q'; 4096];
     let mut queued_after_first_block = None;
@@ -119,6 +141,7 @@ fn a_full_pipe_queues_and_the_queue_bound_is_evidence_loss() {
 
 #[test]
 fn no_progress_within_the_deadline_is_evidence_loss() {
+    let _serial = serial();
     let (mut child, mut sink) = blocked_reader();
     // Fill the pipe so that nothing can drain while the reader sleeps.
     let payload = vec![b'p'; 8192];
@@ -152,12 +175,13 @@ fn no_progress_within_the_deadline_is_evidence_loss() {
 
 #[test]
 fn a_closed_reader_is_evidence_loss_rather_than_a_signal() {
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg("exit 0")
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("/bin/sh is available");
+    let _serial = serial();
+    let mut child = spawn(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::piped()),
+    );
     let stdin = child.stdin.take().expect("a piped stdin");
     let fd = stdin.into_raw_fd();
     // SAFETY: the sink is the only owner of this descriptor.
@@ -262,4 +286,440 @@ fn j4_s8_the_last_receipt_note_is_read_only_from_a_complete_trace() {
     // A torn tail after the note: the note is not the last line.
     bytes.extend(b"{\"source\":");
     assert_eq!(read_frames(&bytes).last_receipt_note(), None);
+}
+
+// ---------------------------------------------------------------------------
+// R03 (trace half): partial writes, a consumer that leaves, saturation.
+// ---------------------------------------------------------------------------
+
+/// A sink over a fresh pipe whose read end the test holds.
+fn pipe_sink() -> (std::io::PipeReader, FdSink) {
+    use std::os::fd::{IntoRawFd as _, OwnedFd};
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    let fd = OwnedFd::from(writer).into_raw_fd();
+    // SAFETY: the write end was just created here and handed over whole.
+    let sink = unsafe { FdSink::from_raw_fd(fd) }.expect("the pipe can be made nonblocking");
+    (reader, sink)
+}
+
+/// A JSON frame of exactly `len` bytes carrying its index.
+fn sized_frame(index: usize, len: usize) -> Vec<u8> {
+    let head = format!("{{\"seq\":{index},\"pad\":\"");
+    let pad = len - head.len() - 2;
+    let mut frame = head.into_bytes();
+    frame.extend(std::iter::repeat_n(b'x', pad));
+    frame.extend(b"\"}");
+    assert_eq!(frame.len(), len);
+    frame
+}
+
+/// Read what the pipe holds right now, without blocking.
+fn read_available(reader: &mut std::io::PipeReader) -> Vec<u8> {
+    use std::os::fd::AsRawFd as _;
+    ouro_jail::trace::set_nonblocking(reader.as_raw_fd()).expect("nonblocking reader");
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 65536];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return out,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return out,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => panic!("the test's reader failed: {error}"),
+        }
+    }
+}
+
+#[test]
+fn j4_r03_a_partial_write_resumes_at_its_offset_and_never_repeats_a_frame() {
+    let _serial = serial();
+    use ouro_jail::trace::{TraceState, read_frames};
+
+    let (mut reader, sink) = pipe_sink();
+    let mut sink = sink.with_bounds(EXTERNAL_QUEUE_MAX, Duration::from_secs(30));
+    // Frames above PIPE_BUF, so a nonblocking write into a pipe with less room
+    // than a frame is accepted in part rather than refused whole.
+    let len = 10_000;
+    let mut sent = Vec::new();
+    while sink.queued() % (len + 1) == 0 {
+        assert!(sent.len() < 64, "the pipe never took part of a frame");
+        let frame = sized_frame(sent.len(), len);
+        sink.write_frame(&frame, Priority::Normal)
+            .expect("a full pipe queues, it does not lose");
+        sent.push(frame);
+    }
+    // The front frame is now partly in the pipe; queue two more behind it.
+    for _ in 0..2 {
+        let frame = sized_frame(sent.len(), len);
+        sink.write_frame(&frame, Priority::Normal)
+            .expect("still within the queue bound");
+        sent.push(frame);
+    }
+    let consumer = std::thread::spawn(move || {
+        let mut received = Vec::new();
+        reader
+            .read_to_end(&mut received)
+            .expect("the consumer drains");
+        received
+    });
+    sink.finish();
+    assert_eq!(sink.queued(), 0, "the drain delivered everything");
+    assert!(
+        sink.loss().is_none(),
+        "a consumer that drains loses nothing"
+    );
+    drop(sink);
+    let received = consumer.join().expect("the consumer thread");
+
+    let mut expected = Vec::new();
+    for frame in &sent {
+        expected.extend_from_slice(frame);
+        expected.push(b'\n');
+    }
+    assert_eq!(received.len(), expected.len(), "no byte repeated or lost");
+    assert!(
+        received == expected,
+        "every frame arrived once, in order, and the partly written one resumed at its offset"
+    );
+    let readback = read_frames(&received);
+    assert_eq!(readback.state, TraceState::Complete);
+    let seqs: Vec<u64> = readback
+        .frames
+        .iter()
+        .map(|frame| frame["seq"].as_u64().expect("a sequence number"))
+        .collect();
+    assert_eq!(seqs, (0..sent.len() as u64).collect::<Vec<_>>());
+}
+
+#[test]
+fn j4_r03_a_reader_that_leaves_mid_frame_is_loss_and_the_tail_is_recognizable() {
+    let _serial = serial();
+    use ouro_jail::trace::{TraceState, read_frames};
+
+    let (mut reader, sink) = pipe_sink();
+    let mut sink = sink.with_bounds(EXTERNAL_QUEUE_MAX, Duration::from_secs(30));
+    let len = 1000;
+    let size = len + 1;
+    let mut enqueued = 0usize;
+    while sink.queued() == 0 {
+        assert!(enqueued < 1024, "the pipe never filled");
+        sink.write_frame(&sized_frame(enqueued, len), Priority::Normal)
+            .expect("queued");
+        enqueued += 1;
+    }
+    for _ in 0..3 {
+        sink.write_frame(&sized_frame(enqueued, len), Priority::Normal)
+            .expect("queued");
+        enqueued += 1;
+    }
+    // Frames the sink handed to the pipe whole; the rest never left it whole.
+    let delivered = (enqueued * size - sink.queued()) / size;
+
+    // The consumer takes two and a half frames, then goes away.
+    let mut taken = vec![0u8; 2 * size + size / 2];
+    reader
+        .read_exact(&mut taken)
+        .expect("the pipe holds that much");
+    drop(reader);
+
+    let error = sink
+        .write_frame(&sized_frame(enqueued, len), Priority::Normal)
+        .expect_err("writing to a consumer that left is evidence loss");
+    enqueued += 1;
+    assert_eq!(error.code, ErrorCode::EvidenceLost);
+    let lost = sink.loss().expect("the loss is recorded").lost_frames;
+    assert_eq!(
+        lost,
+        Some((enqueued - delivered) as u64),
+        "every frame the pipe never took whole is counted, the torn one included"
+    );
+    assert!(
+        sink.write_frame(&sized_frame(enqueued, len), Priority::Reserve)
+            .is_err(),
+        "nothing is accepted after the consumer left"
+    );
+    assert_eq!(
+        sink.loss().expect("still recorded").lost_frames,
+        lost.map(|count| count + 1),
+        "a later frame is counted too, never silently dropped"
+    );
+    assert_eq!(
+        sink.queued(),
+        0,
+        "nothing waits for a consumer that is gone"
+    );
+
+    // What the consumer took ends mid-frame, and readback says so.
+    let readback = read_frames(&taken);
+    assert_eq!(readback.state, TraceState::Incomplete);
+    assert_eq!(readback.frames.len(), 2);
+    assert_eq!(readback.bad_offset, Some(2 * size));
+    assert_eq!(readback.bad_line, sized_frame(2, len)[..size / 2]);
+}
+
+#[test]
+fn j4_r03_flush_cost_does_not_grow_with_the_queue() {
+    let _serial = serial();
+    // A consumer that never reads: every flush finds the pipe full. Its cost
+    // must not depend on how much is queued, or a saturated trace would slow
+    // the supervision loop that polls it (§13.3: backpressure cannot block
+    // deadline enforcement).
+    fn cost(target: usize) -> Duration {
+        let (reader, sink) = pipe_sink();
+        let mut sink = sink.with_bounds(EXTERNAL_QUEUE_MAX, Duration::from_secs(600));
+        let payload = vec![b'q'; 4000];
+        while sink.queued() < target {
+            sink.write_frame(&payload, Priority::Normal)
+                .expect("within the queue bound");
+        }
+        // The fastest of three rounds, so scheduler noise does not decide it.
+        let mut best = Duration::MAX;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            for _ in 0..2000 {
+                sink.flush_now().expect("no deadline can pass here");
+            }
+            best = best.min(started.elapsed());
+        }
+        drop(reader);
+        best
+    }
+    let small = cost(64 * 1024);
+    let large = cost(EXTERNAL_QUEUE_MAX - 512 * 1024);
+    assert!(
+        large <= small * 3 + Duration::from_millis(10),
+        "2000 flushes took {large:?} with ~3.5 MiB queued and {small:?} with 64 KiB"
+    );
+}
+
+#[test]
+fn j4_r03_after_a_trace_fd_loss_only_reserve_notes_follow() {
+    let _serial = serial();
+    let (mut reader, sink) = pipe_sink();
+    let mut sink = sink.with_bounds(256 * 1024, Duration::from_secs(600));
+    let payload = vec![b'n'; 4000];
+    let mut refused = None;
+    for _ in 0..1024 {
+        if let Err(error) = sink.write_frame(&payload, Priority::Normal) {
+            refused = Some(error);
+            break;
+        }
+    }
+    assert_eq!(
+        refused.expect("the queue bound is reached").code,
+        ErrorCode::EvidenceLost
+    );
+    // The loss note that follows still has room: part of the bound is kept
+    // for the final gap and receipt notes, as it is for the local cap. It is
+    // larger than any slack an ordinary frame could have left.
+    let gap_note = sized_frame(0, 8000);
+    sink.write_frame(&gap_note, Priority::Reserve)
+        .expect("a reserve note is accepted after the payload overflowed");
+
+    // The consumer comes back and drains everything.
+    let mut received = Vec::new();
+    while sink.queued() > 0 {
+        received.extend(read_available(&mut reader));
+        sink.poll().expect("draining makes progress");
+    }
+    received.extend(read_available(&mut reader));
+    let mut expected_tail = gap_note.clone();
+    expected_tail.push(b'\n');
+    assert!(received.ends_with(&expected_tail));
+
+    // The sink stays marked lost: a later ordinary frame would leave a hole
+    // in the middle of the stream, so it is refused and counted instead.
+    let before = sink.loss().expect("recorded").lost_frames;
+    assert!(sink.write_frame(&payload, Priority::Normal).is_err());
+    assert_eq!(
+        sink.loss().expect("recorded").lost_frames,
+        before.map(|count| count + 1)
+    );
+    sink.write_frame(b"{\"note\":\"receipt\"}", Priority::Reserve)
+        .expect("the final receipt note is still accepted");
+    sink.poll().expect("the consumer is reading");
+    assert!(read_available(&mut reader).ends_with(b"{\"note\":\"receipt\"}\n"));
+}
+
+// ---------------------------------------------------------------------------
+// R03 / N2: the local trace after a failed write.
+// ---------------------------------------------------------------------------
+
+const FSIZE_HELPER: &str = "OURO_J4_FSIZE_HELPER";
+const FSIZE_RAISE: &str = "OURO_J4_FSIZE_RAISE";
+
+/// Runs in its own process: lowers `RLIMIT_FSIZE` to 1000 bytes with
+/// `SIGXFSZ` ignored, so a frame that crosses the limit is a real short write
+/// followed by `EFBIG` (Linux; macOS refuses the whole write), and drives a
+/// `FileSink` across it. With `OURO_J4_FSIZE_RAISE` the limit is raised again
+/// afterwards, as disk space that frees up would be.
+#[test]
+#[ignore = "subprocess helper for j4_r03_a_failed_local_write_never_leaves_a_partial_frame_mid_file"]
+fn j4_fsize_helper() {
+    use ouro_jail::trace::FileSink;
+    let Some(path) = std::env::var_os(FSIZE_HELPER) else {
+        return;
+    };
+    let raise = std::env::var_os(FSIZE_RAISE).is_some();
+    // SAFETY: SIG_IGN is a valid disposition; this process is the helper.
+    unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live rlimit for both calls.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &raw mut limit) },
+        0
+    );
+    let hard = limit.rlim_max;
+    limit.rlim_cur = 1000;
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit) },
+        0
+    );
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("the helper's trace file");
+    let mut sink = FileSink::new(file);
+    // Six 151-byte frames fit in 1000 bytes; the seventh crosses the limit.
+    let accepted: Vec<bool> = (0..8)
+        .map(|index| {
+            sink.write_frame(&sized_frame(index, 150), Priority::Normal)
+                .is_ok()
+        })
+        .collect();
+    if raise {
+        limit.rlim_cur = hard;
+        // SAFETY: as above; the soft limit goes back up to the hard one.
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit) },
+            0
+        );
+    }
+    let later_normal = sink
+        .write_frame(&sized_frame(100, 150), Priority::Normal)
+        .is_ok();
+    let later_reserve = sink
+        .write_frame(&sized_frame(200, 150), Priority::Reserve)
+        .is_ok();
+    println!(
+        "J4FSIZE {}",
+        serde_json::json!({
+            "accepted": accepted,
+            "later_normal": later_normal,
+            "later_reserve": later_reserve,
+            "lost_frames": sink.loss().and_then(|loss| loss.lost_frames),
+        })
+    );
+}
+
+fn run_fsize_helper(raise: bool) -> (serde_json::Value, Vec<u8>) {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("trace.ndjson");
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args(["--ignored", "--exact", "j4_fsize_helper", "--nocapture"])
+        .env(FSIZE_HELPER, &path);
+    if raise {
+        command.env(FSIZE_RAISE, "1");
+    }
+    let output = command.output().expect("the helper runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the helper failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("J4FSIZE "))
+        .unwrap_or_else(|| panic!("no helper report in {stdout}"));
+    (
+        serde_json::from_str(report).expect("a JSON report"),
+        std::fs::read(&path).expect("the helper's trace"),
+    )
+}
+
+#[test]
+fn j4_r03_a_failed_local_write_never_leaves_a_partial_frame_mid_file() {
+    use ouro_jail::trace::{TraceState, read_frames};
+
+    // Space comes back after the failure: nothing may be appended after a
+    // torn frame, and no ordinary frame after the hole; the reserve note that
+    // records the loss may still be written.
+    let (report, bytes) = run_fsize_helper(true);
+    let readback = read_frames(&bytes);
+    assert_eq!(
+        readback.state,
+        TraceState::Complete,
+        "the file must end on a frame boundary with no torn frame in it: {report} {:?}",
+        String::from_utf8_lossy(&readback.bad_line)
+    );
+    let seqs: Vec<u64> = readback
+        .frames
+        .iter()
+        .map(|frame| frame["seq"].as_u64().expect("a sequence number"))
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4, 5, 200],
+        "a prefix, then only the reserve note: {report}"
+    );
+    assert_eq!(
+        report["accepted"],
+        serde_json::json!([true, true, true, true, true, true, false, false])
+    );
+    assert_eq!(report["later_normal"], false);
+    assert_eq!(report["later_reserve"], true);
+    assert_eq!(
+        report["lost_frames"], 3,
+        "frames 6, 7 and 100 are counted, each once: {report}"
+    );
+
+    // Space never comes back: the file still ends on a frame boundary.
+    let (report, bytes) = run_fsize_helper(false);
+    let readback = read_frames(&bytes);
+    assert_eq!(readback.state, TraceState::Complete, "{report}");
+    assert_eq!(readback.frames.len(), 6, "{report}");
+    assert_eq!(report["later_reserve"], false);
+    assert_eq!(report["lost_frames"], 4, "{report}");
+}
+
+#[test]
+fn j4_r03_after_local_payload_exhaustion_only_reserve_notes_follow() {
+    use ouro_jail::trace::FileSink;
+    let file = tempfile::NamedTempFile::new().expect("a temporary file");
+    let mut sink = FileSink::with_bounds(file.reopen().expect("a handle"), 1000, 400);
+    for index in 0..3 {
+        sink.write_frame(&sized_frame(index, 150), Priority::Normal)
+            .expect("within the payload budget");
+    }
+    // 453 bytes written; a 200-byte frame would cross the 600-byte payload.
+    assert!(
+        sink.write_frame(&sized_frame(3, 200), Priority::Normal)
+            .is_err()
+    );
+    // A smaller ordinary frame would still fit, but writing it would leave a
+    // hole in the middle of the trace: best-effort keeps a prefix (§13.3).
+    assert!(
+        sink.write_frame(&sized_frame(4, 50), Priority::Normal)
+            .is_err(),
+        "an ordinary frame after the loss must be refused"
+    );
+    sink.write_frame(&sized_frame(5, 150), Priority::Reserve)
+        .expect("the reserve is for the notes that follow a loss");
+    assert_eq!(sink.loss().and_then(|loss| loss.lost_frames), Some(2));
+    let readback = ouro_jail::trace::read_frames(&std::fs::read(file.path()).unwrap());
+    let seqs: Vec<u64> = readback
+        .frames
+        .iter()
+        .map(|frame| frame["seq"].as_u64().unwrap())
+        .collect();
+    assert_eq!(seqs, vec![0, 1, 2, 5]);
 }
