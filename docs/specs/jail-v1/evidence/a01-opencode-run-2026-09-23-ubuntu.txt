@@ -1,0 +1,72 @@
+collected_at: 2026-09-23T13:44Z as ubuntu (the operator's own account) on the reference host
+host: Ubuntu 26.04.1 LTS, Linux 7.0.0-31-generic x86_64, bubblewrap 0.11.1, stock
+      (kernel.apparmor_restrict_unprivileged_userns=1, no host configuration)
+vendor: OpenCode 1.18.32, opencode-linux-x64.tar.gz from the GitHub release,
+        sha256 3046e0404fdc60fb80307e7a47824ba07477364178a4d09baa8548496dd6d43b
+        (GitHub's published asset digest), unpacked to ~/.opencode/bin
+ouro-jail: built from 3c3638c4 (branch a01-opencode), release,
+        sha256 8339babdd884c708441906e0b3ac56412a1bb0f0ff06da218fdd30d3130d28a4
+launch profile: crates/ouro-jail/profiles/launch/opencode.toml at 156e645d,
+        copied to ~/.config/ouro/launch/opencode.toml (mode 0600); no credential
+        staged; OpenCode used OpenCode Zen's free model `big-pickle`
+state and config: the jail's defaults, ~/.local/share/ouro and ~/.config/ouro,
+        beneath directories of mode 0775 owned by the account's private group
+
+=== the run
+workspace: ~/a01ws, a git repository holding hello.py
+command (inside the delegated user scope):
+  ouro-jail run --launch opencode --ro ~/.opencode/bin --limit wall=150s \
+    --receipt ~/a01-receipt.json -- ~/.opencode/bin/opencode run \
+    "Create a file named greeting.txt in the current directory containing exactly the word hello. Then stop."
+OpenCode output (tail):
+  > build · big-pickle
+  ← Write greeting.txt
+  Wrote file successfully.
+  Created `greeting.txt` containing `hello`.
+ouro-jail exit: 0
+workspace afterwards: greeting.txt, 5 bytes, "hello"
+receipt: a01-opencode-receipt-2026-09-23-ubuntu.json (attempt
+  att_01fe20f1-4a53-47be-b6cf-07044097e783): phase settled, outcome exited 0,
+  coverage exec/fs.write/fs.deny/net/limits/proxy.net all active, credentials [],
+  state_cleanup complete, errors []
+
+=== the trace of that attempt (counts by source and operation)
+audit proc.exec 69, proc.exit 69, fs.create 11060, fs.write 69, fs.rename 91,
+fs.unlink 86, net.connect 31 (every one mediated, seccomp_user_notification);
+proxy net.connect 31; wrapper jail.receipt 4, note 2
+proxy destinations: registry.npmjs.org:443 allow 28 (run-time package installs),
+  opencode.ai:443 allow 2 (the model API), models.opencode.ai:443 allow 1 (catalog);
+  nothing denied, nothing else reached
+the file OpenCode wrote, as the audit source saw it:
+  fs.create path {"kind":"workspace_relative","value":"greeting.txt"} ok, returned fd 32
+
+=== two defects this run found, fixed before it (tests pinned on the reference host)
+92e7db7c  every connect from a worker thread was refused ESRCH by the unix-peer
+          mediator (seccomp_notif.pid is a thread; pidfd_open refused a
+          non-leader); OpenCode (Bun) made no request and hung
+3c3638c4  the default state root was refused because ~/.local is 0775 on stock
+          Ubuntu (umask 002, user private groups); credential sources beneath
+          it would have been refused the same way
+
+=== repeatability (same profile, same prompt "reply with the single word ok")
+16 jailed runs in two batches (one with OPENCODE_DISABLE_AUTOUPDATE, one also with
+OPENCODE_DISABLE_DEFAULT_PLUGINS): 15 exited 0 in 5-9 s. One printed "ok" and then
+ended with ouro-jail exit 1, `evidence_lost: entry_abandoned` for fs.write and
+fs.deny: a file operation was still in flight in a thread when the program exited,
+so its result is unknown; strict evidence reports that and the receipt keeps the
+target's own exit 0.
+Stalls: several runs between 13:03 and 13:14 UTC, and 1 of the 35 runs made
+after 13:15 (the first attempt at the recorded task above, about 13:30), sat
+after OpenCode's `init` log line until the wall limit, each after 28 registry
+tunnels that stayed open until the stop. Cause NOT established; open item:
+- a configuration that forces OpenCode's first-time provider install stalls at
+  the same log line outside the jail too;
+- 6 direct runs with fresh homes never took the 28-request path and never
+  stalled, so the natural trigger was not reproduced outside the jail;
+- the proxy and bridge relay large and parallel transfers correctly: 12
+  parallel 25-28 MB registry documents and 28 parallel tarballs completed in
+  seconds through the jail.
+
+=== not covered by this record
+A run with the operator's own provider credential (`opencode auth login`, staged
+as the profile's commented auth.json input) has not been made yet.

@@ -250,6 +250,160 @@ pub fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Whether an object with this mode, owner and group can be written by an
+/// account other than its owner. The sticky bit is the caller's concern.
+///
+/// World write always counts. Group write counts unless the group is the
+/// owner's private group: stock Debian and Ubuntu give every account a group
+/// of its own and a umask of 002, so an operator's own directories are
+/// group-writable by nobody else. The jail accepts that, as Debian's OpenSSH
+/// does, only when the group is the owner's primary group, lists no member
+/// but the owner, and is no other account's primary group. An account the
+/// system's user database does not enumerate cannot be seen, which is the
+/// same limit OpenSSH accepts.
+#[must_use]
+pub fn writable_by_others(mode: u32, uid: u32, gid: u32) -> bool {
+    if mode & 0o002 != 0 {
+        return true;
+    }
+    if mode & 0o020 == 0 {
+        return false;
+    }
+    !accounts::group_is_private_to(uid, gid)
+}
+
+/// The account-database side of [`writable_by_others`].
+mod accounts {
+    use std::ffi::CStr;
+    use std::sync::Mutex;
+
+    /// The facts the rule needs, separated from the lookups so the rule can
+    /// be tested without depending on the host's accounts.
+    pub(super) struct Facts<'a> {
+        /// The owner's name and primary group, if the owner is known.
+        pub owner: Option<(&'a [u8], u32)>,
+        /// The group's listed members, if the group is known.
+        pub members: Option<Vec<Vec<u8>>>,
+        /// Whether another account has this group as its primary group.
+        pub another_primary: bool,
+    }
+
+    pub(super) fn private(gid: u32, facts: &Facts<'_>) -> bool {
+        let Some((name, primary)) = facts.owner else {
+            return false;
+        };
+        let Some(members) = &facts.members else {
+            return false;
+        };
+        primary == gid
+            && members.iter().all(|member| member.as_slice() == name)
+            && !facts.another_primary
+    }
+
+    /// `getpwent` walks one process-wide position.
+    static PASSWD_WALK: Mutex<()> = Mutex::new(());
+
+    pub(super) fn group_is_private_to(uid: u32, gid: u32) -> bool {
+        let Some((name, primary)) = owner(uid) else {
+            return false;
+        };
+        let facts = Facts {
+            owner: Some((&name, primary)),
+            members: members(gid),
+            another_primary: another_primary(uid, gid),
+        };
+        private(gid, &facts)
+    }
+
+    fn owner(uid: u32) -> Option<(Vec<u8>, u32)> {
+        let mut buffer = vec![0_u8; 16 * 1024];
+        // SAFETY: `passwd` is a plain C struct; all-zero is a valid value
+        // that getpwuid_r overwrites before we read it.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer is to a live local, the buffer length is the
+        // buffer's own, and getpwuid_r writes only within them.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &raw mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &raw mut result,
+            )
+        };
+        if rc != 0 || result.is_null() || entry.pw_name.is_null() {
+            return None;
+        }
+        // SAFETY: getpwuid_r succeeded, so pw_name points at a NUL-terminated
+        // string inside `buffer`, which is still alive.
+        let name = unsafe { CStr::from_ptr(entry.pw_name) }.to_bytes().to_vec();
+        Some((name, entry.pw_gid))
+    }
+
+    fn members(gid: u32) -> Option<Vec<Vec<u8>>> {
+        let mut buffer = vec![0_u8; 64 * 1024];
+        // SAFETY: as in `owner`, for `group`.
+        let mut entry: libc::group = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: as in `owner`, for getgrgid_r.
+        let rc = unsafe {
+            libc::getgrgid_r(
+                gid,
+                &raw mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &raw mut result,
+            )
+        };
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        let mut out = Vec::new();
+        let mut slot = entry.gr_mem;
+        while !slot.is_null() {
+            // SAFETY: gr_mem is a NULL-terminated array of pointers into
+            // `buffer`; `slot` has not passed its terminator.
+            let member = unsafe { *slot };
+            if member.is_null() {
+                break;
+            }
+            // SAFETY: each member points at a NUL-terminated string inside
+            // `buffer`.
+            out.push(unsafe { CStr::from_ptr(member) }.to_bytes().to_vec());
+            // SAFETY: the array continues until its NULL terminator, which
+            // has not been reached.
+            slot = unsafe { slot.add(1) };
+        }
+        Some(out)
+    }
+
+    fn another_primary(uid: u32, gid: u32) -> bool {
+        let _guard = PASSWD_WALK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut found = false;
+        // SAFETY: setpwent/getpwent/endpwent share one process-wide position, which
+        // the mutex serializes within this process; each entry is read
+        // before the next call.
+        unsafe {
+            libc::setpwent();
+            loop {
+                let entry = libc::getpwent();
+                if entry.is_null() {
+                    break;
+                }
+                if (*entry).pw_gid == gid && (*entry).pw_uid != uid {
+                    found = true;
+                    break;
+                }
+            }
+            libc::endpwent();
+        }
+        found
+    }
+}
+
 /// Checks that `path` is a private directory this operator owns (§6.2).
 ///
 /// Rejects a symlinked state root, foreign ownership and a mode that lets
@@ -281,7 +435,9 @@ pub fn check_state_dir(path: &Path) -> Result<(), JailError> {
 ///
 /// # Errors
 /// Returns [`ErrorCode::UnsafeStatePath`] when an ancestor is not a directory
-/// or is writable by anyone other than its owner without the sticky bit.
+/// or is writable by anyone other than its owner without the sticky bit (a
+/// group-writable ancestor whose group is its owner's private group is not;
+/// see [`writable_by_others`]).
 pub fn check_state_ancestors(path: &Path) -> Result<(), JailError> {
     let mut ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
     ancestors.reverse();
@@ -297,7 +453,11 @@ pub fn check_state_ancestors(path: &Path) -> Result<(), JailError> {
         let mode = mode_of(&metadata);
         // `/tmp` is group- and world-writable but sticky, which is what makes
         // it safe against replacement of entries this operator owns.
-        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        let (owner, group) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (metadata.uid(), metadata.gid())
+        };
+        if writable_by_others(mode, owner, group) && mode & 0o1000 == 0 {
             return Err(unsafe_path(
                 ancestor,
                 format!(
@@ -1352,6 +1512,93 @@ pub fn record_cleanup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_write_always_counts_and_no_group_write_never_does() {
+        assert!(writable_by_others(0o777, 0, 0));
+        assert!(writable_by_others(0o702, 1000, 1000));
+        assert!(!writable_by_others(0o755, 1000, 1000));
+        assert!(!writable_by_others(0o700, 1000, 1000));
+    }
+
+    /// The stock Ubuntu home: a state root beneath a directory that is
+    /// group-writable by the operator's own private group. Accepted exactly
+    /// when the host's account database says the group is private (true for
+    /// the reference host's accounts; false for macOS's shared `staff`).
+    #[test]
+    fn a_group_writable_ancestor_is_refused_unless_its_group_is_private() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("dotlocal");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let state_root = shared.join("state");
+        std::fs::create_dir(&state_root).unwrap();
+        let metadata = std::fs::metadata(&shared).unwrap();
+        let private = accounts::group_is_private_to(metadata.uid(), metadata.gid());
+        let checked = check_state_ancestors(&state_root);
+        assert_eq!(
+            checked.is_ok(),
+            private,
+            "gid {} private: {private}; check: {checked:?}",
+            metadata.gid()
+        );
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            check_state_ancestors(&state_root).is_err(),
+            "world write without the sticky bit is always refused"
+        );
+    }
+
+    #[test]
+    fn group_write_is_private_only_for_the_owners_own_group() {
+        use accounts::{Facts, private};
+        let name: &[u8] = b"ubuntu";
+        let own = Facts {
+            owner: Some((name, 1000)),
+            members: Some(Vec::new()),
+            another_primary: false,
+        };
+        assert!(private(1000, &own), "Ubuntu's user private group");
+        let listed_self = Facts {
+            members: Some(vec![b"ubuntu".to_vec()]),
+            ..own
+        };
+        assert!(private(1000, &listed_self), "the owner listed as a member");
+        let own = Facts {
+            owner: Some((name, 1000)),
+            members: Some(Vec::new()),
+            another_primary: false,
+        };
+        assert!(!private(1001, &own), "not the owner's primary group");
+        let shared = Facts {
+            owner: Some((name, 1000)),
+            members: Some(vec![b"ubuntu".to_vec(), b"someone".to_vec()]),
+            another_primary: false,
+        };
+        assert!(!private(1000, &shared), "another listed member");
+        let primary_elsewhere = Facts {
+            owner: Some((name, 1000)),
+            members: Some(Vec::new()),
+            another_primary: true,
+        };
+        assert!(
+            !private(1000, &primary_elsewhere),
+            "another account's primary group"
+        );
+        let unknown_owner = Facts {
+            owner: None,
+            members: Some(Vec::new()),
+            another_primary: false,
+        };
+        assert!(!private(1000, &unknown_owner));
+        let unknown_group = Facts {
+            owner: Some((name, 1000)),
+            members: None,
+            another_primary: false,
+        };
+        assert!(!private(1000, &unknown_group));
+    }
 
     /// A 0700 temporary directory whatever the umask: a state root under a
     /// group-writable one is refused, rightly.

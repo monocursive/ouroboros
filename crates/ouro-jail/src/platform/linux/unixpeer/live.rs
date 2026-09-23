@@ -455,7 +455,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
         address_complete: false,
     };
     // J3-agent end
-    let Ok(child_pidfd) = pidfd_open(pid) else {
+    let Ok(child_pidfd) = open_notifying_thread(pid, tgid) else {
         respond_and_record(
             listener,
             id,
@@ -774,6 +774,30 @@ fn pending(listener: RawFd) -> bool {
     rc > 0 && pfd.revents != 0
 }
 // J3-agent end
+
+/// A pidfd whose descriptor table is the notifying thread's own.
+///
+/// `seccomp_notif.pid` names the thread that made the call, and a
+/// multi-threaded runtime connects from worker threads. `pidfd_open` refuses a
+/// thread that is not its group's leader unless it is asked for that thread
+/// (`PIDFD_THREAD`, Linux 6.9). On an older kernel the leader's pidfd is used
+/// only when `kcmp` shows the parked thread shares the leader's descriptor
+/// table; otherwise the connect is refused rather than resolved against the
+/// wrong table. The parked thread cannot change its own table while it waits.
+fn open_notifying_thread(tid: libc::pid_t, tgid: Option<libc::pid_t>) -> io::Result<OwnedFd> {
+    match crate::platform::linux::identity::pidfd_open_thread(tid) {
+        Ok(fd) => return Ok(fd),
+        Err(error) if error.raw_os_error() != Some(libc::EINVAL) => return Err(error),
+        Err(_) => {}
+    }
+    let Some(tgid) = tgid else {
+        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+    };
+    if tgid != tid && !crate::platform::linux::identity::same_descriptor_table(tid, tgid) {
+        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+    }
+    pidfd_open(tgid)
+}
 
 fn notif_id_valid(listener: RawFd, id: u64) -> bool {
     let mut id = id;

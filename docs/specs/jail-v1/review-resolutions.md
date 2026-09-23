@@ -150,3 +150,11 @@ it can be tested); per-pid birth identity on audit events (J4).
 | `none` could silently drop a narrowing restriction; unsettled runs without exec were labelled `enforced` | Unapplicable restrictions refuse; such runs stay `prepared` | §§8.1, 9.3; R05, R06 |
 | A crashed attempt's proxy directory was never collected | `gc` removes it through the socket identity recorded at bind | §14.2 |
 | A test-only queue knob and launch-profile reserved names were unstated | Documented | §§6.2, 12 |
+
+## Revision 12 decisions (2026-09-23, the first real agent run)
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| The unix-peer mediator refused every connect from a worker thread (`seccomp_notif.pid` is a thread; `pidfd_open` refuses a non-leader) | Open the notifying thread itself (`PIDFD_THREAD`); on older kernels use the leader only when `kcmp` shows a shared descriptor table, else refuse | §10; N05 (`n05_connects_from_worker_threads_are_mediated_like_any_other`) |
+| Stock Ubuntu homes (umask 002, user private groups) made the default state root and credential sources look shared-writable | Group write is "others" only when the group is not the owner's private group | §§6.2, 12 |
+| No real agent run was recorded | OpenCode 1.18.32 under `agent` on the stock reference host, recorded with its receipt | A01; agent-compatibility.md |

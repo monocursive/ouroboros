@@ -1,34 +1,45 @@
-# EXPERIMENTAL launch profile (jail-v1 §12, north star §4.5).
+# EXPERIMENTAL launch profile for OpenCode (jail-v1 §12, north star §4.5),
+# except for the runs recorded in jail-v1 agent-compatibility.md (row A01).
 #
 # Example data only: `ouro-jail` never reads this directory. An operator who
 # wants it copies it to `<config-dir>/launch/opencode.toml` (mode 0600) and
-# checks every path and host against their own installation. It stays
-# experimental until a real run records the OpenCode version and the exact
-# files and hosts it needed (§12, acceptance row A01); nothing here has been
-# recorded yet.
+# checks every path and host against their own installation.
 #
-# The north star's initial inputs: XDG config and data directories beneath
-# vendor state, provider keys `bind_ro` and the mutable config `copy_rw`, from
-# the node's OpenCode directories. The allowed hosts depend on the providers
-# the operator configures, so none are granted here: add them explicitly.
+# Measured with OpenCode 1.18.32 on the reference host (jail-v1
+# agent-compatibility.md, row A01): OpenCode keeps its config, data, cache and
+# state under the XDG directories and HOME, all of which point into vendor
+# state here, so nothing it writes outlives the attempt. It reaches
+# `opencode.ai` (the OpenCode Zen model API), `models.opencode.ai` (its model
+# catalog) and `registry.npmjs.org` (packages it installs at run time).
+#
+# Run it with the OpenCode install granted read-only and a git repository as
+# the workspace (OpenCode looks for `.opencode` directories from the working
+# directory up to the repository root):
+#
+#   ouro-jail run --launch opencode --ro ~/.opencode/bin -- \
+#     ~/.opencode/bin/opencode run "…"
+#
+# With no credential OpenCode uses OpenCode Zen's free models. For another
+# provider, run `opencode auth login` outside the jail, uncomment the
+# credential below, and add that provider's API host to `network.allow`
+# (measured: Z.AI Coding Plan uses `api.z.ai`). A first run without the host
+# names it: the proxy records the denied destination.
 
 name = "opencode"
 jail = "agent"
-state_subdirs = ["config/opencode", "data/opencode"]
+home_is_state = true
+state_subdirs = ["config/opencode", "data/opencode", "cache/opencode", "state/opencode"]
 
 [environment]
 XDG_CONFIG_HOME = { state = "config" }
 XDG_DATA_HOME = { state = "data" }
+XDG_CACHE_HOME = { state = "cache" }
+XDG_STATE_HOME = { state = "state" }
 
-[credentials.auth]
-source = "~/.local/share/opencode/auth.json"
-dest = "data/opencode/auth.json"
-mode = "bind_ro"
-
-[credentials.config]
-source = "~/.config/opencode/opencode.json"
-dest = "config/opencode/opencode.json"
-mode = "copy_rw"
+# [credentials.auth]
+# source = "~/.local/share/opencode/auth.json"
+# dest = "data/opencode/auth.json"
+# mode = "copy_rw"
 
 [network]
-allow = []
+allow = ["opencode.ai", "models.opencode.ai", "registry.npmjs.org"]

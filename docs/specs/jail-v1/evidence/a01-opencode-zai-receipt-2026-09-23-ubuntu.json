@@ -1,0 +1,411 @@
+{
+  "applied": {
+    "environment_names": [
+      "ALL_PROXY",
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "LANG",
+      "NO_PROXY",
+      "PATH",
+      "PWD",
+      "TMPDIR",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "filesystem": {
+      "mechanism": "bubblewrap-binds",
+      "mounts": [
+        {
+          "mode": "ro",
+          "path": "/"
+        },
+        {
+          "mode": "ro",
+          "path": "/usr"
+        },
+        {
+          "mode": "ro",
+          "path": "/etc/ssl"
+        },
+        {
+          "mode": "ro",
+          "path": "/etc/resolv.conf"
+        },
+        {
+          "mode": "ro",
+          "path": "/etc/passwd"
+        },
+        {
+          "mode": "ro",
+          "path": "/etc/group"
+        },
+        {
+          "mode": "ro",
+          "path": "/etc/hosts"
+        },
+        {
+          "mode": "ro",
+          "path": "/etc/localtime"
+        },
+        {
+          "mode": "ro",
+          "path": "/etc/ld.so.cache"
+        },
+        {
+          "mode": "rw",
+          "path": "/proc"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev/null"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev/zero"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev/full"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev/random"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev/urandom"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev/tty"
+        },
+        {
+          "mode": "rw",
+          "path": "/dev/pts"
+        },
+        {
+          "mode": "rw",
+          "path": "/tmp"
+        },
+        {
+          "mode": "rw",
+          "path": "/home/ubuntu/a01ws"
+        },
+        {
+          "mode": "ro",
+          "path": "/home/ubuntu/.opencode/bin"
+        },
+        {
+          "mode": "rw",
+          "path": "/run/ouro/state"
+        },
+        {
+          "mode": "ro",
+          "path": "/run/ouro/proxy"
+        },
+        {
+          "mode": "ro",
+          "path": "/run/ouro/jail"
+        }
+      ],
+      "protected_coverage": "existing_and_root"
+    },
+    "limits": [
+      {
+        "applied": true,
+        "hit": false,
+        "key": "wall",
+        "mechanism": "boottime-deadline",
+        "requested": "150000",
+        "required": true,
+        "scope": "tree"
+      },
+      {
+        "applied": true,
+        "hit": false,
+        "key": "pids",
+        "mechanism": "pids.max",
+        "requested": "512",
+        "required": false,
+        "scope": "tree"
+      }
+    ],
+    "network": {
+      "allowed_hosts": [
+        "api.z.ai:80",
+        "api.z.ai:443",
+        "opencode.ai:80",
+        "opencode.ai:443",
+        "models.opencode.ai:80",
+        "models.opencode.ai:443",
+        "registry.npmjs.org:80",
+        "registry.npmjs.org:443"
+      ],
+      "mechanism": "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
+      "mode": "proxy"
+    },
+    "removed_environment_names": [],
+    "syscalls": {
+      "digest": "sha256:e2108d4f9e9e9b222f946f375af699707a491a637e9914df45a95b3f33affb75",
+      "mechanism": "seccomp-bpf+seccomp-user-notification"
+    }
+  },
+  "argv_digest": "sha256:4994d3937b0c468808539ff4c8f9c6c7ca57c5adbbed1228cb42a5f31b9bb34b",
+  "attempt_id": "att_9a0facb4-1c54-4952-8e8a-3f19c811852a",
+  "child_protection": "enforced",
+  "cleanup_error": null,
+  "containment": "enforced",
+  "coverage": {
+    "exec": {
+      "gaps": [],
+      "observed_count": 138,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.deny": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.write": {
+      "gaps": [],
+      "observed_count": 2376,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "limits": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "wrapper"
+      ],
+      "status": "active"
+    },
+    "net": {
+      "gaps": [],
+      "observed_count": 31,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "proxy.net": {
+      "gaps": [],
+      "observed_count": 31,
+      "sources": [
+        "proxy"
+      ],
+      "status": "active"
+    }
+  },
+  "created_at": "2026-09-23T14:22:35Z",
+  "credentials": [
+    {
+      "digest": "sha256:REDACTED-in-this-public-copy",
+      "digest_unavailable_reason": null,
+      "id": "auth",
+      "mode": "copy_rw"
+    }
+  ],
+  "errors": [],
+  "exec_observed": true,
+  "jail": {
+    "backend": "bubblewrap",
+    "backend_version": "bubblewrap 0.11.1",
+    "component": "ouro-jail",
+    "version": "0.1.0"
+  },
+  "lifetime": {
+    "boundary": "pid_namespace",
+    "integrity": "verified",
+    "native": {
+      "details": {
+        "agent": {
+          "allowed_setup_operations": [
+            "prctl(PR_SET_NO_NEW_PRIVS)",
+            "seccomp",
+            "landlock_create_ruleset",
+            "landlock_add_rule",
+            "landlock_restrict_self"
+          ],
+          "baseline_filter_digest": "sha256:e2108d4f9e9e9b222f946f375af699707a491a637e9914df45a95b3f33affb75",
+          "filter_variant": "unprivileged_inner",
+          "mediation_filter_digest": "sha256:28c98e72b91a22c212d5dfdddfcc1f1ca153c5a8e89c15833c26724b263ebeff",
+          "mediation_record_queue": 4096,
+          "nested_user_namespace": "unavailable",
+          "nested_user_namespace_evidence": "a nested bubblewrap exited Some(1): bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.; bare unshare(CLONE_NEWUSER) inside: ok",
+          "proxy_socket": "/run/ouro/proxy/proxy.sock",
+          "unix_peer_mediation": "seccomp_user_notification"
+        },
+        "bwrap_pid": 1413402,
+        "cgroup_namespace": 4026532464,
+        "execution_cgroup": {
+          "charged_helpers": [
+            {
+              "pid": 1413402,
+              "role": "bubblewrap"
+            },
+            {
+              "pid": 1413406,
+              "role": "namespace_init"
+            },
+            {
+              "pid": 1413409,
+              "role": "bridge"
+            }
+          ],
+          "device": 29,
+          "inode": 1182003,
+          "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_f5e72808-7877-470c-add9-064cf0ca5adc.leaf",
+          "scope": "target_descendants_and_listed_helpers"
+        },
+        "helpers": [
+          {
+            "charged_to_attempt": true,
+            "kind": "bridge",
+            "listen": "127.0.0.1:3128",
+            "mediated_connects": 31,
+            "pid": 1413409,
+            "rejected_at_capacity": 0,
+            "seccomp_filters": 2
+          }
+        ],
+        "launcher_pid": 1413407,
+        "mnt_namespace": 4026532373,
+        "namespace_init_pid": 1413406,
+        "narrowing_filter_digest": "sha256:4e2c1ab0a6ca9263da038faae8b71fb59d2989a259efc8a067ccddd372a3e2d8",
+        "net_namespace": 4026532465,
+        "pid_namespace": 4026532463,
+        "seccomp_filters": {
+          "expected": 3,
+          "observed": 3
+        },
+        "user_namespace": 4026532474,
+        "watcher_pid": 1413403
+      },
+      "os": "linux"
+    },
+    "tree_empty": true,
+    "verification_scope": "attempt_tree",
+    "verified_at": "2026-09-23T14:22:44Z"
+  },
+  "observer": {
+    "attached": true,
+    "backend": "ptrace",
+    "gaps": [],
+    "set": "linux-closed-v1",
+    "sources": {
+      "audit": "active",
+      "proxy": "active",
+      "wrapper": "active"
+    }
+  },
+  "outcome": {
+    "cause": null,
+    "code": 0,
+    "error": null,
+    "kind": "exited",
+    "signal": null
+  },
+  "phase": "settled",
+  "platform": {
+    "arch": "x86_64",
+    "kernel": "Linux 7.0.0-31-generic",
+    "os": "linux"
+  },
+  "policy": {
+    "digest": "sha256:51c42235ddf95a09d0e2a2a1276f30da065072c560e5a649007b5cc032ca82b6",
+    "evidence": "strict",
+    "grants": [
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "api.z.ai:80"
+      },
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "api.z.ai:443"
+      },
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "opencode.ai:80"
+      },
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "opencode.ai:443"
+      },
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "models.opencode.ai:80"
+      },
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "models.opencode.ai:443"
+      },
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "registry.npmjs.org:80"
+      },
+      {
+        "by": "operator",
+        "kind": "allow_host",
+        "value": "registry.npmjs.org:443"
+      },
+      {
+        "by": "operator",
+        "kind": "read_only",
+        "value": "/home/ubuntu/.opencode/bin"
+      }
+    ],
+    "name": "agent",
+    "observe": "on",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_proxy",
+      "limit:wall",
+      "credential_staging"
+    ]
+  },
+  "process": {
+    "identity": {
+      "kind": "linux_boot_start",
+      "value": {
+        "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+        "pid": 1413407,
+        "start_time_ticks": 12545836
+      }
+    },
+    "pid": 1413407
+  },
+  "revision": 4,
+  "schema": "ouro.jail.receipt/1",
+  "state_cleanup": "complete",
+  "updated_at": "2026-09-23T14:22:44Z"
+}

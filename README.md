@@ -38,8 +38,10 @@ describe the named Linux lane. J3 adds the `agent` profile (an outside HTTP
 proxy as the only network path, host Unix sockets unreachable, unprivileged
 inner sandboxes), data-only launch profiles with credential staging and
 cleanup, and the explicit uncontained `none` profile
-([J3's acceptance map](docs/specs/jail-v1/j3-authority.md)). J4 (evidence and
-recovery) is next. CI is three
+([J3's acceptance map](docs/specs/jail-v1/j3-authority.md)). OpenCode 1.18.32
+runs under `agent` on the stock reference host
+([agent compatibility](docs/specs/jail-v1/agent-compatibility.md)). J4 (evidence
+and recovery) is next. CI is three
 workflows, `contracts`, `rust` and `conformance`
 ([Jail v1 §16](docs/specs/jail-v1.md#16-implementation-order-and-exit-criteria)).
 The specifications link to the previous implementation at commit `f3b2dbfd`,

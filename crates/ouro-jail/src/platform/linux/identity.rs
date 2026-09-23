@@ -179,6 +179,42 @@ pub fn pidfd_open(pid: libc::pid_t) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// `PIDFD_THREAD` (Linux 6.9): a pidfd for one thread rather than its thread
+/// group. The kernel defines it as `O_EXCL`.
+pub const PIDFD_THREAD: libc::c_int = libc::O_EXCL;
+
+/// Open a pidfd for the thread `tid` itself (`pidfd_open` with
+/// [`PIDFD_THREAD`]), so that descriptor operations through it use that
+/// thread's own descriptor table.
+///
+/// # Errors
+///
+/// `EINVAL` on a kernel older than 6.9, which rejects the flag; `ESRCH` when
+/// the thread does not exist.
+pub fn pidfd_open_thread(tid: libc::pid_t) -> io::Result<OwnedFd> {
+    // SAFETY: pidfd_open takes two scalars and dereferences nothing;
+    // PIDFD_THREAD is a documented flag (a kernel that lacks it says EINVAL).
+    let rc = unsafe { libc::syscall(libc::SYS_pidfd_open, tid, PIDFD_THREAD) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = RawFd::try_from(rc).map_err(|_| io::Error::other("pidfd_open returned a huge fd"))?;
+    // SAFETY: `fd` was just created by pidfd_open and is owned by this
+    // process; wrapping it transfers that ownership exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Whether threads `a` and `b` share one descriptor table (`kcmp` with
+/// `KCMP_FILES`). `false` covers "different tables" and "cannot tell".
+#[must_use]
+pub fn same_descriptor_table(a: libc::pid_t, b: libc::pid_t) -> bool {
+    const KCMP_FILES: libc::c_long = 2;
+    // SAFETY: kcmp takes five scalars and dereferences nothing for
+    // KCMP_FILES; the last two arguments are ignored for that type.
+    let rc = unsafe { libc::syscall(libc::SYS_kcmp, a, b, KCMP_FILES, 0, 0) };
+    rc == 0
+}
+
 /// Send a signal through a pidfd (`pidfd_send_signal`, syscall 424).
 ///
 /// # Errors

@@ -1975,7 +1975,7 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
             return Err(usage(
                 key,
                 format!(
-                    "{} already exists; the receipt copy never replaces an existing file,                      symlink or device",
+                    "{} already exists; the receipt copy never replaces an existing file, symlink or device",
                     path.display()
                 ),
             ));

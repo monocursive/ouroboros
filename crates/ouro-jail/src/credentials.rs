@@ -677,7 +677,7 @@ fn check_directory(stat: &Stat) -> Result<(), SourceRefusal> {
             ),
         ));
     }
-    if stat.mode & 0o022 != 0 && stat.mode & 0o1000 == 0 {
+    if crate::state::writable_by_others(stat.mode, stat.uid, stat.gid) && stat.mode & 0o1000 == 0 {
         return Err(SourceRefusal::configuration(
             "source_path_shared_writable",
             format!(
@@ -711,7 +711,7 @@ fn check_file(stat: &Stat) -> Result<(), SourceRefusal> {
             ),
         ));
     }
-    if stat.mode & 0o022 != 0 {
+    if crate::state::writable_by_others(stat.mode, stat.uid, stat.gid) {
         return Err(SourceRefusal::configuration(
             "source_shared_writable",
             format!(
@@ -1037,6 +1037,7 @@ mod tests {
             kind: Kind::Regular,
             mode: 0o600,
             uid: crate::state::effective_uid(),
+            gid: 0,
             nlink: 1,
             size,
             mtime: (mtime, 0),
