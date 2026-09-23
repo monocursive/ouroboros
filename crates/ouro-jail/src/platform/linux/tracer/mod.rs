@@ -55,8 +55,10 @@ mod table;
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{
+    Receiver, RecvError, RecvTimeoutError, SyncSender, TryRecvError, sync_channel,
+};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -87,11 +89,12 @@ pub struct TracerConfig {
     pub queue_max: usize,
     /// The §11.4 user-space event queue budget, in bytes.
     ///
-    /// It covers everything the observer holds on the consumer's behalf: the
-    /// buffered events and their pathname snapshots, the handoff channel and
-    /// the allocator's rounding. The buffer is therefore admitted against
-    /// three quarters of this figure, and each event is charged a fixed
-    /// [`EVENT_FIXED_BYTES`] on top of the bytes its snapshots hold.
+    /// It covers everything the observer holds on the consumer's behalf:
+    /// the buffered events and their pathname snapshots, and the events
+    /// handed to the channel that the consumer has not taken yet. Each event
+    /// is charged a fixed [`EVENT_FIXED_BYTES`] — the enum, its slot and the
+    /// allocator's rounding — on top of the bytes its snapshots hold. The
+    /// bounds this puts in force are [`TracerConfig::queue_bounds`].
     pub queue_bytes_max: usize,
     /// The `CLOCK_BOOTTIME` reading, in nanoseconds, at which the supervisor
     /// started. Gap endpoints are reported as elapsed time since this epoch
@@ -105,6 +108,66 @@ pub struct TracerConfig {
 /// buffer slot, and the allocator's rounding of two small allocations.
 pub const EVENT_FIXED_BYTES: usize = 256;
 
+/// Bytes of the §11.4 queue budget that results may not consume, so the
+/// lifecycle facts — an `Exec`, a `Fork` — have room to land behind them.
+/// The critical facts (`Exit`, `Gap`, `Finished`) need no reserve: they are
+/// exempt from every bound (J4 D6).
+const LIFECYCLE_RESERVE: usize = 64 * 1024;
+
+/// What an event costs the queue budget: its snapshots plus
+/// [`EVENT_FIXED_BYTES`]. The tracer charges it when an event is buffered
+/// or handed over, and [`Events`] gives it back when the consumer takes it.
+fn event_bytes(event: &TracerEvent) -> usize {
+    let snapshots = match event {
+        TracerEvent::Syscall { args, .. } => {
+            args.path.as_ref().map_or(0, |p| p.bytes.len())
+                + args.path2.as_ref().map_or(0, |p| p.bytes.len())
+        }
+        TracerEvent::Exec { path, .. } => path.as_ref().map_or(0, |p| p.bytes.len()),
+        _ => 0,
+    };
+    EVENT_FIXED_BYTES + snapshots
+}
+
+/// The queue bounds a [`TracerConfig`] puts in force (§11.4, "Record actual
+/// values in the observer plan"). Computed here once, for the tracer that
+/// applies them and for the observer plan that records them, so the record
+/// cannot drift from what is in force (J4 W3, loss review finding 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueBounds {
+    /// Most bytes held for the consumer — buffered, or handed to the channel
+    /// and not yet taken — by every event except the critical facts, which
+    /// §11.4 exempts. `queue_bytes_max`, and never less than one fixed-size
+    /// event, or nothing could ever be delivered.
+    pub bytes_max: usize,
+    /// Most bytes a result may bring that total to: `bytes_max` short of the
+    /// lifecycle reserve, and never less than one fixed-size event. Below a
+    /// budget of about 64 KiB that admits a result with no pathname and
+    /// none with one.
+    pub result_bytes_max: usize,
+    /// The part of `bytes_max` results may not use.
+    pub lifecycle_reserve: usize,
+    /// Most events in the handoff channel at once (their bytes are inside
+    /// `bytes_max`).
+    pub handoff_events: usize,
+}
+
+impl TracerConfig {
+    /// The queue bounds this configuration puts in force.
+    #[must_use]
+    pub fn queue_bounds(&self) -> QueueBounds {
+        let bytes_max = self.queue_bytes_max.max(EVENT_FIXED_BYTES);
+        QueueBounds {
+            bytes_max,
+            result_bytes_max: bytes_max
+                .saturating_sub(LIFECYCLE_RESERVE)
+                .max(EVENT_FIXED_BYTES),
+            lifecycle_reserve: LIFECYCLE_RESERVE,
+            handoff_events: HANDOFF_DEPTH.min(self.queue_max.max(1)) + TERMINAL_RESERVE,
+        }
+    }
+}
+
 /// Slots above the handoff depth kept for the terminal gap and `Finished`.
 const TERMINAL_RESERVE: usize = 2;
 
@@ -113,9 +176,10 @@ const TERMINAL_RESERVE: usize = 2;
 ///
 /// It is a handoff, not the queue: the queue is the tracer's own buffer,
 /// which is bounded in bytes ([`TracerConfig::queue_bytes_max`]) because a
-/// count cannot bound two four-kilobyte pathnames per event. A channel deep
-/// enough to hold `queue_max` events would put the whole backlog somewhere
-/// the tracer cannot measure it.
+/// count cannot bound two four-kilobyte pathnames per event. What sits in
+/// the channel is inside that byte budget too: the tracer charges an event
+/// when it hands it over and [`Events`] credits it back when the consumer
+/// takes it, so a small budget is a small queue however deep the channel.
 const HANDOFF_DEPTH: usize = 64;
 
 impl Default for TracerConfig {
@@ -716,10 +780,60 @@ impl fmt::Display for TracerError {
 
 impl std::error::Error for TracerError {}
 
+/// The consumer's end of the event stream.
+///
+/// A receiver that gives each event's bytes back to the queue budget as it
+/// is taken (J4 W3, loss review finding 4): the tracer counts what it has
+/// handed over and not seen taken, so the §11.4 budget bounds the channel
+/// as well as the tracer's own buffer. The three methods are
+/// [`Receiver`]'s own.
+pub struct Events {
+    rx: Receiver<TracerEvent>,
+    handed: Arc<AtomicUsize>,
+}
+
+impl Events {
+    fn new(rx: Receiver<TracerEvent>, handed: Arc<AtomicUsize>) -> Events {
+        Events { rx, handed }
+    }
+
+    fn taken(&self, event: TracerEvent) -> TracerEvent {
+        // The tracer added these bytes before the send this event came
+        // through, so the subtraction never passes zero.
+        self.handed
+            .fetch_sub(event_bytes(&event), Ordering::Relaxed);
+        event
+    }
+
+    /// [`Receiver::recv`].
+    ///
+    /// # Errors
+    /// [`RecvError`] once the tracer is gone and nothing is left.
+    pub fn recv(&self) -> Result<TracerEvent, RecvError> {
+        self.rx.recv().map(|event| self.taken(event))
+    }
+
+    /// [`Receiver::recv_timeout`].
+    ///
+    /// # Errors
+    /// [`RecvTimeoutError`] on timeout or once the tracer is gone.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<TracerEvent, RecvTimeoutError> {
+        self.rx.recv_timeout(timeout).map(|event| self.taken(event))
+    }
+
+    /// [`Receiver::try_recv`].
+    ///
+    /// # Errors
+    /// [`TryRecvError`] when nothing is waiting or the tracer is gone.
+    pub fn try_recv(&self) -> Result<TracerEvent, TryRecvError> {
+        self.rx.try_recv().map(|event| self.taken(event))
+    }
+}
+
 /// A running observer. Dropping it stops the tracer thread and joins it.
 pub struct Tracer {
     launcher: pid_t,
-    events: Receiver<TracerEvent>,
+    events: Events,
     handle: Option<JoinHandle<TracerSummary>>,
     stop: Arc<AtomicBool>,
     /// How long the thread may take to end a live tree once told to stop.
@@ -754,8 +868,9 @@ impl Tracer {
         // `Finished`, so they have somewhere to land the moment the consumer
         // reads anything at all. Everything else waits in the tracer's own
         // byte-bounded buffer.
-        let depth = HANDOFF_DEPTH.min(config.queue_max.max(1)) + TERMINAL_RESERVE;
+        let depth = config.queue_bounds().handoff_events;
         let (tx, rx): (SyncSender<TracerEvent>, Receiver<TracerEvent>) = sync_channel(depth);
+        let handed = Arc::new(AtomicUsize::new(0));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), TracerError>>();
         let stop = Arc::new(AtomicBool::new(false));
         let shutdown_ns = Arc::new(AtomicU64::new(
@@ -766,6 +881,7 @@ impl Tracer {
             stop: Arc::clone(&stop),
             shutdown_ns: Arc::clone(&shutdown_ns),
             tid: Arc::clone(&tid),
+            handed: Arc::clone(&handed),
         };
         let handle = std::thread::Builder::new()
             .name("ouro-jail-tracer".to_string())
@@ -776,7 +892,7 @@ impl Tracer {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Tracer {
                 launcher,
-                events: rx,
+                events: Events::new(rx, handed),
                 handle: Some(handle),
                 stop,
                 shutdown_ns,
@@ -805,7 +921,7 @@ impl Tracer {
     /// still queued when [`Tracer::finish`] consumes the tracer are lost with
     /// it.
     #[must_use]
-    pub fn events(&self) -> &Receiver<TracerEvent> {
+    pub fn events(&self) -> &Events {
         &self.events
     }
 
@@ -898,7 +1014,10 @@ impl Drop for Tracer {
         // panicking, so it is the same bounded shutdown as `finish`.
         let taken = Tracer {
             launcher: self.launcher,
-            events: std::mem::replace(&mut self.events, sync_channel(1).1),
+            events: std::mem::replace(
+                &mut self.events,
+                Events::new(sync_channel(1).1, Arc::default()),
+            ),
             handle: self.handle.take(),
             stop: Arc::clone(&self.stop),
             shutdown_ns: Arc::clone(&self.shutdown_ns),
@@ -997,6 +1116,35 @@ mod tests {
             Err(other) => panic!("expected a refused seize, got {other}"),
             Ok(_) => panic!("seizing pid 1 must not succeed as an unprivileged user"),
         }
+    }
+
+    /// J4 W3 (loss review finding 4): the bounds in force, including for a
+    /// budget too small to hold a pathname or even one event.
+    #[test]
+    fn j4_w3_queue_bounds_are_the_budget_with_a_floor_of_one_event() {
+        let bounds = |queue_bytes_max| {
+            TracerConfig {
+                queue_bytes_max,
+                ..TracerConfig::default()
+            }
+            .queue_bounds()
+        };
+        let default = TracerConfig::default().queue_bounds();
+        assert_eq!(default.bytes_max, 4 * 1024 * 1024);
+        assert_eq!(default.result_bytes_max, 4 * 1024 * 1024 - 64 * 1024);
+        assert_eq!(default.lifecycle_reserve, 64 * 1024);
+        assert_eq!(default.handoff_events, 66);
+        assert_eq!(bounds(65_536 + 256).result_bytes_max, 256);
+        assert_eq!(bounds(65_536 + 4096).result_bytes_max, 4096);
+        assert_eq!(bounds(16_384).bytes_max, 16_384);
+        assert_eq!(bounds(16_384).result_bytes_max, EVENT_FIXED_BYTES);
+        assert_eq!(bounds(1).bytes_max, EVENT_FIXED_BYTES);
+        assert_eq!(bounds(1).result_bytes_max, EVENT_FIXED_BYTES);
+        let shallow = TracerConfig {
+            queue_max: 3,
+            ..TracerConfig::default()
+        };
+        assert_eq!(shallow.queue_bounds().handoff_events, 5);
     }
 
     #[test]

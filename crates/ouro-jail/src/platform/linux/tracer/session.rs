@@ -15,7 +15,9 @@
 //!   with. A failed `execve` never reaches that event and comes out as
 //!   `Syscall { op: Exec, ret: -errno }`. A non-leader exec is followed: the
 //!   thread's id becomes the leader's, the in-flight entry moves with it, and
-//!   the process keeps the identity it was born with.
+//!   the process keeps the identity it was born with. Whatever the leader
+//!   itself had in flight can no longer return: it is abandoned, a gap of its
+//!   own classes, and never paired with the exec's syscall exit (J4 W3).
 //! * Entry and exit are paired per thread. An exit with no entry is a gap. A
 //!   kernel restart code at the exit (`ERESTARTSYS` and its family) is not a
 //!   result yet: the kernel decides afterwards whether to re-enter the call
@@ -23,7 +25,9 @@
 //!   observer has seen that decision — see [`RestartWait`]. A re-entry
 //!   produces the one result; an `EINTR` is the result; emitting the code
 //!   itself would be the duplicate §11.2 forbids, and dropping it would be
-//!   the silence §11.4 forbids.
+//!   the silence §11.4 forbids. A restart read from a handler's frame, which
+//!   the program can rewrite, is believed only when the re-entry is seen
+//!   (J4 W3, R1).
 //! * A read-only open never becomes an event, never takes an in-flight slot
 //!   and so is never refused one (J4 O-1), and never even costs a second
 //!   stop: the tracee is continued from the seccomp stop instead of being
@@ -55,13 +59,16 @@
 //!   exists to report, nor the record of what it could not see.
 //! * The buffer is bounded in bytes, not in events, because §11.4 budgets
 //!   bytes and two four-kilobyte pathnames per event make a count meaningless.
+//!   The budget covers what was handed to the channel and not yet taken as
+//!   well ([`super::Events`] gives the bytes back), so the figure the
+//!   observer plan records is the bound in force (J4 W3).
 //! * Nothing is ever delivered with a bare `try_send`. Every send has a
 //!   deadline, and what misses it is counted.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -71,8 +78,8 @@ use super::closed_set::{self, ClosedOp, Entry, FlagSource};
 use super::proc;
 use super::sys::{self, Wait};
 use super::{
-    Args, EVENT_FIXED_BYTES, GapReason, OpSet, PathSnapshot, SockaddrSnapshot, TracerConfig,
-    TracerError, TracerEvent, TracerSummary, clock,
+    Args, GapReason, OpSet, PathSnapshot, SockaddrSnapshot, TracerConfig, TracerError, TracerEvent,
+    TracerSummary, clock, event_bytes,
 };
 
 /// How long a tracee may be held at a stop by a consumer that is not reading.
@@ -96,12 +103,6 @@ const TERMINAL_POLL: Duration = Duration::from_millis(5);
 /// exit is admitted.
 const LIFECYCLE_MAX: usize = 16_384;
 
-/// Bytes of the §11.4 queue budget that results may not consume, so the
-/// lifecycle facts a supervisor must never lose — `Exit`, `Gap`, `Finished`
-/// — always have room to land behind them. Generous against their fixed
-/// [`EVENT_FIXED_BYTES`] size.
-const LIFECYCLE_RESERVE: usize = 64 * 1024;
-
 /// How long a killed tree is given to be reaped before the remaining tracees
 /// are recorded as abandoned.
 const KILL_GRACE: Duration = Duration::from_secs(2);
@@ -115,6 +116,8 @@ pub(super) struct Handles {
     pub stop: Arc<AtomicBool>,
     pub shutdown_ns: Arc<AtomicU64>,
     pub tid: Arc<AtomicI32>,
+    /// Bytes handed to the channel and not yet taken by the consumer.
+    pub handed: Arc<AtomicUsize>,
 }
 
 /// The two `/proc` reads that name a task: its thread group and its birth.
@@ -190,6 +193,22 @@ struct Site {
 ///   `restart_syscall`, which is not traced), an unreadable or unrecognised
 ///   frame, a stop out of this sequence: [`GapReason::RestartUnresolved`].
 ///
+/// "Restarted" at a handler's entry is not yet the end (J4 W3, tracer review
+/// R1). The re-entry comes only after the handler returns, through
+/// `rt_sigreturn`, which restores the frame — and the frame is the
+/// program's memory: the handler, or a sibling thread before the observer
+/// reads it, can rewrite it, so the program sees `EINTR` from a call the
+/// observer read as restarted. The thread is then let run
+/// ([`Awaiting::Reentry`]) and the wait is settled by what follows:
+///
+/// * its next entry stop at the same [`Site`]: the re-entry, restarted;
+/// * its next entry stop anywhere else: [`GapReason::RestartUnresolved`] —
+///   a call inside the handler cannot be told from one after a rewritten
+///   frame, so a covered call made by an `SA_RESTART` handler costs a gap;
+/// * its end first: nothing when the kernel decided the restart whatever the
+///   frame (`ERESTARTNOINTR`, so there is no `EINTR` it could have hidden),
+///   [`GapReason::RestartUnresolved`] when the frame decided it.
+///
 /// The call keeps its in-flight slot until then.
 struct RestartWait {
     call: InFlight,
@@ -199,6 +218,32 @@ struct RestartWait {
     /// The last signal delivered to the thread since the exit, if any. The
     /// kernel notifies a handler's entry only after a signal was delivered.
     delivered: Option<libc::c_int>,
+    awaiting: Awaiting,
+}
+
+/// What a [`RestartWait`] is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Awaiting {
+    /// The kernel's decision. The thread is single-stepped.
+    Decision,
+    /// The re-entry a handler's entry announced. The thread runs freely.
+    Reentry {
+        /// The restart code alone decided it (`ERESTARTNOINTR`), not the
+        /// frame the program can rewrite.
+        by_kernel: bool,
+    },
+}
+
+/// What an entry stop of a thread owing a restart decision showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryStop {
+    /// Stopped at the entry of the call made at this site.
+    At(Site),
+    /// Killed at this stop before it was resumed: the kernel skips the call,
+    /// and which call it was can no longer be read.
+    Killed,
+    /// Not describable.
+    Unreadable,
 }
 
 /// What the kernel did with a call whose exit carried a restart code.
@@ -302,7 +347,13 @@ pub(super) fn run(
 ) -> TracerSummary {
     handles.tid.store(sys::gettid(), Ordering::Release);
     let epoch_boottime_ns = config.epoch_boottime_ns;
-    let mut session = Session::new(config, tx, epoch_boottime_ns, Box::new(LiveProc));
+    let mut session = Session::new(
+        config,
+        tx,
+        Arc::clone(&handles.handed),
+        epoch_boottime_ns,
+        Box::new(LiveProc),
+    );
     match seize_and_confirm(launcher) {
         Ok(()) => {
             if ready.send(Ok(())).is_err() {
@@ -388,14 +439,19 @@ struct CoalescedGap {
 struct Session {
     config: TracerConfig,
     tx: SyncSender<TracerEvent>,
-    /// Events the consumer has not taken yet, oldest first.
+    /// Bytes of events handed to the channel that the consumer has not taken
+    /// yet: part of the budget, given back by [`super::Events`].
+    handed: Arc<AtomicUsize>,
+    /// Events not yet handed to the channel, oldest first.
     pending: VecDeque<Queued>,
     pending_bytes: usize,
     lifecycle_pending: usize,
-    /// The byte ceiling the outbox admits against.
+    /// The byte ceiling the outbox admits against: buffered and handed-over
+    /// bytes together ([`super::QueueBounds::bytes_max`]).
     bytes_max: usize,
     /// The byte ceiling results admit against: `bytes_max` short of the
-    /// lifecycle reserve, so the reserve stays free for lifecycle facts.
+    /// lifecycle reserve, so the reserve stays free for lifecycle facts
+    /// ([`super::QueueBounds::result_bytes_max`]).
     result_bytes_max: usize,
     /// True while the consumer is behind: results are dropped without
     /// waiting another second to find out again.
@@ -432,29 +488,24 @@ impl Session {
     fn new(
         config: TracerConfig,
         tx: SyncSender<TracerEvent>,
+        handed: Arc<AtomicUsize>,
         epoch_boottime_ns: u64,
         procfs: Box<dyn ProcView>,
     ) -> Self {
         let scratch = vec![0u8; config.path_snapshot_max.max(128)];
-        // §11.4 budgets the whole user-space queue. What the consumer has
-        // already taken from the channel, and what the allocator rounded up,
-        // are part of that budget too, so the buffer admits against three
-        // quarters of it.
-        let bytes_max =
-            (config.queue_bytes_max - config.queue_bytes_max / 4).max(EVENT_FIXED_BYTES);
-        // Results stop short of the reserve, so the reserve stays free for
-        // the lifecycle facts a supervisor must never lose.
-        let result_bytes_max = bytes_max
-            .saturating_sub(LIFECYCLE_RESERVE)
-            .max(EVENT_FIXED_BYTES);
+        // §11.4 budgets the whole user-space queue: the buffer and what was
+        // handed to the channel and not taken yet are admitted against it
+        // together. The bounds are the ones the observer plan records.
+        let bounds = config.queue_bounds();
         Session {
             config,
             tx,
+            handed,
             pending: VecDeque::new(),
             pending_bytes: 0,
             lifecycle_pending: 0,
-            bytes_max,
-            result_bytes_max,
+            bytes_max: bounds.bytes_max,
+            result_bytes_max: bounds.result_bytes_max,
             stalled: false,
             disconnected: false,
             coalesced: Vec::new(),
@@ -480,18 +531,11 @@ impl Session {
 
     // ---------------------------------------------------------- the outbox
 
-    /// What an event costs the budget: its snapshots plus a fixed charge for
-    /// the enum, the buffer slot and the allocator's rounding.
-    fn event_bytes(event: &TracerEvent) -> usize {
-        let snapshots = match event {
-            TracerEvent::Syscall { args, .. } => {
-                args.path.as_ref().map_or(0, |p| p.bytes.len())
-                    + args.path2.as_ref().map_or(0, |p| p.bytes.len())
-            }
-            TracerEvent::Exec { path, .. } => path.as_ref().map_or(0, |p| p.bytes.len()),
-            _ => 0,
-        };
-        EVENT_FIXED_BYTES + snapshots
+    /// Everything held for the consumer: buffered, or handed over and not
+    /// yet taken. The handed-over part can only be smaller by the time it is
+    /// used, so admitting against it errs towards less.
+    fn held(&self) -> usize {
+        self.pending_bytes + self.handed.load(Ordering::Relaxed)
     }
 
     /// Whether an event is a lifecycle fact rather than an audit result.
@@ -530,6 +574,9 @@ impl Session {
         while let Some(front) = self.pending.pop_front() {
             let lifecycle = front.lifecycle;
             let bytes = front.bytes;
+            // Charged before the send, so the consumer's credit, which comes
+            // after the receive, can never run ahead of it.
+            self.handed.fetch_add(bytes, Ordering::Relaxed);
             match self.tx.try_send(front.event) {
                 Ok(()) => {
                     self.pending_bytes -= bytes;
@@ -540,6 +587,7 @@ impl Session {
                     self.last_healthy_ns = self.now_ns();
                 }
                 Err(TrySendError::Full(event)) => {
+                    self.handed.fetch_sub(bytes, Ordering::Relaxed);
                     self.pending.push_front(Queued {
                         event,
                         bytes,
@@ -548,6 +596,7 @@ impl Session {
                     return;
                 }
                 Err(TrySendError::Disconnected(event)) => {
+                    self.handed.fetch_sub(bytes, Ordering::Relaxed);
                     self.pending.push_front(Queued {
                         event,
                         bytes,
@@ -563,7 +612,7 @@ impl Session {
 
     fn room_for(&self, bytes: usize) -> bool {
         self.pending.len() < self.config.queue_max.max(1)
-            && self.pending_bytes + bytes <= self.result_bytes_max
+            && self.held() + bytes <= self.result_bytes_max
     }
 
     fn enqueue(&mut self, event: TracerEvent, bytes: usize, lifecycle: bool) {
@@ -574,7 +623,7 @@ impl Session {
             self.summary.gaps += 1;
         }
         self.pending_bytes += bytes;
-        self.summary.queue_bytes_peak = self.summary.queue_bytes_peak.max(self.pending_bytes);
+        self.summary.queue_bytes_peak = self.summary.queue_bytes_peak.max(self.held());
         self.pending.push_back(Queued {
             event,
             bytes,
@@ -594,7 +643,7 @@ impl Session {
                 to_ns: gap.to_ns,
                 count: gap.count,
             };
-            let bytes = Session::event_bytes(&event);
+            let bytes = event_bytes(&event);
             self.enqueue(event, bytes, true);
         }
     }
@@ -602,7 +651,7 @@ impl Session {
     fn emit(&mut self, event: TracerEvent) {
         self.flush();
         let lifecycle = Session::is_lifecycle(&event);
-        let bytes = Session::event_bytes(&event);
+        let bytes = event_bytes(&event);
         let ops = Session::ops_of(&event);
 
         if lifecycle {
@@ -613,8 +662,8 @@ impl Session {
             // over. Results stop short of [`LIFECYCLE_RESERVE`], so a dropped
             // `Exec` means the budget was full of evidence, not that the
             // reserve failed.
-            let over = self.lifecycle_pending >= LIFECYCLE_MAX
-                || self.pending_bytes + bytes > self.bytes_max;
+            let over =
+                self.lifecycle_pending >= LIFECYCLE_MAX || self.held() + bytes > self.bytes_max;
             if over {
                 // J4 D6: the critical facts are exempt from every cap, both
                 // of them. Checking the count first, as this used to, dropped
@@ -874,7 +923,14 @@ impl Session {
         // a call in flight is stepped to its syscall exit; anything else
         // runs to its next traced event.
         let (request, fresh) = match self.tasks.get(&pid) {
-            Some(task) if task.restart.is_some() => (sys::PTRACE_SINGLESTEP, false),
+            Some(Task {
+                restart:
+                    Some(RestartWait {
+                        awaiting: Awaiting::Decision,
+                        ..
+                    }),
+                ..
+            }) => (sys::PTRACE_SINGLESTEP, false),
             Some(task) if task.pending.is_some() => (sys::PTRACE_SYSCALL, task.entry_fresh),
             _ => (sys::PTRACE_CONT, false),
         };
@@ -1034,23 +1090,27 @@ impl Session {
     }
 
     fn handle_exec(&mut self, tid: pid_t) {
-        self.summary.exec_transitions += 1;
         // After execve the thread group has exactly one thread and its id is
         // the leader's, which is the id this stop was reported under. If a
         // worker did the exec, PTRACE_GETEVENTMSG names the id it had before.
         let former = sys::event_msg(tid)
             .map(|value| value as pid_t)
             .unwrap_or(tid);
+        self.exec_transition(tid, former);
+    }
+
+    /// The exec transition reported under `tid`, made by the thread that had
+    /// the id `former` before it (`tid` itself for a leader exec).
+    fn exec_transition(&mut self, tid: pid_t, former: pid_t) {
+        self.summary.exec_transitions += 1;
+        let non_leader = former != tid && former > 0;
         let mut carried: Option<(InFlight, Site)> = None;
-        if former != tid
-            && former > 0
-            && let Some(task) = self.tasks.remove(&former)
-        {
+        if non_leader && let Some(task) = self.tasks.remove(&former) {
             carried = task.pending.map(|pending| (pending, task.site));
-            if task.restart.is_some() {
+            if let Some(wait) = task.restart {
                 // Not reachable: the thread that execs is in its `execve`,
                 // not waiting for a restart decision. Kept exact anyway.
-                self.restart_unfinished();
+                self.restart_ended(wait);
             }
             // That task did not die: it is this one now, under the leader's
             // id. Nothing will ever report it, so it is not retired — a
@@ -1059,6 +1119,35 @@ impl Session {
             if let Some(process) = self.procs.get_mut(&task.tgid) {
                 process.threads.remove(&former);
             }
+        }
+        // The task registered under `tid` was the leader until now. After a
+        // non-leader exec that thread is gone: the kernel destroyed it, and
+        // the thread that execed took its id. Whatever it had in flight can
+        // no longer return, and the syscall exit that follows is the exec's
+        // own — whether or not the exec's entry was followed (J4 W3, loss
+        // review finding 1: when it was refused an in-flight slot, the
+        // leader's stale entry used to be paired with that exit, an invented
+        // result). The gap names the call, because the entry is in hand.
+        let (stale, stale_wait) = match self.tasks.get_mut(&tid) {
+            Some(task) if non_leader => (task.pending.take(), task.restart.take()),
+            // A leader's own exec: a wait would have been settled at its
+            // `execve` entry, so one here is out of sequence.
+            Some(task) => (None, task.restart.take()),
+            None => (None, None),
+        };
+        if let Some(call) = stale {
+            self.inflight = self.inflight.saturating_sub(1);
+            self.summary.loss.abandoned_entries += 1;
+            self.gap(GapReason::EntryAbandoned, call.ops(), Some(1));
+        }
+        match stale_wait {
+            Some(wait) if non_leader => self.restart_ended(wait),
+            Some(wait) => {
+                self.inflight = self.inflight.saturating_sub(1);
+                self.summary.loss.restart_unresolved += 1;
+                self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
+            }
+            None => {}
         }
         let tgid = self.tgid_of(tid);
         let mut destroyed = Vec::new();
@@ -1088,24 +1177,10 @@ impl Session {
                 self.summary.loss.abandoned_entries += 1;
                 self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
             }
-            if task.restart.is_some() {
-                // Destroyed between a restart code and the kernel's
-                // decision: the call did nothing and returned nothing.
-                self.restart_unfinished();
+            if let Some(wait) = task.restart {
+                // Destroyed while its restart was owed: as a death.
+                self.restart_ended(wait);
             }
-        }
-        if carried.is_some()
-            && let Some(ops) = self
-                .tasks
-                .get(&tid)
-                .and_then(|t| t.pending.as_ref().map(InFlight::ops))
-        {
-            // Both the leader and the thread that execed had a call in
-            // flight; the leader's can no longer return, and the gap names
-            // it because the entry is in hand.
-            self.inflight = self.inflight.saturating_sub(1);
-            self.summary.loss.abandoned_entries += 1;
-            self.gap(GapReason::EntryAbandoned, ops, Some(1));
         }
         let mut path = None;
         let mut dirfd = None;
@@ -1173,9 +1248,7 @@ impl Session {
         // naming it from this one would mislabel the call (J4 D2): it is
         // foreign, followed to its return and never decoded.
         if info.arch != sys::AUDIT_ARCH_X86_64 || info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0 {
-            if self.admit(OpSet::ALL) {
-                self.begin(tid, InFlight::Foreign, site);
-            }
+            self.follow(tid, InFlight::Foreign, site);
             return;
         }
         // J4 D1: a child asking for its own notification listener. The flags
@@ -1184,9 +1257,7 @@ impl Session {
         if info.nr == u64::from(super::filter::LISTENER_SYSCALL.1)
             && info.args[1] & u64::from(super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
         {
-            if self.admit(OpSet::ALL) {
-                self.begin(tid, InFlight::Listener, site);
-            }
+            self.follow(tid, InFlight::Listener, site);
             return;
         }
         // J4 S4: a clone the kernel will not attach to this tracer. The flags
@@ -1195,9 +1266,7 @@ impl Session {
         if info.nr == u64::from(super::filter::CLONE_SYSCALL.1)
             && info.args[0] & u64::from(super::filter::CLONE_UNTRACED) != 0
         {
-            if self.admit(OpSet::ALL) {
-                self.begin(tid, InFlight::Untraced, site);
-            }
+            self.follow(tid, InFlight::Untraced, site);
             return;
         }
         let Some(entry) = closed_set::lookup(info.nr) else {
@@ -1249,6 +1318,36 @@ impl Session {
             return false;
         }
         true
+    }
+
+    /// Follow `call`, which is not a closed-set call but decides what the
+    /// observer can see from here on, or record what refusing it costs.
+    ///
+    /// Refused an in-flight slot, it runs unfollowed, and its return is the
+    /// one fact that would have said whether it did anything. So the refusal
+    /// costs what success would (J4 W3, loss review finding 3): a listener
+    /// request is the open-ended `child_notification_listener` gap, and a
+    /// `clone(CLONE_UNTRACED)` the open-ended `untraced_descendant` gap —
+    /// never a one-count `inflight_exhausted` gap with an end, which would
+    /// claim coverage back that the listener or the descendant can take. A
+    /// foreign call is one call: `inflight_exhausted`, as for any other.
+    fn follow(&mut self, tid: pid_t, call: InFlight, site: Site) {
+        if self.inflight < self.config.inflight_max {
+            self.begin(tid, call, site);
+            return;
+        }
+        self.summary.loss.inflight_rejected += 1;
+        match call {
+            InFlight::Listener => {
+                self.gap(GapReason::ChildNotificationListener, OpSet::ALL, None);
+            }
+            InFlight::Untraced => {
+                self.gap(GapReason::UntracedDescendant, OpSet::ALL, None);
+            }
+            InFlight::Foreign | InFlight::Closed(_) => {
+                self.gap(GapReason::InflightExhausted, call.ops(), Some(1));
+            }
+        }
     }
 
     /// Record `call`, which entered the kernel at `site`, as this thread's
@@ -1374,6 +1473,7 @@ impl Session {
                     code: -rval,
                     site: task.site,
                     delivered: None,
+                    awaiting: Awaiting::Decision,
                 });
             }
             return;
@@ -1497,34 +1597,32 @@ impl Session {
         signal: libc::c_int,
         event: libc::c_int,
     ) -> Option<libc::c_int> {
-        let (code, site, delivered) = {
+        let (code, site, delivered, awaiting) = {
             let wait = self.tasks.get(&tid)?.restart.as_ref()?;
-            (wait.code, wait.site, wait.delivered)
+            (wait.code, wait.site, wait.delivered, wait.awaiting)
         };
+        if event == sys::PTRACE_EVENT_SECCOMP {
+            // The thread's next entry. Stepped since the exit, no user
+            // instruction ran before it, so only the kernel's re-entry can
+            // be here; let run since a handler's entry, it is the re-entry
+            // only if it is at the call's own site. Either way it is judged
+            // here, and then handled as ever.
+            let seen = Self::entry_stop(tid);
+            self.judge_entry_stop(tid, seen);
+            return None;
+        }
+        if awaiting != Awaiting::Decision {
+            // Waiting for the re-entry while the handler runs: signals,
+            // group-stops, forks and the thread's exit are handled as ever,
+            // and the wait goes on.
+            return None;
+        }
         match event {
-            sys::PTRACE_EVENT_SECCOMP => {
-                // The thread's next entry. It was single-stepped since the
-                // exit, so no user instruction ran before this one: an entry
-                // of the same call at the same instruction is the kernel's
-                // re-entry, and anything else is not.
-                match sys::syscall_info(tid) {
-                    Ok(info)
-                        if info.arch == site.arch && info.nr == site.nr && info.ip == site.ip =>
-                    {
-                        self.settle_restart(tid, Verdict::Restarted);
-                    }
-                    // Killed at this stop: the death ends the wait, and the
-                    // entry is judged (and skipped) by `handle_entry`.
-                    Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {}
-                    Ok(_) if Self::at_exit_notification(tid) => {}
-                    _ => self.settle_restart(tid, Verdict::Unknown),
-                }
-                None
-            }
             // A group-stop, or the thread's exit: the decision is still
             // ahead, or never comes. Handled as ever; the thread keeps
-            // stepping.
-            sys::PTRACE_EVENT_STOP | sys::PTRACE_EVENT_EXIT => None,
+            // stepping. An exec reported under this id is another thread's,
+            // which destroyed this one: `exec_transition` ends the wait.
+            sys::PTRACE_EVENT_STOP | sys::PTRACE_EVENT_EXIT | sys::PTRACE_EVENT_EXEC => None,
             0 if signal != sys::SYSCALL_STOP_SIG => {
                 if signal == libc::SIGTRAP {
                     if let Some(uc) = delivered.and_then(|sig| self.handler_entry(tid, sig)) {
@@ -1532,7 +1630,19 @@ impl Session {
                         // call. This notification is not a signal: nothing
                         // is delivered for it.
                         let frame = Self::read_frame(tid, uc);
-                        self.settle_restart(tid, verdict_at_handler(code, frame, site));
+                        match verdict_at_handler(code, frame, site) {
+                            Verdict::Restarted => {
+                                // Believed at the re-entry itself (R1).
+                                if let Some(wait) =
+                                    self.tasks.get_mut(&tid).and_then(|t| t.restart.as_mut())
+                                {
+                                    wait.awaiting = Awaiting::Reentry {
+                                        by_kernel: code == sys::ERESTARTNOINTR,
+                                    };
+                                }
+                            }
+                            verdict => self.settle_restart(tid, verdict),
+                        }
                         return Some(0);
                     }
                     if Self::is_step_trap(tid) {
@@ -1599,6 +1709,58 @@ impl Session {
         )
     }
 
+    /// What the entry stop `tid` is at shows.
+    fn entry_stop(tid: pid_t) -> EntryStop {
+        match sys::syscall_info(tid) {
+            Ok(info)
+                if info.op == sys::SYSCALL_INFO_SECCOMP || info.op == sys::SYSCALL_INFO_ENTRY =>
+            {
+                EntryStop::At(Site {
+                    arch: info.arch,
+                    nr: info.nr,
+                    ip: info.ip,
+                })
+            }
+            // Left this stop without being resumed, which only a SIGKILL does
+            // (J4 O-3): on its way out, or already at its exit notification.
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => EntryStop::Killed,
+            Ok(_) if Self::at_exit_notification(tid) => EntryStop::Killed,
+            _ => EntryStop::Unreadable,
+        }
+    }
+
+    /// Judge an entry stop of a thread whose restart wait is still open.
+    fn judge_entry_stop(&mut self, tid: pid_t, seen: EntryStop) {
+        let Some((site, awaiting)) = self
+            .tasks
+            .get(&tid)
+            .and_then(|task| task.restart.as_ref())
+            .map(|wait| (wait.site, wait.awaiting))
+        else {
+            return;
+        };
+        match (seen, awaiting) {
+            (EntryStop::At(at), _) if at == site => self.settle_restart(tid, Verdict::Restarted),
+            // Killed at the re-entry, which the kernel now skips (J4 O-3):
+            // stepped here, it can only be the re-entry; let run, it is taken
+            // as one only when the kernel alone decided the restart. The call
+            // is counted once, as killed at its entry, by `handle_entry` —
+            // not a second time as a restart that never finished (J4 W3,
+            // tracer review R2).
+            (EntryStop::Killed, Awaiting::Decision | Awaiting::Reentry { by_kernel: true }) => {
+                if self
+                    .tasks
+                    .get_mut(&tid)
+                    .and_then(|task| task.restart.take())
+                    .is_some()
+                {
+                    self.inflight = self.inflight.saturating_sub(1);
+                }
+            }
+            _ => self.settle_restart(tid, Verdict::Unknown),
+        }
+    }
+
     /// Settle a thread's restart wait with `verdict`.
     fn settle_restart(&mut self, tid: pid_t, verdict: Verdict) {
         let Some(wait) = self
@@ -1632,10 +1794,23 @@ impl Session {
         }
     }
 
-    /// A restart wait whose thread ended before the kernel decided.
-    fn restart_unfinished(&mut self) {
+    /// A restart wait whose thread ended — died, or was destroyed by another
+    /// thread's `execve` — before the wait was settled. Before the kernel's
+    /// decision the call did nothing and returned nothing, and so after a
+    /// restart the kernel alone decided: neither a result nor a loss. After
+    /// a restart read from the frame, the `EINTR` the program may have seen
+    /// was never observed: a gap (J4 W3, R1).
+    fn restart_ended(&mut self, wait: RestartWait) {
         self.inflight = self.inflight.saturating_sub(1);
-        self.summary.restarts_unfinished += 1;
+        match wait.awaiting {
+            Awaiting::Decision | Awaiting::Reentry { by_kernel: true } => {
+                self.summary.restarts_unfinished += 1;
+            }
+            Awaiting::Reentry { by_kernel: false } => {
+                self.summary.loss.restart_unresolved += 1;
+                self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
+            }
+        }
     }
 
     fn handle_death(&mut self, pid: pid_t, status: libc::c_int) {
@@ -1668,11 +1843,10 @@ impl Session {
             self.summary.loss.abandoned_entries += 1;
             self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
         }
-        if task.restart.is_some() {
-            // Died between a restart code and the kernel's decision (a fatal
-            // signal's delivery is exactly such a decision point): the call
-            // did nothing, and no result was ever returned.
-            self.restart_unfinished();
+        if let Some(wait) = task.restart {
+            // Died while its restart was owed (a fatal signal's delivery is
+            // exactly such a decision point).
+            self.restart_ended(wait);
         }
         let Some(process) = self.procs.get_mut(&task.tgid) else {
             // A task whose thread group we no longer hold: its death cannot
@@ -1941,7 +2115,7 @@ impl Session {
         }
         self.materialise_gap();
         let finished = TracerEvent::Finished;
-        let bytes = Session::event_bytes(&finished);
+        let bytes = event_bytes(&finished);
         self.enqueue(finished, bytes, true);
 
         // Hand over the backlog. Nothing is stopped behind it, so this waits
@@ -1983,6 +2157,7 @@ fn sockaddr_len(family: u16, declared: u64) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::EVENT_FIXED_BYTES;
     use super::sockaddr_len;
     use super::*;
 
@@ -1993,7 +2168,10 @@ mod tests {
             queue_bytes_max: 64 * 1024 * 1024,
             ..TracerConfig::default()
         };
-        (Session::new(config, tx, 0, Box::new(LiveProc)), rx)
+        (
+            Session::new(config, tx, Arc::default(), 0, Box::new(LiveProc)),
+            rx,
+        )
     }
 
     fn fork(child: pid_t) -> TracerEvent {
@@ -2081,7 +2259,7 @@ mod tests {
             queue_bytes_max: 4 * EVENT_FIXED_BYTES,
             ..TracerConfig::default()
         };
-        let mut session = Session::new(config, tx, 0, Box::new(LiveProc));
+        let mut session = Session::new(config, tx, Arc::default(), 0, Box::new(LiveProc));
         for child in 2..100 {
             session.emit(fork(child));
         }
@@ -2182,6 +2360,7 @@ mod tests {
         let mut session = Session::new(
             TracerConfig::default(),
             tx,
+            Arc::default(),
             0,
             Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
         );
@@ -2256,6 +2435,7 @@ mod tests {
         let mut session = Session::new(
             TracerConfig::default(),
             tx,
+            Arc::default(),
             0,
             Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
         );
@@ -2364,6 +2544,7 @@ mod tests {
         let mut session = Session::new(
             TracerConfig::default(),
             tx,
+            Arc::default(),
             0,
             Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
         );
@@ -2420,11 +2601,291 @@ mod tests {
         assert!(!GapReason::RestartUnresolved.is_open_ended());
     }
 
+    // ------------------------------------------------ J4 wave 3
+
+    fn scripted(
+        config: TracerConfig,
+        tasks: &[(pid_t, pid_t)],
+    ) -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        for (tid, tgid) in tasks {
+            table.lock().unwrap().insert(*tid, (*tgid, 1000));
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let mut session = Session::new(
+            config,
+            tx,
+            Arc::default(),
+            0,
+            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+        );
+        for (tid, _) in tasks {
+            session.register(*tid);
+        }
+        (session, rx)
+    }
+
+    /// A handler's entry has just said "restarted": by the frame, or by the
+    /// restart code alone.
+    fn announced(session: &mut Session, tid: pid_t, by_kernel: bool) {
+        waiting(session, tid, 257, "/w/fifo");
+        let wait = session
+            .tasks
+            .get_mut(&tid)
+            .and_then(|task| task.restart.as_mut())
+            .expect("a restart wait");
+        wait.awaiting = Awaiting::Reentry { by_kernel };
+    }
+
+    /// J4 W3, tracer review R1, at the session: a restart read at a
+    /// handler's entry is settled by what the thread does next. Its
+    /// re-entry at the same site: restarted, no result of its own and no
+    /// loss. Any other entry: one `restart_unresolved` gap of the call's
+    /// classes. Its end: nothing when the restart code alone decided
+    /// (`ERESTARTNOINTR`), a gap when the frame did. Killed at an entry
+    /// stop that cannot be read: taken as the re-entry only when the code
+    /// decided. Every end releases the slot.
+    #[test]
+    fn j4_w3_r1_a_restart_read_at_a_handler_is_settled_by_what_follows() {
+        let open = OpSet::of(ClosedOp::Open);
+        type Step = fn(&mut Session);
+        let die: Step = |session| session.handle_death(RECYCLED, 0);
+        let reenter: Step =
+            |session| session.judge_entry_stop(RECYCLED, EntryStop::At(Site::default()));
+        let other: Step = |session| {
+            session.judge_entry_stop(
+                RECYCLED,
+                EntryStop::At(Site {
+                    nr: 83,
+                    ..Site::default()
+                }),
+            );
+        };
+        let killed: Step = |session| session.judge_entry_stop(RECYCLED, EntryStop::Killed);
+        let unreadable: Step = |session| session.judge_entry_stop(RECYCLED, EntryStop::Unreadable);
+        let gap = vec![(GapReason::RestartUnresolved, open, Some(1))];
+        type Gaps = Vec<(GapReason, OpSet, Option<u64>)>;
+        // (label, decided by the code alone, what follows, the gaps, restarts,
+        // restarts unfinished)
+        type Case = (&'static str, bool, Step, Gaps, u64, u64);
+        let cases: [Case; 10] = [
+            ("frame, re-entry", false, reenter, vec![], 1, 0),
+            ("code, re-entry", true, reenter, vec![], 1, 0),
+            ("frame, another entry", false, other, gap.clone(), 0, 0),
+            ("code, another entry", true, other, gap.clone(), 0, 0),
+            (
+                "frame, unreadable entry",
+                false,
+                unreadable,
+                gap.clone(),
+                0,
+                0,
+            ),
+            ("frame, death", false, die, gap.clone(), 0, 0),
+            ("code, death", true, die, vec![], 0, 1),
+            (
+                "frame, killed at an entry",
+                false,
+                killed,
+                gap.clone(),
+                0,
+                0,
+            ),
+            ("code, killed at an entry", true, killed, vec![], 0, 0),
+            (
+                "code, killed then death",
+                true,
+                |session| {
+                    session.judge_entry_stop(RECYCLED, EntryStop::Killed);
+                    session.handle_death(RECYCLED, 0);
+                },
+                vec![],
+                0,
+                0,
+            ),
+        ];
+        for (label, by_kernel, step, gaps, restarts, unfinished) in cases {
+            let (mut session, rx) = scripted(TracerConfig::default(), &[(RECYCLED, RECYCLED)]);
+            announced(&mut session, RECYCLED, by_kernel);
+            assert_eq!(session.inflight, 1, "{label}: still in flight");
+            step(&mut session);
+            let events = drained(&rx, &mut session);
+            assert_eq!(gaps_of(&events), gaps, "{label}: {events:?}");
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, TracerEvent::Syscall { .. })),
+                "{label}: never a result: {events:?}"
+            );
+            assert_eq!(session.summary.restarts, restarts, "{label}");
+            assert_eq!(session.summary.restarts_unfinished, unfinished, "{label}");
+            assert_eq!(session.inflight, 0, "{label}: the slot is released");
+        }
+    }
+
+    /// R1 through the stepping phase is unchanged: a re-entry seen while
+    /// stepping — no handler ran — is the kernel's own, and a kill there
+    /// counts the call once (R2), as killed at its entry.
+    #[test]
+    fn j4_w3_r2_a_kill_at_a_stepped_reentry_ends_the_wait_without_a_count() {
+        let (mut session, rx) = scripted(TracerConfig::default(), &[(RECYCLED, RECYCLED)]);
+        waiting(&mut session, RECYCLED, 257, "/w/fifo");
+        session.judge_entry_stop(RECYCLED, EntryStop::Killed);
+        session.handle_death(RECYCLED, libc::SIGKILL);
+        assert!(drained(&rx, &mut session).is_empty());
+        assert_eq!(session.summary.restarts_unfinished, 0);
+        assert_eq!(session.summary.restarts, 0);
+        assert_eq!(session.inflight, 0);
+    }
+
+    const LEADER: pid_t = 5_000_011;
+    const PEER: pid_t = 5_000_012;
+
+    /// J4 W3, loss review finding 1, at the session: after a non-leader
+    /// exec the leader's entry is abandoned — a gap of its own classes —
+    /// whether the thread that execed carried its own entry or had none
+    /// (refused an in-flight slot), and nothing is left on the leader's id
+    /// that the exec's syscall exit could be paired with. A restart the
+    /// leader owed ends as its death would.
+    #[test]
+    fn j4_w3_a_non_leader_exec_abandons_the_leaders_entry_whatever_was_carried() {
+        for carried in [false, true] {
+            let (mut session, rx) =
+                scripted(TracerConfig::default(), &[(LEADER, LEADER), (PEER, LEADER)]);
+            pend(&mut session, LEADER, 257, "/w/fifo");
+            if carried {
+                pend(&mut session, PEER, 59, "/bin/image");
+            }
+            session.exec_transition(LEADER, PEER);
+            let events = drained(&rx, &mut session);
+            assert_eq!(
+                gaps_of(&events),
+                vec![(
+                    GapReason::EntryAbandoned,
+                    OpSet::of(ClosedOp::Open),
+                    Some(1)
+                )],
+                "carried {carried}: {events:?}"
+            );
+            let exec_path = events.iter().find_map(|event| match event {
+                TracerEvent::Exec { pid, path, .. } => Some((*pid, path.clone())),
+                _ => None,
+            });
+            let leader = session
+                .tasks
+                .get(&LEADER)
+                .expect("the leader's id lives on");
+            if carried {
+                assert!(
+                    matches!(
+                        leader.pending,
+                        Some(InFlight::Closed(Pending {
+                            exec_confirmed: true,
+                            ..
+                        }))
+                    ),
+                    "the carried execve is the one entry left"
+                );
+                assert_eq!(session.inflight, 1);
+                assert_eq!(
+                    exec_path.map(|(pid, path)| (pid, path.map(|p| p.bytes))),
+                    Some((LEADER, Some(b"/bin/image".to_vec())))
+                );
+            } else {
+                assert!(leader.pending.is_none(), "nothing to pair the exit with");
+                assert_eq!(session.inflight, 0);
+                assert_eq!(exec_path, Some((LEADER, None)));
+            }
+            assert!(!session.tasks.contains_key(&PEER));
+            assert_eq!(session.summary.loss.abandoned_entries, 1);
+        }
+        for (by_kernel, gaps) in [
+            (
+                false,
+                vec![(
+                    GapReason::RestartUnresolved,
+                    OpSet::of(ClosedOp::Open),
+                    Some(1),
+                )],
+            ),
+            (true, vec![]),
+        ] {
+            let (mut session, rx) =
+                scripted(TracerConfig::default(), &[(LEADER, LEADER), (PEER, LEADER)]);
+            announced(&mut session, LEADER, by_kernel);
+            session.exec_transition(LEADER, PEER);
+            let events = drained(&rx, &mut session);
+            assert_eq!(gaps_of(&events), gaps, "by kernel {by_kernel}: {events:?}");
+            assert_eq!(session.inflight, 0);
+            assert!(session.tasks[&LEADER].restart.is_none());
+        }
+    }
+
+    /// J4 W3, loss review finding 3, at the session: refused an in-flight
+    /// slot, a listener request and an untraced clone cost the open-ended
+    /// gap of their kind; a foreign call is one call.
+    #[test]
+    fn j4_w3_a_refused_listener_or_untraced_clone_is_the_open_ended_gap_of_its_kind() {
+        let (mut session, rx) = scripted(
+            TracerConfig {
+                inflight_max: 1,
+                ..TracerConfig::default()
+            },
+            &[(LEADER, LEADER), (PEER, LEADER)],
+        );
+        pend(&mut session, LEADER, 257, "/w/fifo");
+        session.follow(PEER, InFlight::Listener, Site::default());
+        session.follow(PEER, InFlight::Untraced, Site::default());
+        session.follow(PEER, InFlight::Foreign, Site::default());
+        assert_eq!(
+            gaps_of(&drained(&rx, &mut session)),
+            vec![
+                (GapReason::ChildNotificationListener, OpSet::ALL, None),
+                (GapReason::UntracedDescendant, OpSet::ALL, None),
+                (GapReason::InflightExhausted, OpSet::ALL, Some(1)),
+            ]
+        );
+        assert_eq!(session.summary.loss.inflight_rejected, 3);
+        assert!(session.tasks[&PEER].pending.is_none());
+        assert_eq!(session.inflight, 1);
+    }
+
+    /// J4 W3, loss review finding 4, at the session: what was handed to the
+    /// channel and not taken counts against the budget, and taking it gives
+    /// the bytes back.
+    #[test]
+    fn j4_w3_the_handoff_channel_is_inside_the_byte_budget() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let handed = Arc::new(AtomicUsize::new(0));
+        let config = TracerConfig {
+            queue_bytes_max: 4 * EVENT_FIXED_BYTES,
+            ..TracerConfig::default()
+        };
+        let mut session = Session::new(config, tx, Arc::clone(&handed), 0, Box::new(LiveProc));
+        for child in 2..20 {
+            session.emit(fork(child));
+        }
+        assert_eq!(
+            handed.load(Ordering::Relaxed),
+            4 * EVENT_FIXED_BYTES,
+            "four events fit, all of them already in the channel"
+        );
+        assert_eq!(session.pending.len(), 0);
+        assert_eq!(session.summary.loss.lifecycle_dropped, 14);
+        assert!(session.summary.queue_bytes_peak <= 4 * EVENT_FIXED_BYTES);
+        let events = super::super::Events::new(rx, Arc::clone(&handed));
+        while events.try_recv().is_ok() {}
+        assert_eq!(handed.load(Ordering::Relaxed), 0, "taken, and given back");
+        session.emit(fork(99));
+        assert_eq!(session.summary.loss.lifecycle_dropped, 14, "room again");
+    }
+
     // ------------------------------------------------ O-3, with a real kernel
 
     /// A child of this test, seized by the calling thread, that has the
     /// narrowing filter installed and makes one `mkdir` of `path` when
-    /// released: its first stop is that call's seccomp entry stop.
+    /// released (or, from [`Mkdirer::start_open`], one `openat(path,
+    /// O_WRONLY)`): its first stop is that call's seccomp entry stop.
     struct Mkdirer {
         pid: pid_t,
         go: libc::c_int,
@@ -2433,6 +2894,16 @@ mod tests {
     impl Mkdirer {
         /// `None` when this host will not let a test trace its own child.
         fn start(path: &std::ffi::CStr) -> Option<Mkdirer> {
+            Mkdirer::start_call(path, false)
+        }
+
+        /// The same child making `openat(path, O_WRONLY)`: on a FIFO nobody
+        /// reads, it sleeps inside the call.
+        fn start_open(path: &std::ffi::CStr) -> Option<Mkdirer> {
+            Mkdirer::start_call(path, true)
+        }
+
+        fn start_call(path: &std::ffi::CStr, open: bool) -> Option<Mkdirer> {
             let mut fds: [libc::c_int; 2] = [0; 2];
             // SAFETY: `pipe2` writes two descriptors into the live array.
             assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
@@ -2451,7 +2922,16 @@ mod tests {
                     }
                     let mut byte = 0u8;
                     libc::read(fds[0], (&raw mut byte).cast::<libc::c_void>(), 1);
-                    libc::syscall(libc::SYS_mkdir, path.as_ptr(), 0o700);
+                    if open {
+                        libc::syscall(
+                            libc::SYS_openat,
+                            libc::AT_FDCWD,
+                            path.as_ptr(),
+                            libc::O_WRONLY | libc::O_CLOEXEC,
+                        );
+                    } else {
+                        libc::syscall(libc::SYS_mkdir, path.as_ptr(), 0o700);
+                    }
                     libc::_exit(0);
                 }
             }
@@ -2520,7 +3000,13 @@ mod tests {
     fn live_session() -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
         let (tx, rx) = std::sync::mpsc::sync_channel(1024);
         (
-            Session::new(TracerConfig::default(), tx, 0, Box::new(LiveProc)),
+            Session::new(
+                TracerConfig::default(),
+                tx,
+                Arc::default(),
+                0,
+                Box::new(LiveProc),
+            ),
             rx,
         )
     }
@@ -2714,6 +3200,86 @@ mod tests {
         assert_eq!(
             session.summary.loss.total(),
             1,
+            "{:?}",
+            session.summary.loss
+        );
+        assert_eq!(session.inflight, 0);
+    }
+
+    /// Whether `pid` is asleep inside syscall `nr`, by `/proc`.
+    fn sleeping_in(pid: pid_t, nr: libc::c_long) -> bool {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let state = stat
+            .rsplit_once(") ")
+            .and_then(|(_, rest)| rest.chars().next());
+        let syscall = std::fs::read_to_string(format!("/proc/{pid}/syscall")).unwrap_or_default();
+        state == Some('S')
+            && syscall
+                .split_whitespace()
+                .next()
+                .and_then(|first| first.parse::<libc::c_long>().ok())
+                == Some(nr)
+    }
+
+    /// J4 W3, tracer review R2: a SIGKILL exactly at the re-entry of a
+    /// restarted call. The child sleeps in `openat` of a FIFO, a default-
+    /// ignored signal interrupts it (`-ERESTARTSYS` at the exit), the kernel
+    /// re-enters the call, and the child is killed at that re-entry's
+    /// seccomp stop. The kernel skips the re-entered call, so it is neither
+    /// a result nor a loss — and it is one call, counted once. On the base
+    /// it was counted twice, as `killed_at_entry` and `restarts_unfinished`.
+    #[test]
+    fn j4_w3_r2_a_kill_at_the_reentry_of_a_restarted_call_is_counted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path and a mode.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let Some(child) = Mkdirer::start_open(&c) else {
+            return;
+        };
+        let (mut session, rx) = live_session();
+        let status = child.release();
+        assert!(is_seccomp_stop(status), "the open's entry: {status:#x}");
+        session.handle(child.pid, status);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !sleeping_in(child.pid, libc::SYS_openat) {
+            assert!(
+                Instant::now() < deadline,
+                "the child never slept in its open"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // SAFETY: a pid this test created, and a valid signal.
+        assert_eq!(unsafe { libc::kill(child.pid, libc::SIGWINCH) }, 0);
+        let status = child.wait();
+        assert!(
+            libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == sys::SYSCALL_STOP_SIG,
+            "the restart-coded exit: {status:#x}"
+        );
+        session.handle(child.pid, status);
+        let status = child.wait();
+        assert!(
+            libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGWINCH,
+            "the signal's delivery: {status:#x}"
+        );
+        session.handle(child.pid, status);
+        let status = child.wait();
+        assert!(is_seccomp_stop(status), "the re-entry: {status:#x}");
+        child.kill();
+        session.handle(child.pid, status);
+        child.reap_into(&mut session);
+        let events = drained(&rx, &mut session);
+        assert_eq!(gaps_of(&events), vec![], "{events:?}");
+        assert_eq!(
+            session.summary.killed_at_entry + session.summary.restarts_unfinished,
+            1,
+            "one call, counted once: {:?}",
+            session.summary
+        );
+        assert_eq!(
+            session.summary.loss.total(),
+            0,
             "{:?}",
             session.summary.loss
         );
