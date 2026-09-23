@@ -993,14 +993,26 @@ fn n04_saturation_refuses_with_overload_then_recovers() {
         budgets,
         Arc::clone(&resolver) as Arc<dyn Resolver + Send + Sync>,
     );
-    // Fill every slot with a connection parked in its header read.
-    let mut held: Vec<UnixStream> = (0..CAP)
-        .map(|_| {
-            let mut stream = harness.connect();
-            stream.write_all(b"C").expect("writes");
-            stream
-        })
-        .collect();
+    // Fill every slot with a connection parked in its header read. The fill
+    // paces itself on the proxy's own admissions: a runner's accept loop can
+    // lag rapid connects, the kernel's listen backlog (128) would fill, and
+    // unlike Linux a full Unix backlog on macOS refuses the connect outright
+    // (ECONNREFUSED) instead of queueing it. Fewer than half the backlog is
+    // ever unadmitted, so the queue cannot reach capacity.
+    let fill_deadline = Instant::now() + WAIT;
+    let mut held: Vec<UnixStream> = Vec::with_capacity(CAP);
+    for i in 0..CAP {
+        while i >= harness.handle.active_connections() + CAP / 2 {
+            assert!(
+                Instant::now() < fill_deadline,
+                "the proxy stopped admitting connections"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut stream = harness.connect();
+        stream.write_all(b"C").expect("writes");
+        held.push(stream);
+    }
     // Accept order is connection order, so this one meets a full budget.
     let (status, reason) = refused(&harness, &connect_request(&format!("127.0.0.1:{port}")));
     assert_eq!((status, reason.as_str()), (503, "overload"));
