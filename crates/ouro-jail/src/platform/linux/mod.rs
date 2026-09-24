@@ -11,6 +11,10 @@ pub mod bpf;
 // hidden subcommand and its place in the sandbox are Linux's
 pub mod bridge;
 // J3-agent end
+// J4 autoscope begin: the supervisor's own delegated scope (§9.3); the
+// decision is portable, the host that acts on it is gated inside
+pub mod scope;
+// J4 autoscope end
 pub mod seccomp;
 
 // J3-agent begin: the `agent` profile's proxy, mediator and bridge wiring
