@@ -95,7 +95,10 @@ opt kconfig_bpf "$(grep -E '^CONFIG_(BPF_SYSCALL|BPF_JIT|DEBUG_INFO_BTF)=' "/boo
 say btf_vmlinux "$([ -r /sys/kernel/btf/vmlinux ] && echo present || echo absent)"
 say beam_present "$(have erl && echo yes || echo no)"
 opt rust_toolchain "$(PATH="$HOME/.cargo/bin:$PATH" cargo --version 2>/dev/null)" "cargo is not installed"
-opt ouro_binaries_on_path "$(for b in ouro ouro-jail ouro-ledger; do command -v "$b"; done 2>/dev/null | tr '\n' ' ')" "none on PATH"
+# The conformance suite compiles a C helper with /usr/bin/gcc at test time
+# (observer_linux.rs), so the host needs it; record which one it has.
+opt gcc "$( [ -x /usr/bin/gcc ] && /usr/bin/gcc --version 2>/dev/null | head -1 )" "no /usr/bin/gcc: the conformance suite's observer tests compile a C helper with it"
+opt ouro_binaries_on_path "$(for b in ouro ouro-jail ouro-ledger ouro-fleet; do command -v "$b"; done 2>/dev/null | tr '\n' ' ')" "none on PATH"
 
 # The manifest is evidence only if the facts §3.2 requires are in it.
 if [ "$missing" -gt 0 ]; then

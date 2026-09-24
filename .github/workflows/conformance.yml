@@ -69,13 +69,22 @@ jobs:
       - name: Install the pinned toolchain
         # Only needed to build the driver itself; the suite is built on the host.
         run: rustup toolchain install && rustup show
+      # The driver runs the contract validator (validate_contract.py) at the
+      # same revision and records its output as evidence (R01); it needs uv.
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff  # v6, pinned by SHA (third-party toolchain installer: highest-risk unpinned action)
       - name: Conformance suite
-        # The xtask driver copies the tree to a per-run directory on the host,
-        # builds it, runs `doctor --json` against the expected-capability
-        # manifest, runs the suite with OURO_CONFORMANCE=1 so a skipped live
-        # capability fails the job (jail-v1 §16), and copies the evidence back.
-        # It removes the remote run directory on success and keeps it, with the
-        # path printed, on failure.
+        # The xtask driver validates the contract locally, copies the tree to a
+        # per-run directory on the host, builds it, runs `doctor --json`
+        # against the expected-capability manifest, runs the plain-session
+        # smoke leg (a `tool` run, a `none` run and `doctor` with no
+        # systemd-run around them), probes I01 (no ledger, fleet or BEAM),
+        # runs the suite with OURO_CONFORMANCE=1 so a skipped live capability
+        # fails the job (jail-v1 §16) and with PATH scrubbed to the system
+        # directories, and copies the evidence back. It then evaluates
+        # docs/specs/jail-v1/acceptance-map.toml over the suite's own log and
+        # fails when any §15 gate clause in its lane fails (evidence/gates.txt,
+        # gates.json). It removes the remote run directory on success and
+        # keeps it, with the path printed, on failure.
         #
         # The `hashFiles('Cargo.toml')` gate that used to guard this step is
         # gone: the workspace exists, and a condition that silently disarms the

@@ -12,6 +12,9 @@ mod conformance;
 // J5-D begin
 mod freeze;
 // J5-D end
+// J5-A begin
+mod gates;
+// J5-A end
 mod i02;
 mod manifest;
 mod stamp;
@@ -68,6 +71,10 @@ enum Task {
         doctor: Option<PathBuf>,
     },
     // J5-D end
+    // J5-A begin
+    /// The per-gate verdict of jail-v1 §15 over saved test logs.
+    Gates(gates::GatesArgs),
+    // J5-A end
 }
 
 fn main() -> ExitCode {
@@ -88,6 +95,9 @@ fn main() -> ExitCode {
             }
         }
         // J5-D end
+        // J5-A begin
+        Task::Gates(args) => gates::run_cli(&args, &conformance::worktree_root()),
+        // J5-A end
         Task::Conformance {
             host,
             user,
