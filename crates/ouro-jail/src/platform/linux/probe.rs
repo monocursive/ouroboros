@@ -35,7 +35,7 @@ pub mod agent;
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
 /// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 18] = [
+pub const PROBE_NAMES: [&str; 19] = [
     "bwrap_present",
     "user_namespace",
     "pid_namespace",
@@ -44,6 +44,9 @@ pub const PROBE_NAMES: [&str; 18] = [
     "seccomp_filter_load",
     "ptrace_seize_descendant",
     "observer_closed_set",
+    // J4 autoscope: what this process's own scope step did (§9.3), before
+    // the leaf probes that depend on it
+    "supervisor_scope",
     "cgroup_delegated_leaf",
     "cgroup_pids",
     "cgroup_memory",
@@ -154,6 +157,7 @@ pub fn run_one(name: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         "seccomp_filter_load" => probe_seccomp(jail_exe, bwrap),
         "ptrace_seize_descendant" => probe_ptrace_seize(),
         "observer_closed_set" => probe_observer(jail_exe),
+        "supervisor_scope" => probe_supervisor_scope(),
         "cgroup_delegated_leaf" => probe_cgroup_leaf("cgroup_delegated_leaf", None),
         "cgroup_pids" => probe_cgroup_leaf("cgroup_pids", Some("pids")),
         "cgroup_memory" => probe_cgroup_leaf("cgroup_memory", Some("mem")),
@@ -764,6 +768,26 @@ fn last() -> i32 {
     super::sys::last_errno()
 }
 
+// J4 autoscope begin
+/// The supervisor scope step's record (§9.3), as a row: `available` when
+/// this process is inside the delegated subtree (`already_delegated` or
+/// `entered`), `unavailable` with the step's reason otherwise. It runs
+/// nothing: the step ran once, before anything else, and this reports it.
+fn probe_supervisor_scope() -> ProbeResult {
+    const NAME: &str = "supervisor_scope";
+    const MECHANISM: &str = "systemd-user-transient-scope";
+    let outcome = super::scope::current();
+    let (status, reason_code) = match (outcome.state, outcome.reason) {
+        (super::scope::State::Unavailable, reason) => (
+            ProbeStatus::Unavailable,
+            reason.map_or("unavailable", super::scope::Reason::code),
+        ),
+        (state, _) => (ProbeStatus::Available, state.as_str()),
+    };
+    ProbeResult::new(NAME, status, MECHANISM, reason_code, outcome.summary())
+}
+// J4 autoscope end
+
 fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResult {
     const MECHANISM: &str = "cgroup-v2-delegated";
     let mut limits = crate::policy::LimitsSnapshot {
@@ -1225,6 +1249,22 @@ mod tests {
             assert_eq!(result.name, name, "{name} fell through to the unknown arm");
         }
     }
+
+    // J4 autoscope begin
+    #[test]
+    fn the_scope_row_never_claims_a_step_that_did_not_run() {
+        // No test in this binary runs the step, so the row reports the
+        // process as it is, unavailable, whatever its cgroup.
+        let result = run_one(
+            "supervisor_scope",
+            Path::new("/nonexistent"),
+            Path::new("/nonexistent"),
+        );
+        assert_eq!(result.status, ProbeStatus::Unavailable, "{result:?}");
+        assert_eq!(result.reason_code, "not_attempted");
+        assert!(result.evidence.starts_with("unavailable"), "{result:?}");
+    }
+    // J4 autoscope end
 
     #[test]
     fn an_unknown_name_is_skipped_not_available() {

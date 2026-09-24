@@ -67,10 +67,12 @@ observer_closed_set = "available"
 # the delegated user@1001.service has cpu/memory/pids enabled. Each doctor
 # probe creates a unique leaf, sets/reads its control, places a fixture,
 # invokes cgroup.kill, verifies populated=0, reaps and removes the leaf.
-# An ordinary SSH session is still outside that subtree and cannot move in.
+# From an ordinary SSH session `run` and `doctor` move themselves in where the
+# user manager lingers (jail-v1 §9.3, `supervisor_scope`).
 # Full measurement and tests: evidence/j2-doctor-2026-09-22-ouro-ci.json and
 # evidence/j2-test-log-2026-09-22-ouro-ci.txt, run 20260922T165552Z-e89a3f7918c2,
 # which includes the J2 review fixes recorded in j2-authority.md.
+supervisor_scope = "available"
 cgroup_delegated_leaf = "available"
 cgroup_pids = "available"
 cgroup_memory = "available"

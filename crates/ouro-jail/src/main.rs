@@ -24,6 +24,15 @@ fn main() -> ExitCode {
         return code;
     }
     let cli = Cli::parse();
+    // J4 autoscope: jail-v1 §9.3 — `run` and `doctor` enter a delegated user
+    // scope themselves when started outside one, first, before any thread or
+    // other resource exists, so an attempt gets its execution leaf. The step
+    // runs `busctl` as a child and never re-executes this process; it never
+    // fails the command, and every receipt and `doctor` report what it did.
+    #[cfg(target_os = "linux")]
+    if matches!(cli.command, Command::Run(_) | Command::Doctor(_)) {
+        let _ = ouro_jail::platform::linux::scope::enter();
+    }
     let context = match build_context() {
         Ok(context) => context,
         Err(error) => return fail(&error),
@@ -353,7 +362,8 @@ fn doctor(context: &Context, args: &DoctorArgs) -> ExitCode {
 }
 
 fn doctor_json(report: &DoctorReport) -> serde_json::Value {
-    serde_json::json!({
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut value = serde_json::json!({
         "component": "ouro-jail",
         "version": env!("CARGO_PKG_VERSION"),
         "platform": platform_json(&report.platform),
@@ -382,7 +392,17 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
                 .collect::<Vec<_>>(),
         })),
         // J3-launch end
-    })
+    });
+    // J4 autoscope: what the supervisor scope step did for this `doctor`
+    // (the `supervisor_scope` capability row carries its state too).
+    #[cfg(target_os = "linux")]
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "supervisor_scope".to_owned(),
+            ouro_jail::platform::linux::scope::details(),
+        );
+    }
+    value
 }
 
 fn print_doctor_text(report: &DoctorReport) {

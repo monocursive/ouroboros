@@ -1725,6 +1725,9 @@ impl Boundary {
     fn boundary_identity(&self) -> BoundaryIdentity {
         let mut details = Map::new();
         details.insert("watcher_pid".to_owned(), Value::from(self.watcher.pid()));
+        // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
+        // made: already delegated, entered a scope of its own, or why not.
+        details.insert("supervisor_scope".to_owned(), super::scope::details());
         details.insert(
             "execution_cgroup".to_owned(),
             match &self.cgroup {
