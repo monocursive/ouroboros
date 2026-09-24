@@ -2770,6 +2770,8 @@ mod j5e {
         // exec'd (or failed to), so no sample can see this process's image.
         let t0 = monotonic_ns();
         let spawned = spawn_exec(&img, ExecVia::Execve)?;
+        // Once the child's exec is known to have happened (or failed).
+        let exec_ns = monotonic_ns();
         sampler.pid = spawned.pid;
         let waited = wait_sampling(spawned.pid, &mut sampler, deadline_ms);
         let t1 = monotonic_ns();
@@ -2783,6 +2785,7 @@ mod j5e {
             "argv": argv.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
             "pid": spawned.pid,
             "t0_ns": t0,
+            "exec_ns": exec_ns,
             "t1_ns": t1,
             "timens": timens,
             "exec_errno": spawned.exec_errno.map(errno_name),

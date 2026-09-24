@@ -317,6 +317,8 @@ pub fn round_order(arms: &[Arm], round: u32) -> Vec<Arm> {
 pub struct LauncherFacts {
     pub pid: i64,
     pub t0_ns: u64,
+    /// The launcher's reading once its child's exec is confirmed.
+    pub exec_ns: u64,
     pub t1_ns: u64,
     pub timens: Option<String>,
     pub exec_errno: Option<String>,
@@ -2010,6 +2012,7 @@ fn host_facts(plan: &Plan) -> Value {
         },
         "fixture": { "path": plan.fixture, "sha256": sha256(&plan.fixture) },
         "bwrap_version": command_text("bwrap", &["--version"]),
+        "spawn_child_resolved": std::fs::canonicalize("/usr/bin/true").ok(),
         "doctor_tool": json_of(command_text(jail, &["doctor", "--json", "--profile", "tool"])),
     })
 }

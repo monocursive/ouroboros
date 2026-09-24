@@ -164,6 +164,28 @@ fn spawn_tree_counts_children_that_fail_or_cannot_exec() {
 }
 
 #[test]
+fn the_start_line_precedes_the_work() {
+    // The children write to the same stdout: the start reading must come
+    // before their output, and the summary after it.
+    let out = run(&["spawn-tree", "2", "--", "/bin/echo", "child"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let order: Vec<&str> = text
+        .lines()
+        .map(|l| {
+            if l.contains("\"perf-start\"") {
+                "start"
+            } else if l.contains("\"spawn-tree\"") {
+                "summary"
+            } else {
+                l
+            }
+        })
+        .collect();
+    assert_eq!(order, ["start", "child", "child", "summary"], "{text}");
+}
+
+#[test]
 fn spawn_tree_zero_is_the_no_op_workload() {
     let out = run(&["spawn-tree", "0"]);
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
@@ -271,6 +293,41 @@ fn perf_launch_brackets_the_command_on_the_clock_the_workload_reads() {
         assert_eq!(r["timens"], Value::Null);
     }
     assert_eq!(r["attempts"], Value::Null, "no data directory was named");
+}
+
+#[test]
+fn perf_launch_reads_the_clock_before_fork_and_again_after_exec() {
+    let launch = perf_launch(&[], &[os(&fixture()), "spawn-tree".into(), "0".into()]);
+    let r = &launch.result;
+    let (start, _) = start_and_summary(&launch.out, "spawn-tree");
+    let (t0, exec) = (n(r, &["t0_ns"]), n(r, &["exec_ns"]));
+    // fork and exec take time, so the pre-fork reading is strictly earlier
+    // than the one taken once the exec is confirmed, which precedes the
+    // target's own entry reading.
+    assert!(t0 < exec, "{t0} {exec}");
+    assert!(exec <= u64_at(&start, "monotonic_ns"), "{r:#} {start}");
+}
+
+#[test]
+fn perf_launch_samples_the_launched_process_not_itself() {
+    // A launched process far larger than the launcher: its own high-water
+    // mark is what is sampled.
+    let python = Path::new("/usr/bin/python3");
+    if !cfg!(target_os = "linux") || !python.exists() {
+        ouro_fixture::harness::skip_or_fail("needs Linux /proc and /usr/bin/python3");
+        return;
+    }
+    let launch = perf_launch(
+        &["--sample-ms".into(), "2".into()],
+        &[
+            os(python),
+            "-c".into(),
+            "import time; x = bytearray(96 << 20); time.sleep(0.3)".into(),
+        ],
+    );
+    let s = &launch.result["sampling"];
+    assert!(n(s, &["hwm_kib"]) > 90 * 1024, "{:#}", launch.result);
+    assert!(n(&launch.result, &["rusage", "maxrss_kib"]) > 90 * 1024);
 }
 
 #[test]
