@@ -114,6 +114,8 @@ fn validators() -> BTreeMap<String, Validator> {
 fn validate(run: &Run) {
     validate_receipts(run);
     validate_events(run.trace_events());
+    // J5-C: the trace as a stream and the control transcript too.
+    common::assert_run_records(run);
 }
 
 fn validate_receipts(run: &Run) {
