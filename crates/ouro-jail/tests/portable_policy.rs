@@ -501,6 +501,96 @@ fn p02_raising_a_ceiling_refuses_with_that_limit_key() {
     );
 }
 
+// J5-B1 begin: P02 — mem/cpu ceilings and launch/executable/backend keys
+/// Raising the `mem` or `cpu` ceiling refuses with that limit's key path.
+/// The §6.3 battery raised only `wall` and `pids`; a baseline that already
+/// carries a `mem` and a `cpu` ceiling is needed, because adding a
+/// previously absent finite limit is a narrowing, not a widening
+/// (gap analysis §1.2, P02).
+#[test]
+fn p02_raising_mem_or_cpu_refuses_with_that_limit_key() {
+    let workspace = Workspace::new();
+    let with_ceiling = |mem: bool, value: u64| {
+        move |baseline: &mut ProfileBaseline| {
+            let ceiling = Ceiling {
+                value,
+                requested: value.to_string(),
+                required: true,
+            };
+            if mem {
+                baseline.limits.mem = Some(ceiling);
+            } else {
+                baseline.limits.cpu = Some(ceiling);
+            }
+        }
+    };
+    // The baseline caps memory at 256 MiB; the project asks for 512 MiB.
+    expect_widening(
+        workspace.resolve_project(
+            ProfileName::Build,
+            with_ceiling(true, 256 * 1024 * 1024),
+            PolicyDelta {
+                limits: Ceilings {
+                    mem: ceiling(512 * 1024 * 1024, "512MiB"),
+                    ..Ceilings::default()
+                },
+                ..PolicyDelta::default()
+            },
+        ),
+        "jail.limits.mem",
+    );
+    // The baseline caps CPU at 50%; the project asks for 100%.
+    expect_widening(
+        workspace.resolve_project(
+            ProfileName::Tool,
+            with_ceiling(false, 50),
+            PolicyDelta {
+                limits: Ceilings {
+                    cpu: ceiling(100, "100"),
+                    ..Ceilings::default()
+                },
+                ..PolicyDelta::default()
+            },
+        ),
+        "jail.limits.cpu",
+    );
+}
+
+/// A project `ouro.toml` cannot add credentials, select a launch profile, name
+/// an executable or set a backend: each is refused (§6.3's "Add credentials,
+/// launch profile, executable, `none` or backend settings | Refuse"). These
+/// are not narrowing keys at all, so the workspace-owned file is rejected
+/// rather than silently ignored, and the refusal names the offending key.
+#[test]
+fn p02_a_project_file_cannot_add_credentials_launch_executable_or_backend() {
+    for (label, body) in [
+        (
+            "credentials",
+            "[jail.credentials.token]\nsource = \"/etc/passwd\"\ndest = \"t\"\n",
+        ),
+        ("launch", "[jail]\nlaunch = \"vendor\"\n"),
+        ("executable", "[jail]\nexecutable = \"/bin/sh\"\n"),
+        ("backend", "[jail.backend]\ncommand = \"bwrap\"\n"),
+    ] {
+        let error = ouro_jail::config::parse_project_config(body)
+            .expect_err(&format!("a project file adding {label} must refuse"));
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{label}: {error:?}");
+        // The refusal is not silently swallowed and does not exit 0.
+        assert_eq!(
+            error.exit_code(),
+            2,
+            "{label}: a config syntax error exits 2"
+        );
+        assert!(
+            error.message.to_lowercase().contains(label)
+                || error.message.to_lowercase().contains("unknown"),
+            "{label}: the refusal does not name the offending key: {}",
+            error.message
+        );
+    }
+}
+// J5-B1 end
+
 #[test]
 fn p02_weakening_coverage_evidence_or_observation_refuses() {
     let workspace = Workspace::new();

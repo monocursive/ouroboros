@@ -24,13 +24,18 @@ pub const GATE_MAX_BYTES: usize = 1024;
 /// `None` means "do not check this binding", which is a deliberate hole: it
 /// used to be reachable by `ExpectedPlan::default()`, so a plan that checked
 /// nothing looked exactly like a plan that checked everything. `Default` is
-/// gone, [`ExpectedPlan::bound`] names all three at once, and
-/// [`GateOwner::authorise`] refuses a plan that binds nothing at all.
+/// gone, [`ExpectedPlan::bound`] names all three identity bindings at once,
+/// [`ExpectedPlan::complete`] adds the requirements, and
+/// [`GateOwner::authorise`] refuses a plan that binds no identity at all.
 #[derive(Debug, Clone)]
 pub struct ExpectedPlan {
     pub attempt_id: Option<String>,
     pub policy_digest: Option<String>,
     pub argv_digest: Option<String>,
+    // J5-B1 begin: I03 — §8.2 "and applied requirements"
+    /// The requirement names the owner authorised, compared as a set.
+    pub requirements: Option<Vec<String>>,
+    // J5-B1 end
     pub phase: Option<String>,
 }
 
@@ -47,9 +52,39 @@ impl ExpectedPlan {
             attempt_id: None,
             policy_digest: None,
             argv_digest: None,
+            requirements: None,
             phase: Some("prepared".to_string()),
         }
     }
+
+    // J5-B1 begin: I03
+    /// Every binding §8.2 asks an owner to compare: the attempt, policy and
+    /// argv bindings and the applied requirements.
+    #[must_use]
+    pub fn complete<I, S>(
+        attempt_id: impl Into<String>,
+        policy_digest: impl Into<String>,
+        argv_digest: impl Into<String>,
+        requirements: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        ExpectedPlan::bound(attempt_id, policy_digest, argv_digest).requirements(requirements)
+    }
+
+    /// Bind the requirement names, as a set.
+    #[must_use]
+    pub fn requirements<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.requirements = Some(sorted_set(names));
+        self
+    }
+    // J5-B1 end
 
     /// The complete plan: every binding §8.2 asks an owner to compare.
     #[must_use]
@@ -77,14 +112,20 @@ impl ExpectedPlan {
         if self.argv_digest.is_none() {
             out.push("argv_digest");
         }
+        // J5-B1 begin: I03
+        if self.requirements.is_none() {
+            out.push("requirements");
+        }
+        // J5-B1 end
         out
     }
 
     /// True when the plan binds no identity at all, so it can authorise
-    /// anything the jail proposes.
+    /// anything the jail proposes. Requirements alone are not an identity:
+    /// every attempt of the same policy has them.
     #[must_use]
     pub fn binds_nothing(&self) -> bool {
-        self.unbound().len() == 3
+        self.attempt_id.is_none() && self.policy_digest.is_none() && self.argv_digest.is_none()
     }
 
     #[must_use]
@@ -113,8 +154,23 @@ pub struct Proposal {
     pub attempt_id: Option<String>,
     pub policy_digest: Option<String>,
     pub argv_digest: Option<String>,
+    // J5-B1 begin: I03
+    /// `policy.requirements` of the prepared receipt, as a sorted set.
+    pub requirements: Option<Vec<String>>,
+    // J5-B1 end
     pub phase: Option<String>,
 }
+
+// J5-B1 begin: I03
+fn sorted_set<I, S>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let set: std::collections::BTreeSet<String> = names.into_iter().map(Into::into).collect();
+    set.into_iter().collect()
+}
+// J5-B1 end
 
 fn string_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     let mut cur = v;
@@ -144,6 +200,19 @@ impl Proposal {
             }
             p.policy_digest = string_at(r, &["policy", "digest"]).map(str::to_string);
             p.argv_digest = string_at(r, &["argv_digest"]).map(str::to_string);
+            // J5-B1 begin: I03 — a non-string entry makes the whole list
+            // absent rather than silently shorter.
+            p.requirements = r
+                .pointer("/policy/requirements")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .map(|item| item.as_str().map(str::to_string))
+                        .collect::<Option<Vec<String>>>()
+                })
+                .map(sorted_set);
+            // J5-B1 end
             if let Some(v) = string_at(r, &["phase"]) {
                 p.phase = Some(v.to_string());
             }
@@ -175,6 +244,19 @@ pub fn mismatches(plan: &ExpectedPlan, proposal: &Proposal) -> Vec<String> {
     );
     one("argv_digest", &plan.argv_digest, &proposal.argv_digest);
     one("phase", &plan.phase, &proposal.phase);
+    // J5-B1 begin: I03
+    if let Some(want) = &plan.requirements
+        && proposal.requirements.as_ref() != Some(want)
+    {
+        out.push(format!(
+            "requirements: authorised {want:?}, proposed {}",
+            proposal
+                .requirements
+                .as_ref()
+                .map_or_else(|| "<absent>".to_owned(), |got| format!("{got:?}"))
+        ));
+    }
+    // J5-B1 end
     out
 }
 
@@ -211,6 +293,10 @@ pub enum Release {
     DuplicateKeys,
     /// Exactly these bytes.
     Raw(Vec<u8>),
+    // J5-B1 begin: X02 "missing/extra LF"
+    /// A valid frame followed by a second LF: a blank line after the frame.
+    ExtraLf,
+    // J5-B1 end
 }
 
 /// The canonical frame body (no terminator) for an attempt and digest.
@@ -281,6 +367,12 @@ pub fn frame_bytes(variant: &Release, attempt_id: &str, policy_digest: &str) -> 
             with_lf(&dup)
         }
         Release::Raw(bytes) => bytes.clone(),
+        // J5-B1 begin
+        Release::ExtraLf => {
+            let mut b = with_lf(&body);
+            b.push(b'\n');
+            b
+        } // J5-B1 end
     }
 }
 
@@ -363,6 +455,14 @@ impl<'a> GateOwner<'a> {
     }
 
     /// Compare the proposal with the plan. `Ok(())` authorises release.
+    ///
+    /// The `Err` carries the proposal and every mismatch. J5-B1 gave
+    /// [`Proposal`] a requirements set, which pushes the tuple past
+    /// `clippy::result_large_err`'s threshold; it is a test helper whose Err
+    /// is built once per refusal, so the size is allowed rather than boxed
+    /// (boxing would change every caller's pattern, including files this
+    /// slice does not own).
+    #[allow(clippy::result_large_err)]
     pub fn authorise(
         &self,
         control: &Value,
@@ -410,9 +510,64 @@ impl<'a> GateOwner<'a> {
     }
 
     /// Withhold the gate: close it with nothing written. X02's first case.
+    ///
+    /// This is the owner that says no by closing. [`GateOwner::hold`] is the
+    /// owner that says nothing and keeps the gate open, which the jail can
+    /// only end at its gate budget.
     pub fn withhold(&mut self) {
         self.gate.take();
     }
+
+    // J5-B1 begin: X02 — withheld (open, silent) is not closed (EOF)
+    /// Take the gate writer and keep it open without writing a byte. The
+    /// jail sees neither a frame nor EOF for as long as the caller holds the
+    /// returned writer; dropping it closes the gate.
+    pub fn hold(&mut self) -> io::Result<GateWriter> {
+        self.gate
+            .take()
+            .ok_or_else(|| io::Error::other("the gate was already closed by this owner"))
+    }
+
+    /// Write the chosen release variant and keep the gate open: the frame is
+    /// complete, but §8.2 reads through EOF before releasing, so the jail
+    /// waits for a close that the caller controls by holding the writer.
+    pub fn write_unclosed(
+        &mut self,
+        variant: &Release,
+        attempt_id: &str,
+        policy_digest: &str,
+    ) -> io::Result<GateWriter> {
+        let bytes = frame_bytes(variant, attempt_id, policy_digest);
+        let mut writer = self.hold()?;
+        if !bytes.is_empty() {
+            writer.write_all(&bytes)?;
+        }
+        Ok(writer)
+    }
+
+    /// Read control messages until the first of `kind`, keeping every
+    /// message read. `None` when the channel closed first.
+    pub fn await_kind(&mut self, kind: &str) -> io::Result<Option<Value>> {
+        loop {
+            let Some(line) = self.control.next_line()? else {
+                return Ok(None);
+            };
+            if line.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_slice(&line).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("control message is not JSON: {e}"),
+                )
+            })?;
+            self.seen.push(value.clone());
+            if value.get("kind").and_then(Value::as_str) == Some(kind) {
+                return Ok(Some(value));
+            }
+        }
+    }
+    // J5-B1 end
 
     /// Drain and return whatever else the jail says on the control channel.
     ///
@@ -513,7 +668,47 @@ mod tests {
         assert_eq!(text.matches("\"action\"").count(), 2);
 
         assert_eq!(f(Release::Raw(b"anything".to_vec())), b"anything");
+
+        // J5-B1: an extra LF is the valid frame plus exactly one more LF.
+        let extra = f(Release::ExtraLf);
+        let mut valid = f(Release::Valid);
+        valid.push(b'\n');
+        assert_eq!(extra, valid);
     }
+
+    // J5-B1 begin: I03
+    #[test]
+    fn requirements_are_compared_as_a_set_and_an_absent_list_mismatches() {
+        let receipt = serde_json::json!({
+            "attempt_id": ID,
+            "phase": "prepared",
+            "policy": {"digest": DIGEST, "requirements": ["b", "a", "b"]},
+            "argv_digest": "sha256:bb",
+        });
+        let control = serde_json::json!({"attempt_id": ID, "kind": "prepared"});
+        let proposal = Proposal::read(&control, Some(&receipt));
+        assert_eq!(
+            proposal.requirements,
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
+        let plan = ExpectedPlan::complete(ID, DIGEST, "sha256:bb", ["a", "b"]);
+        assert!(mismatches(&plan, &proposal).is_empty());
+
+        let wider = ExpectedPlan::complete(ID, DIGEST, "sha256:bb", ["a"]);
+        let problems = mismatches(&wider, &proposal);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].starts_with("requirements:"), "{problems:?}");
+
+        let mut absent = proposal.clone();
+        absent.requirements = None;
+        let problems = mismatches(&plan, &absent);
+        assert!(problems[0].contains("<absent>"), "{problems:?}");
+
+        // A list with a non-string entry is not read as a shorter list.
+        let odd = serde_json::json!({"policy": {"requirements": ["a", 1]}});
+        assert_eq!(Proposal::read(&control, Some(&odd)).requirements, None);
+    }
+    // J5-B1 end
 
     #[test]
     fn a_proposal_prefers_the_receipt_bindings_over_the_control_message() {
@@ -551,6 +746,7 @@ mod tests {
             attempt_id: Some(ID.into()),
             policy_digest: Some(DIGEST.into()),
             argv_digest: Some("sha256:bb".into()),
+            requirements: None,
             phase: Some("prepared".into()),
         };
         assert!(mismatches(&plan, &good).is_empty());
@@ -581,14 +777,23 @@ mod tests {
         assert!(empty.binds_nothing());
         assert_eq!(
             empty.unbound(),
-            vec!["attempt_id", "policy_digest", "argv_digest"]
+            vec!["attempt_id", "policy_digest", "argv_digest", "requirements"]
         );
 
         let partial = ExpectedPlan::new().attempt_id(ID);
         assert!(!partial.binds_nothing());
-        assert_eq!(partial.unbound(), vec!["policy_digest", "argv_digest"]);
+        assert_eq!(
+            partial.unbound(),
+            vec!["policy_digest", "argv_digest", "requirements"]
+        );
 
-        let complete = ExpectedPlan::bound(ID, DIGEST, "sha256:bb");
+        // Requirements are not an identity: a plan binding only them still
+        // binds nothing that tells one attempt from another.
+        assert!(ExpectedPlan::new().requirements(["x"]).binds_nothing());
+
+        let bound = ExpectedPlan::bound(ID, DIGEST, "sha256:bb");
+        assert_eq!(bound.unbound(), vec!["requirements"]);
+        let complete = ExpectedPlan::complete(ID, DIGEST, "sha256:bb", ["b", "a"]);
         assert!(complete.unbound().is_empty());
 
         // `mismatches` alone is permissive about an unbound identity field --
