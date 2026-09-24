@@ -2908,6 +2908,11 @@ smoke doctor 0
     /// suite's PATH. Elsewhere the driver's PATH is not in force and there is
     /// nothing to check; a log without the conformance marker is refused by
     /// the verdict, so this cannot pass for a conformance run by skipping.
+    ///
+    /// Linux only: the scrubbed PATH is the Linux conformance driver's; the
+    /// macOS leg sets OURO_CONFORMANCE=1 for the verdict's sake with its own
+    /// PATH.
+    #[cfg(target_os = "linux")]
     #[test]
     fn i01_under_conformance_the_test_process_has_exactly_the_suite_path() {
         if std::env::var_os("OURO_CONFORMANCE").as_deref() != Some(std::ffi::OsStr::new("1")) {
