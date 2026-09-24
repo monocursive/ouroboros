@@ -991,3 +991,85 @@ fn p04_a_scratch_root_overlapping_the_state_directory_refuses() {
         run.stderr_text()
     );
 }
+
+// ===========================================================================
+// §6.4: an exec that observation-off cannot confirm is a coded tool error
+// ===========================================================================
+
+/// One `--observe off` run of `target` under `profile`: exit code, stderr
+/// lines, the last receipt.
+fn observe_off_run(profile: &str, target: &[&str]) -> (Option<i32>, Vec<String>, Value) {
+    let c = case(profile);
+    let run = c
+        .jail
+        .args(["--observe", "off"])
+        .target(target)
+        .run()
+        .expect("the jail runs");
+    let lines = run
+        .stderr_text()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    (run.code(), lines, last(&run))
+}
+
+/// With observation off, a target that ends before the supervisor can see
+/// its new image leaves exec unconfirmed: the outcome stays an honest
+/// `unknown`, and §6.4 makes the exit 1 a tool error with a stable code and
+/// one stderr line — not a bare exit 1 with an empty `errors[]` and nothing
+/// on stderr (found by the J5-C and J5-E reviews). A target that lives long
+/// enough to be seen still exits 0 with no error.
+#[test]
+fn observe_off_an_unconfirmed_fast_exec_is_the_coded_error_exec_unconfirmed() {
+    if !common::live() {
+        return;
+    }
+    for profile in ["tool", "agent"] {
+        // `/bin/true` ends within microseconds; a few tries make sure the
+        // unconfirmed branch is actually reached, and every unconfirmed run
+        // must carry the code.
+        let mut unconfirmed = 0;
+        for _ in 0..5 {
+            let (code, stderr, receipt) = observe_off_run(profile, &["/bin/true"]);
+            if receipt["exec_observed"] == true {
+                assert_eq!(code, Some(0), "{profile}: a confirmed exec of true");
+                continue;
+            }
+            unconfirmed += 1;
+            assert_eq!(
+                receipt["outcome"]["kind"], "unknown",
+                "{profile}: {receipt:#}"
+            );
+            assert_eq!(code, Some(1), "{profile}: exit 1 is a tool error");
+            let errors = receipt["errors"].as_array().expect("errors[]");
+            assert_eq!(
+                errors.first().map(|error| error["code"].clone()),
+                Some(Value::from("exec_unconfirmed")),
+                "{profile}: {receipt:#}"
+            );
+            assert_eq!(errors[0]["stage"], "running", "{profile}");
+            assert_eq!(errors[0]["remediation_category"], "configuration");
+            assert!(
+                errors[0]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("--observe on")),
+                "{profile}: the message does not say how to confirm the exec: {}",
+                errors[0]
+            );
+            assert_eq!(stderr.len(), 1, "{profile}: one stderr line: {stderr:?}");
+            assert!(stderr[0].contains("exec_unconfirmed"), "{stderr:?}");
+        }
+        assert!(
+            unconfirmed > 0,
+            "{profile}: never reached the unconfirmed branch"
+        );
+
+        // A target that lives long enough to be seen is confirmed and clean.
+        let (code, stderr, receipt) = observe_off_run(profile, &["/bin/sh", "-c", "sleep 0.3"]);
+        assert_eq!(receipt["exec_observed"], true, "{profile}: {receipt:#}");
+        assert_eq!(code, Some(0), "{profile}: {stderr:?}");
+        assert_eq!(receipt["errors"], serde_json::json!([]), "{profile}");
+    }
+}

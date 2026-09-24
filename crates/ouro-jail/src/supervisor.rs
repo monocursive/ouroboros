@@ -1543,6 +1543,29 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 // J4-D5 remainder: the first error is the reported one.
                 outcome_error.get_or_insert(error);
             }
+            // J5-B1 begin: §6.4 — the same honest unknown, and a coded error
+            RunEvent::ExecUnconfirmed { reason } => {
+                record.outcome.kind = OutcomeKind::Unknown;
+                record.outcome.code = None;
+                record.outcome.signal = None;
+                if let Some(cause) = running.limit_cause() {
+                    record.outcome.cause.get_or_insert(cause);
+                }
+                record.outcome.cause.get_or_insert(reason);
+                let error = JailError::new(
+                    ErrorCode::ExecUnconfirmed,
+                    ErrorStage::Running,
+                    Remediation::Configuration,
+                    "with observation off the target's exec could not be confirmed: it ended \
+                     before the supervisor saw its new image, so whether it ran is unknown; \
+                     run with --observe on to confirm it"
+                        .to_owned(),
+                );
+                record.errors.push(error.to_object());
+                outcome_error.get_or_insert(error);
+                break;
+            }
+            // J5-B1 end
             RunEvent::Unknown { reason } => {
                 record.outcome.kind = OutcomeKind::Unknown;
                 record.outcome.code = None;

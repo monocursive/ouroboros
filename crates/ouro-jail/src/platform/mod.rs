@@ -243,6 +243,15 @@ pub enum RunEvent {
         after_target_end: bool,
         // J4 W2-S end
     },
+    // J5-B1 begin: §6.4
+    /// Without an observer, the target's exec could not be confirmed (it
+    /// ended before its new image was seen); the outcome is unknown and the
+    /// run is a coded tool error, never a silent exit 1.
+    ExecUnconfirmed {
+        /// A safe reason.
+        reason: String,
+    },
+    // J5-B1 end
     /// The facts needed are missing; never a fabricated outcome.
     Unknown {
         /// A safe reason.

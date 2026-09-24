@@ -333,6 +333,10 @@ pub enum ErrorCode {
     /// errno stays in `outcome.cause`; this code tells it from a missing
     /// program, which is `exec_failed`.
     ExecInterpreterMissing,
+    /// With observation off, the target's exec could not be confirmed: it
+    /// ended before the supervisor saw its new image, so whether it ran is
+    /// unknown (§6.4: exit 1 is a tool error with a stable code).
+    ExecUnconfirmed,
     // J5-B1 end
     /// Observation evidence was lost (§11.4).
     EvidenceLost,
@@ -366,6 +370,7 @@ impl ErrorCode {
             ErrorCode::ExecFailed => "exec_failed",
             // J5-B1 begin: X04
             ErrorCode::ExecInterpreterMissing => "exec_interpreter_missing",
+            ErrorCode::ExecUnconfirmed => "exec_unconfirmed",
             // J5-B1 end
             ErrorCode::EvidenceLost => "evidence_lost",
             ErrorCode::TreeUnknown => "tree_unknown",
@@ -625,6 +630,8 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
         | ErrorCode::ExecInterpreterMissing => 125,
         ErrorCode::EvidenceLost
         | ErrorCode::TreeUnknown
+        // J5-B1: §6.4
+        | ErrorCode::ExecUnconfirmed
         | ErrorCode::StateWriteFailed
         | ErrorCode::InternalError => 1,
     }

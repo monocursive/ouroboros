@@ -2927,7 +2927,8 @@ impl LinuxRunning {
             return Some(RunEvent::ExecError { errno, detail });
         }
         if !self.exec_confirmed {
-            return Some(RunEvent::Unknown {
+            // J5-B1: §6.4 — a coded error, not a bare unknown.
+            return Some(RunEvent::ExecUnconfirmed {
                 reason: "the backend ended without independent evidence of target exec".to_owned(),
             });
         }
