@@ -74,6 +74,8 @@ enum Task {
     // J5-A begin
     /// The per-gate verdict of jail-v1 §15 over saved test logs.
     Gates(gates::GatesArgs),
+    /// Fold acceptance-additions files into the acceptance map.
+    GatesMerge(gates::MergeArgs),
     // J5-A end
 }
 
@@ -97,6 +99,7 @@ fn main() -> ExitCode {
         // J5-D end
         // J5-A begin
         Task::Gates(args) => gates::run_cli(&args, &conformance::worktree_root()),
+        Task::GatesMerge(args) => gates::run_merge(&args, &conformance::worktree_root()),
         // J5-A end
         Task::Conformance {
             host,

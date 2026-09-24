@@ -8,6 +8,11 @@
 # offline. The format, the tags and the verdict rules are documented in
 # crates/xtask/src/gates.rs.
 #
+# This file is always in the form `cargo xtask gates-merge` writes: add to it
+# with `cargo xtask gates-merge <acceptance-additions.toml>...`, which adds
+# tests to a clause (`id = "X02.4"`) or a new clause (`id = "X02.new"`)
+# and new [[ignored]] pins, and rewrites the file.
+#
 # Rules this file keeps (the honesty invariant):
 # - `row` is the §15 text verbatim; when the spec changes a row, the check
 #   fails until the clauses below are reviewed against the new text.
@@ -15,15 +20,14 @@
 #   nothing asserts yet is `untested` and fails the verdict; a clause the stock
 #   reference host cannot produce is `recorded-limit` with the document that
 #   records it. `simulated` means the real trigger is not produced.
-# - `[[ignored]]` pins the suite's ignored set exactly: an `#[ignore]` added to
-#   a gate test fails the run instead of passing silently.
+# - `[[ignored]]` pins the suite's ignored set exactly, per lane: an
+#   `#[ignore]` added to a gate test fails the run instead of passing silently.
 #
 # Seeded by J5-A from the J5 gap analysis §1.2, test by test, at 1328c381.
 
 schema = "ouro.jail.acceptance-map/1"
 
-
-# ---------------------------------------------------------------- P01
+# ------------------------------------------------------------------ P01
 
 [[gate]]
 id = "P01"
@@ -78,7 +82,7 @@ tests = [
 ]
 note = "No live test recomputes a run's argv_digest against the canonical framing (gap analysis §1.2 P01)."
 
-# ---------------------------------------------------------------- P02
+# ------------------------------------------------------------------ P02
 
 [[gate]]
 id = "P02"
@@ -174,7 +178,7 @@ clause = "Widening through a launch profile, executable or backend setting refus
 tag = "untested"
 note = "Owned by J5-B1."
 
-# ---------------------------------------------------------------- P03
+# ------------------------------------------------------------------ P03
 
 [[gate]]
 id = "P03"
@@ -197,7 +201,7 @@ clause = "The child itself edits project and profile files after preparation; th
 tag = "untested"
 note = "Owned by J5-B1."
 
-# ---------------------------------------------------------------- P04
+# ------------------------------------------------------------------ P04
 
 [[gate]]
 id = "P04"
@@ -252,7 +256,7 @@ tests = [
 ]
 note = "Scoped to J3 by §16's J1 row; live through credentials::stage on the reference host."
 
-# ---------------------------------------------------------------- X01
+# ------------------------------------------------------------------ X01
 
 [[gate]]
 id = "X01"
@@ -267,7 +271,7 @@ tests = [
   "ouro-jail/tests/conformance_j1.rs::x01_literal_argv",
 ]
 
-# ---------------------------------------------------------------- X02
+# ------------------------------------------------------------------ X02
 
 [[gate]]
 id = "X02"
@@ -337,7 +341,7 @@ tests = [
   "ouro-jail/tests/macos_refusal.rs::a_malformed_attempt_id_is_a_usage_error_not_a_path",
 ]
 
-# ---------------------------------------------------------------- X03
+# ------------------------------------------------------------------ X03
 
 [[gate]]
 id = "X03"
@@ -367,7 +371,7 @@ clause = "Owner death during release never causes a second exec"
 tag = "untested"
 note = "Owned by J5-B1."
 
-# ---------------------------------------------------------------- X04
+# ------------------------------------------------------------------ X04
 
 [[gate]]
 id = "X04"
@@ -389,7 +393,7 @@ clause = "Missing executable, missing interpreter and permission error have outc
 tag = "untested"
 note = "review_linux.rs r2 prints the distinct messages and never asserts they differ. Owned by J5-B1."
 
-# ---------------------------------------------------------------- X05
+# ------------------------------------------------------------------ X05
 
 [[gate]]
 id = "X05"
@@ -413,7 +417,7 @@ tests = [
   "ouro-jail/tests/conformance_j1.rs::x05_streams",
 ]
 
-# ---------------------------------------------------------------- X06
+# ------------------------------------------------------------------ X06
 
 [[gate]]
 id = "X06"
@@ -456,7 +460,7 @@ clause = "No tracing privilege: ptrace and pidfd_getfd against the supervisor an
 tag = "untested"
 note = "Owned by J5-B1."
 
-# ---------------------------------------------------------------- X07
+# ------------------------------------------------------------------ X07
 
 [[gate]]
 id = "X07"
@@ -471,7 +475,7 @@ tests = [
   "ouro-jail/tests/conformance_j1.rs::x07_background_descendant_is_terminated",
 ]
 
-# ---------------------------------------------------------------- F01
+# ------------------------------------------------------------------ F01
 
 [[gate]]
 id = "F01"
@@ -514,7 +518,7 @@ clause = "A workspace symlink to a HOME secret reads as absent or denied (symlin
 tag = "untested"
 note = "Only resolution and scanner tests exist. Owned by J5-B2."
 
-# ---------------------------------------------------------------- F02
+# ------------------------------------------------------------------ F02
 
 [[gate]]
 id = "F02"
@@ -547,7 +551,7 @@ clause = "Mount replacement of a protected object (unmount, rename or mount over
 tag = "untested"
 note = "Only the generic mount-syscall denial exists (review_linux.rs r1_the_baseline_filter_denies_what_the_spec_lists). Owned by J5-B2."
 
-# ---------------------------------------------------------------- F03
+# ------------------------------------------------------------------ F03
 
 [[gate]]
 id = "F03"
@@ -578,7 +582,7 @@ clause = "A new deep protected segment created at run time is outside existing_a
 tag = "untested"
 note = "Owned by J5-B2."
 
-# ---------------------------------------------------------------- F04
+# ------------------------------------------------------------------ F04
 
 [[gate]]
 id = "F04"
@@ -612,7 +616,7 @@ clause = "Through ouro-jail run, each refusal writes a refused receipt that clai
 tag = "untested"
 note = "The product's refusal paths (platform.rs) are reached by no test. Owned by J5-B2."
 
-# ---------------------------------------------------------------- S01
+# ------------------------------------------------------------------ S01
 
 [[gate]]
 id = "S01"
@@ -652,7 +656,7 @@ tests = [
   "ouro-jail/tests/linux_mechanisms.rs::ordinary_work_still_works_under_the_filter",
 ]
 
-# ---------------------------------------------------------------- S02
+# ------------------------------------------------------------------ S02
 
 [[gate]]
 id = "S02"
@@ -703,7 +707,7 @@ tests = [
   "ouro-jail/tests/review_linux.rs::r1_the_child_cannot_reach_the_supervisors_state",
 ]
 
-# ---------------------------------------------------------------- S03
+# ------------------------------------------------------------------ S03
 
 [[gate]]
 id = "S03"
@@ -755,7 +759,7 @@ clause = "Attempts to undo the cgroup, Landlock, seccomp and no_new_privs bounda
 tag = "untested"
 note = "Owned by J5-B2."
 
-# ---------------------------------------------------------------- S04
+# ------------------------------------------------------------------ S04
 
 [[gate]]
 id = "S04"
@@ -801,11 +805,11 @@ note = "A ring on stdout or stderr is not tested."
 [[clause]]
 id = "S04.5"
 gate = "S04"
-clause = "none retains and records its explicit io_uring observation exclusion"
+clause = "none retains its explicit io_uring exclusion: io_uring is not filtered under none"
 tag = "untested"
 note = "Named in j4-authority.md Known gaps; no live none run exercises it. Owned by J5-B2."
 
-# ---------------------------------------------------------------- N01
+# ------------------------------------------------------------------ N01
 
 [[gate]]
 id = "N01"
@@ -828,7 +832,7 @@ clause = "The same egress attempts fail under build"
 tag = "untested"
 note = "The egress loop is agent and tool only. Owned by J5-B2."
 
-# ---------------------------------------------------------------- N02
+# ------------------------------------------------------------------ N02
 
 [[gate]]
 id = "N02"
@@ -855,7 +859,7 @@ tests = [
   "ouro-jail/tests/portable_proxy.rs::n02_results_are_valid_distinct_proxy_source_events",
 ]
 
-# ---------------------------------------------------------------- N03
+# ------------------------------------------------------------------ N03
 
 [[gate]]
 id = "N03"
@@ -951,7 +955,7 @@ tests = [
   "ouro-jail/tests/conformance_j3_agent.rs::n03_address_and_host_rules_hold_end_to_end",
 ]
 
-# ---------------------------------------------------------------- N04
+# ------------------------------------------------------------------ N04
 
 [[gate]]
 id = "N04"
@@ -1007,7 +1011,7 @@ tests = [
   "ouro-jail/tests/portable_proxy.rs::n04_saturation_refuses_with_overload_then_recovers",
 ]
 
-# ---------------------------------------------------------------- N05
+# ------------------------------------------------------------------ N05
 
 [[gate]]
 id = "N05"
@@ -1085,7 +1089,7 @@ tests = [
   "ouro-jail/tests/conformance_j3_agent.rs::n05_child_path_and_mount_changes_cannot_redirect_the_bridge",
 ]
 
-# ---------------------------------------------------------------- O01
+# ------------------------------------------------------------------ O01
 
 [[gate]]
 id = "O01"
@@ -1118,7 +1122,7 @@ tests = [
 ]
 note = "Asserted on every audit outcome these runs produce; the event schema itself does not yet forbid bytes_* on audit outcomes (J5-C)."
 
-# ---------------------------------------------------------------- O02
+# ------------------------------------------------------------------ O02
 
 [[gate]]
 id = "O02"
@@ -1213,7 +1217,7 @@ tests = [
   "ouro-jail/tests/observer_linux.rs::o02_a_leader_leaving_live_workers_emits_exactly_one_exit",
 ]
 
-# ---------------------------------------------------------------- O03
+# ------------------------------------------------------------------ O03
 
 [[gate]]
 id = "O03"
@@ -1267,7 +1271,7 @@ tests = [
   "ouro-jail/tests/j4_loss_linux.rs::j4_o03_a_class_never_returns_to_active_after_an_early_gap",
 ]
 
-# ---------------------------------------------------------------- O04
+# ------------------------------------------------------------------ O04
 
 [[gate]]
 id = "O04"
@@ -1293,7 +1297,7 @@ tests = [
 ]
 note = "Under none only."
 
-# ---------------------------------------------------------------- O05
+# ------------------------------------------------------------------ O05
 
 [[gate]]
 id = "O05"
@@ -1349,7 +1353,7 @@ tests = [
   "ouro-jail/tests/review_linux.rs::r6_a_denied_connect_counts_under_fs_deny_only",
 ]
 
-# ---------------------------------------------------------------- O06
+# ------------------------------------------------------------------ O06
 
 [[gate]]
 id = "O06"
@@ -1402,7 +1406,7 @@ tests = [
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o06_racing_pathname_is_only_a_literal_snapshot",
 ]
 
-# ---------------------------------------------------------------- L01
+# ------------------------------------------------------------------ L01
 
 [[gate]]
 id = "L01"
@@ -1477,7 +1481,7 @@ clause = "A fork storm stopped mid-flight ends at verified tree death"
 tag = "untested"
 note = "Owned by J5-B1."
 
-# ---------------------------------------------------------------- L02
+# ------------------------------------------------------------------ L02
 
 [[gate]]
 id = "L02"
@@ -1539,7 +1543,7 @@ clause = "A supervisor killed during bubblewrap's startup in an attempt without 
 tag = "recorded-limit"
 limit = "j4-authority.md, Known gaps (first item); jail-v1 §9.3: without lingering the supervisor stays in its session and the limit remains"
 
-# ---------------------------------------------------------------- L03
+# ------------------------------------------------------------------ L03
 
 [[gate]]
 id = "L03"
@@ -1579,13 +1583,13 @@ tests = [
 id = "L03.4"
 gate = "L03"
 clause = "none without a usable cgroup refuses"
-tag = "simulated"
+tag = "live-cli"
 tests = [
   "ouro-jail/tests/conformance_j3_none.rs::l03_none_without_a_usable_cgroup_refuses",
 ]
-note = "Reached through the OURO_JAIL_TEST_SUPERVISOR_SCOPE seam on the lingering reference account."
+note = "In the conformance scope the real jail runs inside a bubblewrap cgroup namespace rooted at the test's scope, so the delegated subtree is outside it; from a plain session the test holds the scope step to its no-lingering branch through OURO_JAIL_TEST_SUPERVISOR_SCOPE."
 
-# ---------------------------------------------------------------- L04
+# ------------------------------------------------------------------ L04
 
 [[gate]]
 id = "L04"
@@ -1633,16 +1637,16 @@ id = "L04.5"
 gate = "L04"
 clause = "BOOTTIME deadlines ignore wall-clock adjustments"
 tag = "recorded-limit"
-limit = "J5 milestone report (to be written by J5-F; proposed in .../j5/A/spec-proposal.md): setting the clock needs CAP_SYS_TIME, which the stock reference account does not have"
+limit = "J5 milestone report, recorded limits (pending J5-F): setting the clock needs CAP_SYS_TIME, which the stock reference account does not have; deadlines use CLOCK_BOOTTIME"
 
 [[clause]]
 id = "L04.6"
 gate = "L04"
 clause = "BOOTTIME deadlines include suspend"
 tag = "recorded-limit"
-limit = "J5 milestone report (to be written by J5-F; proposed in .../j5/A/spec-proposal.md): the account cannot suspend the reference VM"
+limit = "J5 milestone report, recorded limits (pending J5-F): the unprivileged account cannot suspend the reference VM; deadlines use CLOCK_BOOTTIME"
 
-# ---------------------------------------------------------------- L05
+# ------------------------------------------------------------------ L05
 
 [[gate]]
 id = "L05"
@@ -1667,7 +1671,7 @@ tests = [
   "ouro-jail/tests/portable_launch.rs::rm11_a_teardown_that_lost_integrity_retains_vendor_state_and_says_why",
 ]
 
-# ---------------------------------------------------------------- R01
+# ------------------------------------------------------------------ R01
 
 [[gate]]
 id = "R01"
@@ -1717,7 +1721,7 @@ tests = [
 ]
 checks = ["contract_validation"]
 
-# ---------------------------------------------------------------- R02
+# ------------------------------------------------------------------ R02
 
 [[gate]]
 id = "R02"
@@ -1744,7 +1748,7 @@ tests = [
 ]
 note = "Injected through the portable I/O seam; a full or stalled disk is not producible on the stock host (j4-authority.md, Known gaps)."
 
-# ---------------------------------------------------------------- R03
+# ------------------------------------------------------------------ R03
 
 [[gate]]
 id = "R03"
@@ -1792,7 +1796,7 @@ tests = [
 ]
 note = "On the simulated platform only."
 
-# ---------------------------------------------------------------- R04
+# ------------------------------------------------------------------ R04
 
 [[gate]]
 id = "R04"
@@ -1840,7 +1844,7 @@ tests = [
   "ouro-jail/tests/portable_loss.rs::j4_r04_protection_labels_never_change",
 ]
 
-# ---------------------------------------------------------------- R05
+# ------------------------------------------------------------------ R05
 
 [[gate]]
 id = "R05"
@@ -1871,7 +1875,7 @@ clause = "Forging the receipt, trace or jail state is outside local evidence ass
 tag = "untested"
 note = "Owned by J5-B1."
 
-# ---------------------------------------------------------------- R06
+# ------------------------------------------------------------------ R06
 
 [[gate]]
 id = "R06"
@@ -1905,7 +1909,7 @@ clause = "An unobserved migrated descendant is not certified dead by registered-
 tag = "untested"
 note = "Only the registered_boundary scope label is asserted. Owned by J5-B2."
 
-# ---------------------------------------------------------------- C01
+# ------------------------------------------------------------------ C01
 
 [[gate]]
 id = "C01"
@@ -1961,7 +1965,7 @@ tests = [
   "ouro-jail/tests/portable_launch.rs::c01_every_ld_and_dyld_launch_key_refuses_through_the_file",
 ]
 
-# ---------------------------------------------------------------- C02
+# ------------------------------------------------------------------ C02
 
 [[gate]]
 id = "C02"
@@ -2008,7 +2012,7 @@ tests = [
   "ouro-jail/tests/portable_launch.rs::c02_a_replaced_vendor_state_directory_is_never_deleted",
 ]
 
-# ---------------------------------------------------------------- C03
+# ------------------------------------------------------------------ C03
 
 [[gate]]
 id = "C03"
@@ -2078,7 +2082,7 @@ tests = [
   "ouro-jail/tests/j4_gc_linux.rs::j4_c03_a_replaced_leaf_is_never_touched",
 ]
 
-# ---------------------------------------------------------------- M01
+# ------------------------------------------------------------------ M01
 
 [[gate]]
 id = "M01"
@@ -2112,7 +2116,7 @@ tests = [
   "ouro-jail/tests/macos_refusal.rs::m01_none_also_refuses_and_stays_unprotected",
 ]
 
-# ---------------------------------------------------------------- M02
+# ------------------------------------------------------------------ M02
 
 [[gate]]
 id = "M02"
@@ -2127,7 +2131,7 @@ tests = [
   "ouro-jail/tests/portable_records.rs::m02_the_hypothetical_macos_receipt_validates_without_linux_fields",
 ]
 
-# ---------------------------------------------------------------- M03
+# ------------------------------------------------------------------ M03
 
 [[gate]]
 id = "M03"
@@ -2164,7 +2168,7 @@ tests = [
   "ouro-jail/tests/macos_refusal.rs::usage_errors_exit_two",
 ]
 
-# ---------------------------------------------------------------- I01
+# ------------------------------------------------------------------ I01
 
 [[gate]]
 id = "I01"
@@ -2191,7 +2195,7 @@ clause = "Full jail conformance passes in that environment"
 tag = "live-cli"
 checks = ["suite_clean"]
 
-# ---------------------------------------------------------------- I02
+# ------------------------------------------------------------------ I02
 
 [[gate]]
 id = "I02"
@@ -2228,7 +2232,7 @@ tests = [
   "ouro-jail/tests/portable_launch.rs::i02_the_runtime_never_embeds_or_discovers_the_bundled_profiles",
 ]
 
-# ---------------------------------------------------------------- I03
+# ------------------------------------------------------------------ I03
 
 [[gate]]
 id = "I03"
@@ -2265,7 +2269,7 @@ clause = "Untrusted request fields cannot mutate the owner's operator inputs"
 tag = "untested"
 note = "Owned by J5-B1."
 
-# ---------------------------------------------------------------- A01
+# ------------------------------------------------------------------ A01
 
 [[gate]]
 id = "A01"
@@ -2279,7 +2283,7 @@ clause = "A real batch agent run records revision, OS, backend, vendor version, 
 tag = "credential"
 note = "Recorded manually in agent-compatibility.md at 3c3638c4 (J3 era); re-run or explicit skip is user decision §4.4 of the J5 contract."
 
-# ------------------------------------------------ the pinned ignored set
+# ---------------------------------------- the pinned ignored set, linux lane
 
 [[ignored]]
 test = "ouro-jail/tests/conformance_j2.rs::startup_supervisor_helper"
@@ -2333,7 +2337,7 @@ reason = "subprocess helper for j4_r03_a_failed_local_write_never_leaves_a_parti
 test = "ouro-fixture/doc::crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail"
 reason = "an `ignore` doc example"
 
-# The macOS leg (rust.yml, macos-latest) runs the portable tests only.
+# ---------------------------------------- the pinned ignored set, macos lane
 
 [[ignored]]
 test = "ouro-jail/tests/portable_network_rules.rs::n03_nfc_normalization_test_17"

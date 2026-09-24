@@ -10,6 +10,41 @@
 //! a `cargo test` log, and computes a verdict per clause and per gate. It is
 //! pure: every input is a value, so every branch is unit-tested against real
 //! logs.
+//!
+//! # The map (`ouro.jail.acceptance-map/1`)
+//!
+//! - `[[gate]]`: `id`, `row` (the §15 text verbatim), `kind` (`scripted`, or
+//!   `credential` for A01).
+//! - `[[clause]]`: `id` (`<gate>.<n>`), `gate`, `clause` (the claim),
+//!   `tag`, `lane` (`linux` by default, or `macos`), `tests`, `checks`,
+//!   `limit` (required for, and only for, `recorded-limit`), `note`.
+//! - `[[ignored]]`: `test`, `reason`, `lane`: the exact ignored set per lane.
+//!
+//! A test id is `<crate>/<source>::<libtest name>`: the package, the path
+//! cargo prints after `Running` (`tests/x.rs`, `src/lib.rs`, `src/main.rs`,
+//! `src/bin/y.rs`) or `doc`, and the name libtest prints, with ` - should
+//! panic` and a doc-test's ` (line N)` removed.
+//!
+//! Tags say how the clause is proved, at the strongest honest level:
+//! `live-cli` (a listed test drives the real `ouro-jail` on the lane's host,
+//! or a driver check runs there), `live-lib` (live, below the command line),
+//! `portable` (no live kernel feature needed), `simulated` (a seam, fake clock
+//! or simulated platform stands in for the real trigger), `recorded-limit`
+//! (not producible on the stock reference host; `limit` names the record),
+//! `credential` (A01), and `untested`, which always fails.
+//!
+//! Checks are driver evidence that is not a libtest test: `i01_absent`,
+//! `i01_scrubbed_path`, `i02_scan`, `contract_validation`, `doctor_manifest`,
+//! `plain_session_smoke`, and `suite_clean` (computed from the lane's log).
+//!
+//! # The verdict
+//!
+//! A clause passes when it has evidence and every listed test is reported
+//! `ok` exactly once in its lane's log and every check passed; a
+//! `recorded-limit` clause whose tests pass is a `limit`; a clause in a lane
+//! whose log was not given is `elsewhere`. A gate fails when any clause
+//! fails, and the run fails on any failing gate, on a map that disagrees with
+//! §15, and on an ignored set that differs from the pin in either direction.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1183,6 +1218,476 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
     }
 }
 
+// ------------------------------------------------------------- merging
+
+/// A slice's `acceptance-additions.toml`: clauses and ignored pins only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Additions {
+    #[serde(default)]
+    pub clause: Vec<AddedClause>,
+    #[serde(default)]
+    pub ignored: Vec<Ignored>,
+}
+
+/// One contributed clause: an existing id (`X02.4`) gains tests, or
+/// `<gate>.new` is a clause the map lacks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddedClause {
+    /// An existing clause's id, or `<gate>.new`; without one, a clause of
+    /// the gate with exactly this `clause` text, else a new clause.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub gate: String,
+    #[serde(default)]
+    pub clause: Option<String>,
+    pub tag: Tag,
+    #[serde(default)]
+    pub lane: Option<Lane>,
+    #[serde(default)]
+    pub tests: Vec<String>,
+    #[serde(default)]
+    pub checks: Vec<String>,
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// How strongly a tag proves its clause, for merging: evidence is added,
+/// never demoted.
+fn strength(tag: Tag) -> u8 {
+    match tag {
+        Tag::Untested | Tag::Credential => 0,
+        Tag::RecordedLimit => 1,
+        Tag::Simulated => 2,
+        Tag::Portable => 3,
+        Tag::LiveLib => 4,
+        Tag::LiveCli => 5,
+    }
+}
+
+/// Merge `add` (from `source`, for the report) into `map`. Returns one line
+/// per change. The merged map must still be well formed.
+///
+/// An existing clause gains the tests and checks it does not have yet, and
+/// takes the contributor's tag when that is stronger (so evidence is added,
+/// never demoted); a clause that becomes proved drops its `limit`, and one
+/// that leaves `untested` takes the contributor's note in place of the old
+/// one. `<gate>.new` appends a clause numbered after its gate's last.
+/// Credential clauses are recorded by hand, never merged.
+pub fn merge(map: &mut Map, add: &Additions, source: &str) -> Result<Vec<String>, String> {
+    let mut changes = Vec::new();
+    for a in &add.clause {
+        let id = match &a.id {
+            Some(id) => id.clone(),
+            None => map
+                .clause
+                .iter()
+                .find(|c| c.gate == a.gate && a.clause.as_ref() == Some(&c.clause))
+                .map_or_else(|| format!("{}.new", a.gate), |c| c.id.clone()),
+        };
+        if let Some(c) = map.clause.iter().find(|c| c.id == id)
+            && c.gate != a.gate
+        {
+            return Err(format!(
+                "{source}: {} belongs to gate {}, not {}",
+                id, c.gate, a.gate
+            ));
+        }
+        let Some(kind) = map.gate.iter().find(|g| g.id == a.gate).map(|g| g.kind) else {
+            return Err(format!(
+                "{source}: {} names gate {}, which is not in the map",
+                id, a.gate
+            ));
+        };
+        if a.tag == Tag::Credential || kind == Kind::Credential {
+            return Err(format!(
+                "{source}: {}: credential clauses are recorded by hand, not merged",
+                id
+            ));
+        }
+        if id == format!("{}.new", a.gate) {
+            let Some(text) = a.clause.clone().filter(|t| !t.trim().is_empty()) else {
+                return Err(format!(
+                    "{source}: {}: a new clause needs its `clause` text",
+                    id
+                ));
+            };
+            let next = 1 + map
+                .clause
+                .iter()
+                .filter(|c| c.gate == a.gate)
+                .filter_map(|c| {
+                    c.id.rsplit_once('.')
+                        .and_then(|(_, n)| n.parse::<u32>().ok())
+                })
+                .max()
+                .unwrap_or(0);
+            let id = format!("{}.{next}", a.gate);
+            let at = map
+                .clause
+                .iter()
+                .rposition(|c| c.gate == a.gate)
+                .map_or(map.clause.len(), |i| i + 1);
+            changes.push(format!(
+                "{id}: new clause from {source} ({} test(s), tag {}): {text}",
+                a.tests.len(),
+                a.tag.as_str()
+            ));
+            let open: Vec<&str> = map
+                .clause
+                .iter()
+                .filter(|c| c.gate == a.gate && c.tag == Tag::Untested)
+                .map(|c| c.id.as_str())
+                .collect();
+            if !open.is_empty() {
+                changes.push(format!(
+                    "note: {} still has untested {}; if {id} proves one of them, give that id \
+                     instead so the untested clause is closed rather than duplicated",
+                    a.gate,
+                    open.join(", ")
+                ));
+            }
+            map.clause.insert(
+                at,
+                Clause {
+                    id,
+                    gate: a.gate.clone(),
+                    clause: text,
+                    tag: a.tag,
+                    lane: a.lane.unwrap_or_default(),
+                    tests: a.tests.clone(),
+                    checks: a.checks.clone(),
+                    limit: a.limit.clone(),
+                    note: a.note.clone(),
+                },
+            );
+            continue;
+        }
+        let Some(c) = map.clause.iter_mut().find(|c| c.id == id) else {
+            return Err(format!(
+                "{source}: clause {} is not in the map (a clause the map lacks is `{}.new`)",
+                id, a.gate
+            ));
+        };
+        if a.lane.is_some_and(|l| l != c.lane) {
+            return Err(format!(
+                "{source}: {} is in the {} lane",
+                id,
+                c.lane.as_str()
+            ));
+        }
+        let added_tests: Vec<String> = a
+            .tests
+            .iter()
+            .filter(|t| !c.tests.contains(t))
+            .cloned()
+            .collect();
+        let added_checks: Vec<String> = a
+            .checks
+            .iter()
+            .filter(|k| !c.checks.contains(k))
+            .cloned()
+            .collect();
+        c.tests.extend(added_tests.iter().cloned());
+        c.checks.extend(added_checks.iter().cloned());
+        let before = c.tag;
+        if strength(a.tag) > strength(c.tag) {
+            c.tag = a.tag;
+        }
+        if c.tag == Tag::RecordedLimit {
+            if let Some(limit) = &a.limit {
+                c.limit = Some(limit.clone());
+            }
+        } else {
+            c.limit = None;
+        }
+        if let Some(note) = &a.note {
+            c.note = Some(match (&c.note, before) {
+                (Some(old), tag) if tag != Tag::Untested => format!("{old} {note}"),
+                _ => note.clone(),
+            });
+        }
+        if let Some(text) = a.clause.as_ref().filter(|t| **t != c.clause) {
+            changes.push(format!(
+                "{}: {source} words the clause as `{text}`; the map's wording is kept",
+                c.id
+            ));
+        }
+        changes.push(format!(
+            "{}: +{} test(s), +{} check(s) from {source}; tag {} -> {}",
+            c.id,
+            added_tests.len(),
+            added_checks.len(),
+            before.as_str(),
+            c.tag.as_str()
+        ));
+    }
+    for i in &add.ignored {
+        if map
+            .ignored
+            .iter()
+            .any(|m| m.test == i.test && m.lane == i.lane)
+        {
+            continue;
+        }
+        changes.push(format!(
+            "[[ignored]] {} ({}) from {source}",
+            i.test,
+            i.lane.as_str()
+        ));
+        map.ignored.push(i.clone());
+    }
+    let problems = map.problems();
+    if problems.is_empty() {
+        Ok(changes)
+    } else {
+        Err(format!(
+            "{source}: the merged map has {} problem(s):\n- {}",
+            problems.len(),
+            problems.join("\n- ")
+        ))
+    }
+}
+
+/// Rewrite a bare `<file>.rs::<name>` test id (the interim contribution
+/// format) to `<crate>/tests/<file>.rs::<name>`, using the one crate under
+/// `root/crates` that has that integration test file. Anything else is left
+/// for the map's own validation.
+pub fn resolve_bare_test_ids(add: &mut Additions, root: &std::path::Path) -> Result<(), String> {
+    let resolve = |id: &mut String| -> Result<(), String> {
+        let Some((file, name)) = id.split_once("::") else {
+            return Ok(());
+        };
+        if file.contains('/') {
+            return Ok(());
+        }
+        // `name.rs::fn`, or `name::fn` when some crate has tests/name.rs.
+        let explicit = file.ends_with(".rs");
+        let file = if explicit {
+            file.to_string()
+        } else {
+            format!("{file}.rs")
+        };
+        let file = file.as_str();
+        let crates = std::fs::read_dir(root.join("crates"))
+            .map_err(|e| format!("cannot list {}: {e}", root.join("crates").display()))?;
+        let owners: Vec<String> = crates
+            .filter_map(Result::ok)
+            .filter(|d| d.path().join("tests").join(file).is_file())
+            .map(|d| d.file_name().to_string_lossy().into_owned())
+            .collect();
+        match owners.as_slice() {
+            [krate] => {
+                *id = format!("{krate}/tests/{file}::{name}");
+                Ok(())
+            }
+            [] if explicit => Err(format!("`{id}`: no crate has tests/{file}")),
+            [] => Ok(()),
+            _ => Err(format!(
+                "`{id}`: tests/{file} is in {}",
+                owners.join(" and ")
+            )),
+        }
+    };
+    for c in &mut add.clause {
+        for t in &mut c.tests {
+            resolve(t)?;
+        }
+    }
+    for i in &mut add.ignored {
+        resolve(&mut i.test)?;
+    }
+    Ok(())
+}
+
+/// The comment the map file starts with.
+pub const MAP_HEADER: &str = "\
+# Acceptance map for jail-v1 §15 (J5, `ouro.jail.acceptance-map/1`).
+#
+# Every §15 row, split into the separately testable claims it makes, with the
+# tests (or driver checks) that assert each claim and how they assert it.
+# `cargo xtask conformance` evaluates this map against the suite's own
+# `test.log` and fails the run when a gate in its lane fails;
+# `cargo xtask gates --log linux=<test.log> [--log macos=<log>]` does the same
+# offline. The format, the tags and the verdict rules are documented in
+# crates/xtask/src/gates.rs.
+#
+# This file is always in the form `cargo xtask gates-merge` writes: add to it
+# with `cargo xtask gates-merge <acceptance-additions.toml>...`, which adds
+# tests to a clause (`id = \"X02.4\"`) or a new clause (`id = \"X02.new\"`)
+# and new [[ignored]] pins, and rewrites the file.
+#
+# Rules this file keeps (the honesty invariant):
+# - `row` is the §15 text verbatim; when the spec changes a row, the check
+#   fails until the clauses below are reviewed against the new text.
+# - A test is listed under a clause only if it asserts that clause. A clause
+#   nothing asserts yet is `untested` and fails the verdict; a clause the stock
+#   reference host cannot produce is `recorded-limit` with the document that
+#   records it. `simulated` means the real trigger is not produced.
+# - `[[ignored]]` pins the suite's ignored set exactly, per lane: an
+#   `#[ignore]` added to a gate test fails the run instead of passing silently.
+#
+# Seeded by J5-A from the J5 gap analysis §1.2, test by test, at 1328c381.
+";
+
+/// A TOML basic string (JSON's escapes are a subset TOML accepts).
+fn toml_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// The map in its canonical form: the file is always what this prints.
+#[must_use]
+pub fn render_map(map: &Map) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::from(MAP_HEADER);
+    let _ = writeln!(s, "\nschema = {}", toml_string(&map.schema));
+    let clause = |s: &mut String, c: &Clause| {
+        let _ = writeln!(s, "\n[[clause]]");
+        let _ = writeln!(s, "id = {}", toml_string(&c.id));
+        let _ = writeln!(s, "gate = {}", toml_string(&c.gate));
+        let _ = writeln!(s, "clause = {}", toml_string(&c.clause));
+        let _ = writeln!(s, "tag = {}", toml_string(c.tag.as_str()));
+        if c.lane != Lane::Linux {
+            let _ = writeln!(s, "lane = {}", toml_string(c.lane.as_str()));
+        }
+        if !c.tests.is_empty() {
+            let _ = writeln!(s, "tests = [");
+            for t in &c.tests {
+                let _ = writeln!(s, "  {},", toml_string(t));
+            }
+            let _ = writeln!(s, "]");
+        }
+        if !c.checks.is_empty() {
+            let checks: Vec<String> = c.checks.iter().map(|k| toml_string(k)).collect();
+            let _ = writeln!(s, "checks = [{}]", checks.join(", "));
+        }
+        if let Some(limit) = &c.limit {
+            let _ = writeln!(s, "limit = {}", toml_string(limit));
+        }
+        if let Some(note) = &c.note {
+            let _ = writeln!(s, "note = {}", toml_string(note));
+        }
+    };
+    for g in &map.gate {
+        let _ = writeln!(s, "\n# {:-<66} {}\n", "", g.id);
+        let _ = writeln!(s, "[[gate]]");
+        let _ = writeln!(s, "id = {}", toml_string(&g.id));
+        let _ = writeln!(s, "row = {}", toml_string(&g.row));
+        if g.kind == Kind::Credential {
+            let _ = writeln!(s, "kind = \"credential\"");
+        }
+        for c in map.clause.iter().filter(|c| c.gate == g.id) {
+            clause(&mut s, c);
+        }
+    }
+    let orphans: Vec<&Clause> = map
+        .clause
+        .iter()
+        .filter(|c| !map.gate.iter().any(|g| g.id == c.gate))
+        .collect();
+    if !orphans.is_empty() {
+        let _ = writeln!(s, "\n# clauses whose gate is not in this map");
+        for c in orphans {
+            clause(&mut s, c);
+        }
+    }
+    for lane in [Lane::Linux, Lane::Macos] {
+        let pins: Vec<&Ignored> = map.ignored.iter().filter(|i| i.lane == lane).collect();
+        if pins.is_empty() {
+            continue;
+        }
+        let _ = writeln!(
+            s,
+            "\n# {:-<40} the pinned ignored set, {} lane",
+            "",
+            lane.as_str()
+        );
+        for i in pins {
+            let _ = writeln!(s, "\n[[ignored]]");
+            let _ = writeln!(s, "test = {}", toml_string(&i.test));
+            let _ = writeln!(s, "reason = {}", toml_string(&i.reason));
+            if lane != Lane::Linux {
+                let _ = writeln!(s, "lane = {}", toml_string(lane.as_str()));
+            }
+        }
+    }
+    s
+}
+
+/// `cargo xtask gates-merge`: fold acceptance additions into the map.
+#[derive(Debug, clap::Args)]
+pub struct MergeArgs {
+    /// The acceptance map to rewrite; defaults to the repository's.
+    #[arg(long, value_name = "PATH")]
+    pub map: Option<std::path::PathBuf>,
+    /// Print the changes without writing the map.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// `acceptance-additions.toml` files, applied in order. With none, the
+    /// map is only rewritten in its canonical form.
+    #[arg(value_name = "ADDITIONS")]
+    pub additions: Vec<std::path::PathBuf>,
+}
+
+/// Run `cargo xtask gates-merge`.
+pub fn run_merge(args: &MergeArgs, root: &std::path::Path) -> std::process::ExitCode {
+    let fail = |msg: String| {
+        eprintln!("xtask gates-merge: {msg}");
+        std::process::ExitCode::FAILURE
+    };
+    let path = args.map.clone().unwrap_or_else(|| root.join(MAP_PATH));
+    let mut map = match std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
+        .and_then(|t| Map::parse(&t))
+    {
+        Ok(m) => m,
+        Err(e) => return fail(e),
+    };
+    for file in &args.additions {
+        // `<slice>/<file>`: the scratch layout names the slice by directory.
+        let source = match (file.parent().and_then(|p| p.file_name()), file.file_name()) {
+            (Some(dir), Some(name)) => {
+                format!("{}/{}", dir.to_string_lossy(), name.to_string_lossy())
+            }
+            _ => file.display().to_string(),
+        };
+        let mut add: Additions = match std::fs::read_to_string(file)
+            .map_err(|e| format!("cannot read {source}: {e}"))
+            .and_then(|t| toml::from_str(&t).map_err(|e| format!("{source}: {e}")))
+        {
+            Ok(a) => a,
+            Err(e) => return fail(e),
+        };
+        if let Err(e) = resolve_bare_test_ids(&mut add, root) {
+            return fail(format!("{source}: {e}"));
+        }
+        match merge(&mut map, &add, &source) {
+            Ok(changes) => changes.iter().for_each(|c| println!("{c}")),
+            Err(e) => return fail(e),
+        }
+    }
+    if let Ok(spec) = std::fs::read_to_string(root.join(SPEC_PATH))
+        && let Ok(rows) = spec_rows(&spec)
+    {
+        for p in spec_problems(&map, &rows) {
+            println!("note: {p}");
+        }
+    }
+    if args.dry_run {
+        return std::process::ExitCode::SUCCESS;
+    }
+    match std::fs::write(&path, render_map(&map)) {
+        Ok(()) => {
+            println!("wrote {}", path.display());
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => fail(format!("cannot write {}: {e}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1737,6 +2242,217 @@ reason = ""
             v.failures().is_empty(),
             "another lane is reported, not failed"
         );
+    }
+
+    // --------------------------------------------------------- merging
+
+    fn additions(text: &str) -> Additions {
+        toml::from_str(text).expect("additions parse")
+    }
+
+    #[test]
+    fn a_rendered_map_parses_back_to_the_same_map() {
+        let (map, _) = mini();
+        let again = Map::parse(&render_map(&map)).expect("the rendering parses");
+        assert_eq!(render_map(&again), render_map(&map));
+        assert_eq!(again.clause.len(), map.clause.len());
+        assert_eq!(again.ignored.len(), map.ignored.len());
+        assert_eq!(again.gate[1].kind, Kind::Credential);
+    }
+
+    #[test]
+    fn the_checked_in_map_is_in_canonical_form() {
+        let map = Map::parse(MAP).unwrap();
+        assert!(
+            render_map(&map) == MAP,
+            "run `cargo xtask gates-merge` (with no additions) to rewrite it"
+        );
+    }
+
+    #[test]
+    fn merging_tests_into_an_untested_clause_takes_the_contributors_tag() {
+        let untested = MINI_MAP.replace(
+            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"untested\"",
+        );
+        let mut map = Map::parse(&untested).unwrap();
+        let changes = merge(
+            &mut map,
+            &additions(
+                "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
+                 tests = [\"ouro-jail/tests/j5_process_linux.rs::x01_new\"]\nnote = \"B1 adds it\"\n",
+            ),
+            "B1",
+        )
+        .unwrap();
+        let c = &map.clause[0];
+        assert_eq!(c.tag, Tag::LiveCli);
+        assert_eq!(
+            c.tests,
+            vec!["ouro-jail/tests/j5_process_linux.rs::x01_new"]
+        );
+        assert!(c.note.as_deref().unwrap().contains("B1 adds it"));
+        assert!(
+            changes
+                .iter()
+                .any(|l| l.contains("X01.1") && l.contains("untested -> live-cli")),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn merging_never_weakens_a_tag_and_a_proved_limit_drops_its_limit() {
+        let (mut map, _) = mini();
+        merge(
+            &mut map,
+            &additions(
+                "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"portable\"\n\
+                 tests = [\"ouro-jail/tests/portable_gate.rs::x01_parser\"]\n",
+            ),
+            "C",
+        )
+        .unwrap();
+        assert_eq!(
+            map.clause[0].tag,
+            Tag::LiveCli,
+            "portable evidence adds, never demotes"
+        );
+        assert_eq!(map.clause[0].tests.len(), 2);
+
+        let limited = MINI_MAP.replace(
+            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"recorded-limit\"\nlimit = \"j4-authority.md, Known gaps\"",
+        );
+        let mut map = Map::parse(&limited).unwrap();
+        merge(
+            &mut map,
+            &additions(
+                "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
+                 tests = [\"ouro-jail/tests/j5_boundary_linux.rs::x01_live\"]\n",
+            ),
+            "B2",
+        )
+        .unwrap();
+        assert_eq!(map.clause[0].tag, Tag::LiveCli);
+        assert_eq!(
+            map.clause[0].limit, None,
+            "a clause that is proved is no longer a limit"
+        );
+    }
+
+    #[test]
+    fn a_new_clause_is_numbered_after_its_gate_and_placed_with_it() {
+        let (mut map, _) = mini();
+        let changes = merge(
+            &mut map,
+            &additions(
+                "[[clause]]\nid = \"X01.new\"\ngate = \"X01\"\nclause = \"tabs too\"\n\
+                 tag = \"live-cli\"\ntests = [\"ouro-jail/tests/j5_process_linux.rs::x01_tabs\"]\n",
+            ),
+            "B1",
+        )
+        .unwrap();
+        let ids: Vec<&str> = map.clause.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["X01.1", "X01.2", "A01.1"]);
+        assert!(
+            changes
+                .iter()
+                .any(|l| l.contains("X01.2") && l.contains("new")),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn a_merge_that_names_nothing_real_or_breaks_the_map_is_refused() {
+        let (map, _) = mini();
+        for (text, needle) in [
+            (
+                "[[clause]]\nid = \"X01.9\"\ngate = \"X01\"\ntag = \"live-cli\"\ntests = [\"a/tests/b.rs::c\"]\n",
+                "X01.9",
+            ),
+            (
+                "[[clause]]\nid = \"X01.1\"\ngate = \"A01\"\ntag = \"live-cli\"\ntests = [\"a/tests/b.rs::c\"]\n",
+                "gate",
+            ),
+            (
+                "[[clause]]\nid = \"A01.1\"\ngate = \"A01\"\ntag = \"live-cli\"\ntests = [\"a/tests/b.rs::c\"]\n",
+                "recorded by hand",
+            ),
+            (
+                "[[clause]]\nid = \"X01.new\"\ngate = \"X01\"\ntag = \"live-cli\"\ntests = [\"a/tests/b.rs::c\"]\n",
+                "clause",
+            ),
+            (
+                "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
+                 tests = [\"ouro-jail/tests/conformance_j2.rs::startup_supervisor_helper\"]\n",
+                "pinned as ignored",
+            ),
+        ] {
+            let mut m = map.clone();
+            let err = merge(&mut m, &additions(text), "X").unwrap_err();
+            assert!(err.contains(needle), "{needle}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_clause_without_an_id_merges_by_its_exact_text_or_is_new() {
+        let (mut map, _) = mini();
+        merge(
+            &mut map,
+            &additions(
+                "[[clause]]\ngate = \"X01\"\nclause = \"spaces reach the fixture\"\ntag = \"live-cli\"\n\
+                 tests = [\"ouro-jail/tests/j5_process_linux.rs::x01_more\"]\n\
+                 [[clause]]\ngate = \"X01\"\nclause = \"tabs reach the fixture\"\ntag = \"live-cli\"\n\
+                 tests = [\"ouro-jail/tests/j5_process_linux.rs::x01_tabs\"]\n",
+            ),
+            "B1",
+        )
+        .unwrap();
+        assert_eq!(map.clause[0].tests.len(), 2, "same text: the same clause");
+        assert_eq!(map.clause[1].id, "X01.2", "other text: a new clause");
+        assert_eq!(map.clause[1].clause, "tabs reach the fixture");
+    }
+
+    #[test]
+    fn bare_test_file_names_are_resolved_to_the_one_crate_that_has_them() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut add = additions(
+            "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
+             tests = [\"conformance_j1.rs::x01_literal_argv\", \"harness_gate::a_run_that_fails_to_start_is_an_error_not_a_pass\", \"xtask/src/main.rs::gates::tests::x\"]\n\
+             [[ignored]]\ntest = \"portable_state.rs::lock_probe_child_helper\"\nreason = \"r\"\n",
+        );
+        resolve_bare_test_ids(&mut add, &root).unwrap();
+        assert_eq!(
+            add.clause[0].tests,
+            vec![
+                "ouro-jail/tests/conformance_j1.rs::x01_literal_argv",
+                "ouro-fixture/tests/harness_gate.rs::a_run_that_fails_to_start_is_an_error_not_a_pass",
+                "xtask/src/main.rs::gates::tests::x",
+            ]
+        );
+        assert_eq!(
+            add.ignored[0].test,
+            "ouro-jail/tests/portable_state.rs::lock_probe_child_helper"
+        );
+        let mut missing = additions(
+            "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\ntests = [\"no_such_file.rs::t\"]\n",
+        );
+        assert!(
+            resolve_bare_test_ids(&mut missing, &root)
+                .unwrap_err()
+                .contains("no_such_file.rs")
+        );
+    }
+
+    #[test]
+    fn merged_ignored_pins_are_added_once() {
+        let (mut map, _) = mini();
+        let add = additions(
+            "[[ignored]]\ntest = \"ouro-jail/tests/j5_process_linux.rs::helper\"\nreason = \"a helper\"\n\
+             [[ignored]]\ntest = \"ouro-jail/tests/conformance_j2.rs::startup_supervisor_helper\"\nreason = \"helper\"\n",
+        );
+        merge(&mut map, &add, "B1").unwrap();
+        assert_eq!(map.ignored.len(), 2, "{:#?}", map.ignored);
     }
 
     // ------------------------------------------------------ the real map
