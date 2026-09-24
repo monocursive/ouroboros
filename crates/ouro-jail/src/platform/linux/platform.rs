@@ -391,35 +391,41 @@ impl LinuxPlatform {
             .filter(|name| wanted(name))
             .map(|name| probe::run_one_backend(name, &exe, self.backend()))
             .collect();
-        let measured_at = rfc3339_utc(SystemTime::now());
-
-        // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
-        // Shadows the fn for this call only; the closure falls back to it.
-        let capability_for = |requirement: &str, results: &[ProbeResult], measured_at: &str| {
-            super::uncontained::capability_for(plan.profile, requirement, results, measured_at)
-                .unwrap_or_else(|| capability_for(requirement, results, measured_at))
-        };
-        // J3-none end
-        let mut out: Vec<Capability> = plan
-            .requirements
-            .iter()
-            .map(|requirement| capability_for(requirement, &results, &measured_at))
-            .collect();
-        // The probe rows themselves, so `doctor --json` reports what was
-        // measured and not only what the plan happened to ask for (§14.1).
-        for result in &results {
-            out.push(Capability {
-                name: result.name.to_owned(),
-                status: status_of(result),
-                scope: CapabilityScope::Host,
-                mechanism: Some(result.mechanism.to_owned()),
-                reason_code: Some(result.reason_code.to_owned()),
-                measured_at: Some(measured_at.clone()),
-                evidence_ref: Some(result.evidence.clone()),
-            });
-        }
-        out
+        derive(plan, &results, &rfc3339_utc(SystemTime::now()))
     }
+}
+
+// J5-D: the derivation apart from the probing, so the requirement→probe
+// mapping is testable with stated results (review F12).
+/// The plan's capabilities from the probe results: one row per requirement
+/// (through [`inputs_for`] and `none`'s own mapping), then the probe rows.
+fn derive(plan: &PlanRequest, results: &[ProbeResult], measured_at: &str) -> Vec<Capability> {
+    // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
+    // Shadows the fn for this call only; the closure falls back to it.
+    let capability_for = |requirement: &str, results: &[ProbeResult], measured_at: &str| {
+        super::uncontained::capability_for(plan.profile, requirement, results, measured_at)
+            .unwrap_or_else(|| capability_for(requirement, results, measured_at))
+    };
+    // J3-none end
+    let mut out: Vec<Capability> = plan
+        .requirements
+        .iter()
+        .map(|requirement| capability_for(requirement, results, measured_at))
+        .collect();
+    // The probe rows themselves, so `doctor --json` reports what was
+    // measured and not only what the plan happened to ask for (§14.1).
+    for result in results {
+        out.push(Capability {
+            name: result.name.to_owned(),
+            status: status_of(result),
+            scope: CapabilityScope::Host,
+            mechanism: Some(result.mechanism.to_owned()),
+            reason_code: Some(result.reason_code.to_owned()),
+            measured_at: Some(measured_at.to_owned()),
+            evidence_ref: Some(result.evidence.clone()),
+        });
+    }
+    out
 }
 
 impl Platform for LinuxPlatform {
@@ -3508,6 +3514,121 @@ mod tests {
                 assert_eq!(result.status, ProbeStatus::Unavailable, "{name}");
                 assert_eq!(result.reason_code, "backend_unavailable", "{name}");
             }
+        }
+    }
+
+    fn plan_for(profile: crate::policy::ProfileName, observe_off: bool) -> super::PlanRequest {
+        let baseline = crate::profiles::baseline(profile, crate::records::Os::Linux, &|_| None);
+        let inputs = crate::policy::ResolveInputs {
+            platform: crate::records::Os::Linux,
+            base_profile: profile,
+            policy_name: profile.as_str().to_owned(),
+            baseline,
+            workspace: b"/work".to_vec(),
+            scratch: crate::policy::ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: Vec::new(),
+        };
+        let mut snapshot = crate::policy::resolve(&inputs)
+            .expect("the built-in baseline resolves")
+            .snapshot;
+        if observe_off {
+            snapshot.observation.mode = crate::records::ObserveMode::Off;
+        }
+        let requirements = crate::capability::requirements(&snapshot);
+        super::PlanRequest {
+            snapshot,
+            profile,
+            requirements,
+        }
+    }
+
+    /// Review F12: through the real requirement→probe mapping, a build for
+    /// an architecture the tables do not cover leaves the filter, observer
+    /// and proxy requirements unsupported (so `run` refuses before
+    /// preparation), and nothing else: `none` with observation off still
+    /// derives every requirement it needs.
+    #[test]
+    fn off_x86_64_the_real_mapping_refuses_exactly_the_table_bound_requirements() {
+        use super::super::probe::{self, ProbeResult, ProbeStatus};
+        use crate::capability::{
+            CapabilityStatus, REQ_CLOSED_SET_OBSERVATION, REQ_NETWORK_PROXY, REQ_SYSCALL_FILTER,
+        };
+        use crate::policy::ProfileName;
+        let results: Vec<ProbeResult> = probe::PROBE_NAMES
+            .iter()
+            .map(|name| {
+                probe::architecture_refusal(name, "aarch64").unwrap_or_else(|| ProbeResult {
+                    name,
+                    status: ProbeStatus::Available,
+                    mechanism: "test",
+                    reason_code: "ok",
+                    evidence: String::new(),
+                })
+            })
+            .collect();
+        let refused = [
+            REQ_SYSCALL_FILTER,
+            REQ_CLOSED_SET_OBSERVATION,
+            REQ_NETWORK_PROXY,
+        ];
+        for (profile, observe_off, expected) in [
+            (
+                ProfileName::Tool,
+                false,
+                &[REQ_SYSCALL_FILTER, REQ_CLOSED_SET_OBSERVATION][..],
+            ),
+            (ProfileName::Tool, true, &[REQ_SYSCALL_FILTER][..]),
+            (
+                ProfileName::Build,
+                false,
+                &[REQ_SYSCALL_FILTER, REQ_CLOSED_SET_OBSERVATION][..],
+            ),
+            (
+                ProfileName::Agent,
+                false,
+                &[
+                    REQ_SYSCALL_FILTER,
+                    REQ_CLOSED_SET_OBSERVATION,
+                    REQ_NETWORK_PROXY,
+                ][..],
+            ),
+            (ProfileName::None, false, &[REQ_CLOSED_SET_OBSERVATION][..]),
+            (ProfileName::None, true, &[][..]),
+        ] {
+            let plan = plan_for(profile, observe_off);
+            let capabilities = super::derive(&plan, &results, "2026-09-24T00:00:00Z");
+            let mut unsatisfied = Vec::new();
+            for requirement in &plan.requirements {
+                let row = capabilities
+                    .iter()
+                    .find(|row| &row.name == requirement)
+                    .unwrap_or_else(|| panic!("{profile:?}: no row for {requirement}"));
+                if row.satisfies() {
+                    continue;
+                }
+                assert_eq!(
+                    row.status,
+                    CapabilityStatus::Unsupported,
+                    "{profile:?} {requirement}"
+                );
+                assert_eq!(
+                    row.reason_code.as_deref(),
+                    Some("unsupported_architecture"),
+                    "{profile:?} {requirement}"
+                );
+                assert!(refused.contains(&requirement.as_str()), "{requirement}");
+                unsatisfied.push(requirement.clone());
+            }
+            let mut expected: Vec<&str> = expected.to_vec();
+            expected.sort_unstable();
+            unsatisfied.sort();
+            assert_eq!(
+                unsatisfied, expected,
+                "{profile:?} observe_off={observe_off}"
+            );
         }
     }
     // J5-D end
