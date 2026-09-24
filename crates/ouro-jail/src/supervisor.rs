@@ -1457,12 +1457,21 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     record_tree(&mut record, &tree);
                 }
                 // J3-launch end
+                // X04: the errno stays in `cause`; a missing interpreter,
+                // which the kernel reports as ENOENT like a missing program,
+                // takes its own code so the two differ in a machine field.
                 let error = JailError::new(
-                    ErrorCode::ExecFailed,
+                    detail.map_or(
+                        ErrorCode::ExecFailed,
+                        crate::platform::ExecFailureDetail::error_code,
+                    ),
                     ErrorStage::Released,
                     Remediation::Configuration,
-                    match &detail {
-                        Some(detail) => format!("the target exec failed with {errno}: {detail}"),
+                    match detail {
+                        Some(detail) => format!(
+                            "the target exec failed with {errno}: {}",
+                            detail.explanation()
+                        ),
                         None => format!("the target exec failed with {errno}"),
                     },
                 );

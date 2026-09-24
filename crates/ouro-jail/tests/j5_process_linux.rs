@@ -232,41 +232,51 @@ fn assert_x04(profile: &str) {
     let [missing, interpreter, permission, exit125] = cases.as_slice() else {
         unreachable!()
     };
-    // The three exec failures are proved exec errors, refused with 125.
-    for failure in [missing, interpreter, permission] {
-        assert_eq!(failure.phase, "refused", "{profile} {}", failure.label);
+    // The three exec failures are proved exec errors, refused with 125, and
+    // each is told apart by two stable machine fields, never by message text:
+    // `outcome.cause` is the kernel's errno name (§13.2), which is ENOENT
+    // for a missing program and for a missing interpreter alike, and
+    // `outcome.error.code` separates those two (spec-proposal.md, X04).
+    for (failure, cause, error_code) in [
+        (missing, "ENOENT", "exec_failed"),
+        (interpreter, "ENOENT", "exec_interpreter_missing"),
+        (permission, "EACCES", "exec_failed"),
+    ] {
+        let label = failure.label;
+        assert_eq!(failure.phase, "refused", "{profile} {label}");
+        assert_eq!(failure.outcome["kind"], "exec_error", "{profile} {label}");
+        assert_eq!(failure.outcome["cause"], cause, "{profile} {label}");
         assert_eq!(
-            failure.outcome["kind"], "exec_error",
-            "{profile} {}",
-            failure.label
+            failure.outcome["error"]["code"], error_code,
+            "{profile} {label}"
         );
-        assert_eq!(
-            failure.outcome["error"]["code"], "exec_failed",
-            "{}",
-            failure.label
-        );
-        assert_eq!(failure.code, Some(125), "{profile} {}", failure.label);
-        assert_eq!(failure.terminal_control, ["refused"], "{}", failure.label);
+        assert_eq!(failure.code, Some(125), "{profile} {label}");
+        assert_eq!(failure.terminal_control, ["refused"], "{profile} {label}");
     }
-    // §13.2: the errno name in its own field. The kernel answers ENOENT for a
-    // missing program and for a missing interpreter alike; EACCES for the
-    // permission error.
-    assert_eq!(missing.outcome["cause"], "ENOENT");
-    assert_eq!(interpreter.outcome["cause"], "ENOENT");
-    assert_eq!(permission.outcome["cause"], "EACCES");
+    let machine = |case: &ExecCase| {
+        (
+            case.outcome["kind"].clone(),
+            case.outcome["cause"].clone(),
+            case.outcome["code"].clone(),
+            case.outcome["error"]["code"].clone(),
+        )
+    };
     // A child that exits 125 exited: it is settled, never a refusal.
     assert_eq!(exit125.phase, "settled", "{profile}");
     assert_eq!(exit125.outcome["kind"], "exited");
     assert_eq!(exit125.outcome["code"], 125);
     assert_eq!(exit125.code, Some(125));
     assert_eq!(exit125.terminal_control, ["settled"]);
-    // X04 itself: four distinct outcomes, compared as whole objects.
+    // X04 itself: four distinct outcomes in their machine fields alone
+    // (kind, cause, exit code, error code), messages left out.
     for (i, a) in cases.iter().enumerate() {
         for b in &cases[i + 1..] {
             assert_ne!(
-                a.outcome, b.outcome,
-                "{profile}: `{}` and `{}` have the same outcome",
-                a.label, b.label
+                machine(a),
+                machine(b),
+                "{profile}: `{}` and `{}` share every machine field of their outcome",
+                a.label,
+                b.label
             );
         }
     }

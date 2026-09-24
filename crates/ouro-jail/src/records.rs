@@ -327,6 +327,13 @@ pub enum ErrorCode {
     AttemptExists,
     /// The target `exec` failed; no target instruction ran (§8.1).
     ExecFailed,
+    // J5-B1 begin: X04
+    /// The target `exec` failed with ENOENT although the named file exists:
+    /// its `#!` interpreter or ELF loader is what is missing (X04). The
+    /// errno stays in `outcome.cause`; this code tells it from a missing
+    /// program, which is `exec_failed`.
+    ExecInterpreterMissing,
+    // J5-B1 end
     /// Observation evidence was lost (§11.4).
     EvidenceLost,
     /// Tree death could not be verified within its budget (§9.3).
@@ -357,6 +364,9 @@ impl ErrorCode {
             ErrorCode::PrepareTimeout => "prepare_timeout",
             ErrorCode::AttemptExists => "attempt_exists",
             ErrorCode::ExecFailed => "exec_failed",
+            // J5-B1 begin: X04
+            ErrorCode::ExecInterpreterMissing => "exec_interpreter_missing",
+            // J5-B1 end
             ErrorCode::EvidenceLost => "evidence_lost",
             ErrorCode::TreeUnknown => "tree_unknown",
             ErrorCode::StateWriteFailed => "state_write_failed",
@@ -610,7 +620,9 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
         | ErrorCode::GateClosed
         | ErrorCode::PrepareTimeout
         | ErrorCode::AttemptExists
-        | ErrorCode::ExecFailed => 125,
+        | ErrorCode::ExecFailed
+        // J5-B1: X04
+        | ErrorCode::ExecInterpreterMissing => 125,
         ErrorCode::EvidenceLost
         | ErrorCode::TreeUnknown
         | ErrorCode::StateWriteFailed

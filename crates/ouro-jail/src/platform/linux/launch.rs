@@ -478,12 +478,12 @@ impl ExecFailure {
         super::sys::errno_name(self.errno)
     }
 
-    /// What the errno alone does not say, for the refusal's message; `None`
-    /// when it says everything the launcher knows.
+    /// What the errno alone does not say; `None` when it says everything
+    /// the launcher knows.
     #[must_use]
-    pub fn detail(&self) -> Option<&'static str> {
+    pub fn detail(&self) -> Option<crate::platform::ExecFailureDetail> {
         self.interpreter_missing
-            .then_some("the program exists, but the interpreter or loader it names was not found")
+            .then_some(crate::platform::ExecFailureDetail::InterpreterMissing)
     }
 }
 
@@ -508,15 +508,10 @@ pub fn decode_exec_failure(bytes: &[u8]) -> Option<ExecFailure> {
 /// hands them to the supervisor: `("unknown", None)` for a report that does
 /// not decode.
 #[must_use]
-pub fn exec_failure_parts(bytes: &[u8]) -> (String, Option<String>) {
+pub fn exec_failure_parts(bytes: &[u8]) -> (String, Option<crate::platform::ExecFailureDetail>) {
     decode_exec_failure(bytes).map_or_else(
         || ("unknown".to_owned(), None),
-        |failure| {
-            (
-                failure.errno_name().to_owned(),
-                failure.detail().map(ToOwned::to_owned),
-            )
-        },
+        |failure| (failure.errno_name().to_owned(), failure.detail()),
     )
 }
 
@@ -1032,7 +1027,10 @@ mod tests {
             "the errno stays the kernel's"
         );
         assert!(interpreter.interpreter_missing);
-        assert!(interpreter.detail().unwrap().contains("interpreter"));
+        assert_eq!(
+            interpreter.detail(),
+            Some(crate::platform::ExecFailureDetail::InterpreterMissing)
+        );
 
         // The detail means nothing beside another errno, an unknown code or
         // a report of the wrong length.

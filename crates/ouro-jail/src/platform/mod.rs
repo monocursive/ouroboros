@@ -227,7 +227,7 @@ pub enum RunEvent {
         errno: String,
         /// What the errno alone does not say (X04: a missing interpreter
         /// answers ENOENT like a missing program), when the platform knows.
-        detail: Option<String>,
+        detail: Option<ExecFailureDetail>,
     },
     /// The wall deadline expired.
     WallExpired,
@@ -249,6 +249,39 @@ pub enum RunEvent {
         reason: String,
     },
 }
+
+// J5-B1 begin: X04
+/// What a target exec failure's errno does not say, when the platform
+/// established it (X04).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExecFailureDetail {
+    /// The named file exists, but the kernel answered ENOENT: its `#!`
+    /// interpreter or its ELF loader is missing.
+    InterpreterMissing,
+}
+
+impl ExecFailureDetail {
+    /// The refusal's error code for this failure.
+    #[must_use]
+    pub fn error_code(self) -> crate::records::ErrorCode {
+        match self {
+            ExecFailureDetail::InterpreterMissing => {
+                crate::records::ErrorCode::ExecInterpreterMissing
+            }
+        }
+    }
+
+    /// The explanation appended to the refusal's message.
+    #[must_use]
+    pub fn explanation(self) -> &'static str {
+        match self {
+            ExecFailureDetail::InterpreterMissing => {
+                "the program exists, but the interpreter or loader it names was not found"
+            }
+        }
+    }
+}
+// J5-B1 end
 
 /// A monotonic deadline (§6.4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
