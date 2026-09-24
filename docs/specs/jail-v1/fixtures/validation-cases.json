@@ -1409,7 +1409,7 @@
     ]
   },
   {
-    "name": "exec transition names its call",
+    "name": "an exec transition names its call, when it names one",
     "schema": "jail-event",
     "base": "examples/event-exec.json",
     "valid": false,

@@ -33,7 +33,7 @@ sha256 = "a8150159c5d368ea4183e4898a4e7dd37f36eb64a360a239c2737d86547c1d4c"
 file = "jail-event.schema.json"
 id = "urn:ouro:schema:jail-event:1"
 identifier = "ouro.event/1"
-sha256 = "f26ad6d9876b1748c846cd48ce7aeef0f3aba1fb03663e9686a9b033c4097578"
+sha256 = "46f7763e8f15d0969dca092b0cdf1a978dbf5cc61a17e05c7ecbfd82bffba24b"
 
 # §13.2: the receipt
 [[frozen]]

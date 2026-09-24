@@ -317,7 +317,7 @@
       }
     },
     {
-      "$comment": "jail-v1.md:1412-1413 (\u00a711.2): a successful exec's proc.exec names its call in fields.syscall.",
+      "$comment": "jail-v1.md:1412-1413 (\u00a711.2): a successful exec's proc.exec names its call in fields.syscall. The name is not required: an exec transition whose entry the observer did not follow (the in-flight bound, or a process seized inside its own execve) has no call to name, and the product writes none (j4_tracer_precision_linux.rs non-leader exec tests); the spec does not say what such a result carries (J5-C spec proposal).",
       "if": {
         "properties": {
           "source": {
@@ -347,9 +347,6 @@
       "then": {
         "properties": {
           "fields": {
-            "required": [
-              "syscall"
-            ],
             "properties": {
               "syscall": {
                 "type": "string",
