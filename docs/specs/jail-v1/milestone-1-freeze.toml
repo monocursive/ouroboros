@@ -924,7 +924,7 @@ sha256 = "9339224696295fcad830ff7f17fc51e2ba8dbbfff4057a678c13f7ac7eb42755"
 file = "jail-doctor.schema.json"
 id = "urn:ouro:schema:jail-doctor:1"
 identifier = "ouro.jail.doctor/1"
-sha256 = "9d3947d21b7810bbb7f09eed7741cd49b8aeba942eae158a5905cfee8023471d"
+sha256 = "bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9"
 
 # No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
 # records the milestone conformance run, and `cargo xtask freeze --check`
