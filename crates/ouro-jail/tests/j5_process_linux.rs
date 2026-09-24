@@ -1424,6 +1424,39 @@ fn p04_run(data: Option<&Path>, extra: &[&OsStr]) -> (Option<i32>, String, bool)
     (run.code(), run.stderr_text(), marker.exists())
 }
 
+/// P04 (state/scratch/receipt overlap, the scratch-receipt pair): a
+/// `--receipt` path inside the `--scratch` root, which the child can write,
+/// refuses before exec as a usage error naming `--receipt`.
+#[test]
+fn p04_a_receipt_path_inside_the_scratch_root_refuses() {
+    if !common::live() {
+        return;
+    }
+    let outer = common::private_tempdir();
+    let scratch = outer.path().join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    let receipt = scratch.join("receipt.json");
+    let (code, stderr, ran) = p04_run(
+        None,
+        &[
+            OsStr::new("--scratch"),
+            scratch.as_os_str(),
+            OsStr::new("--receipt"),
+            receipt.as_os_str(),
+        ],
+    );
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(!ran, "the target ran");
+    assert!(
+        stderr.contains("invalid_config") && stderr.contains("(key: --receipt)"),
+        "{stderr}"
+    );
+    assert!(
+        !receipt.exists(),
+        "a receipt was written inside the scratch"
+    );
+}
+
 /// P04.6: the state root overlapping an operator grant refuses before exec,
 /// in both directions: an `--ro` grant of the state root's parent (the root
 /// is beneath the grant) and an `--rw` grant beneath the state root.
