@@ -161,10 +161,81 @@ pub fn run_path_for_humans(run_dir: &str) -> String {
     format!("~/{REMOTE_RUNS}/{run_dir}")
 }
 
-/// The remote build, run by [`detached_start`] in the run directory.
+/// The remote build, run by [`detached_start`] in the run directory, with
+/// the build-provenance environment of [`build_env`].
 #[must_use]
-pub fn build_command(jobs: u32) -> String {
-    format!("{REMOTE_CARGO} build --release --workspace -j{jobs}")
+pub fn build_command(jobs: u32, revision: &str) -> String {
+    format!(
+        "env {} {REMOTE_CARGO} build --release --workspace -j{jobs}",
+        build_env(revision)
+    )
+}
+
+/// The build-provenance claims every cargo step that builds or tests the
+/// jail receives (`crates/ouro-jail/src/build_provenance.rs` states the
+/// rule; its build.rs enforces it): the tested commit and whether the tree
+/// was dirty, from the suite's own revision marker. Cargo tracks both, so
+/// the build and test steps get identical values or the suite rebuilds the
+/// tested binary with other claims. An unknown revision passes nothing, and
+/// the binary then records the claims as unknown.
+#[must_use]
+pub fn build_env(revision: &str) -> String {
+    let (sha, dirty) = match revision.strip_suffix("+dirty") {
+        Some(sha) => (sha, true),
+        None => (revision, false),
+    };
+    let known = sha.len() == 40
+        && sha.bytes().all(|b| b.is_ascii_hexdigit())
+        && !sha.bytes().all(|b| b == b'0');
+    if known {
+        format!("OURO_BUILD_REVISION={sha} OURO_BUILD_DIRTY={dirty}")
+    } else {
+        String::new()
+    }
+}
+
+/// What `doctor --json`'s `build` object must say for a conformance run to
+/// count: the tested revision, a clean tree, and an optimised release build.
+#[must_use]
+pub fn provenance_problems(doctor: &Value, revision: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let (sha, dirty) = match revision.strip_suffix("+dirty") {
+        Some(sha) => (sha, true),
+        None => (revision, false),
+    };
+    let build = &doctor["build"];
+    if !build.is_object() {
+        problems.push("doctor.json has no build object".to_string());
+        return problems;
+    }
+    match build["revision"].as_str() {
+        Some(r) if r.eq_ignore_ascii_case(sha) => {}
+        other => problems.push(format!(
+            "doctor.json names revision {other:?}, not the tested {sha}"
+        )),
+    }
+    if dirty {
+        problems.push(format!("the tested tree {sha} had uncommitted changes"));
+    }
+    if build["dirty"] != Value::Bool(false) {
+        problems.push(format!(
+            "doctor.json says dirty {}, not false",
+            build["dirty"]
+        ));
+    }
+    if build["opt_level"].as_str() != Some("3") {
+        problems.push(format!(
+            "doctor.json says opt_level {}, not \"3\"",
+            build["opt_level"]
+        ));
+    }
+    if build["debug_assertions"] != Value::Bool(false) {
+        problems.push(format!(
+            "doctor.json says debug_assertions {}, not false",
+            build["debug_assertions"]
+        ));
+    }
+    problems
 }
 
 /// The remote I02 vendor-name scan (jail-v1 §15 row I02).
@@ -217,9 +288,10 @@ pub fn test_command(run_dir: &str, jobs: u32, revision: &str) -> String {
          env OURO_CONFORMANCE=1 \
          OURO_JAIL_BIN=$PWD/target/release/ouro-jail \
          OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture \
-         RUSTC=$R RUSTDOC=$D \
+         RUSTC=$R RUSTDOC=$D {} \
          {}",
         suite_unit(run_dir),
+        build_env(revision),
         with_suite_path(
             &format!("$C test --workspace --release -j{jobs} --no-fail-fast -- --test-threads=1"),
             revision
@@ -1069,6 +1141,10 @@ pub fn decide(
                         failures.push(format!("capability `{}`: {p}", row.name));
                     }
                 }
+                let revision = outcomes.revision.as_deref().unwrap_or("");
+                for p in provenance_problems(&doctor, revision) {
+                    failures.push(format!("build provenance: {p}"));
+                }
             }
         },
     }
@@ -1315,7 +1391,7 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
             opts,
             &run_dir,
             "build",
-            &build_command(opts.jobs),
+            &build_command(opts.jobs, &revision),
             BUILD_PATIENCE,
             None,
         );
@@ -1809,12 +1885,73 @@ mod tests {
 
     #[test]
     fn the_remote_commands_use_the_account_cargo_and_two_jobs() {
-        let b = build_command(2);
-        assert_eq!(b, "$HOME/.cargo/bin/cargo build --release --workspace -j2");
+        let b = build_command(2, REV);
+        assert_eq!(
+            b,
+            format!(
+                "env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
+                 $HOME/.cargo/bin/cargo build --release --workspace -j2"
+            )
+        );
         let started = detached_start("d", "build", &b);
         assert!(
             started.starts_with("cd $HOME/ouro-ci/runs/d && mkdir build.started &&"),
             "{started}"
+        );
+    }
+
+    #[test]
+    fn the_build_and_test_steps_carry_identical_provenance_claims() {
+        // Cargo tracks both variables: a test step with other values (or
+        // none) rebuilds the tested binary under the suite (review of J5-D, F8).
+        for revision in [REV.to_string(), format!("{REV}+dirty")] {
+            let env = build_env(&revision);
+            assert!(!env.is_empty(), "{revision}");
+            assert!(build_command(2, &revision).contains(&env), "{revision}");
+            assert!(test_command("d", 2, &revision).contains(&env), "{revision}");
+        }
+        assert_eq!(
+            build_env(&format!("{REV}+dirty")),
+            format!("OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=true")
+        );
+        // An unknown revision claims nothing.
+        for unknown in [
+            "0000000000000000000000000000000000000000+dirty",
+            "abc",
+            "",
+            "g123456789abcdef0123456789abcdef01234567",
+        ] {
+            assert_eq!(build_env(unknown), "", "{unknown}");
+        }
+    }
+
+    #[test]
+    fn doctors_build_provenance_must_name_the_tested_clean_optimised_build() {
+        let good: Value = serde_json::from_str(GOOD_DOCTOR).unwrap();
+        assert!(provenance_problems(&good, REV).is_empty());
+        let mutate = |f: &dyn Fn(&mut Value)| {
+            let mut d = good.clone();
+            f(&mut d);
+            provenance_problems(&d, REV)
+        };
+        assert!(!mutate(&|d| d["build"]["revision"] = "f".repeat(40).into()).is_empty());
+        assert!(!mutate(&|d| d["build"]["revision"] = Value::Null).is_empty());
+        assert!(!mutate(&|d| d["build"]["dirty"] = Value::Bool(true)).is_empty());
+        assert!(!mutate(&|d| d["build"]["dirty"] = Value::Null).is_empty());
+        assert!(!mutate(&|d| d["build"]["opt_level"] = "0".into()).is_empty());
+        assert!(!mutate(&|d| d["build"]["debug_assertions"] = Value::Bool(true)).is_empty());
+        assert!(!mutate(&|d| d["build"] = Value::Null).is_empty());
+        assert!(!provenance_problems(&good, &format!("{REV}+dirty")).is_empty());
+        // And the decision fails the run on it.
+        let mut o = a_clean_run();
+        o.doctor_json = Some(GOOD_DOCTOR.replace("\"dirty\":false", "\"dirty\":true"));
+        assert!(
+            verdict(&o)
+                .failures
+                .iter()
+                .any(|f| f.starts_with("build provenance:")),
+            "{:?}",
+            verdict(&o).failures
         );
     }
 
@@ -2237,7 +2374,7 @@ mod tests {
         }
     }
 
-    const GOOD_DOCTOR: &str = r#"{"capabilities":[{"name":"bwrap_present","status":"available"}]}"#;
+    const GOOD_DOCTOR: &str = r#"{"capabilities":[{"name":"bwrap_present","status":"available"}],"build":{"revision":"0123456789abcdef0123456789abcdef01234567","dirty":false,"opt_level":"3","debug_assertions":false}}"#;
     /// A suite log that satisfies [`MINI_MAP`]: the PATH line, then one
     /// library binary and the one mapped test.
     const GOOD_LOG: &str = "\
