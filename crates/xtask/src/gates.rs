@@ -3215,6 +3215,32 @@ reason = "an `ignore` doc example"
     }
 
     #[test]
+    fn a_log_is_clean_only_with_a_summary_per_binary_and_no_anomaly() {
+        let ok = TestLog {
+            results: BTreeMap::from([("a/tests/t.rs::x".to_string(), vec![Outcome::Ok])]),
+            summaries: 2,
+            binaries: 2,
+            ..TestLog::default()
+        };
+        assert!(ok.clean());
+        let short = TestLog {
+            summaries: 1,
+            ..ok.clone()
+        };
+        assert!(!short.clean(), "a binary without its `test result:` line");
+        let odd = TestLog {
+            anomalies: vec![Anomaly {
+                test: Some("a/tests/t.rs::y".into()),
+                binary: None,
+                text: "a nested line".into(),
+            }],
+            ..ok.clone()
+        };
+        assert!(!odd.clean(), "an unattributed line");
+        assert!(!parse_log(HOSTILE_H7).clean(), "h7's nested result line");
+    }
+
+    #[test]
     fn a_result_outside_any_binary_is_a_failure() {
         let v = review(&format!("test stray ... ok\n{MINI_LOG}"));
         assert!(
