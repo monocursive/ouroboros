@@ -1,6 +1,7 @@
 //! The tracer thread: one `waitpid(-1, __WALL)` loop that owns every child
 //! and every tracee of the process, and the §11 bookkeeping that turns its
-//! stops into the events of [`super::TracerEvent`].
+//! stops into the events of [`super::TracerEvent`]. It ends on its own
+//! account of what it answers for ([`Owed`]), not when no child is left.
 //!
 //! Everything the spec calls a semantic lives here as code:
 //!
@@ -143,6 +144,50 @@ impl ProcView for LiveProc {
 
     fn start_ticks(&self, tid: pid_t) -> Option<u64> {
         proc::start_ticks(tid)
+    }
+}
+
+/// J5-T: the children of this process, besides its tracees, whose end the
+/// tracer answers for.
+///
+/// It ends on this account, never on `waitpid(-1)` returning `ECHILD`. A
+/// process can start with children it never made — a shell's process
+/// substitution forked before it `exec`ed the supervisor, a background job,
+/// a library's helper — and those are no part of the attempt: waiting for
+/// them held the tracer open until its deadline and then reported them as
+/// unreaped. While the tracer runs it still reaps any of them that exits
+/// (`waitpid(-1)` cannot leave them out) and delivers the status as
+/// [`TracerEvent::UntracedChildExit`], so nothing is lost; one alive when it
+/// finishes is left to its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    /// Nothing: the launcher is itself a child of this process.
+    Nothing,
+    /// The child the launcher descends through — bubblewrap — with its
+    /// birth, until its exit has been reaped and delivered.
+    Backend {
+        pid: pid_t,
+        birth: Option<u64>,
+        reaped: bool,
+    },
+    /// The launcher's ancestry could not be read, so which child is the
+    /// backend is unknown: every child is waited for, as before J5-T.
+    Every,
+}
+
+impl Owed {
+    /// Read from the kernel's parent links while the launcher is seized and
+    /// blocked, so the chain above it cannot change under the walk.
+    fn toward(launcher: pid_t, procfs: &dyn ProcView) -> Owed {
+        match proc::child_toward(sys::getpid(), launcher) {
+            Some(child) if child == launcher => Owed::Nothing,
+            Some(child) => Owed::Backend {
+                pid: child,
+                birth: procfs.start_ticks(child),
+                reaped: false,
+            },
+            None => Owed::Every,
+        }
     }
 }
 
@@ -376,6 +421,7 @@ pub(super) fn run(
         monotonic_ns: clock::boottime_ns(),
     });
     session.register(launcher);
+    session.owed = Owed::toward(launcher, &*session.procfs);
     session.run_loop(&handles);
     session.finish(&handles)
 }
@@ -531,6 +577,8 @@ struct Session {
     // unmatched. `None` in the release binary unless the seam is set.
     force_truncate_marker: Option<Vec<u8>>,
     force_unmatched_marker: Option<Vec<u8>>,
+    /// J5-T: which children, besides the tracees, the tracer answers for.
+    owed: Owed,
 }
 
 impl Session {
@@ -570,6 +618,9 @@ impl Session {
             procfs,
             force_truncate_marker: seam_marker(TRUNCATE_PATH_SEAM),
             force_unmatched_marker: seam_marker(UNMATCHED_EXIT_SEAM),
+            // `run` reads the real one once the launcher is seized; a
+            // session built without it keeps the rule before J5-T.
+            owed: Owed::Every,
         }
     }
 
@@ -845,6 +896,11 @@ impl Session {
                     break;
                 }
             }
+            // J5-T: done on its own account. Past this point a blocking
+            // wait could only be for a child the tracer does not answer for.
+            if self.accounted_for() {
+                break;
+            }
             // About to block: hand the consumer whatever is still buffered,
             // so a backlog never waits on the tree making its next call.
             self.flush();
@@ -858,6 +914,27 @@ impl Session {
                 Wait::NoChildren => break,
                 Wait::Status { pid, status } => self.handle(pid, status),
             }
+        }
+    }
+
+    /// J5-T: every tracee has been reaped and the backend's exit delivered
+    /// ([`Owed`]). Any other child of this process may live on.
+    fn accounted_for(&self) -> bool {
+        self.tasks.is_empty()
+            && match self.owed {
+                Owed::Nothing => true,
+                Owed::Backend { pid, birth, reaped } => reaped || !self.still_there(pid, birth),
+                Owed::Every => false,
+            }
+    }
+
+    /// Whether `pid` still names the process born at `birth`, zombie
+    /// included. Without a birth, whether anything has the number.
+    fn still_there(&self, pid: pid_t, birth: Option<u64>) -> bool {
+        match (self.procfs.start_ticks(pid), birth) {
+            (Some(now), Some(born)) => now == born,
+            (now, None) => now.is_some(),
+            (None, Some(_)) => false,
         }
     }
 
@@ -1895,6 +1972,17 @@ impl Session {
                 self.tracee_deaths.insert(pid, Instant::now() + KILL_GRACE);
                 return;
             }
+            // J5-T: the backend's exit is the one the tracer owes; any other
+            // child's is delivered all the same, and is not the tree's.
+            if let Owed::Backend {
+                pid: backend,
+                reaped,
+                ..
+            } = &mut self.owed
+                && *backend == pid
+            {
+                *reaped = true;
+            }
             self.summary.untraced_child_exits += 1;
             self.emit(TracerEvent::UntracedChildExit { pid, status });
             return;
@@ -2179,11 +2267,20 @@ impl Session {
     fn finish(mut self, handles: &Handles) -> TracerSummary {
         // Direct children that were never reaped have no route left for
         // their exit status: the supervisor was told not to wait for its own
-        // children while a tracer is attached.
-        let unreaped: Vec<pid_t> = proc::children(sys::getpid())
-            .into_iter()
-            .filter(|pid| !self.tasks.contains_key(pid))
-            .collect();
+        // children while a tracer is attached. J5-T: only those it answers
+        // for; another child is its owner's to wait for once this ends.
+        let unreaped: Vec<pid_t> = match self.owed {
+            Owed::Every => proc::children(sys::getpid())
+                .into_iter()
+                .filter(|pid| !self.tasks.contains_key(pid))
+                .collect(),
+            Owed::Backend {
+                pid,
+                birth,
+                reaped: false,
+            } if self.still_there(pid, birth) => vec![pid],
+            Owed::Backend { .. } | Owed::Nothing => Vec::new(),
+        };
         if !unreaped.is_empty() {
             self.summary.loss.unreaped_children += unreaped.len() as u64;
             self.gap(

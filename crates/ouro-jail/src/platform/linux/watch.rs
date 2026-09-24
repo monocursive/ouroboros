@@ -18,8 +18,9 @@
 //! that started it, which can die before the rest of a dying supervisor, so
 //! bubblewrap can end while the supervisor still looks alive (measured with an
 //! instrumented watcher, J4). A supervisor still alive when the grace ends
-//! owns what is left, and the watcher leaves, so the observer's wait for its
-//! last child is never held up for long.
+//! owns what is left, and the watcher leaves. The observer does not wait for
+//! the watcher (J5-T): the supervisor reaps it itself once the observer is
+//! done.
 //!
 //! Killing only the backend is not enough (J4, measured 2026-09-23):
 //! bubblewrap's namespace init arms its own parent-death signal late in its

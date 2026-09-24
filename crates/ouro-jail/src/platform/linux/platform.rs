@@ -3086,8 +3086,8 @@ impl RunningExecution for LinuxRunning {
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
             self.pump_status();
-            // The observer finishes only once every child of this process is
-            // gone, the watcher included.
+            // The observer finishes once every tracee and the backend are
+            // reaped (J5-T); the watcher, released here, is reaped below.
             self.boundary.release_watcher_after_backend();
             let tracer_done = self.boundary.tracer.is_none() || self.finished;
             if tracer_done
