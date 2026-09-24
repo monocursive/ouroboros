@@ -1363,11 +1363,8 @@ impl Uncontained {
         let status = self.target_status?;
         self.pump_error();
         if !self.error_bytes.is_empty() {
-            let errno = launch::decode_error_report(&self.error_bytes).map_or_else(
-                || "unknown".to_owned(),
-                |code| super::sys::errno_name(code).to_owned(),
-            );
-            return Some(RunEvent::ExecError { errno });
+            let (errno, detail) = launch::exec_failure_parts(&self.error_bytes);
+            return Some(RunEvent::ExecError { errno, detail });
         }
         let outcome = shared::outcome_from_status(status);
         if !self.exec_confirmed {
@@ -1616,12 +1613,9 @@ impl RunningExecution for Uncontained {
             self.error_bytes.clear();
         }
         if !self.error_bytes.is_empty() {
-            let errno = launch::decode_error_report(&self.error_bytes).map_or_else(
-                || "unknown".to_owned(),
-                |code| super::sys::errno_name(code).to_owned(),
-            );
+            let (errno, detail) = launch::exec_failure_parts(&self.error_bytes);
             self.error_bytes.clear();
-            return RunEvent::ExecError { errno };
+            return RunEvent::ExecError { errno, detail };
         }
         let done = if self.tracer_attached {
             self.target_outcome.is_some() || self.finished

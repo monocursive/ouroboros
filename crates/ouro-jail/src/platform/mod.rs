@@ -225,6 +225,9 @@ pub enum RunEvent {
     ExecError {
         /// The errno name the launcher reported.
         errno: String,
+        /// What the errno alone does not say (X04: a missing interpreter
+        /// answers ENOENT like a missing program), when the platform knows.
+        detail: Option<String>,
     },
     /// The wall deadline expired.
     WallExpired,

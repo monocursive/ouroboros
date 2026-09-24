@@ -239,6 +239,7 @@ impl RunningExecution for SimRunning {
             },
             Scenario::ExecError => RunEvent::ExecError {
                 errno: "ENOENT".into(),
+                detail: None,
             },
             Scenario::Script(events) => events
                 .get(self.step - 1)

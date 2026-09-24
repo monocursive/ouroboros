@@ -1442,7 +1442,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 record.outcome.signal = Some(signal);
                 break;
             }
-            RunEvent::ExecError { errno } => {
+            RunEvent::ExecError { errno, detail } => {
                 // §8.1: an unsuccessful target exec is a pre-exec failure, and
                 // §13.2 gives it its own outcome kind. It is not `refused`:
                 // the attempt reached release and the kernel answered, which
@@ -1461,7 +1461,10 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     ErrorCode::ExecFailed,
                     ErrorStage::Released,
                     Remediation::Configuration,
-                    format!("the target exec failed with {errno}"),
+                    match &detail {
+                        Some(detail) => format!("the target exec failed with {errno}: {detail}"),
+                        None => format!("the target exec failed with {errno}"),
+                    },
                 );
                 // J4-R: a receipt still with the worker lands (or is given up
                 // on) before the refused one.

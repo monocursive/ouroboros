@@ -2923,11 +2923,8 @@ impl LinuxRunning {
         // backend's report is all there is.
         let status = self.bwrap_status?;
         if !self.boundary.error_bytes.is_empty() {
-            let errno = super::launch::decode_error_report(&self.boundary.error_bytes).map_or_else(
-                || "unknown".to_owned(),
-                |code| super::sys::errno_name(code).to_owned(),
-            );
-            return Some(RunEvent::ExecError { errno });
+            let (errno, detail) = super::launch::exec_failure_parts(&self.boundary.error_bytes);
+            return Some(RunEvent::ExecError { errno, detail });
         }
         if !self.exec_confirmed {
             return Some(RunEvent::Unknown {
@@ -3026,13 +3023,9 @@ impl RunningExecution for LinuxRunning {
                 self.boundary.error_bytes.clear();
             }
             if !self.boundary.error_bytes.is_empty() {
-                let errno = super::launch::decode_error_report(&self.boundary.error_bytes)
-                    .map_or_else(
-                        || "unknown".to_owned(),
-                        |code| super::sys::errno_name(code).to_owned(),
-                    );
+                let (errno, detail) = super::launch::exec_failure_parts(&self.boundary.error_bytes);
                 self.boundary.error_bytes.clear();
-                return RunEvent::ExecError { errno };
+                return RunEvent::ExecError { errno, detail };
             }
             let done = self.bwrap_status.is_some()
                 && (self.boundary.tracer.is_none()
