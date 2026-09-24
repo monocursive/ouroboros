@@ -14,6 +14,8 @@ pub mod bridge;
 // J5-D begin: the host manifest `doctor --json` produces (§3.2, §14.1); its
 // parsing is portable, its reads are gated inside
 pub mod host;
+// the canonical renderings the milestone freeze pins (§16)
+pub mod freeze;
 // J5-D end
 // J4 autoscope begin: the supervisor's own delegated scope (§9.3); the
 // decision is portable, the host that acts on it is gated inside

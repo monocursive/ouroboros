@@ -56,7 +56,7 @@ use super::seccomp;
 use super::tracer::{Tracer, TracerEvent, TracerSummary};
 
 /// Descriptor the seccomp program is handed to bubblewrap on.
-const SECCOMP_FD: RawFd = 10;
+pub(crate) const SECCOMP_FD: RawFd = 10;
 /// Descriptor bubblewrap writes its JSON status to.
 pub(crate) const STATUS_FD: RawFd = 11;
 /// Descriptor the launcher blocks reading.
@@ -64,14 +64,14 @@ const RELEASE_FD: RawFd = 12;
 /// Descriptor the launcher writes a failed exec's errno to.
 const ERROR_FD: RawFd = 13;
 /// Descriptor a long argument list is handed over.
-const ARGS_FD: RawFd = 14;
+pub(crate) const ARGS_FD: RawFd = 14;
 /// First fixed descriptor number used for pinned protected binds
 /// (`--ro-bind-fd`); the fixed channel descriptors live below it.
 const PINNED_FD_BASE: RawFd = 20;
 // J3-launch begin: the vendor-state directory's descriptor in bubblewrap
 /// Descriptor the vendor-state directory is handed to bubblewrap on
 /// (`--bind-fd`). The `bind_ro` credential views follow the pinned binds.
-const VENDOR_STATE_FD: RawFd = 16;
+pub(crate) const VENDOR_STATE_FD: RawFd = 16;
 // J3-launch end
 
 /// Preparation budget (§8.2).

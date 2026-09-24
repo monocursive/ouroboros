@@ -1106,9 +1106,11 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ouro-jail",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "toml",
 ]
 

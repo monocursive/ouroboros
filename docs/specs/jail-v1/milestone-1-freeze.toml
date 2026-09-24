@@ -13,7 +13,7 @@ rust_version = "1.98.1"
 
 # Cargo.lock, byte for byte
 [cargo_lock]
-sha256 = "3520144f795eb8d7d9cef464ff07332af2444152e671049244c9553deed17bce"
+sha256 = "83ae607b2762d6d844ea5b370f77bf8e93134a375c10a07acee4fede08696c8e"
 packages = 125
 
 # The seccomp programs' digests, from docs/specs/jail-v1/evidence/seccomp-table-*.txt
@@ -58,6 +58,7 @@ state_var = "CLAUDE_CONFIG_DIR"
 home_is_state = false
 state_subdirs = []
 network_allow = ["api.anthropic.com:443"]
+environment = "{}"
 [[launch_profile.credential]]
 id = "credentials"
 source = "~/.claude/.credentials.json"
@@ -77,6 +78,7 @@ state_var = "CODEX_HOME"
 home_is_state = true
 state_subdirs = []
 network_allow = ["api.openai.com:443", "*.openai.com:443"]
+environment = "{}"
 [[launch_profile.credential]]
 id = "auth"
 source = "~/.codex/auth.json"
@@ -95,6 +97,795 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config/opencode", "data/opencode", "cache/opencode", "state/opencode"]
 network_allow = ["opencode.ai", "models.opencode.ai", "registry.npmjs.org"]
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+# What every contained profile passes from the operator's environment, and its PATH
+[contained]
+environment_names = ["LANG", "TERM", "TZ"]
+path = "/usr/local/bin:/usr/bin:/bin"
+
+# Each built-in profile resolved on Linux with fixed inputs (workspace /work,
+# managed scratch, no layer): what it grants, as its canonical snapshot
+
+[[baseline]]
+profile = "agent"
+digest = "sha256:105b0adf2f0f112d511d6d2cedb294945dd355b0027f75636a330a25b1d714c4"
+snapshot = '''
+{
+  "environment": {
+    "bindings": [
+      {
+        "name": "PATH",
+        "value": "/usr/local/bin:/usr/bin:/bin"
+      },
+      {
+        "name": "TMPDIR",
+        "value": {
+          "path": "",
+          "root": "scratch"
+        }
+      }
+    ],
+    "inherit_host": false
+  },
+  "filesystem": {
+    "deny_read": [],
+    "protected_coverage": "none",
+    "protected_segments": [],
+    "read_only": [
+      {
+        "path": "/bin",
+        "root": "host"
+      },
+      {
+        "path": "/etc/group",
+        "root": "host"
+      },
+      {
+        "path": "/etc/hosts",
+        "root": "host"
+      },
+      {
+        "path": "/etc/localtime",
+        "root": "host"
+      },
+      {
+        "path": "/etc/passwd",
+        "root": "host"
+      },
+      {
+        "path": "/etc/resolv.conf",
+        "root": "host"
+      },
+      {
+        "path": "/etc/ssl",
+        "root": "host"
+      },
+      {
+        "path": "/lib",
+        "root": "host"
+      },
+      {
+        "path": "/lib64",
+        "root": "host"
+      },
+      {
+        "path": "/usr",
+        "root": "host"
+      }
+    ],
+    "read_write": [
+      {
+        "path": "",
+        "root": "scratch"
+      },
+      {
+        "path": "",
+        "root": "vendor_state"
+      },
+      {
+        "path": "",
+        "root": "workspace"
+      }
+    ]
+  },
+  "launch": null,
+  "limits": {
+    "cpu": null,
+    "mem": null,
+    "pids": {
+      "required": false,
+      "value": "512"
+    },
+    "wall": {
+      "required": true,
+      "value": "7200000"
+    }
+  },
+  "network": {
+    "allow": [],
+    "mode": "proxy",
+    "ruleset": "ouro.jail.network/1",
+    "translation_prefixes": []
+  },
+  "observation": {
+    "evidence": "strict",
+    "mode": "on"
+  },
+  "platform": "linux",
+  "profile": "agent",
+  "profile_version": 1,
+  "roots": {
+    "scratch": {
+      "kind": "managed"
+    },
+    "vendor_state": null,
+    "workspace": "/work"
+  },
+  "schema": "ouro.jail.policy-snapshot/1"
+}
+'''
+
+[[baseline]]
+profile = "tool"
+digest = "sha256:af89701849a583546277fc46b59874c22683435f2dd5b1b28ac28856f9d2600a"
+snapshot = '''
+{
+  "environment": {
+    "bindings": [
+      {
+        "name": "PATH",
+        "value": "/usr/local/bin:/usr/bin:/bin"
+      },
+      {
+        "name": "TMPDIR",
+        "value": {
+          "path": "",
+          "root": "scratch"
+        }
+      }
+    ],
+    "inherit_host": false
+  },
+  "filesystem": {
+    "deny_read": [],
+    "protected_coverage": "existing_and_root",
+    "protected_segments": [
+      ".git",
+      ".ouroboros"
+    ],
+    "read_only": [
+      {
+        "path": "/bin",
+        "root": "host"
+      },
+      {
+        "path": "/etc/group",
+        "root": "host"
+      },
+      {
+        "path": "/etc/hosts",
+        "root": "host"
+      },
+      {
+        "path": "/etc/localtime",
+        "root": "host"
+      },
+      {
+        "path": "/etc/passwd",
+        "root": "host"
+      },
+      {
+        "path": "/etc/resolv.conf",
+        "root": "host"
+      },
+      {
+        "path": "/etc/ssl",
+        "root": "host"
+      },
+      {
+        "path": "/lib",
+        "root": "host"
+      },
+      {
+        "path": "/lib64",
+        "root": "host"
+      },
+      {
+        "path": "/usr",
+        "root": "host"
+      }
+    ],
+    "read_write": [
+      {
+        "path": "",
+        "root": "scratch"
+      },
+      {
+        "path": "",
+        "root": "workspace"
+      }
+    ]
+  },
+  "launch": null,
+  "limits": {
+    "cpu": null,
+    "mem": null,
+    "pids": {
+      "required": false,
+      "value": "256"
+    },
+    "wall": {
+      "required": true,
+      "value": "1800000"
+    }
+  },
+  "network": {
+    "allow": [],
+    "mode": "none",
+    "ruleset": null,
+    "translation_prefixes": []
+  },
+  "observation": {
+    "evidence": "strict",
+    "mode": "on"
+  },
+  "platform": "linux",
+  "profile": "tool",
+  "profile_version": 1,
+  "roots": {
+    "scratch": {
+      "kind": "managed"
+    },
+    "vendor_state": null,
+    "workspace": "/work"
+  },
+  "schema": "ouro.jail.policy-snapshot/1"
+}
+'''
+
+[[baseline]]
+profile = "build"
+digest = "sha256:9cbc212c4dee6652ffe5c5e2c6ed500a0cfe2c725eb04f4310dc7300be660a58"
+snapshot = '''
+{
+  "environment": {
+    "bindings": [
+      {
+        "name": "PATH",
+        "value": "/usr/local/bin:/usr/bin:/bin"
+      },
+      {
+        "name": "TMPDIR",
+        "value": {
+          "path": "",
+          "root": "scratch"
+        }
+      }
+    ],
+    "inherit_host": false
+  },
+  "filesystem": {
+    "deny_read": [],
+    "protected_coverage": "none",
+    "protected_segments": [],
+    "read_only": [
+      {
+        "path": "/bin",
+        "root": "host"
+      },
+      {
+        "path": "/etc/group",
+        "root": "host"
+      },
+      {
+        "path": "/etc/hosts",
+        "root": "host"
+      },
+      {
+        "path": "/etc/localtime",
+        "root": "host"
+      },
+      {
+        "path": "/etc/passwd",
+        "root": "host"
+      },
+      {
+        "path": "/etc/resolv.conf",
+        "root": "host"
+      },
+      {
+        "path": "/etc/ssl",
+        "root": "host"
+      },
+      {
+        "path": "/lib",
+        "root": "host"
+      },
+      {
+        "path": "/lib64",
+        "root": "host"
+      },
+      {
+        "path": "/usr",
+        "root": "host"
+      }
+    ],
+    "read_write": [
+      {
+        "path": "",
+        "root": "scratch"
+      }
+    ]
+  },
+  "launch": null,
+  "limits": {
+    "cpu": null,
+    "mem": null,
+    "pids": {
+      "required": false,
+      "value": "512"
+    },
+    "wall": {
+      "required": true,
+      "value": "3600000"
+    }
+  },
+  "network": {
+    "allow": [],
+    "mode": "none",
+    "ruleset": null,
+    "translation_prefixes": []
+  },
+  "observation": {
+    "evidence": "strict",
+    "mode": "on"
+  },
+  "platform": "linux",
+  "profile": "build",
+  "profile_version": 1,
+  "roots": {
+    "scratch": {
+      "kind": "managed"
+    },
+    "vendor_state": null,
+    "workspace": "/work"
+  },
+  "schema": "ouro.jail.policy-snapshot/1"
+}
+'''
+
+[[baseline]]
+profile = "none"
+digest = "sha256:1d1a5799a1ddb05061508559d8a881f5824ef273321935a5ea854d0f4418766a"
+snapshot = '''
+{
+  "environment": {
+    "bindings": [],
+    "inherit_host": true
+  },
+  "filesystem": {
+    "deny_read": [],
+    "protected_coverage": "none",
+    "protected_segments": [],
+    "read_only": [],
+    "read_write": []
+  },
+  "launch": null,
+  "limits": {
+    "cpu": null,
+    "mem": null,
+    "pids": null,
+    "wall": {
+      "required": true,
+      "value": "7200000"
+    }
+  },
+  "network": {
+    "allow": [],
+    "mode": "host",
+    "ruleset": null,
+    "translation_prefixes": []
+  },
+  "observation": {
+    "evidence": "strict",
+    "mode": "on"
+  },
+  "platform": "linux",
+  "profile": "none",
+  "profile_version": 1,
+  "roots": {
+    "scratch": {
+      "kind": "managed"
+    },
+    "vendor_state": null,
+    "workspace": "/work"
+  },
+  "schema": "ouro.jail.policy-snapshot/1"
+}
+'''
+
+# The bubblewrap invocation each contained profile's plan renders to
+# (ouro_jail::platform::linux::freeze::backend_plans; generated on Linux)
+
+[[backend_plan]]
+profile = "tool"
+argv = [
+  "--unshare-user",
+  "--unshare-pid",
+  "--unshare-net",
+  "--unshare-ipc",
+  "--unshare-uts",
+  "--unshare-cgroup",
+  "--die-with-parent",
+  "--new-session",
+  "--clearenv",
+  "--setenv",
+  "PATH",
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  "--setenv",
+  "TMPDIR",
+  "/tmp",
+  "--ro-bind",
+  "/usr",
+  "/usr",
+  "--ro-bind",
+  "/bin",
+  "/bin",
+  "--ro-bind",
+  "/sbin",
+  "/sbin",
+  "--ro-bind",
+  "/lib",
+  "/lib",
+  "--ro-bind",
+  "/lib32",
+  "/lib32",
+  "--ro-bind",
+  "/lib64",
+  "/lib64",
+  "--ro-bind",
+  "/libx32",
+  "/libx32",
+  "--ro-bind",
+  "/etc/ssl",
+  "/etc/ssl",
+  "--ro-bind",
+  "/etc/resolv.conf",
+  "/etc/resolv.conf",
+  "--ro-bind",
+  "/etc/passwd",
+  "/etc/passwd",
+  "--ro-bind",
+  "/etc/group",
+  "/etc/group",
+  "--ro-bind",
+  "/etc/hosts",
+  "/etc/hosts",
+  "--ro-bind",
+  "/etc/localtime",
+  "/etc/localtime",
+  "--ro-bind",
+  "/etc/ld.so.cache",
+  "/etc/ld.so.cache",
+  "--proc",
+  "/proc",
+  "--dev",
+  "/dev",
+  "--bind",
+  "/freeze/scratch",
+  "/tmp",
+  "--bind",
+  "/freeze/workspace",
+  "/freeze/workspace",
+  "--ro-bind",
+  "/freeze/ouro-jail",
+  "/run/ouro/jail",
+  "--remount-ro",
+  "/",
+  "--chdir",
+  "/freeze/workspace",
+  "--seccomp",
+  "10",
+  "--json-status-fd",
+  "11",
+  "--",
+  "/freeze/target",
+]
+
+[[backend_plan]]
+profile = "build"
+argv = [
+  "--unshare-user",
+  "--unshare-pid",
+  "--unshare-net",
+  "--unshare-ipc",
+  "--unshare-uts",
+  "--unshare-cgroup",
+  "--die-with-parent",
+  "--new-session",
+  "--clearenv",
+  "--setenv",
+  "PATH",
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  "--setenv",
+  "TMPDIR",
+  "/tmp",
+  "--ro-bind",
+  "/usr",
+  "/usr",
+  "--ro-bind",
+  "/bin",
+  "/bin",
+  "--ro-bind",
+  "/sbin",
+  "/sbin",
+  "--ro-bind",
+  "/lib",
+  "/lib",
+  "--ro-bind",
+  "/lib32",
+  "/lib32",
+  "--ro-bind",
+  "/lib64",
+  "/lib64",
+  "--ro-bind",
+  "/libx32",
+  "/libx32",
+  "--ro-bind",
+  "/etc/ssl",
+  "/etc/ssl",
+  "--ro-bind",
+  "/etc/resolv.conf",
+  "/etc/resolv.conf",
+  "--ro-bind",
+  "/etc/passwd",
+  "/etc/passwd",
+  "--ro-bind",
+  "/etc/group",
+  "/etc/group",
+  "--ro-bind",
+  "/etc/hosts",
+  "/etc/hosts",
+  "--ro-bind",
+  "/etc/localtime",
+  "/etc/localtime",
+  "--ro-bind",
+  "/etc/ld.so.cache",
+  "/etc/ld.so.cache",
+  "--proc",
+  "/proc",
+  "--dev",
+  "/dev",
+  "--bind",
+  "/freeze/scratch",
+  "/tmp",
+  "--ro-bind",
+  "/freeze/workspace",
+  "/freeze/workspace",
+  "--ro-bind",
+  "/freeze/ouro-jail",
+  "/run/ouro/jail",
+  "--remount-ro",
+  "/",
+  "--chdir",
+  "/freeze/workspace",
+  "--seccomp",
+  "10",
+  "--json-status-fd",
+  "11",
+  "--",
+  "/freeze/target",
+]
+
+[[backend_plan]]
+profile = "agent"
+argv = [
+  "--unshare-user",
+  "--unshare-pid",
+  "--unshare-net",
+  "--unshare-ipc",
+  "--unshare-uts",
+  "--unshare-cgroup",
+  "--die-with-parent",
+  "--new-session",
+  "--clearenv",
+  "--setenv",
+  "PATH",
+  "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  "--setenv",
+  "TMPDIR",
+  "/tmp",
+  "--ro-bind",
+  "/usr",
+  "/usr",
+  "--ro-bind",
+  "/bin",
+  "/bin",
+  "--ro-bind",
+  "/sbin",
+  "/sbin",
+  "--ro-bind",
+  "/lib",
+  "/lib",
+  "--ro-bind",
+  "/lib32",
+  "/lib32",
+  "--ro-bind",
+  "/lib64",
+  "/lib64",
+  "--ro-bind",
+  "/libx32",
+  "/libx32",
+  "--ro-bind",
+  "/etc/ssl",
+  "/etc/ssl",
+  "--ro-bind",
+  "/etc/resolv.conf",
+  "/etc/resolv.conf",
+  "--ro-bind",
+  "/etc/passwd",
+  "/etc/passwd",
+  "--ro-bind",
+  "/etc/group",
+  "/etc/group",
+  "--ro-bind",
+  "/etc/hosts",
+  "/etc/hosts",
+  "--ro-bind",
+  "/etc/localtime",
+  "/etc/localtime",
+  "--ro-bind",
+  "/etc/ld.so.cache",
+  "/etc/ld.so.cache",
+  "--proc",
+  "/proc",
+  "--dev",
+  "/dev",
+  "--bind",
+  "/freeze/scratch",
+  "/tmp",
+  "--bind",
+  "/freeze/workspace",
+  "/freeze/workspace",
+  "--bind-fd",
+  "16",
+  "/run/ouro/state",
+  "--ro-bind-fd",
+  "17",
+  "/run/ouro/proxy",
+  "--ro-bind",
+  "/freeze/ouro-jail",
+  "/run/ouro/jail",
+  "--remount-ro",
+  "/",
+  "--chdir",
+  "/freeze/workspace",
+  "--seccomp",
+  "10",
+  "--json-status-fd",
+  "11",
+  "--",
+  "/freeze/target",
+]
+
+# Every Cargo manifest's [profile.*], dependency tables (versions, features,
+# default-features) and [features], as canonical JSON
+
+[[manifest]]
+file = "Cargo.toml"
+sections = '''
+{
+  "profile": {
+    "release": {
+      "debug": false,
+      "opt-level": 3
+    }
+  }
+}
+'''
+
+[[manifest]]
+file = "crates/ouro-fixture/Cargo.toml"
+sections = '''
+{
+  "dependencies": {
+    "clap": {
+      "features": [
+        "derive"
+      ],
+      "version": "4"
+    },
+    "libc": "0.2",
+    "serde": {
+      "features": [
+        "derive"
+      ],
+      "version": "1"
+    },
+    "serde_json": "1",
+    "sha2": "0.10.9"
+  },
+  "dev-dependencies": {
+    "tempfile": "3"
+  }
+}
+'''
+
+[[manifest]]
+file = "crates/ouro-jail/Cargo.toml"
+sections = '''
+{
+  "build-dependencies": {
+    "sha2": "0.10.9"
+  },
+  "dependencies": {
+    "base64": "0.22.1",
+    "clap": {
+      "features": [
+        "derive"
+      ],
+      "version": "4.6.6"
+    },
+    "libc": "0.2.189",
+    "serde": {
+      "features": [
+        "derive"
+      ],
+      "version": "1.0.229"
+    },
+    "serde_json": "1.0.151",
+    "sha2": "0.10.9",
+    "toml": "0.8.23",
+    "uuid": {
+      "features": [
+        "v4"
+      ],
+      "version": "1.24.0"
+    }
+  },
+  "dev-dependencies": {
+    "jsonschema": {
+      "default-features": false,
+      "version": "0.57.0"
+    },
+    "ouro-fixture": {
+      "path": "../ouro-fixture"
+    },
+    "tempfile": "3.27.0"
+  }
+}
+'''
+
+[[manifest]]
+file = "crates/xtask/Cargo.toml"
+sections = '''
+{
+  "dependencies": {
+    "clap": {
+      "features": [
+        "derive"
+      ],
+      "version": "4"
+    },
+    "ouro-jail": {
+      "path": "../ouro-jail"
+    },
+    "serde": {
+      "features": [
+        "derive"
+      ],
+      "version": "1"
+    },
+    "serde_json": "1",
+    "sha2": "0.10.9",
+    "toml": "0.8"
+  },
+  "dev-dependencies": {
+    "tempfile": "3.27.0"
+  }
+}
+'''
 
 # The frozen wire schemas, from docs/specs/jail-v1/frozen-schemas.toml (J5-C); empty until it exists.
 [frozen_schemas]
@@ -135,5 +926,6 @@ id = "urn:ouro:schema:jail-doctor:1"
 identifier = "ouro.jail.doctor/1"
 sha256 = "9d3947d21b7810bbb7f09eed7741cd49b8aeba942eae158a5905cfee8023471d"
 
-# No tested run recorded: pass `--doctor <run>/doctor.json` from the
-# milestone conformance run to record its build, binaries and host.
+# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
+# records the milestone conformance run, and `cargo xtask freeze --check`
+# fails until it is.

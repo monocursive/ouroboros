@@ -346,6 +346,14 @@ fn the_bundled_launch_profiles_are_the_frozen_ones() {
             list(entry.get("network_allow")),
             "{file} network.allow: {REGENERATE}"
         );
+        // Review F3: the environment it sets in the sandbox.
+        let environment = profile
+            .get("environment")
+            .map_or_else(|| serde_json::json!({}), json);
+        let recorded: serde_json::Value =
+            serde_json::from_str(text(entry.get("environment")).expect("an environment"))
+                .expect("the frozen environment is JSON");
+        assert_eq!(environment, recorded, "{file} environment: {REGENERATE}");
         let credentials: Vec<(String, String, String, String)> = profile
             .get("credentials")
             .and_then(toml::Value::as_table)
@@ -423,20 +431,208 @@ fn the_frozen_schemas_are_the_frozen_ones() {
     }
 }
 
-/// The tested run, when recorded, names a reproducible build: a full
-/// revision of a clean tree, and the backend it ran with.
+/// Review F4: a recorded tested run is the milestone run, validated
+/// strictly: ready, Linux x86_64, an optimised build without debug
+/// assertions, a clean named revision, the backend it used, and an explicit
+/// list of the facts that were unknown (never a stand-in value). Whether it
+/// tested exactly this tree is `cargo xtask freeze --check`'s question (the
+/// milestone gate), so ordinary development after the milestone is not
+/// failed by this test.
 #[test]
-fn a_recorded_tested_run_names_a_reproducible_build() {
+fn a_recorded_tested_run_is_the_milestone_run() {
     let freeze = freeze();
     let Some(tested) = freeze.get("tested") else {
+        // Its absence is stated in the file, never silent.
+        let text =
+            std::fs::read_to_string(repo_root().join("docs/specs/jail-v1/milestone-1-freeze.toml"))
+                .expect("the freeze file");
+        assert!(text.contains("No tested run is recorded"), "{text}");
         return;
     };
+    assert_eq!(tested["ready"].as_bool(), Some(true));
+    assert_eq!(frozen_str(tested, &["platform_os"]), "linux");
+    assert_eq!(frozen_str(tested, &["platform_arch"]), "x86_64");
+    assert_eq!(frozen_str(tested, &["target"]), "x86_64-unknown-linux-gnu");
+    assert_eq!(frozen_str(tested, &["opt_level"]), "3");
+    assert_eq!(tested["debug_assertions"].as_bool(), Some(false));
+    assert_eq!(tested["dirty"].as_bool(), Some(false));
     let revision = frozen_str(tested, &["revision"]);
     assert!(
-        revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()),
+        revision.len() == 40
+            && revision.bytes().all(|b| b.is_ascii_hexdigit())
+            && revision.bytes().any(|b| b != b'0'),
         "{revision}"
+    );
+    let inputs = frozen_str(tested, &["inputs"]);
+    assert!(
+        inputs.starts_with("sha256:") && inputs.len() == 71,
+        "{inputs}"
     );
     for key in ["path", "version", "sha256"] {
         assert!(!frozen_str(tested, &["backend", key]).is_empty(), "{key}");
+    }
+    assert!(
+        tested["host"].is_table(),
+        "the whole host object is recorded"
+    );
+    let unknown = frozen_list(tested, &["unknown"]);
+    for path in &unknown {
+        // A fact listed as unknown is absent from the record.
+        let mut node = Some(tested);
+        for part in path.split('.') {
+            node = node.and_then(|value| value.get(part));
+        }
+        assert!(node.is_none(), "{path} is both unknown and recorded");
+    }
+    assert!(!frozen_list(tested, &["verification"]).is_empty());
+}
+
+/// Review F3: what every contained profile passes from the operator's
+/// environment, and the PATH it gives the child.
+#[test]
+fn the_contained_environment_is_the_frozen_one() {
+    let freeze = freeze();
+    assert_eq!(
+        frozen_list(&freeze, &["contained", "environment_names"]),
+        ouro_jail::profiles::CONTAINED_ENVIRONMENT_NAMES,
+        "profiles.rs CONTAINED_ENVIRONMENT_NAMES: {REGENERATE}"
+    );
+    assert_eq!(
+        frozen_str(&freeze, &["contained", "path"]),
+        ouro_jail::profiles::CONTAINED_PATH,
+        "profiles.rs CONTAINED_PATH: {REGENERATE}"
+    );
+}
+
+/// Review F3: each built-in profile's resolved baseline, all four.
+#[test]
+fn the_built_in_baselines_are_the_frozen_ones() {
+    let freeze = freeze();
+    let frozen = freeze["baseline"].as_array().expect("[[baseline]] entries");
+    let baselines = ouro_jail::platform::linux::freeze::baselines().expect("they resolve");
+    assert_eq!(
+        frozen
+            .iter()
+            .map(|entry| entry["profile"].as_str().expect("a profile"))
+            .collect::<Vec<_>>(),
+        ["agent", "tool", "build", "none"]
+    );
+    for (entry, baseline) in frozen.iter().zip(&baselines) {
+        let profile = baseline.profile.as_str();
+        assert_eq!(entry["profile"].as_str(), Some(profile));
+        let snapshot: serde_json::Value =
+            serde_json::from_str(entry["snapshot"].as_str().expect("a snapshot"))
+                .expect("the frozen snapshot is JSON");
+        assert_eq!(
+            baseline.snapshot, snapshot,
+            "{profile}'s baseline: {REGENERATE}"
+        );
+        assert_eq!(
+            entry["digest"].as_str(),
+            Some(baseline.digest.as_str()),
+            "{profile}'s baseline digest: {REGENERATE}"
+        );
+    }
+}
+
+/// Review F3: the backend plan each contained profile renders (Linux, where
+/// the backend exists; the macOS legs check the rest).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_backend_plans_are_the_frozen_ones() {
+    let freeze = freeze();
+    let frozen = freeze["backend_plan"].as_array().expect("[[backend_plan]]");
+    let plans = ouro_jail::platform::linux::freeze::backend_plans().expect("they render");
+    assert_eq!(frozen.len(), plans.len(), "{REGENERATE}");
+    for (entry, (profile, argv)) in frozen.iter().zip(&plans) {
+        assert_eq!(entry["profile"].as_str(), Some(*profile));
+        let recorded: Vec<String> = entry["argv"]
+            .as_array()
+            .expect("argv")
+            .iter()
+            .map(|arg| arg.as_str().expect("a string").to_owned())
+            .collect();
+        assert_eq!(&recorded, argv, "{profile}'s backend plan: {REGENERATE}");
+    }
+}
+
+/// A TOML value as JSON, written here independently of the generator.
+fn json(value: &toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(text) => serde_json::json!(text),
+        toml::Value::Integer(number) => serde_json::json!(number),
+        toml::Value::Float(number) => serde_json::json!(number),
+        toml::Value::Boolean(flag) => serde_json::json!(flag),
+        toml::Value::Datetime(time) => serde_json::json!(time.to_string()),
+        toml::Value::Array(items) => serde_json::Value::Array(items.iter().map(json).collect()),
+        toml::Value::Table(table) => serde_json::Value::Object(
+            table
+                .iter()
+                .map(|(key, value)| (key.clone(), json(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// Review F14: every manifest's profiles, dependency selections (versions,
+/// features, default-features) and feature definitions.
+#[test]
+fn the_manifests_are_the_frozen_ones() {
+    let freeze = freeze();
+    let frozen = freeze["manifest"].as_array().expect("[[manifest]] entries");
+    let mut files = vec!["Cargo.toml".to_owned()];
+    let mut crates: Vec<String> = std::fs::read_dir(repo_root().join("crates"))
+        .expect("crates")
+        .map(|entry| entry.expect("an entry").path().join("Cargo.toml"))
+        .filter(|path| path.is_file())
+        .map(|path| {
+            path.strip_prefix(repo_root())
+                .expect("inside")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    crates.sort();
+    files.extend(crates);
+    assert_eq!(
+        frozen
+            .iter()
+            .map(|entry| entry["file"].as_str().expect("a file").to_owned())
+            .collect::<Vec<_>>(),
+        files,
+        "the manifests: {REGENERATE}"
+    );
+    for entry in frozen {
+        let file = entry["file"].as_str().expect("a file");
+        let manifest = read_toml(file);
+        let mut expected = serde_json::Map::new();
+        for key in [
+            "profile",
+            "dependencies",
+            "dev-dependencies",
+            "build-dependencies",
+            "target",
+            "features",
+            "patch",
+            "replace",
+        ] {
+            if let Some(value) = manifest.get(key) {
+                expected.insert(key.to_owned(), json(value));
+            }
+        }
+        if let Some(value) = manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+        {
+            expected.insert("workspace.dependencies".to_owned(), json(value));
+        }
+        let recorded: serde_json::Value =
+            serde_json::from_str(entry["sections"].as_str().expect("sections"))
+                .expect("the frozen sections are JSON");
+        assert_eq!(
+            serde_json::Value::Object(expected),
+            recorded,
+            "{file}: {REGENERATE}"
+        );
     }
 }

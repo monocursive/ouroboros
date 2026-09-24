@@ -70,8 +70,12 @@ enum Task {
         root: Option<PathBuf>,
         /// The `doctor --json` of the conformance run that tested this tree,
         /// recorded as the tested build, binaries and host.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "check")]
         doctor: Option<PathBuf>,
+        /// Write nothing; fail unless the file is what this tree generates
+        /// and records a tested run of this very tree (the milestone gate).
+        #[arg(long)]
+        check: bool,
     },
     // J5-D end
     // J5-A begin
@@ -90,7 +94,35 @@ fn main() -> ExitCode {
     match Cli::parse().task {
         Task::I02Scan { root } => i02_scan(root),
         // J5-D begin
-        Task::Freeze { root, doctor } => {
+        Task::Freeze {
+            root,
+            doctor,
+            check: true,
+        } => {
+            let _ = doctor;
+            let root = root.unwrap_or_else(conformance::worktree_root);
+            match freeze::check(&root) {
+                Ok(verified) => {
+                    println!(
+                        "xtask freeze --check: the freeze file is this tree's, and its tested \
+                         run passed: {}",
+                        verified.join(", ")
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(problems) => {
+                    for problem in problems {
+                        eprintln!("xtask freeze --check: {problem}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Task::Freeze {
+            root,
+            doctor,
+            check: false,
+        } => {
             let root = root.unwrap_or_else(conformance::worktree_root);
             match freeze::run(&root, doctor.as_deref()) {
                 Ok(path) => {
