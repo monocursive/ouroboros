@@ -4269,10 +4269,16 @@ not json
         fn duplicated_records_never_reach_a_verdict() {
             let five = fileops_pair(5);
             let six_copies: Vec<LaunchRecord> = (0..6).flat_map(|_| five.iter().cloned()).collect();
-            let s = summarize(&six_copies, json!({"launches": 5}), Value::Null);
+            // A quiet threshold that every copy meets: only the duplicates can
+            // withhold the verdict.
+            let s = summarize(
+                &six_copies,
+                json!({"launches": 5, "max_load": 1.0}),
+                Value::Null,
+            );
             let c = off_vs_direct(&s, Workload::Fileops);
-            assert_ne!(c.startup_verdict, Some(Verdict::Pass));
-            assert_ne!(c.startup_verdict, Some(Verdict::Fail));
+            assert_eq!(c.startup_verdict, Some(Verdict::Insufficient));
+            assert!(!s.integrity.is_empty());
             let md = render_markdown(&s);
             assert!(md.contains("Not the §5 measurement"), "{md}");
         }
@@ -4316,15 +4322,20 @@ not json
         #[test]
         fn survivors_of_an_exclusion_get_no_verdict() {
             let mut recs = many(|_| direct(Session::Plain, 2, 200), 40);
-            for i in 0..40 {
-                let slow = i >= 30;
-                let mut r = jailed(Observe::Off, if slow { 900 } else { 100 }, 1200);
-                if slow {
-                    r.launcher.as_mut().unwrap().timed_out = true;
-                }
-                recs.push(r);
-            }
-            let s = summarize(&recs, Value::Null, Value::Null);
+            recs.extend(many(
+                |i| {
+                    let slow = i >= 30;
+                    let mut r = jailed(Observe::Off, if slow { 900 } else { 100 }, 1200);
+                    if slow {
+                        r.launcher.as_mut().unwrap().timed_out = true;
+                    }
+                    r
+                },
+                40,
+            ));
+            // Quiet, clean raw data: only the exclusions can withhold it.
+            let s = summarize(&recs, quiet(), Value::Null);
+            assert!(s.integrity.is_empty(), "{:?}", s.integrity);
             let c = off_vs_direct(&s, Workload::Fileops);
             assert_eq!((c.subject_valid, c.subject_excluded), (30, 10));
             assert_eq!(c.startup_verdict, Some(Verdict::Insufficient));
