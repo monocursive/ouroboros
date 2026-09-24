@@ -10,7 +10,10 @@
 //! ptrace observer ended on `waitpid(-1)` returning `ECHILD`, so that child
 //! held it open until the deadline and was then counted as an unreaped child:
 //! `doctor` reported `observer_closed_set` unavailable and every `run` with
-//! observation refused with a false host diagnosis (125, `host_setup`).
+//! observation refused with a false host diagnosis (125, `host_setup`). The
+//! uncontained `none` supervisor, a child subreaper, classified the same
+//! child as an escaped attempt process, recorded a membership escape and
+//! killed it.
 //!
 //! What is checked, live on the reference host:
 //!
@@ -23,7 +26,7 @@
 //!   (the process-substitution shape, made explicit rather than relying on a
 //!   shell's exec optimisation): `doctor` reports the observer available; a
 //!   strict `tool` run traced to that child settles verified with the whole
-//!   stream delivered to it.
+//!   stream delivered to it; `none` leaves it alone and loses nothing.
 //!
 //! Every process signalled is one this file started; every file is under a
 //! private temporary directory.
@@ -40,6 +43,7 @@ use std::time::{Duration, Instant};
 use ouro_fixture::harness;
 use ouro_jail::platform::linux::clock::Deadline;
 use ouro_jail::platform::linux::exec::{self, FdMap};
+use ouro_jail::platform::linux::probe::{self, ProbeStatus};
 use ouro_jail::platform::linux::tracer::{
     self, ClosedOp, Tracer, TracerConfig, TracerEvent, TracerSummary,
 };
@@ -677,6 +681,8 @@ enum Foreign {
     /// Reads the jail's `--trace-fd 3` to its end into a file and then
     /// writes `eof` to another: `exec ouro-jail … 3> >(cat > copy)`.
     TraceReader,
+    /// Exits by itself after 300 ms, while the jail is running.
+    ExitsSoon,
 }
 
 /// The jail's run and the child it was exec'd beside.
@@ -768,7 +774,7 @@ fn high(fd: OwnedFd) -> OwnedFd {
 
 /// The foreign child: forked by the process that is about to become the
 /// jail, before its `exec`. It never execs and calls only async-signal-safe
-/// functions (`dup2`, `close_range`, `read`, `write`, `_exit`).
+/// functions (`dup2`, `close_range`, `read`, `write`, `nanosleep`, `_exit`).
 ///
 /// # Safety
 /// Runs in a child forked from a multi-threaded process.
@@ -784,6 +790,15 @@ unsafe fn foreign_main(mode: Foreign, hold: RawFd, trace: RawFd, copy: RawFd, do
                 libc::dup2(copy, 1);
                 libc::dup2(done, 2);
                 libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+            }
+            Foreign::ExitsSoon => {
+                libc::syscall(libc::SYS_close_range, 0u32, u32::MAX, 0u32);
+                let pause = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 300_000_000,
+                };
+                libc::nanosleep(&raw const pause, std::ptr::null_mut());
+                libc::_exit(0);
             }
         }
         let mut buf = [0u8; 4096];
@@ -923,6 +938,23 @@ fn run_beside(foreign: Foreign, args: &[&str], target: &[&str]) -> Beside {
     }
 }
 
+/// `none` needs a delegated leaf (§9.3); the conformance run provides it.
+fn none_live() -> bool {
+    let leaf = probe::run_one(
+        "cgroup_delegated_leaf",
+        &harness::jail_path(),
+        Path::new("bwrap"),
+    );
+    if leaf.status != ProbeStatus::Available {
+        harness::skip_or_fail(&format!(
+            "`none` needs a delegated user scope: {}",
+            leaf.evidence
+        ));
+        return false;
+    }
+    true
+}
+
 fn capability<'a>(doctor: &'a Value, name: &str) -> &'a Value {
     doctor["capabilities"]
         .as_array()
@@ -1039,4 +1071,103 @@ fn j5t_a_strict_tool_run_traced_to_an_inherited_reader_settles_verified() {
     let events = beside.trace_copy();
     assert!(!events.is_empty(), "the inherited reader got the stream");
     common::check_trace(&events, Some(&receipt)).expect("the whole stream, ending in the receipt");
+}
+
+/// `none` is a child subreaper and walks its own children to find escaped
+/// attempt processes. A child it was exec'd beside is not one: it is not
+/// signalled, not reaped, and not a membership escape, whether it lives
+/// through the attempt or ends during it, with observation on or off.
+fn none_case(observe: &str, foreign: Foreign) {
+    let _serial = serial();
+    if !common::live() || !tracer_live() || !none_live() {
+        return;
+    }
+    let label = format!("none/observe {observe}/{foreign:?}");
+    let mut beside = run_beside(
+        foreign,
+        &[
+            "run",
+            "--profile",
+            "none",
+            "--observe",
+            observe,
+            "--evidence",
+            "strict",
+        ],
+        &["/bin/sh", "-c", "sleep 1"],
+    );
+    println!(
+        "j5t {label}: exit {:?}\nstderr:\n{}",
+        beside.captured.code(),
+        beside.captured.stderr
+    );
+    let alive_after = beside.foreign_alive();
+    let reader_done = foreign != Foreign::TraceReader || beside.reader_finished();
+    assert_eq!(
+        beside.captured.code(),
+        Some(0),
+        "{label}: the attempt must not be refused because of a child it did not start: {}",
+        beside.captured.stderr
+    );
+    let receipt = beside.receipt();
+    common::assert_semantic_receipt(&receipt);
+    assert_eq!(receipt["phase"], "settled", "{label}: {receipt:#}");
+    assert_eq!(receipt["outcome"]["kind"], "exited", "{label}");
+    assert_eq!(
+        receipt["errors"],
+        serde_json::json!([]),
+        "{label}: {:#}",
+        receipt["errors"]
+    );
+    assert_ne!(
+        receipt["lifetime"]["integrity"], "lost",
+        "{label}: an inherited child is not a membership escape: {:#}",
+        receipt["lifetime"]
+    );
+    assert_eq!(
+        receipt["lifetime"]["tree_empty"], true,
+        "{label}: {:#}",
+        receipt["lifetime"]
+    );
+    if observe == "on" {
+        assert_no_coverage_gap(&receipt, &label);
+    }
+    match foreign {
+        Foreign::Hold => {
+            assert!(alive_after, "{label}: the inherited child was killed");
+            beside.release();
+        }
+        Foreign::TraceReader => {
+            assert!(
+                reader_done,
+                "{label}: the inherited reader was killed before EOF"
+            );
+            common::check_trace(&beside.trace_copy(), Some(&receipt))
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+        }
+        Foreign::ExitsSoon => {}
+    }
+}
+
+#[test]
+fn j5t_none_leaves_an_inherited_child_alone_observed() {
+    none_case("on", Foreign::Hold);
+}
+
+#[test]
+fn j5t_none_leaves_an_inherited_child_alone_unobserved() {
+    none_case("off", Foreign::Hold);
+}
+
+#[test]
+fn j5t_none_traced_to_an_inherited_reader_delivers_the_whole_stream() {
+    none_case("on", Foreign::TraceReader);
+}
+
+/// With observation off `none` reaps its own exited children and checks
+/// where each died; one that was never the attempt's, ending mid-run, is
+/// not a membership escape.
+#[test]
+fn j5t_none_unobserved_an_inherited_child_ending_mid_run_is_not_an_escape() {
+    none_case("off", Foreign::ExitsSoon);
 }

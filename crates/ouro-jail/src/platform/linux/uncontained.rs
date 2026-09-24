@@ -50,6 +50,14 @@
 //! detection, not a promise (§9.3): a descendant that migrates and exits
 //! between two reads while observation is on, or a process another service
 //! starts on the operator's behalf, is not seen.
+//!
+//! What this supervisor already had below it before it started the launcher
+//! is not the attempt (J5-T): a child it was exec'd beside — a shell's
+//! process substitution reading `--trace-fd`, a background job — and that
+//! child's descendants are recorded by birth identity then, and never walked,
+//! reaped, recorded as an escape or signalled. One such process born after
+//! that snapshot and orphaned here is indistinguishable from an escaped
+//! attempt process and is treated as one (a recorded limit).
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -317,6 +325,30 @@ pub fn prepare(
     Ok(Box::new(Prepared { boundary }))
 }
 
+/// J5-T: the processes below this supervisor before it started the
+/// launcher, by pid and birth, so a pid reused later is not mistaken for one.
+#[derive(Debug, Default)]
+struct Inherited(Vec<(libc::pid_t, u64)>);
+
+impl Inherited {
+    /// Every descendant of `own` now.
+    fn below(own: libc::pid_t) -> Inherited {
+        Inherited(
+            tracer::descendants(own)
+                .into_iter()
+                .filter_map(|pid| tracer::start_ticks(pid).map(|birth| (pid, birth)))
+                .collect(),
+        )
+    }
+
+    /// Whether `pid` is still the process recorded under that number.
+    fn contains(&self, pid: libc::pid_t) -> bool {
+        self.0
+            .iter()
+            .any(|(known, birth)| *known == pid && tracer::start_ticks(pid) == Some(*birth))
+    }
+}
+
 /// Everything the `none` boundary owns, from preparation through settlement.
 struct Uncontained {
     snapshot: PolicySnapshot,
@@ -358,6 +390,8 @@ struct Uncontained {
     /// Escaped processes that are this supervisor's own children, so their
     /// pidfds provably name attempt processes and may be signalled.
     escaped: Vec<(libc::pid_t, OwnedFd)>,
+    /// J5-T: what was below this supervisor before the launcher existed.
+    inherited: Inherited,
     wall: Option<clock::Deadline>,
     wall_reported: bool,
     exec_confirmed: bool,
@@ -519,6 +553,11 @@ impl Uncontained {
             ));
         }
 
+        // J5-T: before the launcher exists, everything below this process
+        // is something it was started beside, not the attempt.
+        // SAFETY: getpid takes no arguments and cannot fail.
+        let inherited = Inherited::below(unsafe { libc::getpid() });
+
         let io = |err: std::io::Error| {
             host_setup(
                 ErrorCode::BackendUnavailable,
@@ -631,6 +670,7 @@ impl Uncontained {
             cgroup_of: cgroup::process_cgroup,
             losses: Vec::new(),
             escaped: Vec::new(),
+            inherited,
             wall: None,
             wall_reported: false,
             exec_confirmed: false,
@@ -977,7 +1017,16 @@ impl Uncontained {
     fn scan_descendants(&mut self) {
         // SAFETY: getpid takes no arguments and cannot fail.
         let own = unsafe { libc::getpid() };
-        self.scan_walked(own, tracer::descendants(own));
+        // J5-T: an inherited child and everything below it are left out, so
+        // none of them can be attributed through it either.
+        let mut walked = Vec::new();
+        for child in tracer::children(own) {
+            if !self.inherited.contains(child) {
+                walked.push(child);
+                walked.extend(tracer::descendants(child));
+            }
+        }
+        self.scan_walked(own, walked);
     }
 
     /// [`Uncontained::scan_descendants`] over a given walk of `own`'s tree.
@@ -1045,7 +1094,12 @@ impl Uncontained {
         }
         // SAFETY: getpid takes no arguments and cannot fail.
         let own = unsafe { libc::getpid() };
-        self.reap_exited_children(tracer::children(own));
+        // J5-T: an inherited child's status is its owner's, not the attempt's.
+        let children = tracer::children(own)
+            .into_iter()
+            .filter(|pid| !self.inherited.contains(*pid))
+            .collect();
+        self.reap_exited_children(children);
     }
 
     /// [`Uncontained::reap_orphans`] over a given list of this process's
@@ -2078,6 +2132,7 @@ mod tests {
             cgroup_of,
             losses: Vec::new(),
             escaped: Vec::new(),
+            inherited: Inherited::default(),
             wall: None,
             wall_reported: false,
             exec_confirmed: false,
