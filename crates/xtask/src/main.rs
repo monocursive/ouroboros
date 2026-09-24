@@ -17,6 +17,9 @@ mod gates;
 // J5-A end
 mod i02;
 mod manifest;
+// J5-E begin
+mod perf;
+// J5-E end
 mod stamp;
 
 #[derive(Parser)]
@@ -77,6 +80,10 @@ enum Task {
     /// Fold acceptance-additions files into the acceptance map.
     GatesMerge(gates::MergeArgs),
     // J5-A end
+    // J5-E begin
+    /// Measure jail-v1 §5's performance budgets on the reference host.
+    Perf(perf::Cli),
+    // J5-E end
 }
 
 fn main() -> ExitCode {
@@ -101,6 +108,9 @@ fn main() -> ExitCode {
         Task::Gates(args) => gates::run_cli(&args, &conformance::worktree_root()),
         Task::GatesMerge(args) => gates::run_merge(&args, &conformance::worktree_root()),
         // J5-A end
+        // J5-E begin
+        Task::Perf(cli) => perf::main(cli),
+        // J5-E end
         Task::Conformance {
             host,
             user,
