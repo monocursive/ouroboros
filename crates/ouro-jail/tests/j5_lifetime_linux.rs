@@ -135,15 +135,39 @@ impl Attempt {
         )
     }
 
-    /// Stop here: kill the supervisor (this test's own child), collect what
-    /// it said, and fail with it.
+    /// Stop here and fail, leaving nothing of this attempt on the shared
+    /// host: kill the attempt's execution leaf (named by its own receipt,
+    /// so every process in it is this test's) and the supervisor (this
+    /// test's own child), let `gc` reconcile the attempt's state, remove the
+    /// leaf if it is still there, and report the jail's exit and stderr.
     fn fail(&mut self, why: &str) -> ! {
         let mut spawned = self.spawned.take().expect("the attempt is running");
+        let leaf = spawned.receipt_value().and_then(|receipt| {
+            details(&receipt)["execution_cgroup"]["path"]
+                .as_str()
+                .map(PathBuf::from)
+        });
+        if let Some(leaf) = &leaf {
+            let _ = std::fs::write(leaf.join("cgroup.kill"), "1");
+        }
         let _ = spawned.kill();
         let (code, signal, stderr) = match spawned.wait() {
-            Ok(run) => (run.code(), run.signal(), run.stderr_text()),
+            Ok(run) => {
+                let _ = gc_output(&run);
+                (run.code(), run.signal(), run.stderr_text())
+            }
             Err(error) => (None, None, format!("(no run: {error})")),
         };
+        if let Some(leaf) = &leaf {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while std::fs::read_to_string(leaf.join("cgroup.events"))
+                .is_ok_and(|events| events.contains("populated 1"))
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = std::fs::remove_dir(leaf);
+        }
         panic!(
             "{why}\ncontrol so far: {:?}\njail exit {code:?} signal {signal:?}; stderr:\n{stderr}",
             self.seen
@@ -518,14 +542,18 @@ fn signal_name(signal: libc::c_int) -> &'static str {
     }
 }
 
-/// `ouro-jail gc --json` over a run's private state.
-fn gc(run: &Run) -> (std::process::Output, Value) {
-    let output = std::process::Command::new(harness::jail_path())
+/// `ouro-jail gc --json` over a run's private state, as it came out.
+fn gc_output(run: &Run) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(harness::jail_path())
         .args(["gc", "--json"])
         .env("OURO_DATA_DIR", &run.data_dir)
         .env("OURO_CONFIG_DIR", run.data_dir.with_file_name("config"))
         .output()
-        .expect("gc runs");
+}
+
+/// `ouro-jail gc --json` over a run's private state, with its report.
+fn gc(run: &Run) -> (std::process::Output, Value) {
+    let output = gc_output(run).expect("gc runs");
     let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
         panic!(
             "gc printed no JSON report ({e}): {}",
@@ -719,11 +747,13 @@ fn l01_a_sigterm_ignoring_descendant_is_dead_before_settlement_is_announced() {
     if !common::live() {
         return;
     }
+    // `none` without observation first: there the supervisor's leaf kill is
+    // the only mechanism, so a mutation of it fails the first `none` leg.
     for (profile, observe) in [
         ("tool", "on"),
         ("tool", "off"),
-        ("none", "on"),
         ("none", "off"),
+        ("none", "on"),
     ] {
         let (jail, _) = case(profile);
         let mut attempt = Attempt::start(
@@ -775,6 +805,7 @@ fn l01_a_sigterm_ignoring_descendant_is_dead_before_settlement_is_announced() {
 /// reaches and that still cannot be verified dead.
 struct HeldMember {
     pid: libc::pid_t,
+    released: bool,
 }
 
 impl HeldMember {
@@ -789,7 +820,10 @@ impl HeldMember {
         let pid = libc::pid_t::try_from(child.id()).expect("a pid");
         // The handle is not needed: the test reaps this pid itself below.
         drop(child);
-        let held = HeldMember { pid };
+        let held = HeldMember {
+            pid,
+            released: false,
+        };
         std::fs::write(leaf.join("cgroup.procs"), pid.to_string())
             .expect("the test's process moves into the leaf");
         // SAFETY: PTRACE_SEIZE of this test's own child; no pointers.
@@ -814,7 +848,11 @@ impl HeldMember {
     }
 
     /// Let it finish dying (killing it first if nothing did) and reap it.
-    fn release(self, already_stopped: bool) {
+    fn release(&mut self, already_stopped: bool) {
+        if self.released {
+            return;
+        }
+        self.released = true;
         let mut status = 0;
         if !already_stopped {
             // SAFETY: SIGKILL to this test's own child.
@@ -833,6 +871,14 @@ impl HeldMember {
         }
         // SAFETY: reaping this test's own child.
         unsafe { libc::waitpid(self.pid, &raw mut status, libc::__WALL) };
+    }
+}
+
+impl Drop for HeldMember {
+    /// A test that fails before releasing still lets the member go.
+    fn drop(&mut self) {
+        let stopped = self.killed();
+        self.release(stopped);
     }
 }
 
@@ -858,12 +904,21 @@ fn x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty() {
     let receipt = attempt.receipt();
     let tree = started_tree(&receipt);
     let leaf = leaf_of(&receipt);
-    let member = HeldMember::plant(&leaf);
+    let mut member = HeldMember::plant(&leaf);
     kill_by_pidfd(&tree.launcher, libc::SIGUSR1);
     let terminal = attempt.await_terminal();
     let killed = member.killed();
     member.release(killed);
     let (run, _) = attempt.finish();
+    // Whatever happened, nothing is in the leaf now; gc verifies and removes
+    // the retained leaf before anything is asserted, so a failure leaves
+    // nothing of this test in the shared delegated subtree.
+    poll_until("the leaf to empty", Duration::from_secs(10), || {
+        std::fs::read_to_string(leaf.join("cgroup.events")).map_or(Some(()), |events| {
+            events.contains("populated 0").then_some(())
+        })
+    });
+    let (output, report) = gc(&run);
     assert!(dead(&tree.descendant), "the target's descendant survived");
     assert_eq!(
         terminal["kind"], "unsettled",
@@ -884,14 +939,6 @@ fn x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty() {
         "{receipt:#}"
     );
     assert_eq!(run.code(), Some(1), "{}", run.stderr_text());
-    // The run retained its leaf; now that nothing is in it, gc verifies and
-    // removes it (and leaves nothing of this test on the shared host).
-    poll_until("the leaf to empty", Duration::from_secs(10), || {
-        std::fs::read_to_string(leaf.join("cgroup.events")).map_or(Some(()), |events| {
-            events.contains("populated 0").then_some(())
-        })
-    });
-    let (output, report) = gc(&run);
     assert!(output.status.success(), "{report:#}");
     assert!(!leaf.exists(), "gc left the leaf: {report:#}");
 }
@@ -1173,7 +1220,7 @@ fn l01_operator_int_term_and_hup_each_end_a_none_tree_at_verified_death() {
     if !common::live() {
         return;
     }
-    for observe in ["on", "off"] {
+    for observe in ["off", "on"] {
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
             let name = signal_name(signal);
             let (jail, _) = case("none");
@@ -1268,85 +1315,105 @@ fn l02_killing_the_backend_of_a_real_run_ends_the_tree_and_the_receipt_says_how(
     }
 }
 
-/// L02.4: under `agent` and `build`, killing each lifetime link §9.3 names —
-/// the backend, the watcher, the supervisor — ends the target, its
+/// L02.4: under `agent` and `build`, SIGKILL of the lifetime link `link`
+/// (`bwrap_pid`, `watcher_pid` or `supervisor`) ends the target, its
 /// descendant, every charged helper and the watcher within §9.3's budget of
 /// the kill. Backend and watcher: the supervisor settles verified.
 /// Supervisor: nothing is left to write, the last receipt claims no outcome,
 /// and `gc` finds the owner dead and removes the leaf.
-#[test]
-fn l02_killing_a_lifetime_link_of_agent_or_build_ends_the_tree_within_a_bound() {
-    if !common::live() {
-        return;
-    }
+fn l02_kill_link(link: &str) {
     for profile in ["agent", "build"] {
-        for link in ["bwrap_pid", "watcher_pid", "supervisor"] {
-            let (jail, _) = case(profile);
-            let mut attempt = Attempt::start(jail.target(tree("plain")), false);
-            attempt.await_kind("exec_confirmed");
-            let receipt = attempt.receipt();
-            let tree = started_tree(&receipt);
-            let mut held: Vec<(String, OwnedFd)> =
-                details(&receipt)["execution_cgroup"]["charged_helpers"]
-                    .as_array()
-                    .expect("charged helpers")
-                    .iter()
-                    .map(|h| {
-                        let pid = h["pid"].as_i64().expect("a pid");
-                        (
-                            h["role"].as_str().unwrap_or_default().to_owned(),
-                            pidfd(i32::try_from(pid).expect("a pid")),
-                        )
-                    })
-                    .collect();
-            if profile == "agent" {
-                assert!(held.iter().any(|(role, _)| role == "bridge"));
-            }
-            held.push(("watcher".to_owned(), pidfd(pid_at(&receipt, "watcher_pid"))));
-            let killed = if link == "supervisor" {
-                pidfd(attempt.pid())
-            } else {
-                pidfd(pid_at(&receipt, link))
-            };
-            kill_by_pidfd(&killed, libc::SIGKILL);
-            let Some(took) = await_death(&tree.launcher, LINK_BOUND) else {
-                attempt.fail(&format!(
-                    "{profile} {link}: the target outlived the kill by {LINK_BOUND:?}"
-                ));
-            };
-            if await_death(&tree.descendant, LINK_BOUND).is_none() {
-                attempt.fail(&format!(
-                    "{profile} {link}: the descendant outlived the kill"
-                ));
-            }
-            for (role, fd) in &held {
-                if await_death(fd, LINK_BOUND).is_none() {
-                    attempt.fail(&format!("{profile} {link}: the {role} outlived the kill"));
-                }
-            }
-            if link == "supervisor" {
-                let (run, _) = attempt.finish();
-                assert_eq!(run.signal(), Some(libc::SIGKILL));
-                // The trace ends where the supervisor died; only the
-                // receipts are complete records.
-                let last = last_receipt(&run);
-                assert_ne!(last["phase"], "settled");
-                assert_eq!(last["outcome"]["kind"], "pending", "{last:#}");
-                let (output, report) = gc(&run);
-                assert!(output.status.success(), "{report:#}");
-                let leaf = leaf_of(&receipt);
-                assert!(!leaf.exists(), "gc left the leaf: {report:#}");
-            } else {
-                let terminal = attempt.await_terminal();
-                let (run, _) = attempt.finish();
-                assert_eq!(terminal["kind"], "settled", "{profile} {link}");
-                let receipt = final_receipt(&run);
-                assert_verified(&receipt, "attempt_tree");
-                assert_eq!(receipt["outcome"]["kind"], "signaled", "{receipt:#}");
-                assert_eq!(receipt["outcome"]["signal"], libc::SIGKILL);
-            }
-            eprintln!("L02.4 {profile} {link}: target dead {took:?} after the kill");
+        let (jail, _) = case(profile);
+        let mut attempt = Attempt::start(jail.target(tree("plain")), false);
+        attempt.await_kind("exec_confirmed");
+        let receipt = attempt.receipt();
+        let tree = started_tree(&receipt);
+        let mut held: Vec<(String, OwnedFd)> =
+            details(&receipt)["execution_cgroup"]["charged_helpers"]
+                .as_array()
+                .expect("charged helpers")
+                .iter()
+                .map(|h| {
+                    let pid = h["pid"].as_i64().expect("a pid");
+                    (
+                        h["role"].as_str().unwrap_or_default().to_owned(),
+                        pidfd(i32::try_from(pid).expect("a pid")),
+                    )
+                })
+                .collect();
+        if profile == "agent" {
+            assert!(held.iter().any(|(role, _)| role == "bridge"));
         }
+        held.push(("watcher".to_owned(), pidfd(pid_at(&receipt, "watcher_pid"))));
+        let killed = if link == "supervisor" {
+            pidfd(attempt.pid())
+        } else {
+            pidfd(pid_at(&receipt, link))
+        };
+        kill_by_pidfd(&killed, libc::SIGKILL);
+        let Some(took) = await_death(&tree.launcher, LINK_BOUND) else {
+            attempt.fail(&format!(
+                "{profile} {link}: the target outlived the kill by {LINK_BOUND:?}"
+            ));
+        };
+        if await_death(&tree.descendant, LINK_BOUND).is_none() {
+            attempt.fail(&format!(
+                "{profile} {link}: the descendant outlived the kill"
+            ));
+        }
+        for (role, fd) in &held {
+            if await_death(fd, LINK_BOUND).is_none() {
+                attempt.fail(&format!("{profile} {link}: the {role} outlived the kill"));
+            }
+        }
+        if link == "supervisor" {
+            let (run, _) = attempt.finish();
+            assert_eq!(run.signal(), Some(libc::SIGKILL));
+            // The trace ends where the supervisor died; only the receipts
+            // are complete records.
+            let last = last_receipt(&run);
+            assert_ne!(last["phase"], "settled");
+            assert_eq!(last["outcome"]["kind"], "pending", "{last:#}");
+            let (output, report) = gc(&run);
+            assert!(output.status.success(), "{report:#}");
+            let leaf = leaf_of(&receipt);
+            assert!(!leaf.exists(), "gc left the leaf: {report:#}");
+        } else {
+            let terminal = attempt.await_terminal();
+            let (run, _) = attempt.finish();
+            assert_eq!(terminal["kind"], "settled", "{profile} {link}");
+            let receipt = final_receipt(&run);
+            assert_verified(&receipt, "attempt_tree");
+            assert_eq!(receipt["outcome"]["kind"], "signaled", "{receipt:#}");
+            assert_eq!(receipt["outcome"]["signal"], libc::SIGKILL);
+        }
+        eprintln!("L02.4 {profile} {link}: target dead {took:?} after the kill");
+    }
+}
+
+/// L02.4, the backend (bubblewrap's outer process) of `agent` and `build`.
+#[test]
+fn l02_killing_the_backend_of_agent_or_build_ends_the_tree_within_a_bound() {
+    if common::live() {
+        l02_kill_link("bwrap_pid");
+    }
+}
+
+/// L02.4, the lifetime watcher of `agent` and `build` (§9.3: "watcher death
+/// makes the supervisor stop the boundary").
+#[test]
+fn l02_killing_the_watcher_of_agent_or_build_ends_the_tree_within_a_bound() {
+    if common::live() {
+        l02_kill_link("watcher_pid");
+    }
+}
+
+/// L02.4, the supervisor of `agent` and `build` (§9.3: "supervisor death
+/// makes the watcher kill the whole leaf and then bubblewrap").
+#[test]
+fn l02_killing_the_supervisor_of_agent_or_build_ends_the_tree_within_a_bound() {
+    if common::live() {
+        l02_kill_link("supervisor");
     }
 }
 
@@ -1442,6 +1509,10 @@ fn l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues
         receipt["errors"].as_array().is_some_and(Vec::is_empty),
         "the bridge's death lost evidence: {receipt:#}"
     );
+    assert_eq!(
+        receipt["observer"]["sources"]["proxy"], "active",
+        "the bridge's death degraded the proxy's evidence: {receipt:#}"
+    );
     let bridge_notes: Vec<Value> = notes(&run)
         .into_iter()
         .filter(|fields| fields["kind"] == "helper" && fields["helper"] == "bridge")
@@ -1535,9 +1606,17 @@ fn l03_a_required_limit_whose_leaf_cannot_be_created_refuses_before_exec() {
         }
         let jail = jail.target(["/bin/sh", "-c", &format!(": > {}", marker.display())]);
         let mut attempt = Attempt::start(jail, true);
-        let terminal = attempt.await_terminal();
+        // The gate stays closed: a run that got as far as `prepared` would
+        // wait for it, so the first message is the verdict.
+        let Some(first) = attempt.next() else {
+            attempt.fail(&format!("{profile}: no control message at all"));
+        };
+        if first["kind"] != "refused" {
+            attempt.fail(&format!(
+                "{profile}: the attempt went on without the leaf its required limit needs: {first}"
+            ));
+        }
         let (run, transcript) = attempt.finish();
-        assert_eq!(terminal["kind"], "refused", "{profile}: {transcript:?}");
         assert!(
             transcript
                 .iter()
