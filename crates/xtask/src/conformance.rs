@@ -24,6 +24,9 @@ use crate::stamp;
 pub const REMOTE_RUNS: &str = "ouro-ci/runs";
 /// Cargo is not on the non-login PATH of the reference host.
 pub const REMOTE_CARGO: &str = "$HOME/.cargo/bin/cargo";
+/// rustup, which names the pinned toolchain's own binaries for the suite:
+/// its proxies put `~/.cargo/bin` at the front of the PATH they are given.
+pub const REMOTE_RUSTUP: &str = "$HOME/.cargo/bin/rustup";
 
 #[derive(Debug, Clone)]
 pub struct Target {
@@ -206,17 +209,21 @@ pub fn suite_unit(run_dir: &str) -> String {
 /// four seconds at `--test-threads=1` and never finishes at 2. This is a
 /// property of the mechanism, not a preference about speed.
 #[must_use]
-pub fn test_command(run_dir: &str, jobs: u32) -> String {
+pub fn test_command(run_dir: &str, jobs: u32, revision: &str) -> String {
     format!(
-        "XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet --unit={} \
+        "C=$({REMOTE_RUSTUP} which cargo) && R=$({REMOTE_RUSTUP} which rustc) \
+         && D=$({REMOTE_RUSTUP} which rustdoc) && \
+         XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet --unit={} \
          env OURO_CONFORMANCE=1 \
          OURO_JAIL_BIN=$PWD/target/release/ouro-jail \
          OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture \
+         RUSTC=$R RUSTDOC=$D \
          {}",
         suite_unit(run_dir),
-        with_suite_path(&format!(
-            "{REMOTE_CARGO} test --workspace --release -j{jobs} --no-fail-fast -- --test-threads=1"
-        ))
+        with_suite_path(
+            &format!("$C test --workspace --release -j{jobs} --no-fail-fast -- --test-threads=1"),
+            revision
+        )
     )
 }
 
@@ -240,14 +247,25 @@ pub const SUITE_PATH_MARKER: &str = "ouro-suite-path=";
 /// # Panics
 /// If `command` contains a double quote, which would end the quoting.
 #[must_use]
-pub fn with_suite_path(command: &str) -> String {
+pub fn with_suite_path(command: &str, revision: &str) -> String {
     assert!(
         !command.contains('"'),
         "a suite command cannot contain a double quote: {command}"
     );
+    let sha = revision.strip_suffix("+dirty").unwrap_or(revision);
+    assert!(
+        sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+        "the suite's revision must be a 40-hex commit, optionally +dirty: {revision}"
+    );
     // `\$PATH` survives the detached shell as `$PATH`, so the innermost shell,
-    // started with the scrubbed PATH, prints the PATH it really has.
-    format!("PATH={SUITE_PATH} /bin/sh -c \"echo {SUITE_PATH_MARKER}\\$PATH; exec {command}\"")
+    // started with the scrubbed PATH, prints the PATH it really has, and the
+    // conformance flag as the suite really has it.
+    format!(
+        "PATH={SUITE_PATH} /bin/sh -c \"echo {SUITE_PATH_MARKER}\\$PATH; \
+         echo {}{revision}; echo {}\\$OURO_CONFORMANCE; exec {command}\"",
+        gates::MARKER_REVISION,
+        gates::MARKER_CONFORMANCE
+    )
 }
 
 /// Did the suite's log print exactly the scrubbed PATH (and no other)?
@@ -275,13 +293,22 @@ pub const I01_BINARIES: &[&str] = &[
     "mix",
     "rebar3",
 ];
+/// Where `cargo install` and user installs put binaries that the suite's
+/// PATH does not list but a later shell might.
+pub const I01_EXTRA_BIN_DIRS: &[&str] = &["$HOME/.cargo/bin", "$HOME/.local/bin"];
+
 /// Where a BEAM installation lives when it is installed but not on PATH.
+/// A `~/` entry is the account's home directory.
 pub const I01_DIRECTORIES: &[&str] = &[
     "/usr/lib/erlang",
+    "/usr/lib64/erlang",
     "/usr/local/lib/erlang",
     "/opt/erlang",
     "/usr/lib/elixir",
     "/usr/local/lib/elixir",
+    "~/.asdf/installs/erlang",
+    "~/.kerl",
+    "~/.local/share/mise/installs/erlang",
 ];
 /// The distribution packages that install a BEAM.
 pub const I01_PACKAGES: &[&str] = &["erlang-base", "erlang-base-hipe", "esl-erlang", "elixir"];
@@ -294,13 +321,22 @@ pub const I01_PACKAGES: &[&str] = &["erlang-base", "erlang-base-hipe", "esl-erla
 pub fn i01_command() -> String {
     let mut s = format!("PATH={SUITE_PATH}; export PATH; echo \"i01 path $PATH\"; ");
     for b in I01_BINARIES {
-        s.push_str(&format!(
-            "p=$(command -v {b} 2>/dev/null); echo \"i01 binary {b} ${{p:-absent}}\"; "
-        ));
+        // On the suite's PATH, or where `cargo install` and user installs
+        // put binaries (the PATH of a shell the tests might start).
+        s.push_str(&format!("p=$(command -v {b} 2>/dev/null); "));
+        for dir in I01_EXTRA_BIN_DIRS {
+            s.push_str(&format!(
+                "[ -z \"$p\" ] && [ -e {dir}/{b} ] && p={dir}/{b}; "
+            ));
+        }
+        s.push_str(&format!("echo \"i01 binary {b} ${{p:-absent}}\"; "));
     }
     for d in I01_DIRECTORIES {
+        let path = d
+            .strip_prefix("~/")
+            .map_or_else(|| (*d).to_string(), |rest| format!("$HOME/{rest}"));
         s.push_str(&format!(
-            "if [ -e {d} ]; then echo \"i01 directory {d} present\"; \
+            "if [ -e {path} ]; then echo \"i01 directory {d} present\"; \
              else echo \"i01 directory {d} absent\"; fi; "
         ));
     }
@@ -854,6 +890,9 @@ pub struct RunOutcomes {
     pub smoke: Option<Smoke>,
     /// The acceptance map and §15, loaded before the run.
     pub acceptance: Option<Result<gates::Acceptance, String>>,
+    /// The revision the driver ran (`<sha>` or `<sha>+dirty`), which the
+    /// suite prints and the verdict checks the log against.
+    pub revision: Option<String>,
 }
 
 /// The driver checks this run produced, for the gate verdict.
@@ -912,12 +951,18 @@ pub fn gate_verdict(
     Some(match &outcomes.acceptance {
         None => Err("the acceptance map was not loaded".to_string()),
         Some(Err(e)) => Err(e.clone()),
-        Some(Ok(a)) => Ok(gates::evaluate(
-            &a.map,
-            &a.rows,
-            &BTreeMap::from([(gates::Lane::Linux, gates::parse_log(log))]),
-            &driver_checks(outcomes, manifest),
-        )),
+        Some(Ok(a)) => {
+            let logs = BTreeMap::from([(gates::Lane::Linux, gates::parse_log(log))]);
+            let mut v = gates::evaluate(&a.map, &a.rows, &logs, &driver_checks(outcomes, manifest));
+            // The log must be this run's: the revision the driver ran, in
+            // conformance mode.
+            let expected = outcomes.revision.as_deref().unwrap_or("unknown");
+            v.problems
+                .extend(gates::binding_problems(&logs, Some(expected)));
+            v.map_label = gates::MAP_PATH.to_string();
+            v.lanes_label = gates::describe_lanes(&logs);
+            Ok(v)
+        }
     })
 }
 
@@ -1179,6 +1224,15 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
     );
 
     let mut outcomes = RunOutcomes::default();
+    // The revision the suite prints and the verdict binds its log to.
+    // Without one (no git), the run cannot be tied to anything and fails.
+    let revision = gates::repository_revision(&opts.worktree).unwrap_or_else(|| {
+        outcomes
+            .evidence_errors
+            .push("the worktree's revision could not be read with git".to_string());
+        "0000000000000000000000000000000000000000+dirty".to_string()
+    });
+    outcomes.revision = Some(revision.clone());
     let manifest = match Manifest::load(&opts.manifest) {
         Ok(m) => Some(m),
         Err(e) => {
@@ -1349,7 +1403,7 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
             opts,
             &run_dir,
             "test",
-            &test_command(&run_dir, opts.jobs),
+            &test_command(&run_dir, opts.jobs, &revision),
             SUITE_PATIENCE,
             Some(&unit),
         );
@@ -1763,7 +1817,7 @@ mod tests {
 
     #[test]
     fn the_test_command_forbids_skips_and_names_both_binaries() {
-        let t = test_command("d", 2);
+        let t = test_command("d", 2, REV);
         assert!(t.contains("OURO_CONFORMANCE=1"), "{t}");
         assert!(
             t.contains("--unit=ouro-conformance-d.scope"),
@@ -2095,7 +2149,13 @@ mod tests {
         #[test]
         fn the_scrubbed_path_reaches_the_command_through_the_detached_quoting() {
             let home = Home::new("path");
-            let command = format!("env {}", with_suite_path("/usr/bin/printenv PATH"));
+            let command = format!(
+                "env {}",
+                with_suite_path(
+                    "/usr/bin/printenv PATH",
+                    "0123456789abcdef0123456789abcdef01234567"
+                )
+            );
             home.sh(&detached_start("d", "s", &command));
             assert_eq!(home.settle("s"), Some(Poll::Done(0)));
             let log = home.file("s.log");
@@ -2155,6 +2215,8 @@ mod tests {
     /// library binary and the one mapped test.
     const GOOD_LOG: &str = "\
 ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ouro-suite-revision=0123456789abcdef0123456789abcdef01234567
+ouro-suite-conformance=1
      Running unittests src/lib.rs (target/release/deps/ouro_jail-1d54b8c75e2e48d1)
 
 running 0 tests
@@ -2169,15 +2231,21 @@ test x01_literal_argv ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 ";
 
-    /// Two gates: X01 by a test, I01 by every driver check, so each check's
-    /// wiring into the verdict is exercised by the decision tests.
+    /// The revision the clean run's driver and log agree on.
+    const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// X01 by a test; each driver check on the one clause it may prove, so
+    /// each check's wiring into the verdict is exercised by the decision
+    /// tests.
     const MINI_SPEC: &str = "\
 ## 15. Acceptance matrix
 
 | ID | Test and required result |
 |---|---|
 | X01 | Spaces reach the fixture literally. |
-| I01 | Everything the driver checks holds. |
+| R01 | The contract validates. |
+| I01 | Nothing else is installed and the suite is clean. |
+| I02 | No vendor names. |
 
 ## 16. Next
 ";
@@ -2189,8 +2257,16 @@ id = "X01"
 row = "Spaces reach the fixture literally."
 
 [[gate]]
+id = "R01"
+row = "The contract validates."
+
+[[gate]]
 id = "I01"
-row = "Everything the driver checks holds."
+row = "Nothing else is installed and the suite is clean."
+
+[[gate]]
+id = "I02"
+row = "No vendor names."
 
 [[clause]]
 id = "X01.1"
@@ -2200,11 +2276,39 @@ tag = "live-cli"
 tests = ["ouro-jail/tests/conformance_j1.rs::x01_literal_argv"]
 
 [[clause]]
+id = "R01.1"
+gate = "R01"
+clause = "the validator passes"
+tag = "portable"
+checks = ["contract_validation"]
+
+[[clause]]
 id = "I01.1"
 gate = "I01"
-clause = "every driver check"
+clause = "nothing else installed"
 tag = "live-cli"
-checks = ["i01_absent", "i01_scrubbed_path", "i02_scan", "contract_validation", "doctor_manifest", "plain_session_smoke", "suite_clean"]
+checks = ["i01_absent"]
+
+[[clause]]
+id = "I01.2"
+gate = "I01"
+clause = "the suite's PATH"
+tag = "live-cli"
+checks = ["i01_scrubbed_path"]
+
+[[clause]]
+id = "I01.3"
+gate = "I01"
+clause = "the suite is clean"
+tag = "live-cli"
+checks = ["suite_clean"]
+
+[[clause]]
+id = "I02.1"
+gate = "I02"
+clause = "the scan passes"
+tag = "portable"
+checks = ["i02_scan"]
 "#;
 
     fn mini_acceptance() -> gates::Acceptance {
@@ -2302,6 +2406,7 @@ smoke doctor 0
             }),
             smoke: Some(clean_smoke()),
             acceptance: Some(Ok(mini_acceptance())),
+            revision: Some(REV.to_string()),
         }
     }
 
@@ -2693,7 +2798,7 @@ smoke doctor 0
 
     #[test]
     fn the_suite_does_not_stop_at_the_first_failing_binary() {
-        let t = test_command("d", 2);
+        let t = test_command("d", 2, REV);
         assert!(t.contains("--no-fail-fast"), "{t}");
         assert!(
             t.contains("--test-threads=1"),
@@ -2734,12 +2839,29 @@ smoke doctor 0
 
     #[test]
     fn i01_the_suite_runs_with_only_the_system_directories_on_its_path_and_says_so() {
-        let t = test_command("d", 2);
+        let t = test_command("d", 2, REV);
         assert!(
             t.contains(&format!(
-                "PATH={SUITE_PATH} /bin/sh -c \"echo {SUITE_PATH_MARKER}\\$PATH; exec $HOME/.cargo/bin/cargo test"
+                "PATH={SUITE_PATH} /bin/sh -c \"echo {SUITE_PATH_MARKER}\\$PATH; \
+                 echo ouro-suite-revision={REV}; \
+                 echo ouro-suite-conformance=\\$OURO_CONFORMANCE; exec $C test"
             )),
             "{t}"
+        );
+        // Review H6: the rustup proxy puts ~/.cargo/bin in front of the
+        // PATH it is given, so the suite runs the toolchain's own cargo,
+        // rustc and rustdoc, found by rustup in the run directory.
+        assert!(
+            t.starts_with(
+                "C=$($HOME/.cargo/bin/rustup which cargo) && R=$($HOME/.cargo/bin/rustup which rustc) \
+                 && D=$($HOME/.cargo/bin/rustup which rustdoc) && "
+            ),
+            "{t}"
+        );
+        assert!(t.contains(" RUSTC=$R RUSTDOC=$D "), "{t}");
+        assert!(
+            !t.contains("exec $HOME/.cargo/bin/cargo"),
+            "never the proxy: {t}"
         );
         for dir in SUITE_PATH.split(':') {
             assert!(
@@ -2772,7 +2894,64 @@ smoke doctor 0
     #[test]
     #[should_panic(expected = "double quote")]
     fn a_suite_command_with_a_double_quote_is_refused() {
-        let _ = with_suite_path("echo \"hi\"");
+        let _ = with_suite_path("echo \"hi\"", REV);
+    }
+
+    #[test]
+    #[should_panic(expected = "revision")]
+    fn a_revision_that_is_not_a_commit_is_refused() {
+        let _ = with_suite_path("true", "main; rm -rf /");
+    }
+
+    /// Review H6, the proof on the host: under `OURO_CONFORMANCE=1` this
+    /// test process (like every test process cargo starts) has exactly the
+    /// suite's PATH. Elsewhere the driver's PATH is not in force and there is
+    /// nothing to check; a log without the conformance marker is refused by
+    /// the verdict, so this cannot pass for a conformance run by skipping.
+    #[test]
+    fn i01_under_conformance_the_test_process_has_exactly_the_suite_path() {
+        if std::env::var_os("OURO_CONFORMANCE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return;
+        }
+        assert_eq!(
+            std::env::var("PATH").ok().as_deref(),
+            Some(SUITE_PATH),
+            "the suite's tests run with a PATH other than the one the driver set"
+        );
+    }
+
+    #[test]
+    fn i01_the_probe_also_looks_where_cargo_install_puts_binaries() {
+        let c = i01_command();
+        for b in I01_BINARIES {
+            for dir in I01_EXTRA_BIN_DIRS {
+                assert!(c.contains(&format!("[ -e {dir}/{b} ]")), "{dir}/{b}: {c}");
+            }
+        }
+        assert!(I01_EXTRA_BIN_DIRS.contains(&"$HOME/.cargo/bin"));
+    }
+
+    #[test]
+    fn a_log_from_another_revision_or_without_conformance_mode_fails_the_run() {
+        let mut o = a_clean_run();
+        o.test_log = Some(GOOD_LOG.replace(REV, "fedcba9876543210fedcba9876543210fedcba98"));
+        let d = verdict(&o);
+        assert!(
+            d.failures.iter().any(|f| f.contains("revision")),
+            "{:?}",
+            d.failures
+        );
+        o.test_log = Some(GOOD_LOG.replace("ouro-suite-conformance=1", "ouro-suite-conformance="));
+        let d = verdict(&o);
+        assert!(
+            d.failures.iter().any(|f| f.contains("OURO_CONFORMANCE")),
+            "{:?}",
+            d.failures
+        );
+        let v = gate_verdict(&a_clean_run(), Some(&a_manifest()))
+            .unwrap()
+            .unwrap();
+        assert!(v.lanes_label.contains(&REV[..12]), "{}", v.lanes_label);
     }
 
     #[test]
@@ -2786,7 +2965,9 @@ smoke doctor 0
             assert!(c.contains(&format!("command -v {b} ")), "{b}: {c}");
         }
         for d in I01_DIRECTORIES {
-            assert!(c.contains(&format!("[ -e {d} ]")), "{d}: {c}");
+            let path = d.replace("~/", "$HOME/");
+            assert!(c.contains(&format!("[ -e {path} ]")), "{d}: {c}");
+            assert!(c.contains(&format!("i01 directory {d} absent")), "{d}: {c}");
         }
         for p in I01_PACKAGES {
             assert!(
@@ -2956,7 +3137,7 @@ smoke doctor 0
         assert!(
             d.failures
                 .iter()
-                .any(|f| f.starts_with("gate I01 fails") && f.contains("contract_validation"))
+                .any(|f| f.starts_with("gate R01 fails") && f.contains("contract_validation"))
         );
 
         o.contract_validation = None;
@@ -3156,9 +3337,9 @@ smoke doctor 0
             d.failures
         );
         assert!(
+            !d.failures.iter().any(|f| f.starts_with("gate ")),
+            "the smoke leg proves no §15 clause; it fails the run on its own: {:?}",
             d.failures
-                .iter()
-                .any(|f| f.starts_with("gate I01 fails") && f.contains("plain_session_smoke"))
         );
 
         o.smoke = None;

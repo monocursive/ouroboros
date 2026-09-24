@@ -139,6 +139,9 @@ pub struct Map {
     pub ignored: Vec<Ignored>,
 }
 
+/// The reason an `untested` clause fails.
+pub const UNTESTED: &str = "no test asserts this clause yet";
+
 /// The driver checks a clause may name.
 pub const CHECKS: &[&str] = &[
     "i01_absent",
@@ -150,7 +153,42 @@ pub const CHECKS: &[&str] = &[
     "suite_clean",
 ];
 
+/// Which clauses each driver check may prove: a check is evidence for the
+/// claim it measures, never for another (a clean log proves nothing about an
+/// owner's death, the contract validator nothing about the gate protocol).
+/// `doctor_manifest` and `plain_session_smoke` fail the run on their own and
+/// prove no §15 clause.
+pub const CHECK_CLAUSES: &[(&str, &[&str])] = &[
+    ("i01_absent", &["I01.1"]),
+    ("i01_scrubbed_path", &["I01.2"]),
+    ("suite_clean", &["I01.3", "M01.1"]),
+    ("i02_scan", &["I02.1"]),
+    ("contract_validation", &["R01.1", "R01.4"]),
+    ("doctor_manifest", &[]),
+    ("plain_session_smoke", &[]),
+];
+
 impl Map {
+    /// Every problem [`Map::problems`] finds, plus a `limit` that does not
+    /// cite an existing section of a document under `root/docs` by a
+    /// passage that is in it.
+    #[must_use]
+    pub fn problems_at(&self, root: &std::path::Path) -> Vec<String> {
+        let mut p = self.problems();
+        for c in &self.clause {
+            let Some(limit) = c.limit.as_deref() else {
+                continue;
+            };
+            let Ok(cite) = parse_limit(limit) else {
+                continue; // already a problem
+            };
+            if let Err(why) = cite.check(&|path| std::fs::read_to_string(root.join(path)).ok()) {
+                p.push(format!("{}: {why}", c.id));
+            }
+        }
+        p
+    }
+
     /// Parse and validate. Every problem is reported, not only the first.
     pub fn parse(text: &str) -> Result<Map, String> {
         let map: Map = toml::from_str(text).map_err(|e| format!("the acceptance map: {e}"))?;
@@ -246,13 +284,28 @@ impl Map {
                 }
             }
             for k in &c.checks {
-                if !CHECKS.contains(&k.as_str()) {
-                    p.push(format!(
+                match CHECK_CLAUSES.iter().find(|(name, _)| name == k) {
+                    None => p.push(format!(
                         "{}: `{k}` is not a driver check (one of {})",
                         c.id,
                         CHECKS.join(", ")
-                    ));
+                    )),
+                    Some((_, allowed)) if !allowed.contains(&c.id.as_str()) => p.push(format!(
+                        "{}: the check `{k}` cannot prove it; it proves only {}",
+                        c.id,
+                        if allowed.is_empty() {
+                            "no clause (it fails the run on its own)".to_string()
+                        } else {
+                            allowed.join(", ")
+                        }
+                    )),
+                    Some(_) => {}
                 }
+            }
+            if let Some(limit) = c.limit.as_deref()
+                && let Err(why) = parse_limit(limit)
+            {
+                p.push(format!("{}: the limit `{limit}` {why}", c.id));
             }
         }
         for g in &self.gate {
@@ -311,6 +364,98 @@ pub fn is_test_id(id: &str) -> bool {
 fn is_gate_id(id: &str) -> bool {
     let b = id.as_bytes();
     b.len() == 3 && b[0].is_ascii_uppercase() && b[1].is_ascii_digit() && b[2].is_ascii_digit()
+}
+
+/// A recorded limit's citation: `docs/<file>.md § <heading>: <passage>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Citation {
+    pub path: String,
+    pub heading: String,
+    pub passage: String,
+}
+
+/// The shortest passage a limit may cite: long enough to be a statement.
+pub const MIN_PASSAGE: usize = 24;
+
+/// Whitespace-insensitive text: a quoted passage may wrap in the document.
+fn squash(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Read `docs/<file>.md § <heading>: <passage>`.
+pub fn parse_limit(limit: &str) -> Result<Citation, String> {
+    let shape = "does not cite `docs/<file>.md § <heading>: <passage from that section>`";
+    let Some((path, rest)) = limit.split_once(" § ") else {
+        return Err(shape.to_string());
+    };
+    let Some((heading, passage)) = rest.split_once(": ") else {
+        return Err(shape.to_string());
+    };
+    let path = path.trim();
+    let safe = path.starts_with("docs/")
+        && path.ends_with(".md")
+        && !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+    if !safe {
+        return Err(format!(
+            "names `{path}`, which is not a document under docs/"
+        ));
+    }
+    if heading.trim().is_empty() {
+        return Err(shape.to_string());
+    }
+    let passage = squash(passage);
+    if passage.chars().count() < MIN_PASSAGE {
+        return Err(format!(
+            "quotes `{passage}`, shorter than {MIN_PASSAGE} characters: quote the statement"
+        ));
+    }
+    Ok(Citation {
+        path: path.to_string(),
+        heading: heading.trim().to_string(),
+        passage,
+    })
+}
+
+impl Citation {
+    /// The cited document exists, has the heading, and the section under it
+    /// holds the passage. `read` returns a repository-relative file.
+    pub fn check(&self, read: &dyn Fn(&str) -> Option<String>) -> Result<(), String> {
+        let Some(text) = read(&self.path) else {
+            return Err(format!(
+                "its limit cites {}, which does not exist",
+                self.path
+            ));
+        };
+        let heading_level = |line: &str| -> Option<(usize, String)> {
+            let level = line.bytes().take_while(|b| *b == b'#').count();
+            (level > 0 && line.as_bytes().get(level) == Some(&b' '))
+                .then(|| (level, line[level..].trim().to_string()))
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let Some((at, level)) = lines.iter().enumerate().find_map(|(i, l)| {
+            heading_level(l).and_then(|(lvl, h)| (h == self.heading).then_some((i, lvl)))
+        }) else {
+            return Err(format!(
+                "its limit cites the heading `{}`, which {} does not have",
+                self.heading, self.path
+            ));
+        };
+        let section: Vec<&str> = lines[at + 1..]
+            .iter()
+            .take_while(|l| heading_level(l).is_none_or(|(lvl, _)| lvl > level))
+            .copied()
+            .collect();
+        if squash(&section.join("\n")).contains(&self.passage) {
+            Ok(())
+        } else {
+            Err(format!(
+                "its limit's passage is not in {} § {}: `{}`",
+                self.path, self.heading, self.passage
+            ))
+        }
+    }
 }
 
 /// The §15 rows of the spec, `(id, row text)`, in order.
@@ -373,9 +518,9 @@ pub fn spec_problems(map: &Map, rows: &[(String, String)]) -> Vec<String> {
 /// One test's reported result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    Ok,
-    Failed,
-    Ignored,
+    Ok = 0,
+    Failed = 1,
+    Ignored = 2,
 }
 
 impl Outcome {
@@ -407,6 +552,8 @@ impl Outcome {
 pub struct Anomaly {
     /// The test it concerns, when it concerns one.
     pub test: Option<String>,
+    /// The test binary (`<crate>/<source>`) whose log it makes untrustworthy.
+    pub binary: Option<String>,
     pub text: String,
 }
 
@@ -422,15 +569,119 @@ pub struct TestLog {
     pub summaries: usize,
     /// `skipped:` lines (a live test that did not run).
     pub skips: Vec<String>,
+    /// `ouro-suite-revision=` lines: the revision the suite ran at.
+    pub revisions: Vec<String>,
+    /// `ouro-suite-conformance=` lines: `OURO_CONFORMANCE` as the suite saw it.
+    pub conformance: Vec<String>,
+    /// `ouro-suite-path=` lines: the PATH the suite's shell had.
+    pub paths: Vec<String>,
+    /// Test binaries (`Running` and `Doc-tests` sections) in the log.
+    pub binaries: usize,
+}
+
+/// A log file as text. Test output may hold any bytes (X05's fixtures write
+/// binary data), so invalid UTF-8 is replaced, never a reason to give up.
+pub fn read_log(path: &std::path::Path) -> Result<String, String> {
+    std::fs::read(path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// Where the lanes' logs disagree with each other or with the revision the
+/// map is at, or were not produced by a conformance run. Empty means they
+/// can be judged together.
+#[must_use]
+pub fn binding_problems(
+    logs: &BTreeMap<Lane, TestLog>,
+    expected_revision: Option<&str>,
+) -> Vec<String> {
+    let mut p = Vec::new();
+    let mut seen: Vec<(Lane, &str)> = Vec::new();
+    for (lane, log) in logs {
+        let lane_name = lane.as_str();
+        match log.revisions.as_slice() {
+            [] => p.push(format!(
+                "the {lane_name} log has no {MARKER_REVISION} line: nothing ties it to a revision"
+            )),
+            [one] if is_revision(one) => seen.push((*lane, one.as_str())),
+            [one] => p.push(format!(
+                "the {lane_name} log's revision `{one}` is not a commit"
+            )),
+            many => p.push(format!(
+                "the {lane_name} log names {} revisions ({}): it is not one run",
+                many.len(),
+                many.join(", ")
+            )),
+        }
+        if log.conformance.as_slice() != ["1"] {
+            p.push(format!(
+                "the {lane_name} log was not run with OURO_CONFORMANCE=1 (it says {:?}): \
+                 a live test that skipped itself would print ok",
+                log.conformance
+            ));
+        }
+    }
+    if let Some((first_lane, first)) = seen.first() {
+        for (lane, revision) in &seen[1..] {
+            if revision != first {
+                p.push(format!(
+                    "the {} log is at revision {first} and the {} log at {revision}: \
+                     lanes are combined only at one revision",
+                    first_lane.as_str(),
+                    lane.as_str()
+                ));
+            }
+        }
+    }
+    if let Some(expected) = expected_revision {
+        for (lane, revision) in &seen {
+            if *revision != expected {
+                p.push(format!(
+                    "the {} log is at revision {revision}, but the map was read at {expected}",
+                    lane.as_str()
+                ));
+            }
+        }
+    }
+    p
+}
+
+/// Which lanes were combined, at which revision, for the verdict's header.
+#[must_use]
+pub fn describe_lanes(logs: &BTreeMap<Lane, TestLog>) -> String {
+    logs.iter()
+        .map(|(lane, log)| {
+            format!(
+                "{} (revision {}, OURO_CONFORMANCE={})",
+                lane.as_str(),
+                log.revisions.first().map_or("unknown", String::as_str),
+                log.conformance.first().map_or("unset", String::as_str)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" + ")
 }
 
 /// The test binary the log is in.
 struct Binary {
     prefix: String,
-    /// Results attributed to it, for the count check.
-    attributed: usize,
-    /// `passed + failed + ignored` from its last `test result:` line.
-    counted: Option<usize>,
+    /// Results attributed to it, in order; merged into the log at its end.
+    entries: Vec<(String, Outcome)>,
+    /// `passed`, `failed`, `ignored` from its own `test result:` line.
+    summary: Option<[usize; 3]>,
+    /// The names libtest lists under its closing `failures:`.
+    failures: Vec<String>,
+}
+
+/// Reading libtest's closing `failures:` list, which names every failed
+/// test of the binary whatever its subprocesses printed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailuresList {
+    Off,
+    /// After a `failures:` line, before any name.
+    Start,
+    /// Reading `    <name>` lines.
+    Names,
 }
 
 /// `(source, artifact stem)` of a `Running <source> (<artifact>)` line.
@@ -449,18 +700,18 @@ fn running(line: &str) -> Option<(&str, &str)> {
     Some((source, stem))
 }
 
-/// `passed + failed + ignored` of a `test result:` line.
-fn counted(line: &str) -> Option<usize> {
-    let mut total = 0;
+/// `[passed, failed, ignored]` of a `test result:` line.
+fn counted(line: &str) -> Option<[usize; 3]> {
+    let mut out = [None; 3];
     for part in line.split([';', '.']) {
         let part = part.trim();
-        for word in ["passed", "failed", "ignored"] {
+        for (i, word) in ["passed", "failed", "ignored"].iter().enumerate() {
             if let Some(n) = part.strip_suffix(word) {
-                total += n.trim().parse::<usize>().ok()?;
+                out[i] = Some(n.trim().parse::<usize>().ok()?);
             }
         }
     }
-    Some(total)
+    Some([out[0]?, out[1]?, out[2]?])
 }
 
 /// A libtest name as the map spells it: ` - should panic` and a doc-test's
@@ -484,43 +735,111 @@ fn normalise(name: &str) -> String {
     out
 }
 
+/// The markers the conformance suite prints before any test runs.
+pub const MARKER_PATH: &str = "ouro-suite-path=";
+pub const MARKER_REVISION: &str = "ouro-suite-revision=";
+pub const MARKER_CONFORMANCE: &str = "ouro-suite-conformance=";
+
 /// Parse a `cargo test` log (see the module doc and the format document).
 ///
 /// The suite runs with one test thread, so libtest prints `test <name> ... `
 /// and then that test's result before the next test starts. Output a test's
 /// subprocesses write lands between the two; the result is then the next line
-/// that is exactly a result. A `test <other> ... <result>` line while a test
-/// is pending is a nested process's own libtest output, never a result of
-/// this binary, and is reported rather than attributed.
+/// that is exactly a result. While a test is pending, a `test <other> ...`
+/// line, a `running N tests` line or a `test result:` line is a nested
+/// process's own libtest output: never attributed, and the first kind is
+/// reported.
+///
+/// libtest's own accounting is the ground truth the attribution is checked
+/// against. The closing `failures:` list names every failed test, so a test
+/// a subprocess's `ok` line stood in for is still FAILED; and a binary whose
+/// `test result:` counts differ from what the log attributes to it, or that
+/// has no `test result:` line at all (it crashed, or the log is cut), is an
+/// anomaly that makes every result in it untrustworthy.
 #[must_use]
 pub fn parse_log(text: &str) -> TestLog {
     let mut log = TestLog::default();
     let mut package: Option<String> = None;
     let mut binary: Option<Binary> = None;
     let mut pending: Option<String> = None;
+    let mut list = FailuresList::Off;
+    let mut names: Vec<String> = Vec::new();
 
     fn finish(log: &mut TestLog, binary: Option<Binary>, pending: &mut Option<String>) {
+        let Some(mut b) = binary else {
+            if let Some(test) = pending.take() {
+                log.anomalies.push(Anomaly {
+                    text: format!("`{test}` started but no result was printed for it"),
+                    test: Some(test),
+                    binary: None,
+                });
+            }
+            return;
+        };
         if let Some(test) = pending.take() {
             log.anomalies.push(Anomaly {
                 text: format!("`{test}` started but no result was printed for it"),
                 test: Some(test),
+                binary: Some(b.prefix.clone()),
             });
         }
-        if let Some(b) = binary {
-            match b.counted {
-                None => log.anomalies.push(Anomaly {
-                    test: None,
-                    text: format!("{} has no `test result:` line (a truncated log?)", b.prefix),
-                }),
-                Some(n) if n != b.attributed => log.anomalies.push(Anomaly {
-                    test: None,
-                    text: format!(
-                        "{}: libtest counted {n} result(s), the log attributes {}",
-                        b.prefix, b.attributed
-                    ),
-                }),
-                Some(_) => {}
+        // The failures list is libtest's own word on what failed.
+        for name in std::mem::take(&mut b.failures) {
+            let id = format!("{}::{}", b.prefix, normalise(&name));
+            let mut found = false;
+            for (entry, outcome) in &mut b.entries {
+                if *entry == id {
+                    found = true;
+                    if *outcome != Outcome::Failed {
+                        log.anomalies.push(Anomaly {
+                            test: Some(id.clone()),
+                            binary: None,
+                            text: format!(
+                                "`{id}` was read as {} but libtest lists it among the failures: \
+                                 a subprocess printed that result, the test FAILED",
+                                outcome.as_str()
+                            ),
+                        });
+                        *outcome = Outcome::Failed;
+                    }
+                }
             }
+            if !found {
+                log.anomalies.push(Anomaly {
+                    test: Some(id.clone()),
+                    binary: None,
+                    text: format!(
+                        "`{id}` FAILED (libtest lists it) but the log has no result line for it"
+                    ),
+                });
+                b.entries.push((id, Outcome::Failed));
+            }
+        }
+        let mut seen = [0usize; 3];
+        for (_, outcome) in &b.entries {
+            seen[*outcome as usize] += 1;
+        }
+        match b.summary {
+            None => log.anomalies.push(Anomaly {
+                test: None,
+                binary: Some(b.prefix.clone()),
+                text: format!(
+                    "{} has no `test result:` line: it crashed or the log is cut, so none of its results can be trusted",
+                    b.prefix
+                ),
+            }),
+            Some(counts) if counts != seen => log.anomalies.push(Anomaly {
+                test: None,
+                binary: Some(b.prefix.clone()),
+                text: format!(
+                    "{}: libtest counted {} passed, {} failed, {} ignored; the log attributes {}, {}, {}",
+                    b.prefix, counts[0], counts[1], counts[2], seen[0], seen[1], seen[2]
+                ),
+            }),
+            Some(_) => {}
+        }
+        for (id, outcome) in b.entries {
+            log.results.entry(id).or_default().push(outcome);
         }
     }
 
@@ -528,40 +847,61 @@ pub fn parse_log(text: &str) -> TestLog {
         let trimmed = line.trim();
         if let Some((source, stem)) = running(line) {
             finish(&mut log, binary.take(), &mut pending);
+            list = FailuresList::Off;
             if source == "src/lib.rs" || source == "src/main.rs" {
                 package = Some(stem.replace('_', "-"));
             }
             let krate = package.clone().unwrap_or_else(|| "?".to_string());
+            log.binaries += 1;
             binary = Some(Binary {
                 prefix: format!("{krate}/{source}"),
-                attributed: 0,
-                counted: None,
+                entries: Vec::new(),
+                summary: None,
+                failures: Vec::new(),
             });
             continue;
         }
         if let Some(krate) = trimmed.strip_prefix("Doc-tests ") {
             finish(&mut log, binary.take(), &mut pending);
+            list = FailuresList::Off;
+            log.binaries += 1;
             binary = Some(Binary {
                 prefix: format!("{}/doc", krate.replace('_', "-")),
-                attributed: 0,
-                counted: None,
+                entries: Vec::new(),
+                summary: None,
+                failures: Vec::new(),
             });
             continue;
         }
+        if pending.is_none() {
+            for (marker, into) in [
+                (MARKER_PATH, &mut log.paths),
+                (MARKER_REVISION, &mut log.revisions),
+                (MARKER_CONFORMANCE, &mut log.conformance),
+            ] {
+                if let Some(value) = line.strip_prefix(marker) {
+                    into.push(value.trim().to_string());
+                }
+            }
+        }
         if let Some(rest) = trimmed.strip_prefix("test result: ") {
+            if pending.is_some() {
+                // A nested process's libtest run inside the pending test.
+                continue;
+            }
             log.summaries += 1;
             if rest.starts_with("FAILED") {
                 log.failed_binaries += 1;
             }
-            if let Some(test) = pending.take() {
-                log.anomalies.push(Anomaly {
-                    text: format!("`{test}` started but its binary ended without a result for it"),
-                    test: Some(test),
-                });
+            if list == FailuresList::Names
+                && let Some(b) = binary.as_mut()
+            {
+                b.failures.append(&mut names);
             }
+            list = FailuresList::Off;
+            names.clear();
             if let Some(b) = binary.as_mut() {
-                // The last one wins: a nested process may print its own first.
-                b.counted = counted(rest);
+                b.summary = counted(rest).or(Some([usize::MAX; 3]));
             }
             continue;
         }
@@ -569,21 +909,59 @@ pub fn parse_log(text: &str) -> TestLog {
             log.skips.push(trimmed.to_string());
             continue;
         }
-        let prefix = binary.as_ref().map(|b| b.prefix.clone());
+        if pending.is_none() && binary.is_some() {
+            if line == "failures:" {
+                list = FailuresList::Start;
+                names.clear();
+                continue;
+            }
+            match list {
+                FailuresList::Off => {}
+                FailuresList::Start | FailuresList::Names if line.trim().is_empty() => {
+                    if list == FailuresList::Names {
+                        if let Some(b) = binary.as_mut() {
+                            b.failures.append(&mut names);
+                        }
+                        list = FailuresList::Off;
+                    }
+                    continue;
+                }
+                FailuresList::Start | FailuresList::Names => {
+                    match line.strip_prefix("    ") {
+                        Some(name) if !name.starts_with(' ') && !name.is_empty() => {
+                            names.push(name.to_string());
+                            list = FailuresList::Names;
+                        }
+                        _ => {
+                            // `---- name stdout ----` and the like: the
+                            // captured output, not the list of names.
+                            list = FailuresList::Off;
+                            names.clear();
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
         if let Some(rest) = line.strip_prefix("test ")
             && let Some((name, result)) = rest.split_once(" ... ")
         {
-            let Some(prefix) = prefix else {
+            let Some(b) = binary.as_mut() else {
                 log.anomalies.push(Anomaly {
                     test: None,
-                    text: format!("a result outside any test binary: {trimmed}"),
+                    binary: None,
+                    text: format!(
+                        "a result outside any test binary: {}",
+                        trimmed.chars().take(200).collect::<String>()
+                    ),
                 });
                 continue;
             };
-            let id = format!("{prefix}::{}", normalise(name));
+            let id = format!("{}::{}", b.prefix, normalise(name));
             if let Some(waiting) = &pending {
                 log.anomalies.push(Anomaly {
                     test: Some(id.clone()),
+                    binary: None,
                     text: format!(
                         "`{id}` reported while `{waiting}` was running: a nested process's line, not attributed"
                     ),
@@ -591,57 +969,67 @@ pub fn parse_log(text: &str) -> TestLog {
                 continue;
             }
             match Outcome::read(result) {
-                Some(outcome) => {
-                    log.results.entry(id).or_default().push(outcome);
-                    if let Some(b) = binary.as_mut() {
-                        b.attributed += 1;
-                    }
-                }
+                Some(outcome) => b.entries.push((id, outcome)),
                 None => pending = Some(id),
             }
             continue;
         }
         if let Some(test) = &pending
             && let Some(outcome) = Outcome::read(trimmed)
+            && let Some(b) = binary.as_mut()
         {
-            log.results.entry(test.clone()).or_default().push(outcome);
+            b.entries.push((test.clone(), outcome));
             pending = None;
-            if let Some(b) = binary.as_mut() {
-                b.attributed += 1;
-            }
         }
+    }
+    if list == FailuresList::Names
+        && let Some(b) = binary.as_mut()
+    {
+        b.failures.append(&mut names);
     }
     finish(&mut log, binary.take(), &mut pending);
     log
 }
 
 impl TestLog {
-    /// Every test the log reports `ignored` (and nothing else).
+    /// Every test the log reports `ignored` (and nothing else). Two ignored
+    /// doc-test blocks on one item share an id and count once.
     #[must_use]
     pub fn ignored(&self) -> BTreeSet<String> {
         self.results
             .iter()
-            .filter(|(_, v)| v.as_slice() == [Outcome::Ignored])
+            .filter(|(_, v)| !v.is_empty() && v.iter().all(|o| *o == Outcome::Ignored))
             .map(|(k, _)| k.clone())
             .collect()
     }
 
-    /// Results exist, no binary failed, no test failed, nothing skipped.
+    /// Every binary ran to its `test result:` line, every result is
+    /// attributed without doubt, no test failed and nothing skipped.
     #[must_use]
     pub fn clean(&self) -> bool {
-        self.summaries > 0
+        self.binaries > 0
+            && self.summaries >= self.binaries
             && !self.results.is_empty()
             && self.failed_binaries == 0
             && self.skips.is_empty()
+            && self.anomalies.is_empty()
             && !self.results.values().any(|v| v.contains(&Outcome::Failed))
     }
 
-    /// The anomalies that concern `test`.
+    /// The anomalies that concern `test`, or the binary it is in.
     fn anomalies_of<'a>(&'a self, test: &'a str) -> impl Iterator<Item = &'a Anomaly> + 'a {
+        let binary = test.split_once("::").map_or(test, |(b, _)| b);
         self.anomalies
             .iter()
-            .filter(move |a| a.test.as_deref() == Some(test))
+            .filter(move |a| a.test.as_deref() == Some(test) || a.binary.as_deref() == Some(binary))
     }
+}
+
+/// Is `value` a revision the suite may print: 40 hex digits, optionally
+/// followed by `+dirty` for a tree with uncommitted changes?
+fn is_revision(value: &str) -> bool {
+    let sha = value.strip_suffix("+dirty").unwrap_or(value);
+    sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 // -------------------------------------------------------------- the verdict
@@ -710,6 +1098,10 @@ pub struct GateVerdict {
 
 #[derive(Debug, Clone, Default)]
 pub struct Verdict {
+    /// The map the verdict read, as its header names it.
+    pub map_label: String,
+    /// Which lanes were combined, at which revision.
+    pub lanes_label: String,
     pub lanes: Vec<Lane>,
     pub gates: Vec<GateVerdict>,
     /// Failures that are not one gate's: the map, the spec, the ignored set,
@@ -761,6 +1153,10 @@ fn clause_verdict(
     let mut reasons = Vec::new();
     let status = if c.tag == Tag::Credential {
         ClauseStatus::Credential
+    } else if c.tag == Tag::Untested {
+        // Untested in every lane, evaluated or not.
+        reasons.push(UNTESTED.to_string());
+        ClauseStatus::Fail
     } else if let Some(log) = logs.get(&c.lane) {
         let lane = c.lane.as_str();
         for t in &c.tests {
@@ -800,11 +1196,7 @@ fn clause_verdict(
             }
         }
         if c.tests.is_empty() && c.checks.is_empty() && c.tag != Tag::RecordedLimit {
-            reasons.push(if c.tag == Tag::Untested {
-                "untested: no test asserts this clause yet".to_string()
-            } else {
-                "no test or check asserts this clause".to_string()
-            });
+            reasons.push("no test or check asserts this clause".to_string());
         }
         if !reasons.is_empty() {
             ClauseStatus::Fail
@@ -912,10 +1304,16 @@ pub fn evaluate(
                 ));
             }
         }
-        // Anomalies: a failure when they touch a pinned test (mapped tests
-        // already fail their clause), otherwise a warning.
+        // Anomalies: one that names no test (a crashed binary, counts that
+        // disagree, a result outside any binary) is always a failure; one
+        // that touches a pinned test is a failure; one on a mapped test
+        // already fails its clause; the rest are warnings (and make the log
+        // unclean, which I01.3 reads).
         for a in &log.anomalies {
             match &a.test {
+                None => v
+                    .problems
+                    .push(format!("the {} log: {}", lane.as_str(), a.text)),
                 Some(t) if expected.contains(t.as_str()) => v.problems.push(a.text.clone()),
                 Some(t)
                     if map
@@ -978,14 +1376,40 @@ impl Verdict {
         use std::fmt::Write as _;
         let mut s = String::new();
         let lanes: Vec<&str> = self.lanes.iter().map(|l| l.as_str()).collect();
+        let map_label = if self.map_label.is_empty() {
+            MAP_PATH
+        } else {
+            self.map_label.as_str()
+        };
         let _ = writeln!(
             s,
-            "{VERDICT_SCHEMA}: acceptance verdict over the {} log(s), map {MAP_PATH}",
+            "{VERDICT_SCHEMA}: acceptance verdict over the {} log(s), map {map_label}",
             lanes.join(" and ")
         );
+        if !self.lanes_label.is_empty() {
+            let _ = writeln!(s, "lanes combined: {}", self.lanes_label);
+        }
+        let _ = writeln!(
+            s,
+            "evidence: how each gate's clauses are proved (live-cli, live-lib, portable, \
+             simulated, recorded-limit, untested); a pass is only as strong as its column"
+        );
         let _ = writeln!(s);
-        let _ = writeln!(s, "{:<5} {:<12} {:<9} detail", "gate", "status", "clauses");
+        let _ = writeln!(
+            s,
+            "{:<5} {:<12} {:<9} {:<44} detail",
+            "gate", "status", "clauses", "evidence"
+        );
         for g in &self.gates {
+            let mut tags: BTreeMap<Tag, usize> = BTreeMap::new();
+            for c in &g.clauses {
+                *tags.entry(c.tag).or_insert(0) += 1;
+            }
+            let evidence = tags
+                .iter()
+                .map(|(t, n)| format!("{}×{n}", t.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ");
             let passed = g
                 .clauses
                 .iter()
@@ -1012,10 +1436,11 @@ impl Verdict {
             }
             let _ = writeln!(
                 s,
-                "{:<5} {:<12} {:<9} {}",
+                "{:<5} {:<12} {:<9} {:<44} {}",
                 g.id,
                 g.status.as_str(),
                 format!("{passed}/{}", g.clauses.len()),
+                evidence,
                 detail.join(" | ")
             );
         }
@@ -1106,19 +1531,55 @@ pub struct Acceptance {
 
 /// Load the map and the spec from a repository root.
 pub fn load(root: &std::path::Path) -> Result<Acceptance, String> {
-    load_from(&root.join(MAP_PATH), &root.join(SPEC_PATH))
+    load_from(&root.join(MAP_PATH), &root.join(SPEC_PATH), root)
 }
 
-/// Load the map and the spec from explicit paths.
-pub fn load_from(map: &std::path::Path, spec: &std::path::Path) -> Result<Acceptance, String> {
+/// Load the map and the spec from explicit paths; recorded limits are
+/// checked against the documents under `root`.
+pub fn load_from(
+    map: &std::path::Path,
+    spec: &std::path::Path,
+    root: &std::path::Path,
+) -> Result<Acceptance, String> {
     let map_text =
         std::fs::read_to_string(map).map_err(|e| format!("cannot read {}: {e}", map.display()))?;
     let spec_text = std::fs::read_to_string(spec)
         .map_err(|e| format!("cannot read {}: {e}", spec.display()))?;
+    let parsed = Map::parse(&map_text)?;
+    let problems = parsed.problems_at(root);
+    if !problems.is_empty() {
+        return Err(format!(
+            "the acceptance map has {} problem(s):\n- {}",
+            problems.len(),
+            problems.join("\n- ")
+        ));
+    }
     Ok(Acceptance {
-        map: Map::parse(&map_text)?,
+        map: parsed,
         rows: spec_rows(&spec_text)?,
     })
+}
+
+/// The revision a repository is at, as the suite prints it: `<40-hex>`,
+/// with `+dirty` when tracked files have uncommitted changes.
+#[must_use]
+pub fn repository_revision(root: &std::path::Path) -> Option<String> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let sha = git(&["rev-parse", "HEAD"])?;
+    if !is_revision(&sha) || sha.ends_with("+dirty") {
+        return None;
+    }
+    let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    Some(if dirty { format!("{sha}+dirty") } else { sha })
 }
 
 /// `cargo xtask gates`: the verdict over saved logs.
@@ -1142,6 +1603,11 @@ pub struct GatesArgs {
     /// Also write the verdict as JSON here.
     #[arg(long, value_name = "PATH")]
     pub json: Option<std::path::PathBuf>,
+    /// The revision the logs must be at; defaults to this repository's
+    /// (`git rev-parse HEAD`, `+dirty` with uncommitted changes), because the
+    /// map and spec are read from it.
+    #[arg(long, value_name = "SHA")]
+    pub revision: Option<String>,
 }
 
 /// Parse `--check` values.
@@ -1170,12 +1636,18 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
         eprintln!("xtask gates: {msg}");
         std::process::ExitCode::FAILURE
     };
+    let map_path = args.map.clone().unwrap_or_else(|| root.join(MAP_PATH));
     let acceptance = match load_from(
-        &args.map.clone().unwrap_or_else(|| root.join(MAP_PATH)),
+        &map_path,
         &args.spec.clone().unwrap_or_else(|| root.join(SPEC_PATH)),
+        root,
     ) {
         Ok(a) => a,
         Err(e) => return fail(e),
+    };
+    let expected = match args.revision.clone().or_else(|| repository_revision(root)) {
+        Some(r) => r,
+        None => return fail("the repository's revision could not be read; pass --revision".into()),
     };
     let mut logs = BTreeMap::new();
     for spec in &args.logs {
@@ -1185,9 +1657,9 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
         let Some(lane) = Lane::parse(lane) else {
             return fail(format!("--log {spec}: the lane is linux or macos"));
         };
-        let text = match std::fs::read_to_string(file) {
+        let text = match read_log(std::path::Path::new(file)) {
             Ok(t) => t,
-            Err(e) => return fail(format!("cannot read {file}: {e}")),
+            Err(e) => return fail(e),
         };
         if logs.insert(lane, parse_log(&text)).is_some() {
             return fail(format!("--log names the {} lane twice", lane.as_str()));
@@ -1197,7 +1669,12 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
         Ok(c) => c,
         Err(e) => return fail(e),
     };
-    let verdict = evaluate(&acceptance.map, &acceptance.rows, &logs, &checks);
+    let mut verdict = evaluate(&acceptance.map, &acceptance.rows, &logs, &checks);
+    verdict
+        .problems
+        .extend(binding_problems(&logs, Some(&expected)));
+    verdict.map_label = map_path.display().to_string();
+    verdict.lanes_label = describe_lanes(&logs);
     print!("{}", verdict.render());
     if let Some(path) = &args.json {
         let body =
@@ -1253,6 +1730,10 @@ pub struct AddedClause {
     pub limit: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Required, with at least one new test, to take a `recorded-limit`
+    /// clause out of its limit.
+    #[serde(default)]
+    pub resolves_limit: bool,
 }
 
 /// How strongly a tag proves its clause, for merging: evidence is added,
@@ -1268,6 +1749,27 @@ fn strength(tag: Tag) -> u8 {
     }
 }
 
+/// [`merge`], and the merged map's limits must cite documents under `root`.
+pub fn merge_at(
+    map: &mut Map,
+    add: &Additions,
+    source: &str,
+    root: Option<&std::path::Path>,
+) -> Result<Vec<String>, String> {
+    let changes = merge(map, add, source)?;
+    if let Some(root) = root {
+        let problems = map.problems_at(root);
+        if !problems.is_empty() {
+            return Err(format!(
+                "{source}: the merged map has {} problem(s):\n- {}",
+                problems.len(),
+                problems.join("\n- ")
+            ));
+        }
+    }
+    Ok(changes)
+}
+
 /// Merge `add` (from `source`, for the report) into `map`. Returns one line
 /// per change. The merged map must still be well formed.
 ///
@@ -1280,7 +1782,18 @@ fn strength(tag: Tag) -> u8 {
 pub fn merge(map: &mut Map, add: &Additions, source: &str) -> Result<Vec<String>, String> {
     let mut changes = Vec::new();
     for a in &add.clause {
+        let same_text = |gate: &str| {
+            map.clause
+                .iter()
+                .find(|c| c.gate == gate && a.clause.as_ref() == Some(&c.clause))
+                .map(|c| c.id.clone())
+        };
         let id = match &a.id {
+            // A `.new` clause whose text is already there is that clause:
+            // merging one additions file twice adds nothing.
+            Some(id) if *id == format!("{}.new", a.gate) => {
+                same_text(&a.gate).unwrap_or_else(|| id.clone())
+            }
             Some(id) => id.clone(),
             None => map
                 .clause
@@ -1391,10 +1904,29 @@ pub fn merge(map: &mut Map, add: &Additions, source: &str) -> Result<Vec<String>
             .filter(|k| !c.checks.contains(k))
             .cloned()
             .collect();
+        let raises = strength(a.tag) > strength(c.tag);
+        let leaves_limit = c.tag == Tag::RecordedLimit && raises;
+        if leaves_limit && !a.resolves_limit {
+            return Err(format!(
+                "{source}: {id} is a recorded limit; taking it out of its limit needs \
+                 `resolves_limit = true` with the new tests that prove the clause"
+            ));
+        }
+        // Recording a limit is not a proof: an untested clause may become a
+        // recorded limit without a test (its citation is checked instead).
+        let needs_test = raises && !(c.tag == Tag::Untested && a.tag == Tag::RecordedLimit);
+        if needs_test && added_tests.is_empty() {
+            return Err(format!(
+                "{source}: {id} would go from {} to {} without a new test; \
+                 a tag rises only with the test that earns it",
+                c.tag.as_str(),
+                a.tag.as_str()
+            ));
+        }
         c.tests.extend(added_tests.iter().cloned());
         c.checks.extend(added_checks.iter().cloned());
         let before = c.tag;
-        if strength(a.tag) > strength(c.tag) {
+        if raises {
             c.tag = a.tag;
         }
         if c.tag == Tag::RecordedLimit {
@@ -1664,7 +2196,7 @@ pub fn run_merge(args: &MergeArgs, root: &std::path::Path) -> std::process::Exit
         if let Err(e) = resolve_bare_test_ids(&mut add, root) {
             return fail(format!("{source}: {e}"));
         }
-        match merge(&mut map, &add, &source) {
+        match merge_at(&mut map, &add, &source, Some(root)) {
             Ok(changes) => changes.iter().for_each(|c| println!("{c}")),
             Err(e) => return fail(e),
         }
@@ -1897,7 +2429,17 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
                 .iter()
                 .any(|a| a.test.as_deref() == Some(id("d").as_str()))
         );
-        assert_eq!(log.failed_binaries, 1);
+        // The `test result:` line came while e was still running, so it is
+        // read as a nested process's, and the binary has no summary of its
+        // own: nothing in it can be trusted.
+        assert_eq!(log.failed_binaries, 0);
+        assert!(
+            log.anomalies
+                .iter()
+                .any(|a| a.binary.as_deref() == Some("?/tests/t.rs") && a.test.is_none()),
+            "{:#?}",
+            log.anomalies
+        );
         assert!(!log.clean());
     }
 
@@ -2132,7 +2674,10 @@ reason = ""
 
         let limit = MINI_MAP.replace(
             "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
-            "tag = \"recorded-limit\"\nlimit = \"j4-authority.md, known gaps\"",
+            &format!(
+                "tag = \"recorded-limit\"\nlimit = {}",
+                toml_string(GOOD_LIMIT)
+            ),
         );
         let v = evaluate(
             &Map::parse(&limit).unwrap(),
@@ -2142,6 +2687,24 @@ reason = ""
         );
         assert_eq!(gate(&v, "X01").status, GateStatus::PassWithLimits);
         assert!(v.failures().is_empty(), "{:#?}", v.failures());
+    }
+
+    #[test]
+    fn an_untested_clause_fails_whatever_its_lane() {
+        // An untested clause is untested in every lane: tagging it macos must
+        // not turn it into "evaluated elsewhere" in the Linux verdict.
+        let text = MINI_MAP.replace(
+            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"untested\"\nlane = \"macos\"",
+        );
+        let (_, rows) = mini();
+        let v = evaluate(
+            &Map::parse(&text).unwrap(),
+            &rows,
+            &linux(MINI_LOG),
+            &no_checks(),
+        );
+        assert_eq!(gate(&v, "X01").status, GateStatus::Fail, "{v:#?}");
     }
 
     #[test]
@@ -2191,16 +2754,23 @@ reason = ""
 
     #[test]
     fn checks_count_as_evidence_and_an_absent_check_fails() {
-        let with_check = MINI_MAP.replace(
-            "tests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
-            "checks = [\"i01_absent\", \"suite_clean\"]",
+        let spec = MINI_SPEC.replace(
+            "| A01 |",
+            "| I01 | Full jail conformance passes with nothing else installed. |\n| A01 |",
         );
-        let (_, rows) = mini();
-        let map = Map::parse(&with_check).unwrap();
+        let map_text = format!(
+            "{MINI_MAP}\n[[gate]]\nid = \"I01\"\nrow = \"Full jail conformance passes with nothing else installed.\"\n\
+             [[clause]]\nid = \"I01.1\"\ngate = \"I01\"\nclause = \"nothing else\"\ntag = \"live-cli\"\n\
+             checks = [\"i01_absent\"]\n\
+             [[clause]]\nid = \"I01.3\"\ngate = \"I01\"\nclause = \"clean\"\ntag = \"live-cli\"\n\
+             checks = [\"suite_clean\"]\n"
+        );
+        let map = Map::parse(&map_text).unwrap();
+        let rows = spec_rows(&spec).unwrap();
         let v = evaluate(&map, &rows, &linux(MINI_LOG), &no_checks());
-        assert_eq!(gate(&v, "X01").status, GateStatus::Fail);
+        assert_eq!(gate(&v, "I01").status, GateStatus::Fail);
         assert!(
-            gate(&v, "X01").clauses[0]
+            gate(&v, "I01").clauses[0]
                 .reasons
                 .iter()
                 .any(|r| r.contains("i01_absent") && r.contains("not produced")),
@@ -2208,18 +2778,18 @@ reason = ""
         );
         let passed = BTreeMap::from([("i01_absent".to_string(), true)]);
         assert_eq!(
-            gate(&evaluate(&map, &rows, &linux(MINI_LOG), &passed), "X01").status,
+            gate(&evaluate(&map, &rows, &linux(MINI_LOG), &passed), "I01").status,
             GateStatus::Pass
         );
         let failed = BTreeMap::from([("i01_absent".to_string(), false)]);
         assert_eq!(
-            gate(&evaluate(&map, &rows, &linux(MINI_LOG), &failed), "X01").status,
+            gate(&evaluate(&map, &rows, &linux(MINI_LOG), &failed), "I01").status,
             GateStatus::Fail
         );
         // suite_clean comes from the lane's own log.
         let dirty = format!("{MINI_LOG}skipped: no bwrap\n");
         assert_eq!(
-            gate(&evaluate(&map, &rows, &linux(&dirty), &passed), "X01").status,
+            gate(&evaluate(&map, &rows, &linux(&dirty), &passed), "I01").status,
             GateStatus::Fail
         );
     }
@@ -2321,13 +2891,17 @@ reason = ""
 
         let limited = MINI_MAP.replace(
             "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
-            "tag = \"recorded-limit\"\nlimit = \"j4-authority.md, Known gaps\"",
+            &format!(
+                "tag = \"recorded-limit\"\nlimit = {}",
+                toml_string(GOOD_LIMIT)
+            ),
         );
         let mut map = Map::parse(&limited).unwrap();
         merge(
             &mut map,
             &additions(
                 "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
+                 resolves_limit = true\n\
                  tests = [\"ouro-jail/tests/j5_boundary_linux.rs::x01_live\"]\n",
             ),
             "B2",
@@ -2455,11 +3029,508 @@ reason = ""
         assert_eq!(map.ignored.len(), 2, "{:#?}", map.ignored);
     }
 
+    // ------------------------------------------- J5-A review: hostile logs
+    //
+    // The logs under testdata/hostile are the adversarial review's, verbatim
+    // (rev-A/R/parser): each once printed `pass` for a clause it did not prove.
+
+    const HOSTILE_H1: &str = include_str!("../testdata/hostile/h1.log");
+    const HOSTILE_H1B: &str = include_str!("../testdata/hostile/h1b.log");
+    const HOSTILE_H2: &str = include_str!("../testdata/hostile/h2.log");
+    const HOSTILE_H3: &str = include_str!("../testdata/hostile/h3.log");
+    const HOSTILE_H4: &str = include_str!("../testdata/hostile/h4.log");
+    const HOSTILE_H6: &str = include_str!("../testdata/hostile/h6.log");
+    const HOSTILE_H7: &str = include_str!("../testdata/hostile/h7.log");
+
+    /// The review's own mini map and spec (X01 by a test, I01.3 by the
+    /// clean-suite check, A01 credential).
+    const REVIEW_SPEC: &str = "\
+# spec
+
+## 15. Acceptance matrix
+
+| ID | Test and required result |
+|---|---|
+| X01 | Spaces reach the fixture literally. |
+| I01 | Full jail conformance passes. |
+| A01 | A real batch agent run records a receipt. |
+
+## 16. Next
+";
+    const REVIEW_MAP: &str = r#"
+schema = "ouro.jail.acceptance-map/1"
+
+[[gate]]
+id = "X01"
+row = "Spaces reach the fixture literally."
+
+[[gate]]
+id = "I01"
+row = "Full jail conformance passes."
+
+[[gate]]
+id = "A01"
+row = "A real batch agent run records a receipt."
+kind = "credential"
+
+[[clause]]
+id = "X01.1"
+gate = "X01"
+clause = "spaces reach the fixture"
+tag = "live-cli"
+tests = ["ouro-jail/tests/conformance_j1.rs::x01_literal_argv"]
+
+[[clause]]
+id = "I01.3"
+gate = "I01"
+clause = "the suite is clean"
+tag = "live-cli"
+checks = ["suite_clean"]
+
+[[clause]]
+id = "A01.1"
+gate = "A01"
+clause = "a real agent run"
+tag = "credential"
+
+[[ignored]]
+test = "ouro-fixture/doc::crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail"
+reason = "an `ignore` doc example"
+"#;
+
+    fn review(log: &str) -> Verdict {
+        let map = Map::parse(REVIEW_MAP).expect("the review map parses");
+        let rows = spec_rows(REVIEW_SPEC).unwrap();
+        evaluate(&map, &rows, &linux(log), &no_checks())
+    }
+
+    #[test]
+    fn hostile_h1_a_childs_ok_line_does_not_hide_the_tests_failure() {
+        for log in [HOSTILE_H1, HOSTILE_H1B] {
+            let v = review(log);
+            let x01 = gate(&v, "X01");
+            assert_eq!(x01.status, GateStatus::Fail, "{x01:#?}");
+            assert!(
+                x01.clauses[0].reasons.iter().any(|r| r.contains("FAILED")),
+                "{x01:#?}"
+            );
+            assert!(!v.all_noncredential_gates_pass());
+        }
+    }
+
+    #[test]
+    fn hostile_h2_a_crashed_binary_fails_its_tests_the_suite_and_the_run() {
+        let log = parse_log(HOSTILE_H2);
+        assert!(
+            !log.clean(),
+            "a binary with no `test result:` line is not clean"
+        );
+        let v = review(HOSTILE_H2);
+        assert_eq!(gate(&v, "X01").status, GateStatus::Fail, "{v:#?}");
+        assert_eq!(gate(&v, "I01").status, GateStatus::Fail, "{v:#?}");
+        assert!(
+            v.problems
+                .iter()
+                .any(|p| p.contains("ouro-jail/tests/conformance_j1.rs")),
+            "an anomaly that names no test is a failure, not a warning: {v:#?}"
+        );
+        assert!(
+            v.render()
+                .contains("every noncredential gate passes in these lanes: no")
+        );
+    }
+
+    #[test]
+    fn hostile_h3_a_phantom_result_makes_its_whole_binary_untrusted() {
+        let v = review(HOSTILE_H3);
+        let x01 = gate(&v, "X01");
+        assert_eq!(x01.status, GateStatus::Fail, "{x01:#?}");
+        assert!(
+            x01.clauses[0].reasons.iter().any(|r| r.contains("counted")),
+            "{x01:#?}"
+        );
+        assert!(!v.failures().is_empty());
+    }
+
+    #[test]
+    fn hostile_h4_a_failure_glued_to_child_output_is_still_a_failure() {
+        let v = review(HOSTILE_H4);
+        assert_eq!(gate(&v, "X01").status, GateStatus::Fail, "{v:#?}");
+        assert!(!v.failures().is_empty());
+    }
+
+    #[test]
+    fn hostile_h5_a_log_with_binary_bytes_is_read_not_refused() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/hostile/h5.log");
+        let text = read_log(&path).expect("invalid UTF-8 is replaced, not an error");
+        let log = parse_log(&text);
+        assert!(
+            log.results
+                .contains_key("ouro-jail/tests/conformance_j1.rs::x01_literal_argv"),
+            "{:#?}",
+            log.results
+        );
+    }
+
+    #[test]
+    fn hostile_h6_two_ignored_doc_blocks_on_one_item_are_one_pinned_test() {
+        let v = review(HOSTILE_H6);
+        assert!(v.problems.is_empty(), "{:#?}", v.problems);
+        assert_eq!(gate(&v, "X01").status, GateStatus::Pass);
+    }
+
+    #[test]
+    fn hostile_h7_a_helpers_own_libtest_run_does_not_take_the_parents_result() {
+        let v = review(HOSTILE_H7);
+        assert_eq!(gate(&v, "X01").status, GateStatus::Pass, "{v:#?}");
+        assert!(v.problems.is_empty(), "{:#?}", v.problems);
+    }
+
+    #[test]
+    fn hostile_h8_long_lines_unicode_and_a_late_panic_parse() {
+        let long = "é".repeat(2_000_000);
+        let log = format!(
+            "     Running tests/conformance_j1.rs (target/release/deps/conformance_j1-004409195d769e4e)\n\n\
+             running 2 tests\n\
+             test x01_literal_argv ... {long}\n\
+             ok\n\
+             test ünïcode_näme ... ok\n\
+             thread 'x' panicked after the result\n\n\
+             test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        );
+        let parsed = parse_log(&log);
+        assert!(parsed.anomalies.is_empty(), "{:#?}", parsed.anomalies);
+        assert_eq!(
+            parsed
+                .results
+                .get("?/tests/conformance_j1.rs::x01_literal_argv"),
+            Some(&vec![Outcome::Ok])
+        );
+        assert_eq!(
+            parsed
+                .results
+                .get("?/tests/conformance_j1.rs::ünïcode_näme"),
+            Some(&vec![Outcome::Ok])
+        );
+    }
+
+    #[test]
+    fn a_result_outside_any_binary_is_a_failure() {
+        let v = review(&format!("test stray ... ok\n{MINI_LOG}"));
+        assert!(
+            v.problems
+                .iter()
+                .any(|p| p.contains("outside any test binary")),
+            "{v:#?}"
+        );
+    }
+
+    // ------------------------------------------- J5-A review: log binding
+
+    const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn bound(log: &str, revision: &str, conformance: &str) -> String {
+        format!(
+            "ouro-suite-path=/usr/bin\nouro-suite-revision={revision}\nouro-suite-conformance={conformance}\n{log}"
+        )
+    }
+
+    #[test]
+    fn the_suite_markers_are_read_from_the_log() {
+        let log = parse_log(&bound(MINI_LOG, REV, "1"));
+        assert_eq!(log.revisions, vec![REV.to_string()]);
+        assert_eq!(log.conformance, vec!["1".to_string()]);
+        assert_eq!(log.paths, vec!["/usr/bin".to_string()]);
+        assert_eq!(log.binaries, 3);
+    }
+
+    #[test]
+    fn logs_are_judged_together_only_at_one_revision_and_in_conformance_mode() {
+        let lanes = |linux: &str, macos: &str| {
+            BTreeMap::from([
+                (Lane::Linux, parse_log(linux)),
+                (Lane::Macos, parse_log(macos)),
+            ])
+        };
+        let good = lanes(&bound(MINI_LOG, REV, "1"), &bound(MINI_LOG, REV, "1"));
+        assert!(
+            binding_problems(&good, Some(REV)).is_empty(),
+            "{:?}",
+            binding_problems(&good, Some(REV))
+        );
+        assert!(binding_problems(&good, None).is_empty());
+        let label = describe_lanes(&good);
+        assert!(
+            label.contains("linux") && label.contains("macos") && label.contains(&REV[..12]),
+            "{label}"
+        );
+
+        let other = "fedcba9876543210fedcba9876543210fedcba98";
+        for (logs, needle) in [
+            (
+                lanes(&bound(MINI_LOG, REV, "1"), &bound(MINI_LOG, other, "1")),
+                "revision",
+            ),
+            (
+                lanes(&bound(MINI_LOG, REV, "1"), &bound(MINI_LOG, REV, "")),
+                "OURO_CONFORMANCE",
+            ),
+            (
+                lanes(MINI_LOG, &bound(MINI_LOG, REV, "1")),
+                "no ouro-suite-revision",
+            ),
+            (
+                lanes(
+                    &bound(MINI_LOG, REV, "1"),
+                    &bound(&bound(MINI_LOG, other, "1"), REV, "1"),
+                ),
+                "revision",
+            ),
+        ] {
+            let p = binding_problems(&logs, None);
+            assert!(p.iter().any(|p| p.contains(needle)), "{needle}: {p:?}");
+        }
+        let p = binding_problems(&good, Some(other));
+        assert!(
+            p.iter().any(|p| p.contains("map") && p.contains(other)),
+            "{p:?}"
+        );
+    }
+
+    // --------------------------------------- J5-A review: checks and limits
+
+    #[test]
+    fn a_driver_check_proves_only_the_clauses_it_measures() {
+        // Review G1 and G2: a clean log closing "owner death never causes an
+        // exec", the contract validator closing the gate protocol.
+        for (id, gate_id, check) in [
+            ("X03.2", "X03", "suite_clean"),
+            ("I03.2", "I03", "contract_validation"),
+            ("X01.1", "X01", "i01_absent"),
+            ("I01.1", "I01", "plain_session_smoke"),
+        ] {
+            let text = format!(
+                "schema = \"ouro.jail.acceptance-map/1\"\n\
+                 [[gate]]\nid = \"{gate_id}\"\nrow = \"r\"\n\
+                 [[clause]]\nid = \"{id}\"\ngate = \"{gate_id}\"\nclause = \"c\"\ntag = \"live-cli\"\nchecks = [\"{check}\"]\n"
+            );
+            let err = Map::parse(&text).unwrap_err();
+            assert!(
+                err.contains(check) && err.contains(id),
+                "{id} {check}: {err}"
+            );
+        }
+        let text = "schema = \"ouro.jail.acceptance-map/1\"\n\
+                    [[gate]]\nid = \"I01\"\nrow = \"r\"\n\
+                    [[clause]]\nid = \"I01.3\"\ngate = \"I01\"\nclause = \"c\"\ntag = \"live-cli\"\nchecks = [\"suite_clean\"]\n";
+        assert!(Map::parse(text).is_ok());
+    }
+
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn with_limit(limit: &str) -> Map {
+        let text = MINI_MAP.replace(
+            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            &format!("tag = \"recorded-limit\"\nlimit = {}", toml_string(limit)),
+        );
+        Map::parse(&text).unwrap_or_else(|e| panic!("{limit}: {e}"))
+    }
+
+    const GOOD_LIMIT: &str = "docs/specs/jail-v1/j3-authority.md § Known gaps: \
+        The permissive `agent` filter variant (nested namespace setup) is unit-tested only";
+
+    #[test]
+    fn a_limit_must_cite_a_passage_of_an_existing_document_section() {
+        assert!(with_limit(GOOD_LIMIT).problems_at(&repo_root()).is_empty());
+        // The review's G3: a made-up record.
+        let text = MINI_MAP.replace(
+            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"recorded-limit\"\nlimit = \"see nowhere.md, section 99\"",
+        );
+        let err = Map::parse(&text).unwrap_err();
+        assert!(err.contains("see nowhere.md"), "{err}");
+        for (limit, needle) in [
+            (
+                "docs/specs/jail-v1/no-such.md § Known gaps: The permissive `agent` filter variant",
+                "no-such.md",
+            ),
+            (
+                "docs/specs/jail-v1/j3-authority.md § No such heading: The permissive `agent` filter variant",
+                "No such heading",
+            ),
+            (
+                "docs/specs/jail-v1/j3-authority.md § Known gaps: a passage that is not in that section at all",
+                "passage",
+            ),
+            (
+                "docs/specs/jail-v1/j3-authority.md § Operator setup: The permissive `agent` filter variant",
+                "passage",
+            ),
+        ] {
+            let p = with_limit(limit).problems_at(&repo_root());
+            assert!(p.iter().any(|p| p.contains(needle)), "{limit}: {p:?}");
+        }
+        // Outside docs/, or too short to be a statement: refused on parse.
+        for (limit, needle) in [
+            (
+                "docs/../Cargo.toml § x: a passage long enough to count",
+                "under docs/",
+            ),
+            (
+                "docs/specs/jail-v1/j3-authority.md § Known gaps: short",
+                "shorter",
+            ),
+        ] {
+            let text = MINI_MAP.replace(
+                "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+                &format!("tag = \"recorded-limit\"\nlimit = {}", toml_string(limit)),
+            );
+            let err = Map::parse(&text).unwrap_err();
+            assert!(err.contains(needle), "{limit}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_limit_passage_matches_across_line_breaks() {
+        // The quoted text wraps in the document; whitespace is not evidence.
+        let limit = "docs/specs/jail-v1/j3-authority.md § Known gaps: \
+                     A `bind_ro` digest is recorded only on an immutable filesystem; the reference host mounts none";
+        assert!(with_limit(limit).problems_at(&repo_root()).is_empty());
+    }
+
+    // -------------------------------------------- J5-A review: merge rules
+
+    #[test]
+    fn a_merge_that_closes_a_clause_with_a_check_it_cannot_prove_is_refused() {
+        let (mut map, _) = mini();
+        let err = merge(
+            &mut map,
+            &additions("[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\nchecks = [\"suite_clean\"]\n"),
+            "G1",
+        )
+        .unwrap_err();
+        assert!(err.contains("suite_clean"), "{err}");
+    }
+
+    #[test]
+    fn a_merge_cannot_raise_a_tag_or_leave_a_limit_without_a_new_test() {
+        let untested = MINI_MAP.replace(
+            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"untested\"",
+        );
+        let mut map = Map::parse(&untested).unwrap();
+        let err = merge(
+            &mut map,
+            &additions("[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\nnote = \"trust me\"\n"),
+            "X",
+        )
+        .unwrap_err();
+        assert!(err.contains("new test"), "{err}");
+
+        // The review's G4: a limit erased with no new evidence.
+        let mut map = with_limit(GOOD_LIMIT);
+        let err = merge(
+            &mut map,
+            &additions(
+                "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"portable\"\n\
+                 tests = [\"ouro-jail/tests/portable_gate.rs::x01_new\"]\n",
+            ),
+            "G4",
+        )
+        .unwrap_err();
+        assert!(err.contains("resolves_limit"), "{err}");
+        let err = merge(
+            &mut map,
+            &additions("[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\nresolves_limit = true\n"),
+            "G4",
+        )
+        .unwrap_err();
+        assert!(err.contains("new test"), "{err}");
+        merge(
+            &mut map,
+            &additions(
+                "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\nresolves_limit = true\n\
+                 tests = [\"ouro-jail/tests/j5_boundary_linux.rs::x01_live\"]\n",
+            ),
+            "G4",
+        )
+        .unwrap();
+        assert_eq!(map.clause[0].tag, Tag::LiveCli);
+        assert_eq!(map.clause[0].limit, None);
+    }
+
+    #[test]
+    fn a_merge_that_cites_a_made_up_record_is_refused() {
+        let untested = MINI_MAP.replace(
+            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"untested\"",
+        );
+        let mut map = Map::parse(&untested).unwrap();
+        let err = merge_at(
+            &mut map,
+            &additions(
+                "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"recorded-limit\"\n\
+                 limit = \"docs/specs/jail-v1/nowhere.md § Section 99: nothing at all is written here\"\n",
+            ),
+            "G3",
+            Some(&repo_root()),
+        )
+        .unwrap_err();
+        assert!(err.contains("nowhere.md"), "{err}");
+    }
+
+    #[test]
+    fn merging_the_same_new_clause_twice_adds_it_once() {
+        // The review's G5.
+        let (mut map, _) = mini();
+        let add = additions(
+            "[[clause]]\nid = \"X01.new\"\ngate = \"X01\"\nclause = \"tabs too\"\ntag = \"live-cli\"\n\
+             tests = [\"ouro-jail/tests/conformance_j1.rs::x01_tabs\"]\n",
+        );
+        merge(&mut map, &add, "B1").unwrap();
+        merge(&mut map, &add, "B1").unwrap();
+        assert_eq!(
+            map.clause.iter().filter(|c| c.gate == "X01").count(),
+            2,
+            "{:#?}",
+            map.clause
+        );
+    }
+
+    // ------------------------------------------ J5-A review: gates.txt
+
+    #[test]
+    fn gates_txt_names_its_map_its_lanes_and_each_gates_evidence_level() {
+        let (map, rows) = mini();
+        let mut v = evaluate(&map, &rows, &linux(MINI_LOG), &no_checks());
+        v.map_label = "some/other-map.toml".to_string();
+        v.lanes_label = "linux at 0123456789ab".to_string();
+        let text = v.render();
+        assert!(text.contains("some/other-map.toml"), "{text}");
+        assert!(!text.contains(MAP_PATH), "{text}");
+        assert!(text.contains("linux at 0123456789ab"), "{text}");
+        let x01 = text.lines().find(|l| l.starts_with("X01 ")).unwrap();
+        assert!(x01.contains("live-cli"), "{x01}");
+        let limited = evaluate(
+            &with_limit(GOOD_LIMIT),
+            &rows,
+            &linux(MINI_LOG),
+            &no_checks(),
+        );
+        let line = limited.render();
+        let x01 = line.lines().find(|l| l.starts_with("X01 ")).unwrap();
+        assert!(x01.contains("recorded-limit"), "{x01}");
+    }
+
     // ------------------------------------------------------ the real map
 
     #[test]
     fn the_checked_in_map_is_well_formed_and_agrees_with_section_fifteen() {
         let map = Map::parse(MAP).unwrap_or_else(|e| panic!("{e}"));
+        let at = map.problems_at(&repo_root());
+        assert!(at.is_empty(), "{at:#?}");
         let rows = spec_rows(SPEC).unwrap();
         let problems = spec_problems(&map, &rows);
         assert!(problems.is_empty(), "{problems:#?}");
@@ -2586,7 +3657,7 @@ reason = ""
                 for r in &c.reasons {
                     let newer_test = r.ends_with("is absent from the linux log");
                     assert!(
-                        r.starts_with("untested: ")
+                        r == UNTESTED
                             || (r.starts_with("check `")
                                 && r.ends_with("was not produced by this run"))
                             || newer_test,
