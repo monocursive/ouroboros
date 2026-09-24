@@ -1,0 +1,168 @@
+[
+  {
+    "schema": "ouro.event/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "source": "wrapper",
+    "source_seq": 1,
+    "observed_at": "2026-09-21T12:00:00Z",
+    "monotonic_ns": "100000000",
+    "operation": "note",
+    "stage": "result",
+    "decision": null,
+    "outcome": {
+      "ok": true,
+      "return_value": null,
+      "errno": null,
+      "completion": "wrapper"
+    },
+    "fields": {
+      "kind": "lifecycle",
+      "transition": "prepared"
+    }
+  },
+  {
+    "schema": "ouro.event/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "source": "wrapper",
+    "source_seq": 2,
+    "observed_at": "2026-09-21T12:00:00Z",
+    "monotonic_ns": "100500000",
+    "operation": "jail.receipt",
+    "stage": "result",
+    "decision": null,
+    "outcome": {
+      "ok": true,
+      "return_value": null,
+      "errno": null,
+      "completion": "wrapper"
+    },
+    "fields": {
+      "phase": "prepared",
+      "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  {
+    "schema": "ouro.event/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "source": "audit",
+    "source_seq": 1,
+    "observed_at": "2026-09-21T12:00:00Z",
+    "monotonic_ns": "150000000",
+    "operation": "proc.exec",
+    "stage": "result",
+    "decision": null,
+    "outcome": {
+      "ok": true,
+      "return_value": null,
+      "errno": null,
+      "completion": "exec_transition"
+    },
+    "fields": {
+      "syscall": "execve",
+      "pid": 1240,
+      "pid_start_ticks": 123460,
+      "argv_digest": null,
+      "argv_digest_reason": "descendant_argv_not_captured",
+      "path_basis": "argument_snapshot",
+      "path_complete": true,
+      "path": {
+        "kind": "workspace_relative",
+        "value": "bin/fixture"
+      }
+    }
+  },
+  {
+    "schema": "ouro.event/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "source": "wrapper",
+    "source_seq": 3,
+    "observed_at": "2026-09-21T12:00:00Z",
+    "monotonic_ns": "150100000",
+    "operation": "note",
+    "stage": "result",
+    "decision": null,
+    "outcome": {
+      "ok": true,
+      "return_value": null,
+      "errno": null,
+      "completion": "wrapper"
+    },
+    "fields": {
+      "kind": "lifecycle",
+      "transition": "exec_confirmed"
+    }
+  },
+  {
+    "schema": "ouro.event/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "source": "wrapper",
+    "source_seq": 4,
+    "observed_at": "2026-09-21T12:00:00Z",
+    "monotonic_ns": "150200000",
+    "operation": "jail.receipt",
+    "stage": "result",
+    "decision": null,
+    "outcome": {
+      "ok": true,
+      "return_value": null,
+      "errno": null,
+      "completion": "wrapper"
+    },
+    "fields": {
+      "phase": "enforced",
+      "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  },
+  {
+    "schema": "ouro.event/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "source": "wrapper",
+    "source_seq": 6,
+    "observed_at": "2026-09-21T12:00:00Z",
+    "monotonic_ns": "330000000",
+    "operation": "note",
+    "stage": "result",
+    "decision": null,
+    "outcome": {
+      "ok": true,
+      "return_value": null,
+      "errno": null,
+      "completion": "wrapper"
+    },
+    "fields": {
+      "kind": "coverage_gap",
+      "classes": [
+        "exec",
+        "fs.write",
+        "fs.deny",
+        "net"
+      ],
+      "source": "wrapper",
+      "start_ns": "390000000",
+      "end_ns": null,
+      "reason": "trace_transport_loss",
+      "lost_count": null
+    }
+  },
+  {
+    "schema": "ouro.event/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "source": "wrapper",
+    "source_seq": 7,
+    "observed_at": "2026-09-21T12:00:01Z",
+    "monotonic_ns": "400000000",
+    "operation": "jail.receipt",
+    "stage": "result",
+    "decision": null,
+    "outcome": {
+      "ok": true,
+      "return_value": null,
+      "errno": null,
+      "completion": "wrapper"
+    },
+    "fields": {
+      "phase": "settled",
+      "receipt_digest": "sha256:55bccb7581384ca2dfc9dd9758ba976ba960e289a941a946b0707e10872343ef"
+    }
+  }
+]

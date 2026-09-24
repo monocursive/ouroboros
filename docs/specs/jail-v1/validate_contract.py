@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["jsonschema==4.26.0", "rfc8785==0.1.4"]
+# dependencies = ["jsonschema==4.26.0", "rfc3339-validator==0.1.4", "rfc8785==0.1.4"]
 # ///
 """Validate specification artifacts, not live jail/backend conformance.
 
@@ -10,7 +10,12 @@ The checked-in fixture corpus is also input to the Rust P01/R01 suite.
 J5-C: the semantic rules below are the port of ouro_jail::records::semantic.
 Both run fixtures/semantic-cases.json and must name the same rule for every
 case; both run fixtures/gate-frames.json against the §8.2 frame rules. The
-frozen wire schemas are pinned by frozen-schemas.toml.
+frozen wire schemas and the artifacts behind the other announced identifiers
+are pinned by frozen-schemas.toml.
+
+Parity with the Rust validator (jsonschema-rs): `date-time` is checked
+(rfc3339-validator), and `pattern` has ECMA-262 semantics, where `$` matches
+only at the end of the string (Python's `$` also matches before a final LF).
 """
 
 import base64
@@ -25,10 +30,50 @@ import tomllib
 from pathlib import Path
 
 import rfc8785
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+from jsonschema import validators as jsonschema_validators
 from referencing import Registry, Resource
 
 ROOT = Path(__file__).resolve().parent
+DECIMAL = re.compile(r"(0|[1-9][0-9]*)\Z")
+
+
+def ecma_pattern(validator, pattern, instance, schema):
+    """JSON Schema `pattern` with ECMA-262 `$`: only the end of the string."""
+    if not validator.is_type(instance, "string"):
+        return
+    anchored = re.sub(r"(?<!\\)\$", r"\\Z", pattern)
+    if not re.search(anchored, instance):
+        yield ValidationError(f"{instance!r} does not match {pattern!r}")
+
+
+ContractValidator = jsonschema_validators.extend(Draft202012Validator, {"pattern": ecma_pattern})
+
+
+def load_schemas(root):
+    """Every `*.schema.json` under root by stem, refusing a second file that
+    declares an `$id` already declared: a registry keeps one of them, so a
+    duplicate would silently replace a frozen schema."""
+    schemas, owners = {}, {}
+    for file in sorted(root.glob("*.schema.json")):
+        schema = json.loads(file.read_text())
+        identifier = schema["$id"]
+        assert identifier not in owners, (
+            f"{file.name} declares {identifier}, already declared by {owners[identifier]}")
+        owners[identifier] = file.name
+        schemas[file.stem.removesuffix(".schema")] = schema
+    return schemas
+
+
+def build_validators(schemas):
+    registry = Registry()
+    for schema in schemas.values():
+        Draft202012Validator.check_schema(schema)
+        registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
+    return {
+        name: ContractValidator(schema, registry=registry, format_checker=FormatChecker())
+        for name, schema in schemas.items()
+    }
 
 
 def read(path):
@@ -41,6 +86,7 @@ def native_bytes(value):
     else:
         assert set(value) == {"encoding", "data"}
         assert value["encoding"] == "base64"
+        assert isinstance(value["data"], str), "a byte object's data is not a string"
         raw = base64.b64decode(value["data"], validate=True)
         assert base64.b64encode(raw).decode() == value["data"]
         try:
@@ -88,7 +134,7 @@ def violations_in_bytes(node, at, out):
 
 
 def decimal(value):
-    return int(value) if isinstance(value, str) and value.isdigit() else None
+    return int(value) if isinstance(value, str) and DECIMAL.match(value) else None
 
 
 def gap_interval(gap, at, out):
@@ -135,6 +181,22 @@ def semantic_event(event):
     return out
 
 
+def is_loss_note(event):
+    return is_note(event, "coverage_gap") and event["fields"].get("reason") == "trace_transport_loss"
+
+
+def sequence_number(value):
+    """A JSON integer, or a number without a fractional part (JSON Schema's
+    `integer` admits 2.0), as Rust's semantic::sequence_number reads it."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and value.is_integer() and 0 <= value < 2**53:
+        return int(value)
+    return None
+
+
 def phase_may_follow(before, after):
     return before == after or (before, after) in {
         ("prepared", "enforced"), ("prepared", "settled"), ("prepared", "refused"), ("enforced", "settled")}
@@ -148,19 +210,19 @@ def semantic_trace(events):
         for index, event in enumerate(events):
             if event.get("attempt_id") != events[0].get("attempt_id"):
                 out.append(("trace_attempt_mixed", f"[{index}]", event.get("attempt_id")))
-    loss = any(is_note(event, "coverage_gap") and event["fields"].get("reason") == "trace_transport_loss"
-               for event in events)
+    # Holes are recorded loss only from the first loss note on (§13.3).
+    first_loss = next((index for index, event in enumerate(events) if is_loss_note(event)), len(events))
     for source in ["wrapper", "audit", "proxy"]:
-        numbered = [(index, event["source_seq"]) for index, event in enumerate(events)
-                    if event.get("source") == source and isinstance(event.get("source_seq"), int)]
+        numbered = [(index, sequence_number(event.get("source_seq"))) for index, event in enumerate(events)
+                    if event.get("source") == source and sequence_number(event.get("source_seq")) is not None]
         backwards = [pair for pair in zip(numbered, numbered[1:]) if pair[1][1] <= pair[0][1]]
         if backwards:
             (_, before), (index, after) = backwards[0]
             out.append(("source_seq_order", f"[{index}]", f"{source} {after} after {before}"))
             continue
-        if loss:
-            continue
         for position, (index, seq) in enumerate(numbered):
+            if index >= first_loss:
+                break
             if seq != position + 1:
                 out.append(("source_seq_gap", f"[{index}]", f"{source} {seq} where {position + 1} was due"))
                 break
@@ -188,7 +250,29 @@ def trace_ends_with(events, receipt):
     expected = ("wrapper", "jail.receipt", receipt["attempt_id"], receipt["phase"], receipt_digest(receipt))
     found = (last.get("source"), last.get("operation"), last.get("attempt_id"),
              fields.get("phase"), fields.get("receipt_digest"))
-    return [] if found == expected else [("trace_final_receipt", at, f"{found} is not {expected}")]
+    out = [] if found == expected else [("trace_final_receipt", at, f"{found} is not {expected}")]
+    return out + loss_recorded(events, receipt)
+
+
+def loss_recorded(events, receipt):
+    """The loss note and the final receipt's loss gaps agree (§13.3)."""
+    recorded = [(cls, gap) for cls, entry in receipt["coverage"].items()
+                for gap in entry.get("gaps", []) if gap.get("reason") == "trace_transport_loss"]
+    note = next((event for event in events if is_loss_note(event)), None)
+    if note is None:
+        return [("trace_loss_recorded", f"$.coverage.{recorded[0][0]}", "no loss note")] if recorded else []
+    fields = note["fields"]
+    named = [name for name in fields.get("classes", []) if isinstance(name, str)]
+    out = []
+    for cls, gap in recorded:
+        within = all(name in named for name in gap.get("classes", []))
+        if gap.get("source") != fields.get("source") or gap.get("start_ns") != fields.get("start_ns") or not within:
+            out.append(("trace_loss_recorded", f"$.coverage.{cls}", "not the note's loss"))
+    for cls in named:
+        status = receipt["coverage"].get(cls, {}).get("status")
+        if isinstance(status, str) and status != "unsupported" and not any(name == cls for name, _ in recorded):
+            out.append(("trace_loss_recorded", f"$.coverage.{cls}", "covered class without the loss"))
+    return out
 
 
 def kind_may_follow(before, after):
@@ -215,6 +299,8 @@ def assert_clean(found, what):
 
 
 def apply(record, change):
+    if not change["path"]:
+        return change["value"]  # an empty path replaces the whole instance
     node = record
     for part in change["path"][:-1]:
         node = node[part]
@@ -223,6 +309,7 @@ def apply(record, change):
         del node[last]
     else:
         node[last] = change["value"]
+    return record
 
 
 def check_semantic_corpus(validators):
@@ -234,7 +321,7 @@ def check_semantic_corpus(validators):
     for case in corpus["cases"]:
         record = read(case["base"])
         for change in case["changes"]:
-            apply(record, change)
+            record = apply(record, change)
         instances = [record] if case["check"] == "receipt" else record
         for instance in instances:
             errors = [e.message for e in validators[schema_of[case["check"]]].iter_errors(instance)]
@@ -296,6 +383,19 @@ def check_gate_frames(validators):
 # ---------------------------------------------------------------------------
 # The freeze (§13, §17): every wire schema's bytes are the frozen ones.
 # ---------------------------------------------------------------------------
+
+
+def check_loader_refuses_duplicate_ids():
+    """The loader's own negative case: two files, one `$id`."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        for name in ["a.schema.json", "b.schema.json"]:
+            (Path(directory) / name).write_text(json.dumps({"$id": "urn:ouro:schema:event:1"}))
+        try:
+            load_schemas(Path(directory))
+        except AssertionError:
+            return
+        raise AssertionError("the schema loader accepted two files declaring one $id")
 
 
 def check_frozen(schemas):
@@ -432,16 +532,9 @@ def check_network_fixtures():
 
 
 def main():
-    schemas = {file.stem.removesuffix(".schema"): json.loads(file.read_text())
-               for file in ROOT.glob("*.schema.json")}
-    registry = Registry()
-    for schema in schemas.values():
-        Draft202012Validator.check_schema(schema)
-        registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
-    validators = {
-        name: Draft202012Validator(schema, registry=registry, format_checker=FormatChecker())
-        for name, schema in schemas.items()
-    }
+    schemas = load_schemas(ROOT)
+    check_loader_refuses_duplicate_ids()
+    validators = build_validators(schemas)
     # J5-C: an example's schema is named by its file's prefix; checked-in
     # evidence receipts are product output and held to the same contract.
     prefixes = {"event-": "jail-event", "receipt-": "jail-receipt", "gate-": "jail-gate",
@@ -462,7 +555,7 @@ def main():
     for case in cases:
         record = read(case["base"])
         for change in case["changes"]:
-            apply(record, change)
+            record = apply(record, change)
         errors = list(validators[case["schema"]].iter_errors(record))
         assert (not errors) == case["valid"], (case["name"], [e.message for e in errors])
         if not errors and case["schema"] == "jail-receipt":

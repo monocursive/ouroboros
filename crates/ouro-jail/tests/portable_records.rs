@@ -45,16 +45,7 @@ fn read_json(path: &Path) -> serde_json::Value {
 /// so that `jail-event.schema.json` can `$ref` the shared envelope and
 /// `jail-control.schema.json` the receipt's outcome and error.
 fn validators() -> BTreeMap<String, Validator> {
-    let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for entry in std::fs::read_dir(specs_dir()).expect("the specification directory is readable") {
-        let path = entry.expect("a directory entry").path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if let Some(stem) = name.strip_suffix(".schema.json") {
-            schemas.insert(stem.to_owned(), read_json(&path));
-        }
-    }
+    let schemas = common::load_schemas(&specs_dir()).unwrap_or_else(|error| panic!("{error}"));
     // J5-C: the six wire schemas of §13 and §8.2 (J5-D adds the doctor's).
     for stem in [
         "event",
@@ -294,7 +285,11 @@ fn r01_every_event_kind_has_an_example() {
 /// array element. The same operations as `validate_contract.py`'s `apply`.
 fn apply(record: &mut serde_json::Value, change: &serde_json::Value) {
     let path = change["path"].as_array().expect("a path");
-    let (last, parents) = path.split_last().expect("a non-empty path");
+    // An empty path replaces the whole instance (the pair cases).
+    let Some((last, parents)) = path.split_last() else {
+        *record = change["value"].clone();
+        return;
+    };
     let mut cursor = record;
     for segment in parents {
         cursor = step(cursor, segment);
@@ -414,6 +409,29 @@ fn r01_the_semantic_corpus_gets_the_verdicts_it_expects() {
         negative, known,
         "every rule has at least one negative case, and no case names an unknown rule"
     );
+}
+
+/// J5-C review item 1: a second schema file declaring an `$id` another file
+/// already declares would silently replace it in the registry (a frozen
+/// schema shadowed by an unfrozen one, with no frozen sha256 changing). Both
+/// loaders refuse it; this is the Rust loader's negative case, and the spec
+/// directory itself is loaded through the same function.
+#[test]
+fn r01_the_schema_loader_refuses_two_files_with_one_id() {
+    let dir = common::private_tempdir();
+    for name in ["a.schema.json", "b.schema.json"] {
+        std::fs::write(
+            dir.path().join(name),
+            br#"{"$id": "urn:ouro:schema:event:1", "title": "shadow"}"#,
+        )
+        .unwrap();
+    }
+    let refused = common::load_schemas(dir.path()).expect_err("a duplicate $id refuses");
+    assert!(
+        refused.contains("urn:ouro:schema:event:1"),
+        "the refusal names the identifier: {refused}"
+    );
+    assert!(common::load_schemas(&specs_dir()).is_ok());
 }
 
 // ---------------------------------------------------------------------------

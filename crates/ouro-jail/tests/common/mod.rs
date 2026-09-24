@@ -231,6 +231,52 @@ pub fn native_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
     ouro_jail::records::semantic::native_bytes(value)
 }
 
+/// Every `*.schema.json` in `dir`, by stem.
+///
+/// J5-C review item 1: a second file declaring an `$id` that another file
+/// already declares is refused. The registry keeps one resource per `$id`, so
+/// an unfrozen file could otherwise silently replace a frozen schema, with no
+/// frozen sha256 changing and the winner decided by directory order.
+///
+/// # Errors
+/// An unreadable or unparsable file, a schema without an `$id`, or two files
+/// declaring one `$id`.
+pub fn load_schemas(
+    dir: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
+    let mut schemas = std::collections::BTreeMap::new();
+    let mut owners: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|error| format!("{}: {error}", dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some(stem) = name.strip_suffix(".schema.json") else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).map_err(|error| format!("{name}: {error}"))?;
+        let schema: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|error| format!("{name}: {error}"))?;
+        let id = schema["$id"]
+            .as_str()
+            .ok_or_else(|| format!("{name} declares no $id"))?
+            .to_owned();
+        if let Some(owner) = owners.insert(id.clone(), name.clone()) {
+            return Err(format!(
+                "{name} declares {id}, which {owner} already declares: one of them would \
+                 silently replace the other"
+            ));
+        }
+        schemas.insert(stem.to_owned(), schema);
+    }
+    Ok(schemas)
+}
+
 /// Every checked-in schema, by stem (`jail-receipt`, `jail-event`, ...), built
 /// once per test binary with the cross-schema registry and format checks.
 pub fn validators() -> &'static std::collections::BTreeMap<String, jsonschema::Validator> {
@@ -238,20 +284,7 @@ pub fn validators() -> &'static std::collections::BTreeMap<String, jsonschema::V
         OnceLock::new();
     ONCE.get_or_init(|| {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1");
-        let mut schemas = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(&dir).expect("the specification directory") {
-            let path = entry.expect("an entry").path();
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if let Some(stem) = name.strip_suffix(".schema.json") {
-                let schema: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&path).expect("a schema"))
-                        .expect("a JSON schema");
-                schemas.insert(stem.to_owned(), schema);
-            }
-        }
+        let schemas = load_schemas(&dir).unwrap_or_else(|error| panic!("{error}"));
         let resources: Vec<(String, jsonschema::Resource)> = schemas
             .values()
             .map(|schema| {

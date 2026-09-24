@@ -270,11 +270,24 @@ fn every_wire_schema_is_frozen_with_the_identifiers_the_binary_announces() {
         .filter(|name| name.ends_with(".schema.json"))
         .collect();
     on_disk.sort();
+    // J5-C review item 1: no two schema files declare one `$id`. A registry
+    // keeps one resource per `$id`, so an unfrozen file declaring a frozen
+    // identifier would replace the frozen schema without any frozen sha256
+    // changing.
+    let mut declared: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for name in &on_disk {
         assert!(
             entries.iter().any(|(file, ..)| file == name) || unfrozen.contains(name),
             "{name} is neither frozen nor listed as unfrozen in frozen-schemas.toml"
         );
+        let id = read_json(&specs_dir().join(name))["$id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} declares no $id"))
+            .to_owned();
+        if let Some(owner) = declared.insert(id.clone(), name.clone()) {
+            panic!("{name} declares {id}, which {owner} already declares");
+        }
     }
     let announced = version_json();
     let announced: Vec<&str> = announced["schemas"]

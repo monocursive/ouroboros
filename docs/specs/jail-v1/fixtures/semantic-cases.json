@@ -12,6 +12,7 @@
     "trace_final_receipt": "jail-v1.md:1792-1795 (\u00a713.1) and :1948-1949 (\u00a713.3): a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest",
     "control_attempt_mixed": "jail-v1.md:923-924 (\u00a78.2): control output carries one attempt's messages",
     "control_seq_order": "jail-v1.md:923-924 (\u00a78.2): the message number increases monotonically",
+    "trace_loss_recorded": "jail-v1.md:1928-1931 and :1938-1940 (\u00a713.3): the first loss writes one trace_transport_loss note from the last healthy point, and every later receipt records that loss on each covered evidence class",
     "control_kind_order": "jail-v1.md:923-931 (\u00a78.2) and :847-851 (\u00a78.1): prepared, then exec_confirmed, then one terminal message; refused never after exec; nothing after a terminal message"
   },
   "cases": [
@@ -1223,6 +1224,2707 @@
         }
       ],
       "violations": []
+    },
+    {
+      "name": "a gap start beyond 128 bits is still ordered",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "status"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "observed_count"
+          ],
+          "value": null
+        },
+        {
+          "path": [
+            "observer",
+            "sources",
+            "audit"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "errors"
+          ],
+          "value": [
+            {
+              "code": "evidence_lost",
+              "stage": "reconciling",
+              "message": "Synthetic fixture: coverage was lost before settlement.",
+              "remediation_category": "inspect_state"
+            }
+          ]
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "10000000000000000000000000000000000000000",
+              "end_ns": "5",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        },
+        {
+          "path": [
+            "observer",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "0",
+              "end_ns": "5",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "gap_interval_reversed"
+      ]
+    },
+    {
+      "name": "a gap end beyond 128 bits is in order",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "status"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "observed_count"
+          ],
+          "value": null
+        },
+        {
+          "path": [
+            "observer",
+            "sources",
+            "audit"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "errors"
+          ],
+          "value": [
+            {
+              "code": "evidence_lost",
+              "stage": "reconciling",
+              "message": "Synthetic fixture: coverage was lost before settlement.",
+              "remediation_category": "inspect_state"
+            }
+          ]
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "5",
+              "end_ns": "10000000000000000000000000000000000000000",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        },
+        {
+          "path": [
+            "observer",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "5",
+              "end_ns": "10000000000000000000000000000000000000000",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a byte object whose data is not a string",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "lifetime",
+            "native",
+            "details",
+            "blob"
+          ],
+          "value": {
+            "encoding": "base64",
+            "data": 5
+          }
+        }
+      ],
+      "violations": [
+        "native_string"
+      ]
+    },
+    {
+      "name": "a byte object whose data is null",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "blob"
+          ],
+          "value": {
+            "encoding": "base64",
+            "data": null
+          }
+        }
+      ],
+      "violations": [
+        "native_string"
+      ]
+    },
+    {
+      "name": "a byte object with an extra key",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "blob"
+          ],
+          "value": {
+            "encoding": "base64",
+            "data": "/w==",
+            "note": "x"
+          }
+        }
+      ],
+      "violations": [
+        "native_string"
+      ]
+    },
+    {
+      "name": "a repeated source_seq written as an integral float",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            3,
+            "source_seq"
+          ],
+          "value": 2.0
+        }
+      ],
+      "violations": [
+        "source_seq_order"
+      ]
+    },
+    {
+      "name": "an integral float source_seq in order",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            3,
+            "source_seq"
+          ],
+          "value": 3.0
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a hole in the wrapper source before the loss note",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            6
+          ],
+          "value": {
+            "schema": "ouro.event/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "source": "wrapper",
+            "source_seq": 6,
+            "observed_at": "2026-09-21T12:00:00Z",
+            "monotonic_ns": "330000000",
+            "operation": "note",
+            "stage": "result",
+            "decision": null,
+            "outcome": {
+              "ok": true,
+              "return_value": null,
+              "errno": null,
+              "completion": "wrapper"
+            },
+            "fields": {
+              "kind": "coverage_gap",
+              "classes": [
+                "exec",
+                "fs.write",
+                "fs.deny",
+                "net"
+              ],
+              "source": "wrapper",
+              "start_ns": "390000000",
+              "end_ns": null,
+              "reason": "trace_transport_loss",
+              "lost_count": null
+            }
+          }
+        },
+        {
+          "path": [
+            7,
+            "source_seq"
+          ],
+          "value": 8
+        },
+        {
+          "path": [
+            3
+          ],
+          "delete": true
+        }
+      ],
+      "violations": [
+        "source_seq_gap"
+      ]
+    },
+    {
+      "name": "a hole in the audit source before the loss note",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            6
+          ],
+          "value": {
+            "schema": "ouro.event/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "source": "wrapper",
+            "source_seq": 6,
+            "observed_at": "2026-09-21T12:00:00Z",
+            "monotonic_ns": "330000000",
+            "operation": "note",
+            "stage": "result",
+            "decision": null,
+            "outcome": {
+              "ok": true,
+              "return_value": null,
+              "errno": null,
+              "completion": "wrapper"
+            },
+            "fields": {
+              "kind": "coverage_gap",
+              "classes": [
+                "exec",
+                "fs.write",
+                "fs.deny",
+                "net"
+              ],
+              "source": "wrapper",
+              "start_ns": "390000000",
+              "end_ns": null,
+              "reason": "trace_transport_loss",
+              "lost_count": null
+            }
+          }
+        },
+        {
+          "path": [
+            7,
+            "source_seq"
+          ],
+          "value": 8
+        },
+        {
+          "path": [
+            5,
+            "source_seq"
+          ],
+          "value": 3
+        }
+      ],
+      "violations": [
+        "source_seq_gap"
+      ]
+    },
+    {
+      "name": "holes after the loss note are recorded loss",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            6
+          ],
+          "value": {
+            "schema": "ouro.event/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "source": "wrapper",
+            "source_seq": 6,
+            "observed_at": "2026-09-21T12:00:00Z",
+            "monotonic_ns": "330000000",
+            "operation": "note",
+            "stage": "result",
+            "decision": null,
+            "outcome": {
+              "ok": true,
+              "return_value": null,
+              "errno": null,
+              "completion": "wrapper"
+            },
+            "fields": {
+              "kind": "coverage_gap",
+              "classes": [
+                "exec",
+                "fs.write",
+                "fs.deny",
+                "net"
+              ],
+              "source": "wrapper",
+              "start_ns": "390000000",
+              "end_ns": null,
+              "reason": "trace_transport_loss",
+              "lost_count": null
+            }
+          }
+        },
+        {
+          "path": [
+            7,
+            "source_seq"
+          ],
+          "value": 9
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note prepared after prepared",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note enforced after prepared",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note settled after prepared",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note refused after prepared",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note prepared after enforced",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note enforced after enforced",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note settled after enforced",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note refused after enforced",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note prepared after settled",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note enforced after settled",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note settled after settled",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "receipt note refused after settled",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note prepared after refused",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "prepared",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note enforced after refused",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "enforced",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note settled after refused",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "settled",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "receipt note refused after refused",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 1,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "360000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            },
+            {
+              "schema": "ouro.event/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "source": "wrapper",
+              "source_seq": 2,
+              "observed_at": "2026-09-21T12:00:00Z",
+              "monotonic_ns": "370000000",
+              "operation": "jail.receipt",
+              "stage": "result",
+              "decision": null,
+              "outcome": {
+                "ok": true,
+                "return_value": null,
+                "errno": null,
+                "completion": "wrapper"
+              },
+              "fields": {
+                "phase": "refused",
+                "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "control prepared after prepared",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control exec_confirmed after prepared",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "control refused after prepared",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "control settled after prepared",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "control unsettled after prepared",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "control prepared after exec_confirmed",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control exec_confirmed after exec_confirmed",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control refused after exec_confirmed",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control settled after exec_confirmed",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "control unsettled after exec_confirmed",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "control prepared after refused",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control exec_confirmed after refused",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control refused after refused",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control settled after refused",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control unsettled after refused",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control prepared after settled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control exec_confirmed after settled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control refused after settled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control settled after settled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control unsettled after settled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control prepared after unsettled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "prepared",
+              "receipt_phase": "prepared",
+              "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control exec_confirmed after unsettled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "exec_confirmed",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "outcome": {
+                "kind": "pending",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control refused after unsettled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "refused",
+              "receipt_phase": "refused",
+              "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "outcome": {
+                "kind": "refused",
+                "code": null,
+                "signal": null,
+                "cause": null,
+                "error": {
+                  "code": "gate_invalid",
+                  "stage": "prepared",
+                  "message": "gate frame carries a different policy digest",
+                  "remediation_category": "configuration"
+                }
+              },
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control settled after unsettled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "settled",
+              "receipt_phase": "settled",
+              "receipt_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "control unsettled after unsettled",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [],
+          "value": [
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 1,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            },
+            {
+              "schema": "ouro.jail.control/1",
+              "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+              "seq": 2,
+              "kind": "unsettled",
+              "receipt_phase": "enforced",
+              "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "outcome": {
+                "kind": "exited",
+                "code": 0,
+                "signal": null,
+                "cause": null,
+                "error": null
+              },
+              "error": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "a trace loss the final receipt records",
+      "check": "trace",
+      "base": "fixtures/trace-loss.json",
+      "receipt": "fixtures/receipt-trace-loss.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "a loss note starting elsewhere than the receipt's gaps",
+      "check": "trace",
+      "base": "fixtures/trace-loss.json",
+      "receipt": "fixtures/receipt-trace-loss.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "start_ns"
+          ],
+          "value": "380000000"
+        }
+      ],
+      "violations": [
+        "trace_loss_recorded"
+      ]
+    },
+    {
+      "name": "a loss note naming a class the receipt covers without its gap",
+      "check": "trace",
+      "base": "fixtures/trace-loss.json",
+      "receipt": "fixtures/receipt-trace-loss.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "classes"
+          ],
+          "value": [
+            "exec",
+            "fs.write",
+            "fs.deny",
+            "net",
+            "limits"
+          ]
+        }
+      ],
+      "violations": [
+        "trace_loss_recorded"
+      ]
+    },
+    {
+      "name": "a loss note naming a class the receipt does not cover",
+      "check": "trace",
+      "base": "fixtures/trace-loss.json",
+      "receipt": "fixtures/receipt-trace-loss.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "classes"
+          ],
+          "value": [
+            "exec",
+            "fs.write",
+            "fs.deny",
+            "net",
+            "proxy.net"
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a receipt loss gap the note does not name",
+      "check": "trace",
+      "base": "fixtures/trace-loss.json",
+      "receipt": "fixtures/receipt-trace-loss.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "classes"
+          ],
+          "value": [
+            "exec",
+            "fs.write",
+            "fs.deny"
+          ]
+        }
+      ],
+      "violations": [
+        "trace_loss_recorded"
+      ]
+    },
+    {
+      "name": "a receipt loss gap with no loss note",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "receipt": "fixtures/receipt-trace-loss.json",
+      "changes": [],
+      "violations": [
+        "trace_final_receipt",
+        "trace_loss_recorded"
+      ]
     }
   ]
 }

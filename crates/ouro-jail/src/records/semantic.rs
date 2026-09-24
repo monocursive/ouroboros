@@ -11,7 +11,8 @@
 //! - [`event`]: an event's native byte strings and its coverage-gap interval;
 //! - [`trace`]: one attempt per stream, `source_seq` per source (§13.1), and
 //!   receipt notes in lifecycle order; [`trace_ends_with`]: the stream ends on
-//!   the final receipt's note (§13.3);
+//!   the final receipt's note, and its loss note agrees with that receipt's
+//!   loss gaps (§13.3);
 //! - [`control`]: one attempt, increasing message numbers and kinds in
 //!   lifecycle order (§8.2).
 //!
@@ -88,6 +89,10 @@ pub const RULES: &[(&str, &str)] = &[
     (
         "trace_final_receipt",
         "jail-v1.md:1792-1795 (§13.1) and :1948-1949 (§13.3): a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest",
+    ),
+    (
+        "trace_loss_recorded",
+        "jail-v1.md:1928-1931 and :1938-1940 (§13.3): the first loss writes one trace_transport_loss note from the last healthy point, and every later receipt records that loss on each covered evidence class",
     ),
     (
         "control_attempt_mixed",
@@ -187,16 +192,28 @@ fn byte_objects(node: &Value, at: &str, out: &mut Vec<Violation>) {
 // Receipts (§11.4, §13.2)
 // ---------------------------------------------------------------------------
 
-/// A decimal nanosecond string as a number; `None` when it is not one (the
-/// schema's pattern rejects that separately).
-fn decimal(value: &Value) -> Option<u128> {
-    value.as_str().and_then(|text| text.parse().ok())
+/// A decimal nanosecond string (`0` or digits without a leading zero, the
+/// schema's pattern); `None` when it is not one (the schema rejects that
+/// separately).
+fn decimal(value: &Value) -> Option<&str> {
+    value.as_str().filter(|text| {
+        !text.is_empty()
+            && text.bytes().all(|b| b.is_ascii_digit())
+            && (text.len() == 1 || !text.starts_with('0'))
+    })
+}
+
+/// Numeric order of two canonical decimal strings, at any length: a longer
+/// one is larger, equal lengths compare as text. No integer type bounds it,
+/// so `validate_contract.py`'s arbitrary-precision integers agree.
+fn decimal_less(left: &str, right: &str) -> bool {
+    (left.len(), left) < (right.len(), right)
 }
 
 /// A gap whose non-null end is before its start.
 fn gap_interval(gap: &Value, at: &str, out: &mut Vec<Violation>) {
     if let (Some(start), Some(end)) = (decimal(&gap["start_ns"]), decimal(&gap["end_ns"]))
-        && end < start
+        && decimal_less(end, start)
     {
         out.push(violation(
             "gap_interval_reversed",
@@ -275,6 +292,22 @@ fn is_note(event: &Value, kind: &str) -> bool {
     event["source"] == "wrapper" && event["operation"] == "note" && event["fields"]["kind"] == kind
 }
 
+/// The stream's record of a transport loss (§13.3).
+fn is_loss_note(event: &Value) -> bool {
+    is_note(event, "coverage_gap") && event["fields"]["reason"] == "trace_transport_loss"
+}
+
+/// A sequence number: a JSON integer, or a number with no fractional part,
+/// which JSON Schema's `integer` also admits (`2.0`).
+fn sequence_number(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|number| number.fract() == 0.0 && *number >= 0.0 && *number < 2f64.powi(53))
+            .and_then(|number| format!("{number:.0}").parse().ok())
+    })
+}
+
 /// Every rule one event breaks that its schema cannot state.
 #[must_use]
 pub fn event(event: &Value) -> Vec<Violation> {
@@ -328,15 +361,18 @@ pub fn trace(events: &[Value]) -> Vec<Violation> {
             }
         }
     }
-    let loss_recorded = events.iter().any(|item| {
-        is_note(item, "coverage_gap") && item["fields"]["reason"] == "trace_transport_loss"
-    });
+    // Holes are recorded loss only from the stream's first loss note on: the
+    // frames before it are a prefix of what the writer accepted (§13.3), so a
+    // number missing there is a silent loss.
+    let first_loss = events.iter().position(is_loss_note).unwrap_or(events.len());
     for source in ["wrapper", "audit", "proxy"] {
         let numbered: Vec<(usize, u64)> = events
             .iter()
             .enumerate()
             .filter(|(_, item)| item["source"] == source)
-            .filter_map(|(index, item)| item["source_seq"].as_u64().map(|seq| (index, seq)))
+            .filter_map(|(index, item)| {
+                sequence_number(&item["source_seq"]).map(|seq| (index, seq))
+            })
             .collect();
         if let Some(pair) = numbered.windows(2).find(|pair| pair[1].1 <= pair[0].1) {
             out.push(violation(
@@ -346,12 +382,10 @@ pub fn trace(events: &[Value]) -> Vec<Violation> {
             ));
             continue;
         }
-        if loss_recorded {
-            continue;
-        }
         if let Some((position, (index, seq))) = numbered
             .iter()
             .enumerate()
+            .take_while(|(_, (index, _))| *index < first_loss)
             .find(|(position, (_, seq))| u64::try_from(*position + 1) != Ok(*seq))
         {
             out.push(violation(
@@ -434,7 +468,7 @@ pub fn trace_ends_with(events: &[Value], receipt: &Value) -> Vec<Violation> {
         last["fields"]["phase"].as_str(),
         last["fields"]["receipt_digest"].as_str(),
     );
-    if found == expected {
+    let mut out = if found == expected {
         Vec::new()
     } else {
         vec![violation(
@@ -442,6 +476,76 @@ pub fn trace_ends_with(events: &[Value], receipt: &Value) -> Vec<Violation> {
             at,
             format!("the last frame is {found:?}; the final receipt's note would be {expected:?}"),
         )]
+    };
+    loss_recorded(events, receipt, &mut out);
+    out
+}
+
+/// The stream's loss note and the final receipt tell one story (§13.3): every
+/// `trace_transport_loss` gap of the receipt has the note's source and start
+/// and names only classes the note names, and every class the note names that
+/// the receipt covers (not `unsupported`) has such a gap. A receipt loss gap
+/// with no note in a complete stream is a loss the stream never recorded.
+fn loss_recorded(events: &[Value], receipt: &Value, out: &mut Vec<Violation>) {
+    let mut recorded: Vec<(&str, &Value)> = Vec::new();
+    for (class, entry) in receipt["coverage"].as_object().into_iter().flatten() {
+        for gap in entry["gaps"].as_array().into_iter().flatten() {
+            if gap["reason"] == "trace_transport_loss" {
+                recorded.push((class.as_str(), gap));
+            }
+        }
+    }
+    let Some(note) = events.iter().find(|event| is_loss_note(event)) else {
+        if let Some((class, _)) = recorded.first() {
+            out.push(violation(
+                "trace_loss_recorded",
+                format!("$.coverage.{class}"),
+                "the receipt records a trace transport loss the stream has no note for",
+            ));
+        }
+        return;
+    };
+    let fields = &note["fields"];
+    let named: Vec<&str> = fields["classes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    for (class, gap) in &recorded {
+        let within = gap["classes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .all(|name| named.contains(&name));
+        if gap["source"] != fields["source"] || gap["start_ns"] != fields["start_ns"] || !within {
+            out.push(violation(
+                "trace_loss_recorded",
+                format!("$.coverage.{class}"),
+                format!(
+                    "the receipt's loss gap ({} from {}, classes {}) is not the note's ({} from {}, classes {})",
+                    gap["source"],
+                    gap["start_ns"],
+                    gap["classes"],
+                    fields["source"],
+                    fields["start_ns"],
+                    fields["classes"]
+                ),
+            ));
+        }
+    }
+    for class in named {
+        let covered = receipt["coverage"][class]["status"]
+            .as_str()
+            .is_some_and(|status| status != "unsupported");
+        if covered && !recorded.iter().any(|(name, _)| *name == class) {
+            out.push(violation(
+                "trace_loss_recorded",
+                format!("$.coverage.{class}"),
+                "the note names this covered class but the receipt records no transport loss on it",
+            ));
+        }
     }
 }
 
