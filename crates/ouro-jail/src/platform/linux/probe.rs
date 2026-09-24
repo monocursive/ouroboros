@@ -213,10 +213,15 @@ pub fn backend_refusal(name: &str, bwrap: Backend<'_>) -> Option<ProbeResult> {
 pub const ARCH_SEAM: &str = "OURO_JAIL_TEST_ARCH";
 
 fn seam_architecture_refusal(name: &str) -> Option<ProbeResult> {
-    let seam = std::env::var(ARCH_SEAM)
-        .ok()
-        .filter(|value| !value.is_empty())?;
-    let mut refusal = architecture_refusal(name, &seam)?;
+    seam_refusal_for(name, std::env::var(ARCH_SEAM).ok().as_deref())
+}
+
+/// [`seam_architecture_refusal`] for a stated seam value. `None` whenever
+/// the value is unset, empty or an architecture the tables cover, so the
+/// real check that follows it in [`run_one_backend`] always decides.
+fn seam_refusal_for(name: &str, seam: Option<&str>) -> Option<ProbeResult> {
+    let seam = seam.filter(|value| !value.is_empty())?;
+    let mut refusal = architecture_refusal(name, seam)?;
     refusal.evidence = format!("{} (test seam {ARCH_SEAM}={seam})", refusal.evidence);
     Some(refusal)
 }
@@ -1459,6 +1464,19 @@ mod tests {
         for name in PROBE_NAMES {
             assert_eq!(architecture_refusal(name, "x86_64"), None, "{name}");
         }
+    }
+
+    #[test]
+    fn the_arch_seam_only_adds_a_refusal_and_names_itself() {
+        for (name, _) in TABLE_BOUND_PROBES {
+            for seam in [None, Some(""), Some("x86_64")] {
+                assert_eq!(seam_refusal_for(name, seam), None, "{name} {seam:?}");
+            }
+            let refusal = seam_refusal_for(name, Some("aarch64")).expect("refused");
+            assert_eq!(refusal.status, ProbeStatus::Unsupported);
+            assert!(refusal.evidence.contains("OURO_JAIL_TEST_ARCH=aarch64"));
+        }
+        assert_eq!(seam_refusal_for("bwrap_present", Some("aarch64")), None);
     }
 
     /// The capability mapping: on a build the tables do not cover, the
