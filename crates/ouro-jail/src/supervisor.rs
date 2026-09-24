@@ -4028,29 +4028,33 @@ mod tests {
     fn a_receipt_records_the_trace_loss_with_the_notes_start_and_source() {
         use crate::records::{CoverageEntry, SourceStatus};
         let file = tempfile::NamedTempFile::new().unwrap();
-        let trace = trace::shared(FileSink::with_bounds(file.reopen().unwrap(), 100, 40));
+        let trace = trace::shared(FileSink::with_bounds(file.reopen().unwrap(), 2000, 800));
         trace
             .lock()
             .unwrap()
             .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
         let mut journal = Journal::new("att_test", trace.clone());
-        // An event past the 60-byte payload budget: the sink's first loss.
-        let event = crate::records::Event::lifecycle_note(
-            "att_test",
-            0,
-            SystemTime::now(),
-            0,
-            &"x".repeat(200),
-        );
+        let note = |transition: &str| {
+            crate::records::Event::lifecycle_note("att_test", 0, SystemTime::now(), 0, transition)
+        };
+        // One delivered frame, so the last healthy point is after the start,
+        // then an event past the 1200-byte payload budget: the first loss.
+        std::thread::sleep(Duration::from_millis(2));
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&note("prepared"), Priority::Normal)
+            .expect("within the budget");
         assert!(
             trace
                 .lock()
                 .unwrap()
-                .write_event(&event, Priority::Normal)
+                .write_event(&note(&"x".repeat(1500)), Priority::Normal)
                 .is_err()
         );
         assert!(journal.take_new_loss().is_some());
         let start = trace.lock().unwrap().loss_start_ns().expect("a loss start");
+        assert!(start > 0, "the loss starts at the last delivered frame");
         let active = || CoverageEntry {
             status: SourceStatus::Active,
             sources: vec!["audit".to_owned()],
