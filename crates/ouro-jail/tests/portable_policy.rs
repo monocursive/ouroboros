@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+use ouro_jail::cli::PolicyArgs;
+use ouro_jail::config::EnvSettings;
 use ouro_jail::network::{HostRule, NetworkMode};
 use ouro_jail::policy::{
     Ceiling, Ceilings, Layer, LayerOrigin, PathRef, PolicyDelta, ProfileBaseline, ProfileName,
@@ -18,6 +20,7 @@ use ouro_jail::policy::{
 };
 use ouro_jail::profiles;
 use ouro_jail::records::{ErrorCode, EvidenceMode, JailError, NativeString, ObserveMode, Os};
+use ouro_jail::supervisor;
 
 mod common;
 
@@ -924,3 +927,343 @@ fn p02_the_workspace_root_itself_is_a_real_directory() {
             .is_symlink()
     );
 }
+
+// J5-B1 begin: the real file layers, through supervisor::resolve_plan
+// (P01.6, P02.6, P02.9, P02.10, P02.13, I02.4)
+
+/// An operator config directory, a private state root and a workspace, and
+/// the real resolution path the `run` command takes (`resolve_plan`): files
+/// parsed by the product, layered by the product, refused by the product.
+struct Files {
+    _temp: tempfile::TempDir,
+    root: PathBuf,
+    config: PathBuf,
+    workspace: PathBuf,
+}
+
+impl Files {
+    fn new() -> Files {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = common::private_tempdir();
+        let root = std::fs::canonicalize(temp.path()).expect("canonical");
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        for dir in [
+            &config,
+            &root.join("data"),
+            &workspace,
+            &config.join("launch"),
+        ] {
+            std::fs::create_dir_all(dir).expect("a directory");
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("private");
+        }
+        Files {
+            _temp: temp,
+            root,
+            config,
+            workspace,
+        }
+    }
+
+    fn write(&self, path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, text).expect("a file");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+    }
+
+    fn project(&self, text: &str) {
+        self.write(&self.workspace.join("ouro.toml"), text);
+    }
+
+    fn launch(&self, name: &str, text: &str) {
+        self.write(
+            &self.config.join("launch").join(format!("{name}.toml")),
+            text,
+        );
+    }
+
+    fn args(&self, profile: &str) -> PolicyArgs {
+        PolicyArgs {
+            profile: Some(profile.to_owned()),
+            workspace: Some(self.workspace.clone()),
+            ..PolicyArgs::default()
+        }
+    }
+
+    fn plan(&self, args: &PolicyArgs) -> Result<supervisor::Plan, JailError> {
+        let ctx = supervisor::Context {
+            platform: Box::new(ouro_jail::platform::Unimplemented),
+            env_settings: EnvSettings {
+                config_dir: Some(self.config.clone()),
+                data_dir: Some(self.root.join("data")),
+                ..EnvSettings::default()
+            },
+            cwd: self.workspace.clone(),
+            home: Some(self.root.join("home")),
+            env_lookup: Box::new(|_| None),
+        };
+        supervisor::resolve_plan(&ctx, args)
+    }
+
+    fn digest(&self, args: &PolicyArgs) -> String {
+        match self.plan(args) {
+            Ok(plan) => plan.resolved.digest,
+            Err(error) => panic!("the files must resolve: {error:?}"),
+        }
+    }
+}
+
+/// The refusal a resolution must produce, with its code and exact key path.
+fn refuses(result: Result<supervisor::Plan, JailError>, code: ErrorCode, key: &str) -> JailError {
+    match result {
+        Ok(_) => panic!("expected a {code:?} refusal naming `{key}`"),
+        Err(error) => {
+            assert_eq!(error.code, code, "{error:?}");
+            assert_eq!(error.key_path.as_deref(), Some(key), "{error:?}");
+            error
+        }
+    }
+}
+
+/// P02.6 through the files: the operator's `config.toml` caps memory and CPU;
+/// a project `ouro.toml` raising either refuses with that limit's key path.
+#[test]
+fn p02_raising_mem_or_cpu_through_the_project_file_refuses_with_the_limit_key() {
+    let files = Files::new();
+    files.write(
+        &files.config.join("config.toml"),
+        "[jail.limits]\nmem = \"256MiB\"\ncpu = 50\n",
+    );
+    files.project("[jail.limits]\nmem = \"512MiB\"\n");
+    refuses(
+        files.plan(&files.args("tool")),
+        ErrorCode::PolicyWidening,
+        "jail.limits.mem",
+    );
+    files.project("[jail.limits]\ncpu = 100\n");
+    refuses(
+        files.plan(&files.args("tool")),
+        ErrorCode::PolicyWidening,
+        "jail.limits.cpu",
+    );
+    // Lowering either is a narrowing, so the refusals are about the raise.
+    files.project("[jail.limits]\nmem = \"128MiB\"\ncpu = 25\n");
+    assert!(files.plan(&files.args("tool")).is_ok());
+}
+
+/// P02.9: a project `ouro.toml` cannot add a credential. Credentials are a
+/// real key of one layer, the operator's launch profile (§12); in the
+/// workspace-owned narrowing file they are a widening (§6.3 "Add credentials
+/// ... Refuse"), refused with their exact key path rather than as a typo.
+#[test]
+fn p02_a_credential_in_the_project_file_refuses_with_its_key_path() {
+    let files = Files::new();
+    files.project(
+        "[jail.credentials.token]\nsource = \"/etc/hostname\"\ndest = \"token\"\nmode = \"copy_rw\"\n",
+    );
+    refuses(
+        files.plan(&files.args("agent")),
+        ErrorCode::PolicyWidening,
+        "jail.credentials",
+    );
+}
+
+/// P02.10: widening through a launch profile's own settings refuses with the
+/// key path of the setting: credentials or proxy hosts under a profile that
+/// rejects them, and any launch profile under `none` (§6.1).
+#[test]
+fn p02_widening_through_a_launch_profile_refuses_with_its_key_path() {
+    let files = Files::new();
+    let source = files.root.join("fixture-credential");
+    files.write(&source, "not a real credential\n");
+    files.launch(
+        "creds",
+        &format!(
+            "name = \"creds\"\njail = \"agent\"\n[credentials.token]\nsource = {:?}\ndest = \"token\"\nmode = \"copy_rw\"\n",
+            source.display().to_string()
+        ),
+    );
+    files.launch(
+        "hosts",
+        "name = \"hosts\"\njail = \"agent\"\n[network]\nallow = [\"example.test:443\"]\n",
+    );
+    files.launch("plain", "name = \"plain\"\njail = \"tool\"\n");
+    let with = |profile: &str, launch: &str| PolicyArgs {
+        launch: Some(launch.to_owned()),
+        ..files.args(profile)
+    };
+    refuses(
+        files.plan(&with("tool", "creds")),
+        ErrorCode::InvalidConfig,
+        "launch.credentials",
+    );
+    refuses(
+        files.plan(&with("tool", "hosts")),
+        ErrorCode::InvalidConfig,
+        "launch.network.allow",
+    );
+    refuses(
+        files.plan(&with("none", "plain")),
+        ErrorCode::PolicyWidening,
+        "--launch",
+    );
+    // The same files are accepted where the profile permits them.
+    assert!(files.plan(&with("agent", "creds")).is_ok());
+    assert!(files.plan(&with("agent", "hosts")).is_ok());
+    assert!(files.plan(&with("tool", "plain")).is_ok());
+}
+
+/// P02.13: `none` cannot be selected through an untrusted layer — neither a
+/// project file naming it nor an operator profile file extending it (§6.1:
+/// `--profile none` is the only way).
+#[test]
+fn p02_none_cannot_be_selected_through_a_project_or_profile_file() {
+    let files = Files::new();
+    files.project("[jail]\nprofile = \"none\"\n");
+    refuses(
+        files.plan(&files.args("tool")),
+        ErrorCode::PolicyWidening,
+        "jail.profile",
+    );
+    std::fs::remove_file(files.workspace.join("ouro.toml")).expect("removed");
+    let profile = files.workspace.join("widen.toml");
+    files.write(
+        &profile,
+        "schema = \"ouro.jail.policy/1\"\nextends = \"none\"\n",
+    );
+    refuses(
+        files.plan(&files.args(profile.to_str().expect("UTF-8"))),
+        ErrorCode::PolicyWidening,
+        "extends",
+    );
+}
+
+/// P01.6: a semantic change in a canonical TOML input changes the policy
+/// digest, through the files the product parses: the canonical operator
+/// profile (a limit, a grant) and a launch profile (an environment value).
+/// A change of form only (comments, blank lines, key order) does not, and the
+/// argv digest, the other digest of an attempt, never moves with the policy.
+#[test]
+fn p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_digest() {
+    let files = Files::new();
+    for dir in ["fixtures", "secrets", "other"] {
+        std::fs::create_dir(files.workspace.join(dir)).expect("a directory");
+    }
+    let canonical = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/specs/jail-v1/fixtures/canonical-input.toml"),
+    )
+    .expect("the canonical input");
+    let profile = files.workspace.join("canonical.toml");
+    let launch = |value: &str| {
+        files.launch(
+            "fx",
+            &format!("name = \"fx\"\njail = \"tool\"\n[environment]\nFIXTURE_VALUE = {value:?}\n"),
+        );
+    };
+    let args = PolicyArgs {
+        launch: Some("fx".to_owned()),
+        ..files.args(profile.to_str().expect("UTF-8"))
+    };
+    let argv: Vec<Vec<u8>> = vec![b"/usr/bin/true".to_vec()];
+    let argv_digest = ouro_jail::canonical::argv_digest(&argv);
+
+    let digest_of = |text: &str, value: &str| {
+        files.write(&profile, text);
+        launch(value);
+        files.digest(&args)
+    };
+    let base = digest_of(&canonical, "one");
+    let limit = digest_of(&canonical.replace("wall = \"5m\"", "wall = \"4m\""), "one");
+    let grant = digest_of(&canonical.replace("\"./fixtures\"", "\"./other\""), "one");
+    let environment = digest_of(&canonical, "two");
+    let form = digest_of(
+        &format!(
+            "# a comment\n\n{}\n",
+            canonical.replace("pids = 64\n", "pids = 64\n\n")
+        ),
+        "one",
+    );
+    assert_ne!(limit, base, "a changed limit kept the digest");
+    assert_ne!(grant, base, "a changed grant kept the digest");
+    assert_ne!(
+        environment, base,
+        "a changed environment value kept the digest"
+    );
+    assert_ne!(limit, grant);
+    assert_ne!(grant, environment);
+    assert_eq!(form, base, "a change of form only moved the digest");
+    // The attempt's other digest is a function of its argv alone.
+    assert_eq!(ouro_jail::canonical::argv_digest(&argv), argv_digest);
+}
+
+/// I02.4: `--launch NAME` reads only `<operator config>/launch/NAME.toml`.
+/// With no such file it refuses, even with the same name planted in the
+/// workspace, in a `profiles/launch/` directory beside it and in the default
+/// configuration under the operator home; there is no built-in fallback to
+/// the bundled profiles. The operator's own file is then what resolves.
+#[test]
+fn i02_launch_reads_only_the_operators_configuration() {
+    let files = Files::new();
+    let bundled = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("profiles/launch/opencode.toml"),
+    )
+    .expect("the bundled opencode profile");
+    for decoy in [
+        files.workspace.join("launch"),
+        files.workspace.join("profiles/launch"),
+        files.root.join("home/.config/ouro/launch"),
+    ] {
+        std::fs::create_dir_all(&decoy).expect("a decoy directory");
+        files.write(&decoy.join("opencode.toml"), &bundled);
+    }
+    let args = PolicyArgs {
+        launch: Some("opencode".to_owned()),
+        ..PolicyArgs {
+            workspace: Some(files.workspace.clone()),
+            ..PolicyArgs::default()
+        }
+    };
+    let error = refuses(files.plan(&args), ErrorCode::InvalidConfig, "--launch");
+    assert!(
+        error
+            .message
+            .contains(&files.config.join("launch").display().to_string()),
+        "the refusal names the operator's launch directory: {}",
+        error.message
+    );
+    files.launch("opencode", &bundled);
+    let plan = files.plan(&args).expect("the operator's own file resolves");
+    assert_eq!(plan.config_dir, files.config);
+}
+// J5-B1 end
+
+// J5-B1 begin: P02.12
+/// P02.12: a symlink component and a case variation of a denied subtree
+/// refuse as a widening with the exact key path of the grant that tried
+/// them, for both grant keys a narrowing file has. (P02.11 proves the
+/// refusal; this proves the key path the operator is pointed at.)
+#[test]
+fn p02_a_symlink_component_and_a_case_variation_refuse_with_the_key_path() {
+    let workspace = Workspace::new();
+    for (key, delta) in [
+        (
+            "jail.filesystem.read_only",
+            read_only as fn(&[&str]) -> PolicyDelta,
+        ),
+        ("jail.filesystem.read_write", read_write),
+    ] {
+        for spelling in ["./alias", "./escape", "./alias/deeper", "./SECRETS"] {
+            let error = workspace
+                .resolve_project(ProfileName::Tool, |_| {}, delta(&[spelling]))
+                .expect_err("a symlink or a case variation must not become a grant");
+            assert_eq!(error.code, ErrorCode::PolicyWidening, "{key} {spelling}");
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some(key),
+                "{spelling}: the refusal names the grant's key path"
+            );
+        }
+    }
+}
+// J5-B1 end

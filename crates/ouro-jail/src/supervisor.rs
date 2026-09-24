@@ -456,6 +456,22 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
     // 5. The workspace-root `ouro.toml`, which may only narrow.
     let project_path = workspace.join("ouro.toml");
     if let Some(text) = read_project_file(&project_path)? {
+        // J5-B1 begin: P02.9 — §6.3 "Add credentials ... Refuse": a key of
+        // the operator's launch layer in the workspace-owned narrowing file
+        // is a widening, refused with its exact key path, not a typo.
+        if let Some(key) = launch_layer_key_in_project(&text) {
+            return Err(JailError::new(
+                ErrorCode::PolicyWidening,
+                ErrorStage::Resolving,
+                Remediation::Configuration,
+                format!(
+                    "`{key}` is staged only from an operator launch profile (§12); a project \
+                     file may only narrow"
+                ),
+            )
+            .with_key_path(key));
+        }
+        // J5-B1 end
         let project = config::parse_project_config(&text)?;
         if let Some(section) = project.jail {
             config::check_schema("jail.schema", section.schema.as_deref())?;
@@ -673,6 +689,20 @@ fn read_operator_file(path: &Path, key: &str) -> Result<Option<String>, JailErro
         Err(error) => Err(usage(key, format!("{}: {error}", path.display()))),
     }
 }
+
+// J5-B1 begin: P02.9
+/// The key path of a launch-layer grant (`credentials`) under the project
+/// file's `[jail]` table, when there is one. A file that is not TOML is left
+/// to the parser, which reports it.
+fn launch_layer_key_in_project(text: &str) -> Option<&'static str> {
+    let table: toml::Table = toml::from_str(text).ok()?;
+    table
+        .get("jail")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|jail| jail.contains_key("credentials"))
+        .then_some("jail.credentials")
+}
+// J5-B1 end
 
 /// Reads the workspace-root `ouro.toml`, which the contained party writes.
 ///
