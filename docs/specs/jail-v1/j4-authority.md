@@ -70,10 +70,12 @@ All tests run live on the reference host unless named portable.
 ## Known gaps
 
 - A supervisor killed during bubblewrap's startup, in an attempt without an
-  execution leaf (a supervisor outside a delegated user scope), can leave the
-  namespace init (and under `agent` its bridge) alive; §9.3 states the limit.
-  Running in a delegated scope closes it; making that automatic is an open
-  decision.
+  execution leaf, can leave the namespace init (and under `agent` its bridge)
+  alive; §9.3 states the limit. Since revision 18, `run` and `doctor` enter a
+  delegated user scope themselves where the user manager lingers, which closes
+  it from a plain login session (20 of 20 synchronized `agent` kills left
+  survivors before, 0 of 20 after); without lingering the supervisor stays in
+  its session and the limit remains.
 - PID reuse is not forced live (it needs `CAP_SYS_ADMIN` in the pid
   namespace); a session-level hook simulates a recycled tid. Nested pid
   namespaces are evidenced only through `none` running the host's bubblewrap.
