@@ -136,6 +136,10 @@ impl ProbeResult {
     }
 }
 
+/// The backend a probe runs: the resolved bubblewrap (an absolute, canonical
+/// path), or why none was resolved (`platform::resolved_bwrap`).
+pub type Backend<'a> = Result<&'a Path, &'a str>;
+
 /// Run every probe.
 #[must_use]
 pub fn run_all(jail_exe: &Path, bwrap: &Path) -> Vec<ProbeResult> {
@@ -146,10 +150,77 @@ pub fn run_all(jail_exe: &Path, bwrap: &Path) -> Vec<ProbeResult> {
 }
 
 /// Run one probe by name. An unknown name is `skipped`, never a silent pass.
+///
+/// `bwrap` is executed only when it is absolute; a bare or relative name
+/// would be looked up again through `PATH`, so it counts as no backend.
 #[must_use]
 pub fn run_one(name: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+    let backend = if bwrap.is_absolute() {
+        Ok(bwrap)
+    } else {
+        Err("bubblewrap was named by a relative path, which is never executed")
+    };
+    run_one_backend(name, jail_exe, backend)
+}
+
+/// [`run_one`] with the backend as the platform resolved it.
+#[must_use]
+pub fn run_one_backend(name: &str, jail_exe: &Path, bwrap: Backend<'_>) -> ProbeResult {
+    // J5-D: the test seam can only add an architecture refusal, never lift
+    // one; the refusal's evidence names the seam.
+    if let Some(refusal) = seam_architecture_refusal(name) {
+        return refusal;
+    }
     run_one_for(name, std::env::consts::ARCH, jail_exe, bwrap)
 }
+
+// J5-D begin: probes that execute bubblewrap (review F1)
+/// The probes that execute bubblewrap, with the mechanism each names. With
+/// no resolved backend they report `unavailable` with `backend_unavailable`
+/// and execute nothing: a bare name would be looked up again, and an empty
+/// `PATH` entry would find whatever `bwrap` the working directory holds.
+pub const BACKEND_PROBES: [(&str, &str); 10] = [
+    ("bwrap_present", "bubblewrap"),
+    ("user_namespace", "user-namespace"),
+    ("pid_namespace", "pid-namespace"),
+    ("network_namespace", "network-namespace"),
+    ("mount_readonly_bind", "bubblewrap-binds"),
+    ("seccomp_filter_load", "seccomp-bpf"),
+    ("nested_user_namespace", "nested-bubblewrap"),
+    ("agent_proxy_bridge", "outside-http-proxy+loopback-bridge"),
+    ("agent_unix_peer_mediation", "seccomp-user-notification"),
+    ("agent_inner_sandbox", "landlock+seccomp"),
+];
+
+/// The result of a backend probe when no backend was resolved.
+#[must_use]
+pub fn backend_refusal(name: &str, bwrap: Backend<'_>) -> Option<ProbeResult> {
+    let reason = bwrap.err()?;
+    let (name, mechanism) = BACKEND_PROBES.iter().find(|(probe, _)| *probe == name)?;
+    Some(ProbeResult::new(
+        name,
+        ProbeStatus::Unavailable,
+        mechanism,
+        "backend_unavailable",
+        format!("bubblewrap is not available: {reason}"),
+    ))
+}
+
+/// The architecture test seam (`OURO_JAIL_TEST_ARCH`): a stated architecture
+/// the table-bound probes are refused for, as they would be on a build for
+/// it. It only ever adds a refusal: on an architecture the tables do not
+/// cover, the real refusal applies whatever the seam says.
+pub const ARCH_SEAM: &str = "OURO_JAIL_TEST_ARCH";
+
+fn seam_architecture_refusal(name: &str) -> Option<ProbeResult> {
+    let seam = std::env::var(ARCH_SEAM)
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    let mut refusal = architecture_refusal(name, &seam)?;
+    refusal.evidence = format!("{} (test seam {ARCH_SEAM}={seam})", refusal.evidence);
+    Some(refusal)
+}
+// J5-D end
 
 // J5-D begin: the architecture refusal (§3.2)
 /// The probes whose mechanism is one of this implementation's x86_64
@@ -192,10 +263,16 @@ pub fn architecture_refusal(name: &str, arch: &str) -> Option<ProbeResult> {
 /// [`run_one`] for a stated architecture, so the refusal is testable on the
 /// architecture the tests run on.
 #[must_use]
-pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) -> ProbeResult {
     if let Some(refusal) = architecture_refusal(name, arch) {
         return refusal;
     }
+    if let Some(refusal) = backend_refusal(name, bwrap) {
+        return refusal;
+    }
+    // Every probe that uses `bwrap` is in BACKEND_PROBES, so from here on it
+    // is the resolved path whenever one of them reads it.
+    let bwrap = bwrap.unwrap_or(Path::new("/nonexistent/unresolved-bwrap"));
     match name {
         "bwrap_present" => probe_bwrap_present(bwrap),
         "user_namespace" => probe_namespace("user_namespace", jail_exe, bwrap),
@@ -520,9 +597,11 @@ fn probe_seccomp(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 /// user, pid and mount namespaces and its own root, and asks whether it can
 /// run a command — which is what the `agent` profile needs and a bare
 /// `unshare` does not establish.
-fn nested_bwrap_argv() -> Vec<OsString> {
+fn nested_bwrap_argv(bwrap: &Path) -> Vec<OsString> {
+    // J5-D: the same resolved file, as the sandbox sees it through the
+    // read-only runtime roots (review F1: nothing but it runs).
     let mut argv = vec![
-        OsString::from("/usr/bin/bwrap"),
+        bwrap.as_os_str().to_owned(),
         OsString::from("--unshare-user"),
         OsString::from("--unshare-pid"),
     ];
@@ -567,7 +646,7 @@ fn probe_nested_userns(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
             .to_owned(),
         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
     };
-    let run = match run_inside_raw(jail_exe, bwrap, nested_bwrap_argv(), Vec::new(), false) {
+    let run = match run_inside_raw(jail_exe, bwrap, nested_bwrap_argv(bwrap), Vec::new(), false) {
         Ok(run) => run,
         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
     };
@@ -1370,7 +1449,7 @@ mod tests {
                         name,
                         arch,
                         Path::new("/nonexistent"),
-                        Path::new("/nonexistent")
+                        Ok(Path::new("/nonexistent"))
                     ),
                     refusal
                 );

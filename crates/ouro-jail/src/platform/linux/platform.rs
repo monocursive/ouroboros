@@ -93,7 +93,8 @@ const LIMIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 /// The Linux platform.
 #[derive(Clone, Debug)]
 pub struct LinuxPlatform {
-    bwrap: PathBuf,
+    // J5-D: the resolved backend, or why none was (review F1/F2)
+    bwrap: Result<PathBuf, String>,
 }
 
 impl Default for LinuxPlatform {
@@ -103,38 +104,93 @@ impl Default for LinuxPlatform {
 }
 
 impl LinuxPlatform {
-    /// The platform with bubblewrap looked up on `PATH`.
+    /// The platform with the bubblewrap this process resolved once from the
+    /// operator's `PATH` ([`resolved_bwrap`]).
     #[must_use]
     pub fn new() -> Self {
         LinuxPlatform {
-            bwrap: find_bwrap(),
+            bwrap: resolved_bwrap()
+                .map(Path::to_path_buf)
+                .map_err(str::to_owned),
         }
     }
 
-    /// The bubblewrap binary this platform will use.
+    /// The bubblewrap binary this platform executes: an absolute, canonical
+    /// path, or `None` when the operator's `PATH` provides none.
     #[must_use]
-    pub fn bwrap(&self) -> &Path {
-        &self.bwrap
+    pub fn bwrap(&self) -> Option<&Path> {
+        self.bwrap.as_deref().ok()
+    }
+
+    /// The backend as the probes take it: the path, or why there is none.
+    fn backend(&self) -> Result<&Path, &str> {
+        self.bwrap.as_deref().map_err(String::as_str)
     }
 }
 
-/// The backend, looked up on the operator's `PATH`.
+// J5-D begin: bubblewrap, resolved once (review F1, F2)
+/// The backend, resolved from a `PATH` value.
 ///
-/// There is no fallback to a well-known location. An operator whose `PATH`
-/// does not contain bubblewrap has not provisioned this host for the backend,
-/// and `doctor` should say the backend is unavailable rather than reach past
-/// what they configured and report a capability they did not offer.
-fn find_bwrap() -> PathBuf {
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join("bwrap");
-            if candidate.is_file() {
-                return candidate;
-            }
+/// The first *absolute* entry that holds an executable regular file named
+/// `bwrap`, canonicalized, so the path recorded is the file that runs. An
+/// empty entry (which a shell-style lookup reads as the current directory)
+/// and a relative entry are skipped: either would let the working directory
+/// pick the backend. There is no fallback to a well-known location, and an
+/// unset `PATH` is not replaced by the C library's default search path: an
+/// operator whose `PATH` does not name bubblewrap has not provisioned it,
+/// and `doctor` says the backend is unavailable rather than reach past what
+/// they configured (§3.2).
+///
+/// # Errors
+/// Why no backend was found, for the `bwrap_present` evidence.
+pub fn resolve_bwrap(path: Option<&std::ffi::OsStr>) -> Result<PathBuf, String> {
+    let Some(path) = path else {
+        return Err("PATH is unset, so no bubblewrap is provisioned for this process".to_owned());
+    };
+    let mut skipped = Vec::new();
+    for dir in std::env::split_paths(path) {
+        if dir.as_os_str().is_empty() || !dir.is_absolute() {
+            skipped.push(format!("{:?}", dir.display().to_string()));
+            continue;
+        }
+        let Ok(canonical) = std::fs::canonicalize(dir.join("bwrap")) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&canonical) else {
+            continue;
+        };
+        let Ok(c_path) = std::ffi::CString::new(canonical.as_os_str().as_bytes()) else {
+            continue;
+        };
+        // SAFETY: `c_path` is a live NUL-terminated string; access reads it.
+        let executable = unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0;
+        if meta.is_file() && executable {
+            return Ok(canonical);
         }
     }
-    PathBuf::from("bwrap")
+    let mut reason = "no executable `bwrap` in any absolute PATH entry".to_owned();
+    if !skipped.is_empty() {
+        reason.push_str(&format!(
+            " (empty or relative entries are never searched: {})",
+            skipped.join(", ")
+        ));
+    }
+    Err(reason)
 }
+
+/// [`resolve_bwrap`] of this process's `PATH`, computed once: every probe,
+/// every run and `doctor`'s record use this one path.
+///
+/// # Errors
+/// Why no backend was found.
+pub fn resolved_bwrap() -> Result<&'static Path, &'static str> {
+    static RESOLVED: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| resolve_bwrap(std::env::var_os("PATH").as_deref()))
+        .as_deref()
+        .map_err(String::as_str)
+}
+// J5-D end
 
 fn error(
     code: ErrorCode,
@@ -333,7 +389,7 @@ impl LinuxPlatform {
         let results: Vec<ProbeResult> = probe::PROBE_NAMES
             .iter()
             .filter(|name| wanted(name))
-            .map(|name| probe::run_one(name, &exe, &self.bwrap))
+            .map(|name| probe::run_one_backend(name, &exe, self.backend()))
             .collect();
         let measured_at = rfc3339_utc(SystemTime::now());
 
@@ -417,7 +473,16 @@ impl Platform for LinuxPlatform {
             return super::uncontained::prepare(plan, sinks, deadline);
         }
         // J3-none end
-        let prepared = Boundary::create(&self.bwrap, plan, sinks, deadline)?;
+        // J5-D: never a bare name, so nothing but the resolved file runs.
+        let bwrap = self.backend().map_err(|reason| {
+            error(
+                ErrorCode::BackendUnavailable,
+                ErrorStage::Preparing,
+                Remediation::HostSetup,
+                format!("bubblewrap is not available: {reason}"),
+            )
+        })?;
+        let prepared = Boundary::create(bwrap, plan, sinks, deadline)?;
         Ok(Box::new(LinuxPrepared { boundary: prepared }))
     }
 }
@@ -3354,6 +3419,99 @@ impl Drop for Boundary {
 
 #[cfg(test)]
 mod tests {
+    // J5-D begin: bubblewrap resolution (review F1, F2)
+    fn executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn bubblewrap_resolves_only_from_absolute_entries_to_a_canonical_file() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        let link = root.join("link");
+        for d in [&first, &second, &link] {
+            std::fs::create_dir(d).unwrap();
+        }
+        executable(&second.join("bwrap"));
+        let second_s = second.to_str().unwrap().to_owned();
+
+        // An empty, a `.` and a relative entry are never searched, even
+        // listed first; the first absolute entry holding one wins.
+        for path in [
+            format!(":{second_s}"),
+            format!(".:{second_s}"),
+            format!("rel:{second_s}"),
+            format!("{}:{second_s}", first.display()),
+        ] {
+            assert_eq!(
+                super::resolve_bwrap(Some(OsStr::new(&path))).unwrap(),
+                second.join("bwrap"),
+                "{path}"
+            );
+        }
+        // A symlink is recorded as the file it names.
+        std::os::unix::fs::symlink(second.join("bwrap"), link.join("bwrap")).unwrap();
+        assert_eq!(
+            super::resolve_bwrap(Some(OsStr::new(link.to_str().unwrap()))).unwrap(),
+            second.join("bwrap")
+        );
+        // Not executable, or not a regular file: skipped.
+        std::fs::write(first.join("bwrap"), b"").unwrap();
+        std::fs::set_permissions(first.join("bwrap"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        std::fs::create_dir(root.join("dir-named")).unwrap();
+        std::fs::create_dir(root.join("dir-named").join("bwrap")).unwrap();
+        let path = format!(
+            "{}:{}:{second_s}",
+            first.display(),
+            root.join("dir-named").display()
+        );
+        assert_eq!(
+            super::resolve_bwrap(Some(OsStr::new(&path))).unwrap(),
+            second.join("bwrap")
+        );
+        // Nothing absolute holds one: refused, with the reason.
+        for path in ["", ":", ".", "rel:.:"] {
+            let reason = super::resolve_bwrap(Some(OsStr::new(path))).unwrap_err();
+            assert!(reason.contains("no executable `bwrap`"), "{path}: {reason}");
+            assert!(reason.contains("never searched"), "{path}: {reason}");
+        }
+        let reason = super::resolve_bwrap(Some(OsStr::new(first.to_str().unwrap()))).unwrap_err();
+        assert!(!reason.contains("never searched"), "{reason}");
+        // No PATH at all: refused, never the C library's default path.
+        assert!(
+            super::resolve_bwrap(None)
+                .unwrap_err()
+                .contains("PATH is unset")
+        );
+    }
+
+    #[test]
+    fn a_probe_never_executes_a_relative_or_missing_backend() {
+        use super::super::probe::{self, ProbeStatus};
+        let exe = std::path::Path::new("/nonexistent/ouro-jail");
+        for (name, _) in probe::BACKEND_PROBES {
+            for result in [
+                probe::run_one(name, exe, std::path::Path::new("bwrap")),
+                probe::run_one_backend(name, exe, Err("PATH is unset")),
+            ] {
+                // A table-bound probe is refused first off x86_64.
+                if result.status == ProbeStatus::Unsupported {
+                    continue;
+                }
+                assert_eq!(result.status, ProbeStatus::Unavailable, "{name}");
+                assert_eq!(result.reason_code, "backend_unavailable", "{name}");
+            }
+        }
+    }
+    // J5-D end
+
     #[test]
     fn stalled_backend_argument_delivery_has_a_deadline() {
         use std::os::fd::AsRawFd;

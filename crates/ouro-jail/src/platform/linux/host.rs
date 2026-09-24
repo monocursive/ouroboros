@@ -243,18 +243,15 @@ mod linux {
             .map(|text| text.trim().to_owned())
     }
 
-    /// The bubblewrap the product resolved (`LinuxPlatform::bwrap`): its
-    /// path, hash and version, or `null` when the product found none on
-    /// the operator's `PATH` (it then holds the bare name `bwrap`, which
-    /// nothing can hash). A hash or version that cannot be read is `null`.
+    /// The bubblewrap the product resolved (`platform::resolved_bwrap`, an
+    /// absolute canonical path): its path, hash and version, or `null` when
+    /// the operator's `PATH` provides none. A hash or version that cannot be
+    /// read is `null`.
     #[must_use]
-    pub fn bwrap_binary(path: &Path) -> serde_json::Value {
-        if path
-            .parent()
-            .is_none_or(|parent| parent.as_os_str().is_empty())
-        {
+    pub fn bwrap_binary(path: Option<&Path>) -> serde_json::Value {
+        let Some(path) = path else {
             return serde_json::Value::Null;
-        }
+        };
         serde_json::json!({
             "path": path.to_string_lossy(),
             "sha256": file_sha256(path).ok(),

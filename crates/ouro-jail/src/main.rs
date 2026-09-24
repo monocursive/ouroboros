@@ -506,10 +506,9 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
 
 // J5-D begin
 /// The binaries this `doctor` vouches for: itself, and on Linux the
-/// bubblewrap the platform resolved. `LinuxPlatform::new` repeats the exact
-/// lookup the context's platform made (the first `bwrap` on this process's
-/// `PATH`, which nothing changes in between), so the record names the file
-/// a run would execute, not a guess at a well-known location.
+/// bubblewrap the platform resolved. The resolution is made once per
+/// process (`resolved_bwrap`), so the record names exactly the file every
+/// probe and run executes, not a second lookup.
 fn binaries_json() -> serde_json::Value {
     let mut binaries = serde_json::Map::new();
     binaries.insert(
@@ -520,7 +519,7 @@ fn binaries_json() -> serde_json::Value {
     binaries.insert(
         "bwrap".to_owned(),
         ouro_jail::platform::linux::host::bwrap_binary(
-            ouro_jail::platform::linux::platform::LinuxPlatform::new().bwrap(),
+            ouro_jail::platform::linux::platform::resolved_bwrap().ok(),
         ),
     );
     serde_json::Value::Object(binaries)
