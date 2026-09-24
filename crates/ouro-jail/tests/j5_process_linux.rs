@@ -1465,11 +1465,17 @@ fn p04_a_state_root_overlapping_an_ro_or_rw_grant_refuses() {
     if !common::live() {
         return;
     }
+    use std::os::unix::fs::PermissionsExt as _;
     let outer = common::private_tempdir();
     let data = outer.path().join("state");
-    std::fs::create_dir(&data).unwrap();
     let inner = data.join("inner");
-    std::fs::create_dir(&inner).unwrap();
+    // Private (0700) whatever the umask, so the only rule these runs can
+    // break is the overlap one (a 0775 state root refused on its mode made
+    // this test pass for the wrong reason; the mutation replay showed it).
+    for dir in [&data, &inner] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     for (label, extra) in [
         (
             "--ro over the state root",
@@ -1493,9 +1499,12 @@ fn p04_a_symlinked_state_root_refuses_through_run() {
     if !common::live() {
         return;
     }
+    use std::os::unix::fs::PermissionsExt as _;
     let outer = common::private_tempdir();
     let real = outer.path().join("real");
     std::fs::create_dir(&real).unwrap();
+    // A private target, so the symlink rule is the only one it can break.
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
     let link = outer.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let (code, stderr, ran) = p04_run(Some(&link), &[]);
@@ -1534,13 +1543,16 @@ fn p04_an_unsafe_state_root_mode_or_owner_refuses_through_run() {
     }
     use std::os::unix::fs::PermissionsExt as _;
     let outer = common::private_tempdir();
+    // Readable by others but writable by nobody else: the ancestor rule (no
+    // replacement by others) passes it, so only the state root's own mode
+    // rule (0700 or stricter) can refuse it. A 0777 root is refused by both.
     let open = outer.path().join("open");
     std::fs::create_dir(&open).unwrap();
-    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (code, stderr, ran) = p04_run(Some(&open), &[]);
-    assert_eq!(code, Some(125), "mode 0777: {stderr}");
+    assert_eq!(code, Some(125), "mode 0755: {stderr}");
     assert!(!ran);
-    assert!(stderr.contains("unsafe_state_path"), "mode 0777: {stderr}");
+    assert!(stderr.contains("unsafe_state_path"), "mode 0755: {stderr}");
     // A directory owned by root with mode 0700, so only the owner rule can
     // refuse it (a 0755 one would also fail the mode rule).
     let foreign = Path::new("/root");
