@@ -593,9 +593,12 @@ pub fn smoke_problems(smoke: &Smoke) -> Vec<String> {
 /// The step writes its output to `<name>.log`, its shell's pid to
 /// `<name>.pid`, and its exit status to `<name>.rc`, the last by rename, so
 /// a status that exists is complete. The command runs in a subshell, so an
-/// `exit` in it cannot skip the status. `setsid` puts it in a session of its
-/// own, so the end of the starting SSH session signals nothing to it, and
-/// its descriptors are redirected so that session can close at once.
+/// `exit` in it cannot skip the status. `setsid -f` forks it into a session
+/// of its own and returns at once, so the end of the starting SSH session
+/// signals nothing to it, and its descriptors are redirected so that session
+/// can close at once. No `&` list and no `nohup`: the first leaves INT and
+/// QUIT ignored in a non-interactive shell, the second HUP, both survive
+/// exec, and the suite's operator-signal tests need them at their defaults.
 /// `mkdir <name>.started` makes starting idempotent: a start whose reply was
 /// lost cannot start the step twice.
 ///
@@ -610,9 +613,9 @@ pub fn detached_start(run_dir: &str, name: &str, command: &str) -> String {
     let p = run_path(run_dir);
     format!(
         "cd {p} && mkdir {name}.started && \
-         {{ setsid nohup sh -c 'echo $$ > {name}.pid; ( {command} ) > {name}.log 2>&1; \
+         setsid -f sh -c 'echo $$ > {name}.pid; ( {command} ) > {name}.log 2>&1; \
          echo $? > {name}.rc.new; mv {name}.rc.new {name}.rc' \
-         < /dev/null > /dev/null 2>&1 & }} && echo started"
+         < /dev/null > /dev/null 2>&1 && echo started"
     )
 }
 
@@ -1860,11 +1863,15 @@ mod tests {
     fn a_detached_start_is_idempotent_and_holds_no_session_descriptor() {
         let s = detached_start("d", "test", "true");
         let mkdir = s.find("mkdir test.started").unwrap();
-        let setsid = s.find("setsid nohup sh -c").unwrap();
+        let setsid = s.find("setsid -f sh -c").unwrap();
         assert!(mkdir < setsid, "the guard comes before the start: {s}");
         assert!(
-            s.contains("< /dev/null > /dev/null 2>&1 & }"),
+            s.contains("< /dev/null > /dev/null 2>&1 && echo started"),
             "the detached shell must not keep the SSH session's descriptors: {s}"
+        );
+        assert!(
+            !s.contains("nohup") && !s.contains(" & "),
+            "no nohup and no & list: they leave HUP, INT and QUIT ignored: {s}"
         );
         assert!(s.contains("( true ) > test.log 2>&1"), "{s}");
     }
@@ -2116,6 +2123,26 @@ mod tests {
             assert_eq!(home.settle("s"), Some(Poll::Done(3)));
             let log = home.file("s.log");
             assert!(log.contains("out") && log.contains("err"), "{log}");
+        }
+
+        /// The suite's operator-signal tests need INT, QUIT and HUP at their
+        /// defaults; an `&` list ignores INT and QUIT in a non-interactive
+        /// shell and `nohup` ignores HUP, and both survive exec.
+        #[test]
+        fn a_step_starts_with_default_int_quit_and_hup() {
+            let home = Home::new("signals");
+            home.sh(&detached_start("d", "s", "grep ^SigIgn: /proc/self/status"));
+            assert_eq!(home.settle("s"), Some(Poll::Done(0)));
+            let line = home.file("s.log");
+            let mask = u64::from_str_radix(line.trim().trim_start_matches("SigIgn:").trim(), 16)
+                .unwrap_or_else(|e| panic!("no SigIgn mask in {line:?}: {e}"));
+            for (name, signal) in [("INT", 2), ("QUIT", 3), ("HUP", 1)] {
+                assert_eq!(
+                    mask & (1u64 << (signal - 1)),
+                    0,
+                    "{name} is ignored in the step: {line}"
+                );
+            }
         }
 
         #[test]
