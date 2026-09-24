@@ -1,7 +1,10 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 17, 2026-09-24. No implementation
-or backend conformance is claimed by this document. Revision 17 records J4's
+Status: implementation specification, revision 18, 2026-09-24. No implementation
+or backend conformance is claimed by this document. Revision 18 has `run` and
+`doctor` enter a delegated user scope themselves where the user manager
+lingers, so an attempt gets its execution leaf from a plain login session
+(§§6.2, 9.3, 14.1). Revision 17 records J4's
 third wave, the fixes its adversarial reviews forced: the lease held while
 persistence may be in flight, one loss one error, the attempt-named execution
 leaf and gc's association check, gc's intent records and finished attempts, the
@@ -567,8 +570,9 @@ Apply configuration in this order:
    `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
    `OURO_JAIL_EVIDENCE`. No environment-derived path or host grants.
    Every `OURO_JAIL_TEST_*` variable is a test-only knob: it can only shrink
-   a bound or end an attempt early, never widens authority, and leaves the
-   policy digest unchanged. At attempt start every such variable set is
+   a bound, end an attempt early or make the product take a path it takes on
+   other hosts; it never widens authority and leaves the policy digest
+   unchanged. At attempt start every such variable set is
    recorded, name to value (a name set more than once with its first value,
    the one `getenv` returns and every consumer applies), in `jail-state.json` `test_seams` and in
    `lifetime.native.details.test_seams` of every receipt that has native
@@ -587,6 +591,13 @@ Apply configuration in this order:
    are ignored
    unless the value is decimal digits in range and are also named in the
    receipt's `observer_plan.test_seams` with the value applied, or null when
+   ignored. `OURO_JAIL_TEST_SUPERVISOR_SCOPE` takes §9.3's outside-a-scope
+   branch of the supervisor scope step even inside the delegated subtree
+   (`assume-outside`), with `busctl` treated as absent
+   (`assume-outside-no-busctl`), with an unreachable bus
+   (`assume-outside-no-bus`) or with lingering treated as off
+   (`assume-outside-no-linger`); any other value is ignored; it is named in
+   `supervisor_scope.test_seam`, with the value applied or null when
    ignored.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
@@ -1112,18 +1123,39 @@ kill by design. The backend's end without a release starts a short grace
 signal follows the supervisor thread that started it and can fire while the
 rest of a dying supervisor still looks alive: a supervisor that dies within
 the grace still has its leaf killed, and one that outlives it owns the rest.
-Without an execution leaf (a supervisor outside a delegated user scope, where
-no required limit demands one), the watcher can kill only bubblewrap's outer
-process, and a supervisor killed during bubblewrap's startup can leave the
-namespace init, and under `agent` its bridge, alive and holding the run's
-stdout, where `gc` cannot find them (measured 2026-09-23: 6 of 20 synchronized
-kills outside a scope, 0 of 20 inside one). Running a contained profile in a
-delegated user scope (for example `systemd-run --user --scope`) closes it. A
+On Linux, `run` and `doctor` first make sure the supervisor itself is inside
+the operator-delegated subtree. Before any thread or other resource exists, a
+supervisor whose `/proc/self/cgroup` lies outside `user@<uid>.service` asks
+the systemd user manager for a transient scope containing its own pid
+(`StartTransientUnit` of `ouro-jail-<pid>-<random>.scope` with `PIDs` and
+`CollectMode=inactive-or-failed`, through `busctl` at `/usr/bin/busctl` or
+`/bin/busctl`, run as a child with only the bus variables in its environment,
+no inherited descriptor and a parent-death signal). The supervisor is never
+re-executed: its pid, descriptors, argv, stdio and parent are unchanged. It
+then waits up to 2 seconds, call included, to see itself in that very unit
+inside the subtree. It does this only where the user manager lingers
+(logind's record under `/var/lib/systemd/linger`): a supervisor in the scope
+belongs to the user manager, which without lingering stops when the last
+session ends and would take the run with it, while a supervisor left in its
+session scope survives logout. Every receipt with native details records the
+result as `lifetime.native.details.supervisor_scope` (`state`
+`already_delegated`, `entered` or `unavailable`; the `unit` requested or
+null; `reason_code` and `reason`; the `cgroup` observed at the end), and
+`doctor` reports it too (§14.1). The step never fails a run. Where it cannot
+enter a scope (no delegated subtree, no lingering or unknown lingering, no
+`busctl`, no user bus, a refused call or a move not observed in time), the
+attempt lacks an execution leaf unless a required limit demands one; then the
+watcher can kill only bubblewrap's outer process, and a supervisor killed
+during bubblewrap's startup can leave the namespace init, and under `agent`
+its bridge, alive and holding the run's stdout, where `gc` cannot find them
+(measured 2026-09-24 from a plain login session before the step existed: 20
+of 20 synchronized `agent` kills; with it, 0 of 20). Enabling lingering
+(`loginctl enable-linger`) or running in a delegated user scope closes it. A
 synchronized fixture covers death before bootstrap release and after a
 backend clears its parent-death signal; a stand-in fixture covers a leaf
 member that is not the backend. Every process `doctor` starts for a probe
-dies with `doctor` (§14.1); the agent probe's jail has the limit above when
-`doctor` runs outside a delegated scope. A stdio consumer must not treat
+dies with `doctor` (§14.1); the agent probe's jail has the limit above only
+when `doctor` could not enter a scope. A stdio consumer must not treat
 EOF as the only sign that a run ended. Linux kills
 remaining namespace processes when its init dies; this is the mechanism behind
 the required parent-death test, not an assumption about process groups.
@@ -1947,6 +1979,12 @@ normal structured result on macOS, with nonzero readiness exit status.
 
 Required Linux probes:
 
+- `supervisor_scope`: what §9.3's supervisor scope step did for this
+  `doctor`, run before every probe: `available` with `already_delegated` or
+  `entered`, `unavailable` with the step's reason code otherwise (including
+  `no_linger`). `doctor --json` also carries the full record under
+  `supervisor_scope`. The cgroup probes measure from where the step left the
+  process. The row is not a requirement and does not change readiness.
 - Actual user/PID/network namespace creation, readonly/writable mounts and
   denial of the representative protected access.
 - Filter loading, an allowed operation and a rejected representative syscall.
@@ -1972,8 +2010,9 @@ Required Linux probes:
   sandbox restricts its child; `nested_user_namespace` reported as measured).
 
 `doctor` does not edit user namespaces policy, install dependencies, enable
-lingering, alter TCC, change capabilities, start a permanent service or prompt
-for provider sign-in. `explain` shows these as unmeasured requirements.
+lingering, alter TCC, change capabilities, start a permanent service (the
+transient scope of §9.3 ends with the `doctor` process) or prompt for provider
+sign-in. `explain` shows these as unmeasured requirements.
 
 ### 14.2 GC and crash handling
 
