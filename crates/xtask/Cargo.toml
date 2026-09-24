@@ -13,4 +13,6 @@ workspace = true
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# J5-D: the freeze file hashes Cargo.lock and the evidence tables.
+sha2 = "0.10.9"
 toml = "0.8"

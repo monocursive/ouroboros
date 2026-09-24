@@ -9,6 +9,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 mod conformance;
+// J5-D begin
+mod freeze;
+// J5-D end
 mod i02;
 mod manifest;
 mod stamp;
@@ -53,11 +56,38 @@ enum Task {
         #[arg(long)]
         keep_remote: bool,
     },
+    // J5-D begin
+    /// Write the milestone-1 freeze file (jail-v1 §16) from this tree.
+    Freeze {
+        /// Repository root; defaults to the current git worktree.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+        /// The `doctor --json` of the conformance run that tested this tree,
+        /// recorded as the tested build, binaries and host.
+        #[arg(long, value_name = "PATH")]
+        doctor: Option<PathBuf>,
+    },
+    // J5-D end
 }
 
 fn main() -> ExitCode {
     match Cli::parse().task {
         Task::I02Scan { root } => i02_scan(root),
+        // J5-D begin
+        Task::Freeze { root, doctor } => {
+            let root = root.unwrap_or_else(conformance::worktree_root);
+            match freeze::run(&root, doctor.as_deref()) {
+                Ok(path) => {
+                    println!("xtask freeze: wrote {}", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("xtask freeze: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        // J5-D end
         Task::Conformance {
             host,
             user,
