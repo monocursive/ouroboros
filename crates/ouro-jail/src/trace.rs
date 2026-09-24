@@ -280,6 +280,34 @@ pub fn local_bounds(seam: Option<&str>) -> (u64, u64) {
     })
 }
 
+// J5-C begin: wave 3, the trace-fd write-size seam (R03.5)
+/// A test seam (S9, J5 wave 3): `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=<bytes>`
+/// makes the external `--trace-fd` sink put at most that many bytes into each
+/// `write(2)`, so every frame longer than it reaches the consumer in several
+/// partial writes, each resumed at its offset (§13.3: the writer "preserves
+/// unwritten offsets"). Without it a partial write happens only when a pipe
+/// fills mid-frame, which a live test cannot arrange: a nonblocking pipe write
+/// of at most `PIPE_BUF` bytes is all or nothing, and frames are smaller.
+///
+/// Accepted only as plain decimal bytes in `1..=EVENT_MAX`; anything else is
+/// ignored. It changes how bytes are written, never which: it cannot widen a
+/// bound, drop a frame or skip a check, and every loss reason of a sink under
+/// it names the seam and its value. Like every `OURO_JAIL_TEST_*` variable it
+/// is recorded in jail state and in every receipt's native details
+/// (`test_seams`).
+pub const TRACE_FD_WRITE_SEAM: &str = "OURO_JAIL_TEST_TRACE_FD_WRITE_MAX";
+
+/// The per-write cap [`TRACE_FD_WRITE_SEAM`] asks for, if its value is one.
+#[must_use]
+pub fn fd_write_max(seam: Option<&str>) -> Option<usize> {
+    seam.filter(|text| {
+        !text.starts_with('0') && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+    })
+    .and_then(|text| text.parse::<usize>().ok())
+    .filter(|max| (1..=EVENT_MAX).contains(max))
+}
+// J5-C end
+
 /// One bounded NDJSON trace sink.
 pub trait TraceSink {
     /// Writes one already-serialized frame, without its trailing newline.
@@ -566,6 +594,10 @@ pub struct FdSink {
     state: FdState,
     loss: Option<Loss>,
     lost_frames: u64,
+    // J5-C begin: wave 3
+    /// [`TRACE_FD_WRITE_SEAM`]'s cap on each write, when the seam is set.
+    write_max: Option<usize>,
+    // J5-C end
 }
 
 impl FdSink {
@@ -596,8 +628,26 @@ impl FdSink {
             state: FdState::Open,
             loss: None,
             lost_frames: 0,
+            write_max: None,
         })
     }
+
+    // J5-C begin: wave 3
+    /// Takes ownership of `fd` for an attempt, applying
+    /// [`TRACE_FD_WRITE_SEAM`]'s value `seam` if it is one.
+    ///
+    /// # Safety
+    /// As for [`FdSink::from_raw_fd`].
+    ///
+    /// # Errors
+    /// As for [`FdSink::from_raw_fd`].
+    pub unsafe fn for_attempt(fd: RawFd, seam: Option<&str>) -> Result<Self, JailError> {
+        // SAFETY: the caller's guarantee is the one `from_raw_fd` needs.
+        let mut sink = unsafe { Self::from_raw_fd(fd) }?;
+        sink.write_max = fd_write_max(seam);
+        Ok(sink)
+    }
+    // J5-C end
 
     /// Overrides the bounds, for tests that must reach them quickly. The
     /// reserve shrinks with the queue: at most a quarter of it.
@@ -625,7 +675,11 @@ impl FdSink {
     pub fn flush_now(&mut self) -> Result<(), JailError> {
         while let Some(front) = self.frames.front() {
             let front_len = front.len();
-            match (&self.file).write(&front[self.front_written..]) {
+            // J5-C, wave 3: under the seam, at most `write_max` bytes a write.
+            let end = self
+                .write_max
+                .map_or(front_len, |max| (self.front_written + max).min(front_len));
+            match (&self.file).write(&front[self.front_written..end]) {
                 Ok(0) => break,
                 Ok(written) => {
                     self.front_written += written;
@@ -727,16 +781,23 @@ impl FdSink {
     /// Records `frames` more lost frames. The first reason is kept: later
     /// losses follow from it, and a later message would hide its cause.
     fn lose(&mut self, reason: &str, frames: u64) -> JailError {
+        // J5-C, wave 3: a loss under the write-size seam says so.
+        let reason = match self.write_max {
+            Some(max) => format!(
+                "{reason} (trace fd writes capped to {max} bytes by the test seam {TRACE_FD_WRITE_SEAM})"
+            ),
+            None => reason.to_owned(),
+        };
         self.lost_frames += frames;
         let first = self
             .loss
             .as_ref()
-            .map_or_else(|| reason.to_owned(), |loss| loss.reason.clone());
+            .map_or_else(|| reason.clone(), |loss| loss.reason.clone());
         self.loss = Some(Loss {
             reason: first,
             lost_frames: Some(self.lost_frames),
         });
-        evidence_lost(reason)
+        evidence_lost(&reason)
     }
 }
 
@@ -1133,6 +1194,75 @@ mod tests {
             "after a dropped reserve note nothing more is written"
         );
         drop(reader);
+    }
+    // J5-C end
+
+    // J5-C begin: wave 3, the trace-fd write-size seam (R03.5)
+    /// The seam's values: plain decimal bytes in `1..=EVENT_MAX`, else no cap.
+    #[test]
+    fn the_write_size_seam_accepts_only_a_byte_count() {
+        assert_eq!(fd_write_max(Some("64")), Some(64));
+        assert_eq!(fd_write_max(Some("1")), Some(1));
+        assert_eq!(fd_write_max(Some(&EVENT_MAX.to_string())), Some(EVENT_MAX));
+        for ignored in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("064"),
+            Some("-5"),
+            Some("x"),
+            Some("65537"),
+        ] {
+            assert_eq!(fd_write_max(ignored), None, "{ignored:?}");
+        }
+    }
+
+    /// Under the seam every `write(2)` the external sink makes carries at most
+    /// the cap, so a frame longer than it is written in several partial
+    /// writes, each resumed at its offset: a datagram pair shows each write as
+    /// one datagram, and the datagrams reassemble every frame exactly once.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn under_the_write_size_seam_every_frame_is_written_in_pieces() {
+        use std::os::fd::IntoRawFd as _;
+        let (reader, writer) = std::os::unix::net::UnixDatagram::pair().expect("a socket pair");
+        // SAFETY: the writing end was just created here and handed over whole.
+        let mut sink =
+            unsafe { FdSink::for_attempt(writer.into_raw_fd(), Some("64")) }.expect("nonblocking");
+        let frames: Vec<Vec<u8>> = (0..20u8)
+            .map(|index| format!("{{\"n\":{index},\"pad\":\"{}\"}}", "x".repeat(600)).into_bytes())
+            .collect();
+        for frame in &frames {
+            sink.write_frame(frame, Priority::Normal).expect("queued");
+        }
+        sink.finish();
+        assert!(sink.loss().is_none(), "{:?}", sink.loss());
+        drop(sink);
+        let mut received = Vec::new();
+        let mut writes = 0usize;
+        let mut buffer = [0u8; 4096];
+        while let Ok(size) = reader.recv(&mut buffer) {
+            if size == 0 {
+                break;
+            }
+            assert!(size <= 64, "a write of {size} bytes under a 64-byte cap");
+            received.extend_from_slice(&buffer[..size]);
+            writes += 1;
+            reader.set_nonblocking(true).expect("nonblocking reader");
+        }
+        let mut expected = Vec::new();
+        for frame in &frames {
+            expected.extend_from_slice(frame);
+            expected.push(b'\n');
+        }
+        assert_eq!(
+            received, expected,
+            "every frame once, in order, reassembled"
+        );
+        assert!(
+            writes >= frames.len() * 9,
+            "each ~620-byte frame took at least ten writes: {writes}"
+        );
     }
     // J5-C end
 

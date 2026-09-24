@@ -540,3 +540,140 @@ fn j5_a_trace_loss_note_and_its_receipt_agree() {
         );
     }
 }
+
+/// J5-C wave 3, R03.5 "Trace partial writes ... cannot block deadline
+/// enforcement": every trace frame reaches the consumer in several partial
+/// writes (the test seam `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=64` caps each
+/// `write(2)` of the `--trace-fd` sink at 64 bytes, and every frame is longer),
+/// the target produces results for longer than its 2 s wall and then sleeps
+/// 30 s, and the consumer is slow but live (a 4 KiB read every 20 ms, so the
+/// sink never meets its no-progress deadline). The wall still fires on time:
+/// the run ends within seconds, the receipt's cause is `wall_expiry` with the
+/// wall's `hit` recorded, and, when the stream is complete, the target's own
+/// `proc.exit` lies within 3.5 s of its exec on the product's clock. The trace
+/// is every frame reassembled from its pieces (the whole contract holds), or,
+/// when the terminal drain could not deliver the backlog within its budget,
+/// visibly incomplete with the loss in the receipt; never corrupt.
+#[test]
+fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
+    const WRITE_MAX: usize = 64;
+    if !Profile::Tool.available() {
+        return;
+    }
+    let mut c = case_with(Profile::Tool, "best-effort", &["--limit", "wall=2s"]);
+    let base = c.base();
+    let mut steps: Vec<Value> = Vec::new();
+    for batch in 0..40 {
+        for index in 0..30 {
+            steps.push(serde_json::json!([
+                "open",
+                format!("{base}/b{batch}-{index}"),
+                "--create",
+                "--write"
+            ]));
+        }
+        steps.push(serde_json::json!(["sleep", "100"]));
+    }
+    steps.push(serde_json::json!(["sleep", "30000"]));
+    c.jail = c
+        .jail
+        .env(ouro_jail::trace::TRACE_FD_WRITE_SEAM, WRITE_MAX.to_string())
+        .trace_consumer(TraceConsumer::Slow {
+            chunk: 4096,
+            pause: std::time::Duration::from_millis(20),
+        });
+    let started = std::time::Instant::now();
+    let run = c.run(&Value::from(steps), &Release::Valid);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "the 2 s wall stopped the 30 s target on time, not the trace: {elapsed:?}: {}",
+        explain(&run)
+    );
+    let receipts = run.receipts();
+    for receipt in &receipts {
+        common::check_receipt(receipt).unwrap_or_else(|error| panic!("{error}\n{receipt:#}"));
+    }
+    let last = receipts.last().expect("a receipt");
+    assert_eq!(
+        last["outcome"]["cause"], "wall_expiry",
+        "{:#}",
+        last["outcome"]
+    );
+    let wall = last["applied"]["limits"]
+        .as_array()
+        .and_then(|limits| limits.iter().find(|limit| limit["key"] == "wall"))
+        .expect("the wall limit");
+    assert_eq!(
+        wall["hit"], true,
+        "the receipt records the wall's hit: {wall}"
+    );
+    assert_eq!(
+        last["lifetime"]["native"]["details"]["test_seams"][ouro_jail::trace::TRACE_FD_WRITE_SEAM],
+        WRITE_MAX.to_string(),
+        "the seam is recorded in the receipt"
+    );
+    let readback = run.trace_readback.as_ref().expect("a trace fd was used");
+    // Every frame the consumer got was longer than one write: each was
+    // reassembled from its pieces at their offsets.
+    for frame in &readback.frames {
+        let length = serde_json::to_vec(frame).expect("serializes").len();
+        assert!(length > WRITE_MAX, "a {length}-byte frame fits one write");
+    }
+    match readback.state {
+        ouro_fixture::harness::TraceState::Complete => {
+            common::assert_run_records(&run);
+            let events = run.trace_events();
+            let at = |pick: &dyn Fn(&Value) -> bool| -> u128 {
+                events
+                    .iter()
+                    .find(|event| pick(event))
+                    .and_then(|event| event["monotonic_ns"].as_str())
+                    .and_then(|ns| ns.parse().ok())
+                    .unwrap_or_else(|| panic!("the event is missing from the trace"))
+            };
+            let target = last["process"]["pid"].as_i64().expect("the target's pid");
+            let exec = at(&|event| event["fields"]["transition"] == "exec_confirmed");
+            let exit = at(&|event| {
+                event["operation"] == "proc.exit" && event["fields"]["pid"].as_i64() == Some(target)
+            });
+            assert!(
+                exit.saturating_sub(exec) < 3_500_000_000,
+                "the target ended {} ms after its exec: the wall was late",
+                exit.saturating_sub(exec) / 1_000_000
+            );
+            eprintln!(
+                "complete: {} frames, target lifetime {} ms",
+                readback.frames.len(),
+                exit.saturating_sub(exec) / 1_000_000
+            );
+        }
+        ouro_fixture::harness::TraceState::Incomplete => {
+            // Honestly marked: a visibly incomplete tail, and the loss in the
+            // receipt, never a silent one.
+            assert!(
+                last["errors"].as_array().is_some_and(|errors| errors
+                    .iter()
+                    .any(|error| error["code"] == "evidence_lost")),
+                "an incomplete trace is an evidence_lost error: {:#}",
+                last["errors"]
+            );
+            assert_eq!(last["observer"]["sources"]["wrapper"], "degraded");
+            for frame in &readback.frames {
+                let errors: Vec<String> = common::validators()["jail-event"]
+                    .iter_errors(frame)
+                    .map(|error| error.to_string())
+                    .collect();
+                assert!(
+                    errors.is_empty(),
+                    "a delivered frame is a valid event: {errors:?}"
+                );
+            }
+            eprintln!(
+                "incomplete (the drain budget ran out): {} frames delivered",
+                readback.frames.len()
+            );
+        }
+        other => panic!("the trace is {other:?}"),
+    }
+}

@@ -3695,9 +3695,12 @@ fn open_control(args: &RunArgs) -> Result<Option<ControlSink>, JailError> {
 
 fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, JailError> {
     if let Some(fd) = args.trace_fd {
+        // J5-C, wave 3: the write-size test seam (S9), recorded like every
+        // `OURO_JAIL_TEST_*` variable.
+        let seam = std::env::var(trace::TRACE_FD_WRITE_SEAM).ok();
         // SAFETY: as for the control descriptor: exclusively owned for this
         // invocation and already validated as open for writing.
-        let sink = unsafe { FdSink::from_raw_fd(fd) }?;
+        let sink = unsafe { FdSink::for_attempt(fd, seam.as_deref()) }?;
         return Ok(trace::shared(sink));
     }
     let path = attempt_dir.trace_path();
