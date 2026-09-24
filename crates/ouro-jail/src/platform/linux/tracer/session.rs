@@ -3485,4 +3485,100 @@ mod tests {
         assert_eq!(sockaddr_len(libc::AF_PACKET as u16, 128), None);
         assert_eq!(sockaddr_len(0xffff, 128), None);
     }
+
+    /// J5-T (review of the fix, M5): the backend is owed only while its
+    /// number still names the process born at the recorded time. A reused
+    /// number — same pid, another birth — is not the backend: the tracer
+    /// neither waits for it nor lists it as unreaped. The same pid and
+    /// birth is, zombie included, until its exit is reaped. The kernel
+    /// will not reuse a live pid on demand, so the birth is scripted.
+    #[test]
+    fn j5t_the_backend_is_owed_only_under_its_own_birth() {
+        const BACKEND: pid_t = RECYCLED;
+        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let mut session = Session::new(
+            TracerConfig::default(),
+            tx,
+            Arc::default(),
+            0,
+            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+        );
+        session.owed = Owed::Backend {
+            pid: BACKEND,
+            birth: Some(1000),
+            reaped: false,
+        };
+        let now_named = |birth: Option<u64>| {
+            let mut table = table.lock().unwrap();
+            match birth {
+                Some(ticks) => table.insert(BACKEND, (BACKEND, ticks)),
+                None => table.remove(&BACKEND),
+            };
+        };
+
+        now_named(Some(1000));
+        assert!(session.tasks.is_empty());
+        assert!(
+            !session.accounted_for(),
+            "the backend, born at 1000, is alive or a zombie: wait for its exit"
+        );
+        now_named(Some(2000));
+        assert!(
+            session.accounted_for(),
+            "the number now names a process born at 2000: the backend is gone"
+        );
+        now_named(None);
+        assert!(session.accounted_for(), "nothing has the number");
+
+        // Without a recorded birth any holder of the number is kept.
+        session.owed = Owed::Backend {
+            pid: BACKEND,
+            birth: None,
+            reaped: false,
+        };
+        now_named(Some(2000));
+        assert!(!session.accounted_for());
+        // A reaped backend is done whatever holds its number now.
+        session.owed = Owed::Backend {
+            pid: BACKEND,
+            birth: Some(1000),
+            reaped: true,
+        };
+        now_named(Some(1000));
+        assert!(session.accounted_for());
+
+        // The same rule decides what `finish` reports as unreaped.
+        let handles = |session: &Session| Handles {
+            stop: Arc::new(AtomicBool::new(true)),
+            shutdown_ns: Arc::default(),
+            tid: Arc::default(),
+            handed: Arc::clone(&session.handed),
+        };
+        let unreaped = |birth_now: u64| {
+            let (tx, _rx) = std::sync::mpsc::sync_channel(64);
+            let mut session = Session::new(
+                TracerConfig::default(),
+                tx,
+                Arc::default(),
+                0,
+                Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+            );
+            session.owed = Owed::Backend {
+                pid: BACKEND,
+                birth: Some(1000),
+                reaped: false,
+            };
+            now_named(Some(birth_now));
+            let handles = handles(&session);
+            session.finish(&handles).unreaped_children
+        };
+        assert_eq!(unreaped(1000), vec![BACKEND], "its own birth: unreaped");
+        assert_eq!(
+            unreaped(2000),
+            Vec::<pid_t>::new(),
+            "another birth: not the backend, not loss"
+        );
+        drop(rx);
+    }
 }

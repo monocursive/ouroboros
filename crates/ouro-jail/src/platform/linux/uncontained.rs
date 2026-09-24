@@ -1017,10 +1017,15 @@ impl Uncontained {
     fn scan_descendants(&mut self) {
         // SAFETY: getpid takes no arguments and cannot fail.
         let own = unsafe { libc::getpid() };
-        // J5-T: an inherited child and everything below it are left out, so
-        // none of them can be attributed through it either.
+        self.scan_children(own, tracer::children(own));
+    }
+
+    /// [`Uncontained::scan_descendants`] over a given list of `own`'s
+    /// children. J5-T: an inherited child and everything below it are left
+    /// out, so none of them can be attributed through it either.
+    fn scan_children(&mut self, own: libc::pid_t, children: Vec<libc::pid_t>) {
         let mut walked = Vec::new();
-        for child in tracer::children(own) {
+        for child in children {
             if !self.inherited.contains(child) {
                 walked.push(child);
                 walked.extend(tracer::descendants(child));
@@ -2194,6 +2199,60 @@ mod tests {
     fn end(mut child: std::process::Child) {
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// J5-T (review of the fix): an inherited record names a process only
+    /// with its birth. The same pid under another start time is a number the
+    /// kernel reused after the inherited process ended — possibly for an
+    /// escaped attempt process — so it is not inherited and is scanned like
+    /// any child. The kernel will not reuse a live pid on demand, so the
+    /// record's birth is made to differ instead.
+    #[test]
+    fn j5t_an_inherited_record_names_a_process_only_with_its_birth() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = fake_leaf(root.path());
+        // SAFETY: getpid takes no arguments and cannot fail.
+        let own = unsafe { libc::getpid() };
+        let child = spawn_sleeper();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let birth = tracer::start_ticks(pid).expect("the sleeper's start time");
+
+        assert!(Inherited(vec![(pid, birth)]).contains(pid));
+        assert!(
+            !Inherited(vec![(pid, birth + 1)]).contains(pid),
+            "the same pid born at another time is not the inherited process"
+        );
+        assert!(!Inherited(vec![(pid + 1, birth)]).contains(pid));
+
+        // Inherited, with its own birth: never walked, nothing recorded.
+        let mut kept = exited_child_boundary(&leaf, read_outside);
+        kept.collect_target();
+        kept.losses.clear();
+        kept.inherited = Inherited(vec![(pid, birth)]);
+        kept.scan_children(own, vec![pid]);
+        assert!(kept.losses.is_empty(), "{:?}", kept.losses);
+        assert!(kept.escaped.is_empty());
+
+        // The record's birth is not this process's: it is this supervisor's
+        // child outside the leaf, an escape, and kept for signalling.
+        let mut reused = exited_child_boundary(&leaf, read_outside);
+        reused.collect_target();
+        reused.losses.clear();
+        reused.inherited = Inherited(vec![(pid, birth + 1)]);
+        reused.scan_children(own, vec![pid]);
+        assert_eq!(
+            reused.losses,
+            vec![(Subject::Descendant, Loss::MembershipEscape)]
+        );
+        assert_eq!(
+            reused
+                .escaped
+                .iter()
+                .map(|(known, _)| *known)
+                .collect::<Vec<_>>(),
+            vec![pid]
+        );
+        end(child);
     }
 
     /// G5-G7 at the call site: a walked process is attributed only through
