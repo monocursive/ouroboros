@@ -7,6 +7,8 @@
 //! it with the pinned manifest, runs the suite with `OURO_CONFORMANCE=1` so a
 //! skip is a failure, copies the evidence back and removes the run directory —
 //! on success only. A failed run keeps its directory and prints the path.
+//! The build and the suite run detached on the host and are watched with
+//! short status checks, so a dropped connection loses no result.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,6 +33,13 @@ pub struct Target {
 
 /// The SSH options every call shares. `StrictHostKeyChecking=yes` means an
 /// unknown host key fails rather than being learned.
+///
+/// Keepalives: from the hosted runner, a connection to the reference host
+/// that carried no traffic for minutes was reset mid-run (three runs on
+/// 2026-09-23 and 2026-09-24, after 4.5, 10 and 20 minutes). A probe every
+/// 15 s keeps any idle-state middlebox fresh and ends a dead connection in
+/// two minutes instead of never. Long steps no longer depend on one
+/// connection at all (see [`detached_start`]); this covers the short ones.
 #[must_use]
 pub fn ssh_opts(target: &Target) -> Vec<String> {
     let mut v = vec![
@@ -40,6 +49,10 @@ pub fn ssh_opts(target: &Target) -> Vec<String> {
         "BatchMode=yes".to_string(),
         "-o".to_string(),
         "StrictHostKeyChecking=yes".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=8".to_string(),
     ];
     if let Some(kh) = &target.known_hosts {
         v.push("-o".to_string());
@@ -143,13 +156,10 @@ pub fn run_path_for_humans(run_dir: &str) -> String {
     format!("~/{REMOTE_RUNS}/{run_dir}")
 }
 
-/// The remote build command.
+/// The remote build, run by [`detached_start`] in the run directory.
 #[must_use]
-pub fn build_command(run_dir: &str, jobs: u32) -> String {
-    format!(
-        "cd {} && {REMOTE_CARGO} build --release --workspace -j{jobs}",
-        run_path(run_dir)
-    )
+pub fn build_command(jobs: u32) -> String {
+    format!("{REMOTE_CARGO} build --release --workspace -j{jobs}")
 }
 
 /// The remote I02 vendor-name scan (jail-v1 §15 row I02).
@@ -175,13 +185,17 @@ pub fn doctor_command(run_dir: &str) -> String {
     )
 }
 
-/// The remote test command.
+/// The user scope the suite runs in, named so a driver that gives up can
+/// stop exactly this run's processes and nothing else.
+#[must_use]
+pub fn suite_unit(run_dir: &str) -> String {
+    format!("ouro-conformance-{run_dir}.scope")
+}
+
+/// The remote test command, run by [`detached_start`] in the run directory
+/// with its output in `test.log`.
 ///
 /// `OURO_CONFORMANCE=1` turns every live skip into a failure (jail-v1 §16).
-/// The output is redirected to `test.log` and then echoed, rather than piped
-/// through `tee`, so the exit status is the suite's without depending on the
-/// remote login shell providing `pipefail` or `PIPESTATUS`.
-/// The remote test command.
 ///
 /// One test thread, not two. The ptrace observer's thread owns every
 /// `waitpid` in its process (CONTRACT §3.5), so two tests attaching a tracer
@@ -191,15 +205,225 @@ pub fn doctor_command(run_dir: &str) -> String {
 /// property of the mechanism, not a preference about speed.
 #[must_use]
 pub fn test_command(run_dir: &str, jobs: u32) -> String {
-    let p = run_path(run_dir);
     format!(
-        "cd {p} && XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet env OURO_CONFORMANCE=1 \
+        "XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet --unit={} \
+         env OURO_CONFORMANCE=1 \
          OURO_JAIL_BIN=$PWD/target/release/ouro-jail \
          OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture \
          {REMOTE_CARGO} test --workspace --release -j{jobs} --no-fail-fast \
-         -- --test-threads=1 \
-         > test.log 2>&1; rc=$?; cat test.log; exit $rc"
+         -- --test-threads=1",
+        suite_unit(run_dir)
     )
+}
+
+// ------------------------------------------------------------ detached steps
+//
+// The build and the suite run for minutes and print nothing until they end.
+// Run inside one SSH session, their result reached the driver only if that
+// connection survived the whole time, and from the hosted runner it did not:
+// the suite finished on the host, and the job failed with no test result. So
+// a long step is started detached from the session that starts it, writes
+// its output and exit status to files in the run directory, and is watched
+// with short, separate status checks. A check that fails is retried; no
+// connection has to last longer than one check.
+
+/// Start `command` in the run directory, detached, as step `name`.
+///
+/// The step writes its output to `<name>.log`, its shell's pid to
+/// `<name>.pid`, and its exit status to `<name>.rc`, the last by rename, so
+/// a status that exists is complete. The command runs in a subshell, so an
+/// `exit` in it cannot skip the status. `setsid` puts it in a session of its
+/// own, so the end of the starting SSH session signals nothing to it, and
+/// its descriptors are redirected so that session can close at once.
+/// `mkdir <name>.started` makes starting idempotent: a start whose reply was
+/// lost cannot start the step twice.
+///
+/// # Panics
+/// If `command` contains a single quote, which would end the quoting.
+#[must_use]
+pub fn detached_start(run_dir: &str, name: &str, command: &str) -> String {
+    assert!(
+        !command.contains('\''),
+        "a detached command cannot contain a single quote: {command}"
+    );
+    let p = run_path(run_dir);
+    format!(
+        "cd {p} && mkdir {name}.started && \
+         {{ setsid nohup sh -c 'echo $$ > {name}.pid; ( {command} ) > {name}.log 2>&1; \
+         echo $? > {name}.rc.new; mv {name}.rc.new {name}.rc' \
+         < /dev/null > /dev/null 2>&1 & }} && echo started"
+    )
+}
+
+/// One status check of step `name`: `done <status>`, `running <log lines>`,
+/// `vanished` (its shell is gone and left no status) or `absent` (it was
+/// never started). A step that ends between the two tests is read again, so
+/// a normal end is never reported as `vanished`.
+#[must_use]
+pub fn detached_poll(run_dir: &str, name: &str) -> String {
+    let p = run_path(run_dir);
+    format!(
+        "cd {p} && if [ -f {name}.rc ]; then echo \"done $(cat {name}.rc)\"; \
+         elif [ ! -d {name}.started ]; then echo absent; \
+         elif [ -f {name}.pid ] && ! kill -0 \"$(cat {name}.pid)\" 2>/dev/null; then \
+         if [ -f {name}.rc ]; then echo \"done $(cat {name}.rc)\"; else echo vanished; fi; \
+         else echo \"running $(cat {name}.log 2>/dev/null | wc -l)\"; fi"
+    )
+}
+
+/// Stop step `name`: its process group (the shell is the leader of its own
+/// session), and `unit` when the step runs in a named user scope. Only this
+/// run's processes are named; nothing is matched by pattern.
+#[must_use]
+pub fn detached_stop(run_dir: &str, name: &str, unit: Option<&str>) -> String {
+    let p = run_path(run_dir);
+    let mut s = format!(
+        "cd {p}; if [ -f {name}.pid ]; then kill -s TERM -- -\"$(cat {name}.pid)\" 2>/dev/null; fi; "
+    );
+    if let Some(unit) = unit {
+        s.push_str(&format!(
+            "XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user stop {unit} 2>/dev/null; "
+        ));
+    }
+    s.push_str("true");
+    s
+}
+
+/// What one status check said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Poll {
+    Absent,
+    Running(u64),
+    Vanished,
+    Done(i32),
+}
+
+/// Parse a status check's output; `None` for anything else.
+#[must_use]
+pub fn parse_poll(stdout: &str) -> Option<Poll> {
+    let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let rest = rest.trim();
+    match word {
+        "absent" if rest.is_empty() => Some(Poll::Absent),
+        "vanished" if rest.is_empty() => Some(Poll::Vanished),
+        "running" => rest.parse().ok().map(Poll::Running),
+        "done" => rest.parse().ok().map(Poll::Done),
+        _ => None,
+    }
+}
+
+/// How long to wait for a detached step, and how often to look.
+#[derive(Debug, Clone, Copy)]
+pub struct Patience {
+    pub interval: std::time::Duration,
+    pub limit: std::time::Duration,
+    /// Consecutive failed checks after which contact counts as lost.
+    pub failed_checks: u32,
+}
+
+/// The release build: about a minute on the reference host from scratch.
+pub const BUILD_PATIENCE: Patience = Patience {
+    interval: std::time::Duration::from_secs(15),
+    limit: std::time::Duration::from_secs(20 * 60),
+    failed_checks: 12,
+};
+
+/// The suite: about fifteen minutes on the reference host. The limit leaves
+/// room inside the workflow's 45-minute job budget for everything else.
+pub const SUITE_PATIENCE: Patience = Patience {
+    interval: std::time::Duration::from_secs(20),
+    limit: std::time::Duration::from_secs(35 * 60),
+    failed_checks: 9,
+};
+
+/// How waiting for a detached step ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Waited {
+    Done(i32),
+    Absent,
+    Vanished,
+    TimedOut,
+    LostContact(String),
+    Unreadable(String),
+}
+
+/// Wait for a detached step. Pure apart from its arguments: `check` runs one
+/// status check, `pause` waits, `elapsed` reads the clock, and `progress`
+/// hears each new log length, so every ending is unit-tested.
+pub fn wait_for(
+    patience: Patience,
+    mut check: impl FnMut() -> std::io::Result<CommandResult>,
+    mut pause: impl FnMut(std::time::Duration),
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut progress: impl FnMut(u64),
+) -> Waited {
+    let mut failed = 0u32;
+    let mut last_lines = None;
+    loop {
+        if elapsed() >= patience.limit {
+            return Waited::TimedOut;
+        }
+        let why = match check() {
+            Ok(r) if r.ok() => match parse_poll(&r.stdout) {
+                Some(Poll::Done(code)) => return Waited::Done(code),
+                Some(Poll::Absent) => return Waited::Absent,
+                Some(Poll::Vanished) => return Waited::Vanished,
+                Some(Poll::Running(lines)) => {
+                    failed = 0;
+                    if last_lines != Some(lines) {
+                        progress(lines);
+                        last_lines = Some(lines);
+                    }
+                    None
+                }
+                None => {
+                    let line = r.stdout.lines().next().unwrap_or("").trim();
+                    return Waited::Unreadable(scrub(line));
+                }
+            },
+            Ok(r) => Some(format!(
+                "exited {}{}",
+                r.status_text(),
+                first_line(&r.stderr)
+            )),
+            Err(e) => Some(format!("could not run ssh: {e}")),
+        };
+        if let Some(why) = why {
+            failed += 1;
+            if failed >= patience.failed_checks {
+                return Waited::LostContact(format!(
+                    "{failed} consecutive status checks failed; the last {why}"
+                ));
+            }
+        }
+        pause(patience.interval);
+    }
+}
+
+/// What a detached step produced: its exit status when it ended, its log
+/// when it could be read back, and what went wrong otherwise.
+#[derive(Debug, Clone, Default)]
+pub struct Detached {
+    pub code: Option<i32>,
+    pub log: Option<String>,
+    pub problem: Option<String>,
+}
+
+/// The problem a way of waiting stands for; `None` when the step ended.
+#[must_use]
+pub fn wait_problem(waited: &Waited, patience: Patience) -> Option<String> {
+    match waited {
+        Waited::Done(_) => None,
+        Waited::Absent => Some("was never started".to_string()),
+        Waited::Vanished => Some("ended without recording its exit status".to_string()),
+        Waited::TimedOut => Some(format!(
+            "did not finish within {} minutes and was stopped",
+            patience.limit.as_secs() / 60
+        )),
+        Waited::LostContact(why) => Some(format!("lost contact with the host: {why}")),
+        Waited::Unreadable(line) => Some(format!("gave an unreadable status: `{line}`")),
+    }
 }
 
 /// Options for one conformance run.
@@ -283,11 +507,15 @@ pub struct RunOutcomes {
     pub mkdir: Option<CommandResult>,
     pub rsync: Option<CommandResult>,
     pub build: Option<CommandResult>,
+    /// Why the detached build has no exit status, when it has none.
+    pub build_wait: Option<String>,
     pub i02: Option<CommandResult>,
     pub doctor: Option<CommandResult>,
     /// The bytes of `doctor.json`, when they could be read back.
     pub doctor_json: Option<String>,
     pub suite: Option<CommandResult>,
+    /// Why the detached suite has no exit status, when it has none.
+    pub suite_wait: Option<String>,
     /// The full `test.log`, which is the only test evidence.
     pub test_log: Option<String>,
     pub host_manifest: Option<CommandResult>,
@@ -343,6 +571,12 @@ pub fn decide(
     if !step(&mut failures, "rsync", &outcomes.rsync) {
         return finish_decision(failures, outcomes, keep_remote_flag);
     }
+    // A build with no exit status is a failure in its own right: without
+    // this, a lost build would read as "did not run" and fail nothing.
+    if let Some(why) = &outcomes.build_wait {
+        failures.push(format!("the remote release build {why}"));
+        return finish_decision(failures, outcomes, keep_remote_flag);
+    }
     if !step(&mut failures, "the remote release build", &outcomes.build) {
         return finish_decision(failures, outcomes, keep_remote_flag);
     }
@@ -383,13 +617,17 @@ pub fn decide(
     }
 
     // The suite. Its exit code, every test binary's own verdict, and skips.
-    match &outcomes.suite {
-        None => failures.push("the remote conformance suite did not run".to_string()),
-        Some(r) if !r.ok() => failures.push(format!(
-            "the remote conformance suite exited {}",
-            r.status_text()
-        )),
-        Some(_) => {}
+    match (&outcomes.suite, &outcomes.suite_wait) {
+        (_, Some(why)) => failures.push(format!("the remote conformance suite {why}")),
+        (None, None) => failures.push("the remote conformance suite did not run".to_string()),
+        (Some(r), None) => {
+            if !r.ok() {
+                failures.push(format!(
+                    "the remote conformance suite exited {}",
+                    r.status_text()
+                ));
+            }
+        }
     }
     match &outcomes.test_log {
         None => failures.push("test.log could not be read, so no test evidence exists".to_string()),
@@ -547,12 +785,27 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
 
     if outcomes.rsync.as_ref().is_some_and(CommandResult::ok) {
         step("build the workspace, release");
-        let r = ssh(opts, &build_command(&run_dir, opts.jobs))?;
-        print!("{}", r.stdout);
-        if !r.ok() {
-            eprint!("{}", r.stderr);
+        let build = run_detached(
+            opts,
+            &run_dir,
+            "build",
+            &build_command(opts.jobs),
+            BUILD_PATIENCE,
+            None,
+        );
+        if let Some(log) = &build.log {
+            print!("{log}");
         }
-        outcomes.build = Some(r);
+        match build.code {
+            Some(code) => {
+                outcomes.build = Some(CommandResult {
+                    code: Some(code),
+                    stdout: build.log.unwrap_or_default(),
+                    stderr: String::new(),
+                });
+            }
+            None => outcomes.build_wait = build.problem,
+        }
     }
 
     if outcomes.build.as_ref().is_some_and(CommandResult::ok) {
@@ -593,14 +846,30 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
         }
 
         step("run the conformance suite (OURO_CONFORMANCE=1)");
-        let suite = ssh(opts, &test_command(&run_dir, opts.jobs))?;
-        print!("{}", suite.stdout);
-        if !suite.stderr.trim().is_empty() {
-            eprint!("{}", suite.stderr);
+        let unit = suite_unit(&run_dir);
+        let suite = run_detached(
+            opts,
+            &run_dir,
+            "test",
+            &test_command(&run_dir, opts.jobs),
+            SUITE_PATIENCE,
+            Some(&unit),
+        );
+        if let Some(log) = &suite.log {
+            print!("{log}");
+            write_evidence(opts, "test.log", log, &mut outcomes);
         }
-        outcomes.test_log = Some(suite.stdout.clone());
-        write_evidence(opts, "test.log", &suite.stdout, &mut outcomes);
-        outcomes.suite = Some(suite);
+        outcomes.test_log = suite.log.clone();
+        match suite.code {
+            Some(code) => {
+                outcomes.suite = Some(CommandResult {
+                    code: Some(code),
+                    stdout: suite.log.unwrap_or_default(),
+                    stderr: String::new(),
+                });
+            }
+            None => outcomes.suite_wait = suite.problem,
+        }
     }
 
     step("collect the host manifest");
@@ -633,6 +902,69 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
 
 fn ssh(opts: &Options, remote_command: &str) -> std::io::Result<CommandResult> {
     run("ssh", &ssh_argv(&opts.target, remote_command), None)
+}
+
+/// Run one long step detached and wait for it (see [`detached_start`]).
+/// Never an error: every way it can end is recorded in the result.
+fn run_detached(
+    opts: &Options,
+    run_dir: &str,
+    name: &str,
+    command: &str,
+    patience: Patience,
+    unit: Option<&str>,
+) -> Detached {
+    let started = ssh(opts, &detached_start(run_dir, name, command));
+    // A failed start is not final: its reply may be what was lost. The first
+    // status check says whether the step exists.
+    let start_note = match &started {
+        Ok(r) if r.ok() => String::new(),
+        Ok(r) => format!(
+            " (starting it exited {}{})",
+            r.status_text(),
+            first_line(&r.stderr)
+        ),
+        Err(e) => format!(" (starting it could not run ssh: {e})"),
+    };
+    let began = std::time::Instant::now();
+    let waited = wait_for(
+        patience,
+        || ssh(opts, &detached_poll(run_dir, name)),
+        std::thread::sleep,
+        || began.elapsed(),
+        |lines| println!("   ... {name}.log: {lines} lines"),
+    );
+    if matches!(waited, Waited::TimedOut | Waited::LostContact(_)) {
+        // Best effort: when contact is lost this may not reach the host.
+        let _ = ssh(opts, &detached_stop(run_dir, name, unit));
+    }
+    // The log, complete or partial, is evidence either way. A lost reply is
+    // retried; a log that cannot be read at all is recorded as absent.
+    let mut log = None;
+    for _ in 0..3 {
+        if let Ok(r) = ssh(opts, &format!("cat {}/{name}.log", run_path(run_dir)))
+            && r.ok()
+        {
+            log = Some(r.stdout);
+            break;
+        }
+        std::thread::sleep(patience.interval);
+    }
+    let problem = wait_problem(&waited, patience).map(|p| {
+        if matches!(waited, Waited::Absent) {
+            format!("{p}{start_note}")
+        } else {
+            p
+        }
+    });
+    Detached {
+        code: match waited {
+            Waited::Done(code) => Some(code),
+            _ => None,
+        },
+        log,
+        problem,
+    }
 }
 
 fn write_evidence(opts: &Options, name: &str, body: &str, outcomes: &mut RunOutcomes) {
@@ -770,7 +1102,11 @@ mod tests {
                 "-o",
                 "BatchMode=yes",
                 "-o",
-                "StrictHostKeyChecking=yes"
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=8"
             ]
         );
         assert!(!opts.iter().any(|o| o.contains("accept-new")));
@@ -856,18 +1192,23 @@ mod tests {
 
     #[test]
     fn the_remote_commands_use_the_account_cargo_and_two_jobs() {
-        let b = build_command("d", 2);
+        let b = build_command(2);
+        assert_eq!(b, "$HOME/.cargo/bin/cargo build --release --workspace -j2");
+        let started = detached_start("d", "build", &b);
         assert!(
-            b.contains("$HOME/.cargo/bin/cargo build --release --workspace -j2"),
-            "{b}"
+            started.starts_with("cd $HOME/ouro-ci/runs/d && mkdir build.started &&"),
+            "{started}"
         );
-        assert!(b.starts_with("cd $HOME/ouro-ci/runs/d &&"), "{b}");
     }
 
     #[test]
     fn the_test_command_forbids_skips_and_names_both_binaries() {
         let t = test_command("d", 2);
         assert!(t.contains("OURO_CONFORMANCE=1"), "{t}");
+        assert!(
+            t.contains("--unit=ouro-conformance-d.scope"),
+            "a driver that gives up stops exactly this scope: {t}"
+        );
         assert!(
             t.contains("OURO_JAIL_BIN=$PWD/target/release/ouro-jail"),
             "{t}"
@@ -880,15 +1221,314 @@ mod tests {
             t.contains("--test-threads=1"),
             "the suite runs serially because a tracer owns every waitpid in its process: {t}"
         );
-        assert!(t.contains("> test.log 2>&1"), "{t}");
-        assert!(
-            t.contains("exit $rc"),
-            "the suite's own status must survive"
-        );
         assert!(
             !t.contains("| tee"),
             "tee would mask the suite's exit status"
         );
+        assert!(
+            !t.contains('\''),
+            "a detached command cannot contain a single quote"
+        );
+        let started = detached_start("d", "test", &t);
+        assert!(
+            started.contains("> test.log 2>&1"),
+            "the log is test.log: {started}"
+        );
+        assert!(
+            started.contains("echo $? > test.rc.new; mv test.rc.new test.rc"),
+            "the suite's own status must survive, written whole: {started}"
+        );
+    }
+
+    // ------------------------------------------------------- detached steps
+
+    #[test]
+    fn a_detached_start_is_idempotent_and_holds_no_session_descriptor() {
+        let s = detached_start("d", "test", "true");
+        let mkdir = s.find("mkdir test.started").unwrap();
+        let setsid = s.find("setsid nohup sh -c").unwrap();
+        assert!(mkdir < setsid, "the guard comes before the start: {s}");
+        assert!(
+            s.contains("< /dev/null > /dev/null 2>&1 & }"),
+            "the detached shell must not keep the SSH session's descriptors: {s}"
+        );
+        assert!(s.contains("( true ) > test.log 2>&1"), "{s}");
+    }
+
+    #[test]
+    #[should_panic(expected = "single quote")]
+    fn a_detached_command_with_a_single_quote_is_refused() {
+        let _ = detached_start("d", "x", "echo 'hi'");
+    }
+
+    #[test]
+    fn a_stop_names_this_run_only() {
+        let s = detached_stop("d", "test", Some("ouro-conformance-d.scope"));
+        assert!(s.contains("kill -s TERM -- -\"$(cat test.pid)\""), "{s}");
+        assert!(
+            s.contains("systemctl --user stop ouro-conformance-d.scope"),
+            "{s}"
+        );
+        assert!(!s.contains("pkill") && !s.contains("killall"), "{s}");
+        assert!(!detached_stop("d", "build", None).contains("systemctl"));
+    }
+
+    #[test]
+    fn status_checks_parse_strictly() {
+        assert_eq!(parse_poll("done 0\n"), Some(Poll::Done(0)));
+        assert_eq!(parse_poll("done 101"), Some(Poll::Done(101)));
+        assert_eq!(parse_poll("running       42\n"), Some(Poll::Running(42)));
+        assert_eq!(parse_poll("\nabsent\n"), Some(Poll::Absent));
+        assert_eq!(parse_poll("vanished"), Some(Poll::Vanished));
+        assert_eq!(parse_poll("done"), None, "a status without its code");
+        assert_eq!(parse_poll("done x"), None);
+        assert_eq!(parse_poll("running"), None);
+        assert_eq!(parse_poll("absent now"), None);
+        assert_eq!(parse_poll(""), None);
+        assert_eq!(parse_poll("Welcome to Ubuntu"), None);
+    }
+
+    fn reply(stdout: &str) -> std::io::Result<CommandResult> {
+        Ok(CommandResult {
+            code: Some(0),
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        })
+    }
+
+    fn dropped() -> std::io::Result<CommandResult> {
+        Ok(CommandResult {
+            code: Some(255),
+            stdout: String::new(),
+            stderr: "client_loop: send disconnect: Broken pipe".to_string(),
+        })
+    }
+
+    const QUICK: Patience = Patience {
+        interval: std::time::Duration::from_secs(10),
+        limit: std::time::Duration::from_secs(100),
+        failed_checks: 3,
+    };
+
+    /// Drive `wait_for` over scripted replies with a fake clock that advances
+    /// by each pause. Returns the ending, the progress heard and the pauses.
+    fn scripted(
+        replies: Vec<std::io::Result<CommandResult>>,
+        patience: Patience,
+    ) -> (Waited, Vec<u64>, usize) {
+        let mut replies = replies.into_iter();
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let pauses = std::cell::Cell::new(0usize);
+        let mut heard = Vec::new();
+        let waited = wait_for(
+            patience,
+            || {
+                replies
+                    .next()
+                    .expect("the wait asked more than was scripted")
+            },
+            |d| {
+                clock.set(clock.get() + d);
+                pauses.set(pauses.get() + 1);
+            },
+            || clock.get(),
+            |n| heard.push(n),
+        );
+        (waited, heard, pauses.get())
+    }
+
+    #[test]
+    fn a_step_that_ends_is_done_with_its_own_status() {
+        let (w, heard, _) = scripted(
+            vec![
+                reply("running 1"),
+                reply("running 1"),
+                reply("running 7"),
+                reply("done 101"),
+            ],
+            QUICK,
+        );
+        assert_eq!(w, Waited::Done(101));
+        assert_eq!(heard, vec![1, 7], "progress is reported once per change");
+    }
+
+    #[test]
+    fn dropped_checks_are_retried_and_contact_survives_them() {
+        // The failure this replaces: one dropped connection lost the result.
+        let (w, _, _) = scripted(
+            vec![
+                reply("running 3"),
+                dropped(),
+                dropped(),
+                reply("running 9"),
+                dropped(),
+                reply("done 0"),
+            ],
+            QUICK,
+        );
+        assert_eq!(w, Waited::Done(0));
+    }
+
+    #[test]
+    fn consecutive_failed_checks_lose_contact_and_say_why() {
+        let (w, _, _) = scripted(
+            vec![reply("running 3"), dropped(), dropped(), dropped()],
+            QUICK,
+        );
+        match w {
+            Waited::LostContact(why) => {
+                assert!(why.contains("3 consecutive"), "{why}");
+                assert!(why.contains("exited 255"), "{why}");
+                assert!(why.contains("Broken pipe"), "{why}");
+            }
+            other => panic!("expected lost contact, got {other:?}"),
+        }
+        let (w, _, _) = scripted(
+            vec![
+                Err(std::io::Error::other("no ssh")),
+                Err(std::io::Error::other("no ssh")),
+                Err(std::io::Error::other("no ssh")),
+            ],
+            QUICK,
+        );
+        assert!(
+            matches!(w, Waited::LostContact(ref why) if why.contains("no ssh")),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn a_step_that_never_ends_times_out() {
+        let replies = (0..20).map(|_| reply("running 5")).collect();
+        let (w, _, pauses) = scripted(replies, QUICK);
+        assert_eq!(w, Waited::TimedOut);
+        assert_eq!(pauses, 10, "100 s at 10 s per check");
+    }
+
+    #[test]
+    fn absent_vanished_and_unreadable_end_the_wait_at_once() {
+        assert_eq!(scripted(vec![reply("absent")], QUICK).0, Waited::Absent);
+        assert_eq!(
+            scripted(vec![reply("running 2"), reply("vanished")], QUICK).0,
+            Waited::Vanished
+        );
+        assert!(matches!(
+            scripted(vec![reply("Last login: /home/x")], QUICK).0,
+            Waited::Unreadable(ref l) if l == "Last login: <path>"
+        ));
+    }
+
+    #[test]
+    fn every_ending_but_done_is_a_problem() {
+        assert_eq!(wait_problem(&Waited::Done(3), QUICK), None);
+        for w in [
+            Waited::Absent,
+            Waited::Vanished,
+            Waited::TimedOut,
+            Waited::LostContact("x".into()),
+            Waited::Unreadable("x".into()),
+        ] {
+            assert!(wait_problem(&w, QUICK).is_some(), "{w:?}");
+        }
+        assert!(
+            wait_problem(&Waited::TimedOut, SUITE_PATIENCE)
+                .unwrap()
+                .contains("35 minutes")
+        );
+    }
+
+    /// The scripts themselves, run by a real shell against a private HOME.
+    /// Linux only: that is where they run, and macOS has no `setsid`.
+    #[cfg(target_os = "linux")]
+    mod scripts {
+        use super::super::*;
+
+        struct Home(PathBuf);
+
+        impl Home {
+            fn new(tag: &str) -> Home {
+                let dir = std::env::temp_dir()
+                    .join(format!("xtask-detached-{tag}-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(dir.join(REMOTE_RUNS).join("d")).unwrap();
+                Home(dir)
+            }
+
+            fn sh(&self, script: &str) -> String {
+                let out = Command::new("sh")
+                    .arg("-c")
+                    .arg(script)
+                    .env("HOME", &self.0)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            }
+
+            fn poll(&self, name: &str) -> Option<Poll> {
+                parse_poll(&self.sh(&detached_poll("d", name)))
+            }
+
+            /// Poll until the step is no longer running, up to ten seconds.
+            fn settle(&self, name: &str) -> Option<Poll> {
+                for _ in 0..200 {
+                    match self.poll(name) {
+                        Some(Poll::Running(_)) => {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        other => return other,
+                    }
+                }
+                self.poll(name)
+            }
+
+            fn file(&self, name: &str) -> String {
+                std::fs::read_to_string(self.0.join(REMOTE_RUNS).join("d").join(name))
+                    .unwrap_or_default()
+            }
+        }
+
+        impl Drop for Home {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[test]
+        fn a_step_records_its_output_and_status_even_one_that_exits() {
+            let home = Home::new("done");
+            assert_eq!(home.poll("s"), Some(Poll::Absent));
+            let started = home.sh(&detached_start("d", "s", "echo out; echo err 1>&2; exit 3"));
+            assert_eq!(started.trim(), "started");
+            assert_eq!(home.settle("s"), Some(Poll::Done(3)));
+            let log = home.file("s.log");
+            assert!(log.contains("out") && log.contains("err"), "{log}");
+        }
+
+        #[test]
+        fn a_second_start_does_not_run_the_step_twice() {
+            let home = Home::new("twice");
+            home.sh(&detached_start("d", "s", "echo once >> count; sleep 1"));
+            let again = home.sh(&detached_start("d", "s", "echo once >> count; sleep 1"));
+            assert_eq!(again.trim(), "", "the second start must not report started");
+            assert_eq!(home.settle("s"), Some(Poll::Done(0)));
+            assert_eq!(home.file("count").lines().count(), 1);
+        }
+
+        #[test]
+        fn a_step_that_dies_without_a_status_is_vanished_and_a_stop_ends_it() {
+            let home = Home::new("stop");
+            home.sh(&detached_start("d", "s", "sleep 30"));
+            assert!(matches!(home.poll("s"), Some(Poll::Running(_))));
+            // Wait for the pid file, then stop the step's process group.
+            for _ in 0..100 {
+                if !home.file("s.pid").is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            home.sh(&detached_stop("d", "s", None));
+            assert_eq!(home.settle("s"), Some(Poll::Vanished));
+        }
     }
 
     // ------------------------------------------------- the decision function
@@ -932,10 +1572,12 @@ mod tests {
             mkdir: Some(okc()),
             rsync: Some(okc()),
             build: Some(okc()),
+            build_wait: None,
             i02: Some(okc()),
             doctor: Some(okc()),
             doctor_json: Some(GOOD_DOCTOR.to_string()),
             suite: Some(okc()),
+            suite_wait: None,
             test_log: Some(GOOD_LOG.to_string()),
             host_manifest: Some(okc()),
             evidence_errors: Vec::new(),
@@ -951,6 +1593,49 @@ mod tests {
         let d = verdict(&a_clean_run());
         assert!(d.failures.is_empty(), "{:?}", d.failures);
         assert!(!d.keep_remote);
+    }
+
+    #[test]
+    fn a_lost_suite_fails_the_run_and_says_why_even_with_a_clean_partial_log() {
+        // The hosted failure: the suite kept running on the host, and the
+        // driver had no status for it. A partial log with no FAILED line
+        // must not make that a pass.
+        let mut o = a_clean_run();
+        o.suite = None;
+        o.suite_wait =
+            Some("lost contact with the host: 9 consecutive status checks failed".into());
+        let d = verdict(&o);
+        assert!(
+            d.failures
+                .iter()
+                .any(|f| f.starts_with("the remote conformance suite lost contact")),
+            "{:?}",
+            d.failures
+        );
+        assert!(
+            !d.failures.iter().any(|f| f.contains("did not run")),
+            "one cause, reported once: {:?}",
+            d.failures
+        );
+        assert!(d.keep_remote);
+    }
+
+    #[test]
+    fn a_lost_build_fails_the_run_and_stops_there() {
+        let mut o = a_clean_run();
+        o.build = None;
+        o.build_wait = Some("did not finish within 20 minutes and was stopped".into());
+        o.i02 = None;
+        o.doctor = None;
+        o.doctor_json = None;
+        o.suite = None;
+        o.test_log = None;
+        let d = verdict(&o);
+        assert_eq!(
+            d.failures,
+            vec!["the remote release build did not finish within 20 minutes and was stopped"]
+        );
+        assert!(d.keep_remote);
     }
 
     #[test]
