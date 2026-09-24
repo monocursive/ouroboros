@@ -2259,6 +2259,15 @@ mod j5e {
             .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0))
     }
 
+    /// The unified cgroup of this process, or `None` without one.
+    fn own_cgroup() -> Option<String> {
+        std::fs::read_to_string("/proc/self/cgroup")
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("0::"))
+            .map(str::to_owned)
+    }
+
     /// `readlink /proc/self/ns/time`, or `None` without a `/proc`.
     pub(super) fn time_namespace() -> Option<String> {
         std::fs::read_link("/proc/self/ns/time")
@@ -2565,6 +2574,8 @@ mod j5e {
         rusage: libc::rusage,
         wait_errno: Option<c_int>,
         timed_out: bool,
+        /// `pidfd`: the exit is seen at once; `wnohang`: within one tick.
+        via: &'static str,
     }
 
     #[cfg(target_os = "linux")]
@@ -2621,11 +2632,15 @@ mod j5e {
             rusage: unsafe { std::mem::zeroed() },
             wait_errno: None,
             timed_out: false,
+            via: "wnohang",
         };
         let deadline = Instant::now() + Duration::from_millis(deadline_ms);
         let mut term_at: Option<Instant> = None;
         let mut killed = false;
         let pidfd = open_pidfd(pid);
+        if pidfd >= 0 {
+            w.via = "pidfd";
+        }
         let tick = if sampler.interval_ms == 0 {
             if pidfd >= 0 { 1000 } else { 1 }
         } else {
@@ -2791,6 +2806,9 @@ mod j5e {
             "exec_errno": spawned.exec_errno.map(errno_name),
             "timed_out": waited.timed_out,
             "wait_errno": waited.wait_errno.map(errno_name),
+            "waited_via": waited.via,
+            // The cgroup this launcher runs in, which a direct target inherits.
+            "cgroup": own_cgroup(),
             "status": {
                 "raw": s,
                 "exited": exited,

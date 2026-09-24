@@ -293,6 +293,14 @@ fn perf_launch_brackets_the_command_on_the_clock_the_workload_reads() {
         assert_eq!(r["timens"], Value::Null);
     }
     assert_eq!(r["attempts"], Value::Null, "no data directory was named");
+    // How the exit was seen, and the cgroup a direct target inherits.
+    if cfg!(target_os = "linux") {
+        assert_eq!(r["waited_via"], "pidfd", "{r:#}");
+        assert!(r["cgroup"].as_str().unwrap().starts_with('/'), "{r:#}");
+    } else {
+        assert_eq!(r["waited_via"], "wnohang", "{r:#}");
+        assert_eq!(r["cgroup"], Value::Null, "{r:#}");
+    }
 }
 
 #[test]

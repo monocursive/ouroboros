@@ -44,8 +44,8 @@ pub const STARTUP_BUDGET_MS: f64 = 250.0;
 /// jail-v1 §5: "under 20% median overhead on the fixed workload".
 pub const OVERHEAD_BUDGET_PCT: f64 = 20.0;
 
-const RECORD_SCHEMA: &str = "xtask.perf.launch/1";
-const SUMMARY_SCHEMA: &str = "xtask.perf.summary/1";
+const RECORD_SCHEMA: &str = "xtask.perf.launch/2";
+const SUMMARY_SCHEMA: &str = "xtask.perf.summary/2";
 const RAW_FILE: &str = "launches.ndjson";
 const PARAMETERS_FILE: &str = "parameters.json";
 const HOST_FILE: &str = "host.json";
@@ -106,9 +106,17 @@ pub struct RunArgs {
     /// Per-launch deadline before `perf-launch` sends SIGTERM.
     #[arg(long, default_value_t = 300_000)]
     pub deadline_ms: u64,
-    /// Refuse to start a pass while the 1-minute load average is above this.
-    #[arg(long, value_name = "LOAD")]
+    /// The quiet-host threshold: the run refuses to start above it, and a
+    /// verdict needs the 1-minute load average read before every counted
+    /// launch at or below it. Required unless --allow-loaded.
+    #[arg(long, value_name = "LOAD", required_unless_present = "allow_loaded")]
     pub max_load: Option<f64>,
+    /// Measure without a quiet-host threshold: numbers only, no verdict.
+    #[arg(long, conflicts_with = "max_load")]
+    pub allow_loaded: bool,
+    /// Seed of the per-round arm order; default: from the clock. Recorded.
+    #[arg(long, value_name = "N")]
+    pub seed: Option<u64>,
     /// `ouro-jail`; default `target/release/ouro-jail`.
     #[arg(long, value_name = "PATH")]
     pub jail: Option<PathBuf>,
@@ -292,21 +300,39 @@ pub fn arms(profiles: &[Profile]) -> Vec<Arm> {
     out
 }
 
-/// The arm order of round `round`: rotated by one per round, so no arm
-/// always runs right after another and slow drift in the host's load falls
-/// on every arm alike.
+/// SplitMix64: a small, well-mixed generator; enough to order arms, and
+/// reproducible from the recorded seed without a dependency.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// The arm order of round `round`: a Fisher-Yates permutation drawn from
+/// `seed` and the round, so every round runs every arm once, no arm keeps
+/// one predecessor, and the recorded seed reproduces the order. (A rotation
+/// by one per round, which this replaces, kept each arm's predecessor fixed.)
 #[must_use]
-pub fn round_order(arms: &[Arm], round: u32) -> Vec<Arm> {
-    if arms.is_empty() {
-        return Vec::new();
+pub fn round_order(arms: &[Arm], seed: u64, round: u32) -> Vec<Arm> {
+    let mut order = arms.to_vec();
+    let mut state = seed ^ u64::from(round).wrapping_mul(0xd1b5_4a32_d192_ed03);
+    for i in (1..order.len()).rev() {
+        let j = usize::try_from(splitmix64(&mut state) % (i as u64 + 1)).unwrap_or(0);
+        order.swap(i, j);
     }
-    let shift = round as usize % arms.len();
-    arms.iter()
-        .cycle()
-        .skip(shift)
-        .take(arms.len())
-        .copied()
-        .collect()
+    order
+}
+
+/// A per-(session, workload) seed derived from the run's seed, so the two
+/// passes and the three workloads do not repeat one order.
+#[must_use]
+pub fn cell_seed(seed: u64, session: Session, workload: Workload) -> u64 {
+    let mut state = seed
+        ^ (session as u64).wrapping_mul(0x9e37_79b9)
+        ^ (workload as u64).wrapping_mul(0x85eb_ca6b_0000_0001);
+    splitmix64(&mut state)
 }
 
 // ------------------------------------------------------------------- records
@@ -328,6 +354,10 @@ pub struct LauncherFacts {
     pub rusage: RusageFacts,
     pub sampling: SamplingFacts,
     pub attempts: Option<Vec<AttemptFacts>>,
+    /// The launcher's own cgroup, which a direct target inherits.
+    pub cgroup: Option<String>,
+    /// `pidfd` (exit seen at once) or `wnohang` (seen within one interval).
+    pub waited_via: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -489,6 +519,9 @@ pub enum Reason {
     /// The trace is not a complete transcript ending on the final receipt's
     /// note (jail-v1 §13.3).
     TraceIncomplete,
+    /// An event count differs from the workload's exact count, or the trace
+    /// and the receipt disagree, with no gap recorded: a silent loss.
+    CountMismatch,
 }
 
 /// Something a valid launch carries that a reader must see.
@@ -531,6 +564,16 @@ pub struct LaunchRecord {
     /// The 1-minute load average read just before the launch.
     #[serde(default)]
     pub load1_before: Option<f64>,
+    /// `/proc/pressure/cpu` `some avg10` (percent) read just before it.
+    #[serde(default)]
+    pub cpu_pressure_before: Option<f64>,
+    /// Growth of `/proc/pressure/cpu` `some total` (µs) across the launch:
+    /// time some task on the host waited for a CPU while it ran.
+    #[serde(default)]
+    pub cpu_stall_us: Option<u64>,
+    /// The arm launched immediately before this one in the same pass.
+    #[serde(default)]
+    pub predecessor: Option<Arm>,
     #[serde(default)]
     pub stderr_tail: Option<String>,
     #[serde(default)]
@@ -553,6 +596,9 @@ impl LaunchRecord {
             receipt: None,
             kept_attempt: None,
             load1_before: None,
+            cpu_pressure_before: None,
+            cpu_stall_us: None,
+            predecessor: None,
             stderr_tail: None,
             validity: Validity::default(),
         }
@@ -750,9 +796,8 @@ fn validate_jailed(
         }
     } else if unconfirmed {
         flags.push(Flag::ExecUnconfirmed);
-        // The jail ends on its own with a nonzero code; a signal death or
-        // the usage/internal code 125 is not that.
-        if !(l.status.exited && l.status.code.is_some_and(|c| c != 0 && c != 125)) {
+        // §6.4: a post-launch tool error exits 1, and nothing else is this.
+        if !(l.status.exited && l.status.code == Some(1)) {
             reasons.push(Reason::JailExit);
         }
     } else {
@@ -773,6 +818,9 @@ fn validate_jailed(
     if r.observer_gaps > 0 {
         reasons.push(Reason::ObserverGaps);
     }
+    if !counts_match(rec, observe) {
+        reasons.push(Reason::CountMismatch);
+    }
     if observe == Observe::On {
         if !r.observer_attached {
             reasons.push(Reason::ObserverDetached);
@@ -786,6 +834,94 @@ fn validate_jailed(
     }
 }
 
+/// The exact event counts a workload makes under observation, from what the
+/// target itself reports it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Expected {
+    /// Execs: the target itself plus every child it forked.
+    pub execs: u64,
+    pub created: u64,
+    pub renamed: u64,
+    pub unlinked: u64,
+}
+
+impl Expected {
+    #[must_use]
+    pub fn of(rec: &LaunchRecord) -> Expected {
+        let n = |k: &str| {
+            rec.target
+                .summary
+                .as_ref()
+                .and_then(|s| s.get(k))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        match rec.workload {
+            Workload::Noop | Workload::SpawnTree => Expected {
+                execs: 1 + n("forked"),
+                created: 0,
+                renamed: 0,
+                unlinked: 0,
+            },
+            Workload::Fileops => Expected {
+                execs: 1,
+                created: n("created"),
+                renamed: n("renamed"),
+                unlinked: n("unlinked"),
+            },
+        }
+    }
+}
+
+/// Every count is the workload's exact one and the trace agrees with the
+/// receipt (measured exact on the reference host in every validation
+/// launch). With observation off only the wrapper classes are checked and no
+/// audit frame may appear.
+#[must_use]
+pub fn counts_match(rec: &LaunchRecord, observe: Observe) -> bool {
+    let (Some(r), Some(trace)) = (
+        rec.receipt.as_ref(),
+        rec.launcher
+            .as_ref()
+            .and_then(|l| l.attempts.as_ref())
+            .and_then(|a| a.first())
+            .map(|a| &a.trace),
+    ) else {
+        // Missing facts are excluded by their own reasons.
+        return true;
+    };
+    let class = |k: &str| r.coverage.get(k).and_then(|c| c.observed_count);
+    let op = |k: &str| trace.by_operation.get(k).copied().unwrap_or(0);
+    let audit = trace.by_source.get("audit").copied().unwrap_or(0);
+    // No limit is hit and nothing is proxied by these workloads.
+    if class("limits").is_some_and(|c| c != 0) || class("proxy.net").is_some_and(|c| c != 0) {
+        return false;
+    }
+    if observe == Observe::Off {
+        return audit == 0;
+    }
+    if CLOSED_SET
+        .iter()
+        .any(|k| r.coverage.get(*k).is_none_or(|c| c.status != "active"))
+    {
+        // An inactive class is excluded as `class_not_active`; its count
+        // means nothing.
+        return true;
+    }
+    let e = Expected::of(rec);
+    let fs_write = e.created + e.renamed + e.unlinked;
+    class("exec") == Some(2 * e.execs)
+        && class("fs.write") == Some(fs_write)
+        && class("fs.deny") == Some(0)
+        && class("net") == Some(0)
+        && op("proc.exec") == e.execs
+        && op("proc.exit") == e.execs
+        && op("fs.create") == e.created
+        && op("fs.rename") == e.renamed
+        && op("fs.unlink") == e.unlinked
+        && audit == 2 * e.execs + fs_write
+}
+
 /// The timings of one launch, in nanoseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timings {
@@ -795,8 +931,13 @@ pub struct Timings {
     pub wall: u64,
     /// The target's end reading minus its entry reading.
     pub work: u64,
-    /// The launcher's reading after the reap minus the target's end reading.
+    /// The launcher's reading after the reap minus the target's end reading:
+    /// the target's exit, settlement, tree verification, the receipts, the
+    /// trace flush and the leaf's removal, for a jailed arm.
     pub teardown: u64,
+    /// Everything after the target's entry reading: work + teardown, so that
+    /// startup + post-start = wall.
+    pub post_start: u64,
 }
 
 /// The timings, when the four readings exist and are ordered.
@@ -812,6 +953,7 @@ pub fn timings(rec: &LaunchRecord) -> Option<Timings> {
         wall: l.t1_ns - l.t0_ns,
         work: end - start,
         teardown: l.t1_ns - end,
+        post_start: l.t1_ns - start,
     })
 }
 
@@ -902,6 +1044,7 @@ pub struct CellSummary {
     pub wall_ms: Option<Dist>,
     pub work_ms: Option<Dist>,
     pub teardown_ms: Option<Dist>,
+    pub post_start_ms: Option<Dist>,
     /// The launched process's own sampled `VmHWM`: the supervisor for a
     /// jailed arm, the target for direct execution.
     pub launched_hwm_kib: Option<Dist>,
@@ -930,8 +1073,47 @@ pub enum CompareKind {
 pub enum Verdict {
     Pass,
     Fail,
-    /// Fewer than 30 valid launches on one side.
+    /// Fewer than 30 valid launches on one side, any excluded launch on
+    /// either side, or a problem with the raw data: no verdict.
     Insufficient,
+    /// Enough clean data, but the host was not shown quiet (a counted launch
+    /// above --max-load, an unrecorded load, or --allow-loaded): numbers
+    /// only, no verdict.
+    Loaded,
+}
+
+/// What a verdict needs beyond the numbers.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Gate {
+    /// The quiet-host threshold; `None` when the run had none
+    /// (--allow-loaded, or no parameters): then no verdict.
+    pub max_load: Option<f64>,
+    /// The raw data passed every integrity check.
+    pub integrity_ok: bool,
+}
+
+impl Gate {
+    #[must_use]
+    pub fn from_parameters(parameters: &Value, integrity_ok: bool) -> Gate {
+        let allow_loaded = parameters["allow_loaded"].as_bool().unwrap_or(false);
+        Gate {
+            max_load: if allow_loaded {
+                None
+            } else {
+                parameters["max_load"].as_f64()
+            },
+            integrity_ok,
+        }
+    }
+
+    /// Every counted launch had its load recorded, at or below the threshold.
+    fn quiet(&self, counted: &[&LaunchRecord]) -> bool {
+        self.max_load.is_some_and(|max| {
+            counted
+                .iter()
+                .all(|r| r.load1_before.is_some_and(|l| l <= max))
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -951,6 +1133,8 @@ pub struct Comparison {
     pub baseline_startup_median_ms: Option<f64>,
     pub baseline_wall_median_ms: Option<f64>,
     pub baseline_work_median_ms: Option<f64>,
+    pub baseline_teardown_median_ms: Option<f64>,
+    pub baseline_post_start_median_ms: Option<f64>,
     /// Per subject launch: its startup minus the baseline's median startup.
     pub added_startup_ms: Option<Dist>,
     /// Per subject launch: its wall over the baseline's median wall, minus 1.
@@ -961,8 +1145,19 @@ pub struct Comparison {
     pub startup_verdict: Option<Verdict>,
     /// Median wall overhead under 20%; fixed workload against direct only.
     pub wall_verdict: Option<Verdict>,
-    /// Median work-phase overhead under 20%; fixed workload against direct only.
+    /// Median work-phase overhead under 20%; fixed workload against direct
+    /// only. The integrator's current reading of the §5 overhead budget.
     pub work_verdict: Option<Verdict>,
+    /// Per subject launch: its teardown minus the baseline's median teardown.
+    pub added_teardown_ms: Option<Dist>,
+    /// Per subject launch: its post-start time (work + teardown) over the
+    /// baseline's median, minus 1.
+    pub post_start_overhead_pct: Option<Dist>,
+    /// Median post-start overhead under 20%; fixed workload against direct
+    /// only. Startup and post-start together cover the whole wall.
+    pub post_start_verdict: Option<Verdict>,
+    /// The highest 1-minute load read before a counted launch of either arm.
+    pub load1_max: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -973,6 +1168,16 @@ pub struct Summary {
     pub warmup_launches: usize,
     /// The 1-minute load average read before each measured launch.
     pub load1: Option<Dist>,
+    /// `/proc/pressure/cpu` `some avg10` (%) before each measured launch.
+    pub cpu_pressure: Option<Dist>,
+    /// CPU stall on the host (ms) across each measured launch.
+    pub cpu_stall_ms: Option<Dist>,
+    /// What a verdict needed beyond the numbers.
+    pub gate: Gate,
+    /// Problems with the raw data; any one blocks every verdict.
+    pub integrity: Vec<String>,
+    /// Who summarised which raw bytes (filled by `perf summarize`/`run`).
+    pub provenance: Value,
     pub cells: Vec<CellSummary>,
     pub comparisons: Vec<Comparison>,
 }
@@ -1075,6 +1280,7 @@ pub fn summarize_cell(key: CellKey, records: &[&LaunchRecord]) -> CellSummary {
         wall_ms: over(&|_, t| Some(ms(t.wall))),
         work_ms: over(&|_, t| Some(ms(t.work))),
         teardown_ms: over(&|_, t| Some(ms(t.teardown))),
+        post_start_ms: over(&|_, t| Some(ms(t.post_start))),
         launched_hwm_kib: over(&|r, _| r.launcher.as_ref()?.sampling.hwm_kib.map(|k| k as f64)),
         reaped_tree_maxrss_kib: over(&|r, _| Some(r.launcher.as_ref()?.rusage.maxrss_kib as f64)),
         leaf_peak_kib: over(&|r, _| {
@@ -1121,6 +1327,20 @@ fn verdict(
     }
 }
 
+/// A numeric verdict, withheld when the data or the host do not support one:
+/// raw-data problems or any excluded launch on either side make it
+/// `insufficient` (a verdict over the survivors of an exclusion is not
+/// taken); a host not shown quiet makes it `loaded`.
+fn gated(core: Verdict, gate: &Gate, excluded: usize, quiet: bool) -> Verdict {
+    if !gate.integrity_ok || excluded > 0 || core == Verdict::Insufficient {
+        Verdict::Insufficient
+    } else if !quiet {
+        Verdict::Loaded
+    } else {
+        core
+    }
+}
+
 fn flagged(valid: &[(&LaunchRecord, Timings)]) -> BTreeMap<String, usize> {
     let mut out = BTreeMap::new();
     for (r, _) in valid {
@@ -1141,28 +1361,47 @@ pub fn compare(
     kind: CompareKind,
     subject: (Arm, &[&LaunchRecord]),
     baseline: (Arm, &[&LaunchRecord]),
+    gate: &Gate,
 ) -> Comparison {
     let s = valid_timed(subject.1);
     let b = valid_timed(baseline.1);
-    let sorted = |f: &dyn Fn(&Timings) -> u64| {
+    let base_median = |f: &dyn Fn(&Timings) -> u64| {
         let mut v: Vec<f64> = b.iter().map(|(_, t)| ms(f(t))).collect();
         v.sort_by(f64::total_cmp);
         median(&v)
     };
-    let b_startup = sorted(&|t| t.startup);
-    let b_wall = sorted(&|t| t.wall);
-    let b_work = sorted(&|t| t.work);
-    let added = b_startup.and_then(|base| dist(s.iter().map(|(_, t)| ms(t.startup) - base)));
+    let b_startup = base_median(&|t| t.startup);
+    let b_wall = base_median(&|t| t.wall);
+    let b_work = base_median(&|t| t.work);
+    let b_teardown = base_median(&|t| t.teardown);
+    let b_post = base_median(&|t| t.post_start);
+    let added = |base: Option<f64>, f: &dyn Fn(&Timings) -> u64| {
+        base.and_then(|base| dist(s.iter().map(|(_, t)| ms(f(t)) - base)))
+    };
     let ratio = |base: Option<f64>, f: &dyn Fn(&Timings) -> u64| {
         base.filter(|b| *b > 0.0)
             .and_then(|base| dist(s.iter().map(|(_, t)| (ms(f(t)) / base - 1.0) * 100.0)))
     };
+    let added_startup = added(b_startup, &|t| t.startup);
+    let added_teardown = added(b_teardown, &|t| t.teardown);
     let wall = ratio(b_wall, &|t| t.wall);
     let work = ratio(b_work, &|t| t.work);
+    let post = ratio(b_post, &|t| t.post_start);
     let against_direct = baseline.0 == Arm::Direct;
     let fixed = workload == Workload::Fileops;
     let excluded =
         |records: &[&LaunchRecord]| records.iter().filter(|r| !validate(r).valid).count();
+    let (s_excluded, b_excluded) = (excluded(subject.1), excluded(baseline.1));
+    let counted: Vec<&LaunchRecord> = s.iter().chain(b.iter()).map(|(r, _)| *r).collect();
+    let quiet = gate.quiet(&counted);
+    let judge = |value: Option<f64>, budget: f64| {
+        gated(
+            verdict(s.len(), b.len(), value, budget),
+            gate,
+            s_excluded + b_excluded,
+            quiet,
+        )
+    };
     Comparison {
         session,
         workload,
@@ -1171,47 +1410,156 @@ pub fn compare(
         subject: subject.0,
         baseline: baseline.0,
         subject_valid: s.len(),
-        subject_excluded: excluded(subject.1),
+        subject_excluded: s_excluded,
         subject_flagged: flagged(&s),
         baseline_valid: b.len(),
-        baseline_excluded: excluded(baseline.1),
+        baseline_excluded: b_excluded,
         baseline_startup_median_ms: b_startup,
         baseline_wall_median_ms: b_wall,
         baseline_work_median_ms: b_work,
-        startup_verdict: against_direct.then(|| {
-            verdict(
-                s.len(),
-                b.len(),
-                added.as_ref().map(|d| d.p95),
-                STARTUP_BUDGET_MS,
-            )
-        }),
-        wall_verdict: (against_direct && fixed).then(|| {
-            verdict(
-                s.len(),
-                b.len(),
-                wall.as_ref().map(|d| d.median),
-                OVERHEAD_BUDGET_PCT,
-            )
-        }),
-        work_verdict: (against_direct && fixed).then(|| {
-            verdict(
-                s.len(),
-                b.len(),
-                work.as_ref().map(|d| d.median),
-                OVERHEAD_BUDGET_PCT,
-            )
-        }),
-        added_startup_ms: added,
+        baseline_teardown_median_ms: b_teardown,
+        baseline_post_start_median_ms: b_post,
+        startup_verdict: against_direct
+            .then(|| judge(added_startup.as_ref().map(|d| d.p95), STARTUP_BUDGET_MS)),
+        wall_verdict: (against_direct && fixed)
+            .then(|| judge(wall.as_ref().map(|d| d.median), OVERHEAD_BUDGET_PCT)),
+        work_verdict: (against_direct && fixed)
+            .then(|| judge(work.as_ref().map(|d| d.median), OVERHEAD_BUDGET_PCT)),
+        post_start_verdict: (against_direct && fixed)
+            .then(|| judge(post.as_ref().map(|d| d.median), OVERHEAD_BUDGET_PCT)),
+        added_startup_ms: added_startup,
         wall_overhead_pct: wall,
         work_overhead_pct: work,
+        added_teardown_ms: added_teardown,
+        post_start_overhead_pct: post,
+        load1_max: counted
+            .iter()
+            .filter_map(|r| r.load1_before)
+            .max_by(f64::total_cmp),
     }
+}
+
+/// The problems with a set of raw records that make any verdict unsafe:
+/// another schema, a launch recorded twice, a cell whose count is not the
+/// run's parameters, or a stored validity the current rules no longer give.
+#[must_use]
+pub fn integrity_problems(records: &[LaunchRecord], parameters: &Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let foreign = records.iter().filter(|r| r.schema != RECORD_SCHEMA).count();
+    if foreign > 0 {
+        problems.push(format!(
+            "{foreign} record(s) are not `{RECORD_SCHEMA}`; they are left out"
+        ));
+    }
+    let mut seen: BTreeMap<(Session, Workload, Arm, u32, bool), usize> = BTreeMap::new();
+    for r in records.iter().filter(|r| r.schema == RECORD_SCHEMA) {
+        *seen
+            .entry((r.session, r.workload, r.arm, r.round, r.warmup))
+            .or_default() += 1;
+    }
+    let duplicates: Vec<String> = seen
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|((s, w, a, round, warm), n)| {
+            format!(
+                "{} {} {} {}{round} x{n}",
+                s.name(),
+                w.name(),
+                a.name(),
+                if *warm { "warm-up " } else { "" }
+            )
+        })
+        .collect();
+    if !duplicates.is_empty() {
+        problems.push(format!(
+            "{} duplicate launch key(s), recorded more than once (runs mixed in one \
+             directory?): {}",
+            duplicates.len(),
+            duplicates
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if let Some(want) = parameters["launches"].as_u64() {
+        let warm = parameters["warmup"].as_u64();
+        let names = |k: &str| -> Option<Vec<String>> {
+            parameters[k].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+        };
+        let mut expected: Vec<(String, String, String)> = Vec::new();
+        if let (Some(sessions), Some(workloads), Some(profiles)) =
+            (names("sessions"), names("workloads"), names("profiles"))
+        {
+            for s in &sessions {
+                for w in &workloads {
+                    expected.push((s.clone(), w.clone(), "direct".to_owned()));
+                    for p in &profiles {
+                        for o in ["off", "on"] {
+                            expected.push((s.clone(), w.clone(), format!("{p}/{o}")));
+                        }
+                    }
+                }
+            }
+        }
+        let mut count: BTreeMap<(String, String, String), (u64, u64)> = BTreeMap::new();
+        for e in &expected {
+            count.insert(e.clone(), (0, 0));
+        }
+        for ((s, w, a, _, warm_rec), n) in &seen {
+            let e = count
+                .entry((s.name().to_owned(), w.name().to_owned(), a.name()))
+                .or_default();
+            if *warm_rec {
+                e.1 += *n as u64;
+            } else {
+                e.0 += *n as u64;
+            }
+        }
+        for ((s, w, a), (measured, warmups)) in count {
+            if measured != want {
+                problems.push(format!(
+                    "{s} {w} {a}: {measured} measured launch(es), expected {want}"
+                ));
+            }
+            if let Some(warm) = warm
+                && warmups != warm
+            {
+                problems.push(format!(
+                    "{s} {w} {a}: {warmups} warm-up launch(es), expected {warm}"
+                ));
+            }
+        }
+    }
+    let drift = records
+        .iter()
+        .filter(|r| r.validity != Validity::default() && r.validity != validate(r))
+        .count();
+    if drift > 0 {
+        problems.push(format!(
+            "{drift} record(s) whose stored validity differs from the one recomputed now \
+             (the validity rules changed since the run; re-run instead)"
+        ));
+    }
+    problems
 }
 
 /// The whole summary of a set of launch records.
 #[must_use]
 pub fn summarize(records: &[LaunchRecord], parameters: Value, host: Value) -> Summary {
-    let cells = measured(records);
+    let integrity = integrity_problems(records, &parameters);
+    let gate = Gate::from_parameters(&parameters, integrity.is_empty());
+    let ours: Vec<LaunchRecord> = records
+        .iter()
+        .filter(|r| r.schema == RECORD_SCHEMA)
+        .cloned()
+        .collect();
+    let cells = measured(&ours);
     let empty: Vec<&LaunchRecord> = Vec::new();
     let get = |k: CellKey| cells.get(&k).map_or(empty.as_slice(), Vec::as_slice);
     let mut comparisons = Vec::new();
@@ -1239,20 +1587,24 @@ pub fn summarize(records: &[LaunchRecord], parameters: Value, host: Value) -> Su
                 kind,
                 (subject, get((session, workload, subject))),
                 (baseline, get((session, workload, baseline))),
+                &gate,
             ));
         }
     }
+    let measured_records = || ours.iter().filter(|r| !r.warmup);
     Summary {
         schema: SUMMARY_SCHEMA.to_owned(),
         parameters,
         host,
-        warmup_launches: records.iter().filter(|r| r.warmup).count(),
-        load1: dist(
-            records
-                .iter()
-                .filter(|r| !r.warmup)
-                .filter_map(|r| r.load1_before),
+        warmup_launches: ours.iter().filter(|r| r.warmup).count(),
+        load1: dist(measured_records().filter_map(|r| r.load1_before)),
+        cpu_pressure: dist(measured_records().filter_map(|r| r.cpu_pressure_before)),
+        cpu_stall_ms: dist(
+            measured_records().filter_map(|r| r.cpu_stall_us.map(|u| u as f64 / 1000.0)),
         ),
+        gate,
+        integrity,
+        provenance: Value::Null,
         cells: cells.iter().map(|(k, v)| summarize_cell(*k, v)).collect(),
         comparisons,
     }
@@ -1271,16 +1623,31 @@ fn pair(d: Option<&Dist>, digits: usize, unit: &str) -> String {
     )
 }
 
-fn med_max(d: Option<&Dist>) -> String {
+fn med_p95_max(d: Option<&Dist>) -> String {
     d.map_or_else(
         || "n/a".to_owned(),
-        |d| format!("{:.0} / {:.0}", d.median, d.max),
+        |d| format!("{:.0} / {:.0} / {:.0}", d.median, d.p95, d.max),
+    )
+}
+
+fn med_range(d: Option<&Dist>) -> String {
+    d.map_or_else(
+        || "n/a".to_owned(),
+        |d| {
+            if (d.min - d.max).abs() < f64::EPSILON {
+                format!("{:.0}", d.median)
+            } else {
+                format!("{:.0} ({:.0}–{:.0})", d.median, d.min, d.max)
+            }
+        },
     )
 }
 
 fn verdict_text(v: Option<Verdict>, value: Option<f64>, unit: &str) -> String {
     match v {
         None => "n/a".to_owned(),
+        Some(Verdict::Loaded) => format!("loaded (no verdict; {}{unit})", num(value, 1)),
+        Some(Verdict::Insufficient) => format!("insufficient ({}{unit})", num(value, 1)),
         Some(v) => format!("{} ({}{unit})", enum_name(&v), num(value, 1)),
     }
 }
@@ -1327,7 +1694,10 @@ const DEFINITIONS: &str = "\
 - **Launcher.** `ouro-fixture perf-launch`, outside the jail, forks the arm's \
 command: the workload itself (direct) or `ouro-jail run --profile P --observe \
 on|off --workspace WS -- workload`. It reads `CLOCK_MONOTONIC` just before \
-`fork` and again after `wait4` returns.
+`fork` and again after `wait4` returns. While the command runs it samples \
+the launched process's `VmHWM` and, for a jailed arm only, looks up the \
+execution leaf from the receipt and reads its `memory.peak`, every sampling \
+interval: a small asymmetric cost (`--sample-ms 0` is the control run).
 - **Startup.** From that first reading to the target's own first reading at \
 entry to its workload mode (after its exec, dynamic loading and argument \
 parsing, the same for every arm). The target reports its time namespace and \
@@ -1335,40 +1705,90 @@ the launcher its own; a launch where they differ or are unknown is excluded. \
 For a jailed arm startup includes the supervisor's own start, the scope step \
 (plain session), the capability probes, preparation, bubblewrap, observer \
 attachment and the exec.
-- **Added warm startup.** A jailed launch's startup minus the median startup \
-of the direct arm of the same session and workload. Warm: after the discarded \
-warm-up launch of every arm.
-- **Wall.** The launcher's two readings: spawn to the jail's exit, after \
-settlement and the final receipt.
 - **Work.** The target's end reading minus its entry reading: the workload \
 phase alone, where the observer's per-call cost falls.
-- **Teardown.** Wall end minus the target's end reading.
-- **Overhead.** A launch's wall (or work) over the baseline arm's median, minus \
-one. The median of these is the ratio of medians minus one.
+- **Teardown.** The launcher's reading after `wait4` minus the target's end \
+reading: the target's exit and, for a jailed arm, settlement, tree \
+verification, the receipts, the trace flush and the leaf's removal.
+- **Post-start.** Work + teardown: everything after the target's entry. \
+Startup + post-start = wall, so the startup budget and a post-start budget \
+together leave no jail time uncounted.
+- **Wall.** The launcher's two readings: spawn to the jail's exit.
+- **Added (ms).** A launch's startup (or teardown) minus the baseline arm's \
+median, same session and workload. Warm: after the discarded warm-up launch \
+of every arm.
+- **Overhead (%).** A launch's work, post-start or wall time over the \
+baseline arm's median, minus one. The median of these is the ratio of \
+medians minus one.
 - **Median / p95.** The middle value (mean of the two middle values for an \
 even count); p95 by nearest rank, the ⌈0.95·n⌉-th smallest value (the 29th of \
 30).
 - **Peak RSS.** Launched HWM: the launched process's own `VmHWM` (the \
-supervisor for a jailed arm), sampled every interval, last sample (a lower \
-bound). Reaped tree: `wait4`'s `ru_maxrss`, the largest resident set of the \
-launched process and anything it reaped (for a jailed arm the supervisor, \
-bubblewrap and whatever they reaped). Leaf: the execution leaf's \
-`memory.peak` (cgroup memory including page cache), sampled, last sample. \
-Target: the target's own `ru_maxrss` at its end.
+supervisor for a jailed arm), last sample (a lower bound). Reaped tree: \
+`wait4`'s `ru_maxrss`, the largest resident set of the launched process and \
+anything it reaped. Leaf: the execution leaf's `memory.peak` (cgroup memory \
+including page cache), last sample. Target: the target's own `ru_maxrss` at \
+its end.
 - **Validity.** A launch counts only if the launcher ran and exec'd, the \
 target printed both lines and completed its workload, one clock and ordered \
 readings, direct execution exited 0; and for a jailed arm: exactly one \
 attempt, a settled final receipt of the arm's profile and observation mode, \
 the session's scope state (`entered` from a plain session, \
 `already_delegated` in a scope), outcome `exited 0` (or, with observation \
-off, the recorded exec-confirmation limit, flagged), no receipt error, tree \
-death verified, no degraded class, no coverage or observer gap, with \
-observation on an attached observer and every closed-set class active, and a \
-trace that is complete and ends on the final receipt's note (§13.3). \
-Everything else is excluded, counted by reason and never averaged.
-- **Verdicts.** Against direct execution only. `insufficient` below 30 valid \
-launches on either side.
+off, the recorded exec-confirmation limit with jail exit 1, flagged), no \
+receipt error, tree death verified, no degraded class, no coverage or \
+observer gap, with observation on an attached observer and every closed-set \
+class active, every event count exactly the workload's (execs: 2 × (1 + \
+children) in the `exec` class, one `proc.exec` and one `proc.exit` each; \
+fileops: one `fs.create`, `fs.rename`, `fs.unlink` per round, their sum in \
+`fs.write`; nothing in `fs.deny`, `net`, `limits`, `proxy.net`; the trace's \
+audit frames equal to the receipt's closed-set counts; no audit frame with \
+observation off), and a trace that is complete and ends on the final \
+receipt's note (§13.3). Everything else is excluded, counted by reason, never \
+averaged, and its attempt, stdout and stderr are kept under `kept/`.
+- **Verdicts.** Against direct execution only. `insufficient`: fewer than 30 \
+valid launches on either side, any excluded launch on either side (no verdict \
+over survivors), or a raw-data problem. `loaded`: the host was not shown \
+quiet (a counted launch of either side above `--max-load` or with no load \
+recorded, or `--allow-loaded`). A roll-up passes only if every cell passes.
+- **Arm order.** A seeded permutation per round (seed in the parameters); \
+each launch records its predecessor.
+- **CPU share.** Not equalised: a direct target runs in the harness's own \
+cgroup, a jailed one in its execution leaf, and their CPU weights differ \
+only under contention, which the quiet-host condition rules out for a \
+verdict. The direct target's cgroup is recorded per launch.
+- **Sessions.** The plain and scope passes run one after the other, so a \
+difference between them is confounded by time; each pass's load is in \
+`passes.ndjson`.
 ";
+
+/// How the verdicts of several cells combine: pass only if all pass.
+fn roll_up(verdicts: &[Verdict]) -> (Option<Verdict>, String) {
+    if verdicts.is_empty() {
+        return (None, "no cell".to_owned());
+    }
+    let count = |v: Verdict| verdicts.iter().filter(|x| **x == v).count();
+    let overall = if count(Verdict::Fail) > 0 {
+        Verdict::Fail
+    } else if count(Verdict::Insufficient) > 0 {
+        Verdict::Insufficient
+    } else if count(Verdict::Loaded) > 0 {
+        Verdict::Loaded
+    } else {
+        Verdict::Pass
+    };
+    (
+        Some(overall),
+        format!(
+            "{} of {} cells pass, {} fail, {} insufficient, {} loaded",
+            count(Verdict::Pass),
+            verdicts.len(),
+            count(Verdict::Fail),
+            count(Verdict::Insufficient),
+            count(Verdict::Loaded)
+        ),
+    )
+}
 
 /// The Markdown report.
 #[must_use]
@@ -1377,12 +1797,27 @@ pub fn render_markdown(summary: &Summary) -> String {
     let p = &summary.parameters;
     let _ = writeln!(md, "# `ouro-jail` performance (jail-v1 §5)\n");
     let _ = writeln!(md, "{}\n", host_line(&summary.host));
+    if !summary.provenance.is_null() {
+        let v = &summary.provenance;
+        let _ = writeln!(
+            md,
+            "Raw data: `{}`, {} records, sha256 `{}`; summarised {} by xtask {} at source \
+             revision `{}`.\n",
+            v["raw_file"].as_str().unwrap_or("?"),
+            v["raw_records"],
+            v["raw_sha256"].as_str().unwrap_or("unknown"),
+            v["summarized_at"].as_str().unwrap_or("?"),
+            v["summarizer"]["xtask_version"].as_str().unwrap_or("?"),
+            v["summarizer"]["source_revision"]
+                .as_str()
+                .unwrap_or("unknown"),
+        );
+    }
     let _ = writeln!(
         md,
         "Parameters: {} measured launch(es) per arm after {} warm-up launch(es) per arm \
          ({} warm-up records discarded); sessions {}; profiles {}; workloads {}; fileops \
-         {} rounds; spawn-tree {} children; sampling every {} ms. Arm order rotates by one \
-         each round.\n",
+         {} rounds; spawn-tree {} children; sampling every {} ms; arm order seed {}.\n",
         p["launches"],
         p["warmup"],
         summary.warmup_launches,
@@ -1392,41 +1827,139 @@ pub fn render_markdown(summary: &Summary) -> String {
         p["fileops_rounds"],
         p["spawn_count"],
         p["sample_ms"],
+        p["seed"],
     );
+    let dist3 = |d: Option<&Dist>, digits: usize| {
+        d.map_or_else(
+            || "not recorded".to_owned(),
+            |d| {
+                format!(
+                    "{:.digits$} / {:.digits$} / {:.digits$}",
+                    d.min, d.median, d.max
+                )
+            },
+        )
+    };
+    let threshold = match summary.gate.max_load {
+        Some(max) => format!(
+            "`--max-load {max}`: a verdict needs every counted launch of both sides at or \
+             below it"
+        ),
+        None => "none (`--allow-loaded`, or no parameters): numbers only, no verdict".to_owned(),
+    };
     let _ = writeln!(
         md,
-        "Host load: the 1-minute load average before each measured launch was {} (min / \
-         median / max; the host has {} CPUs). A noisy host inflates every jailed arm more \
-         than direct execution.\n",
-        summary.load1.as_ref().map_or_else(
-            || "not recorded".to_owned(),
-            |d| format!("{:.2} / {:.2} / {:.2}", d.min, d.median, d.max)
-        ),
+        "Host quietness: threshold {threshold}. Before the measured launches the 1-minute \
+         load average was {} and `/proc/pressure/cpu` `some avg10` was {} % (min / median / \
+         max); across them the host's CPU stall was {} ms. The host has {} CPUs. The \
+         1-minute load includes the harness's own recent launches.\n",
+        dist3(summary.load1.as_ref(), 2),
+        dist3(summary.cpu_pressure.as_ref(), 2),
+        dist3(summary.cpu_stall_ms.as_ref(), 1),
         summary.host["cpus"]
             .as_u64()
             .map_or("?".to_owned(), |n| n.to_string()),
     );
-    let short = summary.cells.iter().any(|c| c.valid < SPEC_MIN_LAUNCHES)
+    if !summary.integrity.is_empty() {
+        let _ = writeln!(md, "## Raw-data problems: every verdict is withheld\n");
+        for problem in &summary.integrity {
+            let _ = writeln!(md, "- {problem}");
+        }
+        let _ = writeln!(md);
+    }
+    let mut why: Vec<String> = Vec::new();
+    if !summary.integrity.is_empty() {
+        why.push("the raw data has problems".to_owned());
+    }
+    if summary.cells.iter().any(|c| c.valid < SPEC_MIN_LAUNCHES)
         || summary
             .comparisons
             .iter()
-            .any(|c| c.subject_valid < SPEC_MIN_LAUNCHES || c.baseline_valid < SPEC_MIN_LAUNCHES);
-    if short {
+            .any(|c| c.subject_valid < SPEC_MIN_LAUNCHES || c.baseline_valid < SPEC_MIN_LAUNCHES)
+    {
+        why.push(format!(
+            "an arm has fewer than {SPEC_MIN_LAUNCHES} valid launches"
+        ));
+    }
+    if summary.cells.iter().any(|c| c.excluded > 0) {
+        why.push("an arm has excluded launches".to_owned());
+    }
+    let verdicts = || {
+        summary.comparisons.iter().flat_map(|c| {
+            [
+                c.startup_verdict,
+                c.work_verdict,
+                c.post_start_verdict,
+                c.wall_verdict,
+            ]
+        })
+    };
+    if verdicts().any(|v| v == Some(Verdict::Loaded)) {
+        why.push("the host was not shown quiet".to_owned());
+    }
+    if !why.is_empty() {
         let _ = writeln!(
             md,
-            "**Not the §5 measurement:** at least one arm has fewer than {SPEC_MIN_LAUNCHES} \
-             valid launches, so every verdict it touches is `insufficient`; the numbers are \
-             provisional.\n"
+            "**Not the §5 measurement:** {}; the verdicts this touches are withheld and the \
+             numbers are provisional.\n",
+            why.join("; ")
         );
     }
 
     let _ = writeln!(
         md,
-        "## Budgets: the jail's own overhead (`tool`, `--observe off` against direct)\n\n\
-         The budgeted comparison under the decision of 2026-09-24. Each cell: median / p95 \
-         over the valid launches. `exec_unconfirmed` marks valid launches whose receipt \
-         outcome is `unknown` because, with observation off, the target ended before the \
-         supervisor confirmed its exec (the jail then exits 1); the target's own lines \
+        "## Verdict roll-up\n\n\
+         A budget holds for a profile only if every cell below passes. The overhead budget \
+         is read three ways, each its own verdict: **work phase** (the target's own entry to \
+         end; the integrator's current reading of §5), **post-start** (work + teardown: \
+         everything after entry, so startup + post-start cover the whole run), and \
+         **end-to-end wall** (startup included).\n\n\
+         | Profile | Comparison | p95 added startup < 250 ms | Work phase < 20% | \
+         Post-start < 20% | End-to-end wall < 20% |\n|---|---|---|---|---|---|"
+    );
+    let profiles: Vec<Profile> = {
+        let mut v: Vec<Profile> = summary.comparisons.iter().map(|c| c.profile).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    for profile in profiles {
+        for kind in [CompareKind::OffVsDirect, CompareKind::OnVsDirect] {
+            let rows: Vec<&Comparison> = summary
+                .comparisons
+                .iter()
+                .filter(|c| c.profile == profile && c.kind == kind)
+                .collect();
+            let cell = |f: &dyn Fn(&Comparison) -> Option<Verdict>| {
+                let (overall, detail) =
+                    roll_up(&rows.iter().filter_map(|c| f(c)).collect::<Vec<_>>());
+                format!(
+                    "{} ({detail})",
+                    overall.map_or_else(|| "n/a".to_owned(), |v| enum_name(&v))
+                )
+            };
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} | {} | {} | {} |",
+                profile.name(),
+                enum_name(&kind).replace('_', " "),
+                cell(&|c| c.startup_verdict),
+                cell(&|c| c.work_verdict),
+                cell(&|c| c.post_start_verdict),
+                cell(&|c| c.wall_verdict),
+            );
+        }
+    }
+    let _ = writeln!(md);
+
+    let _ = writeln!(
+        md,
+        "## `--observe off` against direct: the jail's own overhead (`tool`)\n\n\
+         Under the decision of 2026-09-24 the §5 budgets apply to this comparison if \
+         observation misses them (next section); otherwise they apply to both. Each cell: \
+         median / p95 over the valid launches. `exec_unconfirmed` marks valid launches whose \
+         receipt outcome is `unknown` because, with observation off, the target ended before \
+         the supervisor confirmed its exec (the jail then exits 1); the target's own lines \
          prove it ran, and the timing is the jail's real path.\n"
     );
     comparison_table(
@@ -1436,43 +1969,46 @@ pub fn render_markdown(summary: &Summary) -> String {
         CompareKind::OffVsDirect,
         true,
     );
-
     let _ = writeln!(
         md,
-        "## Observation cost (reported, not budgeted)\n\n\
-         ### Observation on against observation off\n"
+        "## `--observe on` against direct: the budgets with observation (`tool`)\n\n\
+         The §5 budgets as first written, observation included.\n"
+    );
+    comparison_table(
+        &mut md,
+        summary,
+        Some(Profile::Tool),
+        CompareKind::OnVsDirect,
+        true,
+    );
+    let _ = writeln!(
+        md,
+        "## Observation cost: `--observe on` against `--observe off` (reported, no budget)\n"
     );
     comparison_table(&mut md, summary, None, CompareKind::OnVsOff, false);
-    let _ = writeln!(
-        md,
-        "### Observation on against direct (the original budgets with observation)\n"
-    );
-    comparison_table(&mut md, summary, None, CompareKind::OnVsDirect, true);
-    let _ = writeln!(
-        md,
-        "## Informational profiles: `--observe off` against direct\n"
-    );
+    let _ = writeln!(md, "## Informational profiles\n");
     for profile in [Profile::Agent, Profile::None] {
-        let _ = writeln!(md, "### `{}`\n", profile.name());
-        comparison_table(
-            &mut md,
-            summary,
-            Some(profile),
-            CompareKind::OffVsDirect,
-            true,
-        );
+        for kind in [CompareKind::OffVsDirect, CompareKind::OnVsDirect] {
+            let _ = writeln!(
+                md,
+                "### `{}`, {}\n",
+                profile.name(),
+                enum_name(&kind).replace('_', " ")
+            );
+            comparison_table(&mut md, summary, Some(profile), kind, true);
+        }
     }
 
     let _ = writeln!(md, "## Per arm\n");
     let _ = writeln!(
         md,
-        "| Session | Workload | Arm | Valid | Excluded (reasons) | Flagged | Startup ms | Wall ms | \
-         Work ms | Teardown ms |\n|---|---|---|---|---|---|---|---|---|---|"
+        "| Session | Workload | Arm | Valid | Excluded (reasons) | Flagged | Startup ms | Work \
+         ms | Teardown ms | Post-start ms | Wall ms |\n|---|---|---|---|---|---|---|---|---|---|---|"
     );
     for c in &summary.cells {
         let _ = writeln!(
             md,
-            "| {} | {} | {} | {}/{} | {} ({}) | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {}/{} | {} ({}) | {} | {} | {} | {} | {} | {} |",
             c.session.name(),
             c.workload.name(),
             c.arm.name(),
@@ -1482,14 +2018,15 @@ pub fn render_markdown(summary: &Summary) -> String {
             reasons_text(&c.excluded_by_reason),
             reasons_text(&c.flagged),
             pair(c.startup_ms.as_ref(), 1, ""),
-            pair(c.wall_ms.as_ref(), 1, ""),
             pair(c.work_ms.as_ref(), 1, ""),
             pair(c.teardown_ms.as_ref(), 1, ""),
+            pair(c.post_start_ms.as_ref(), 1, ""),
+            pair(c.wall_ms.as_ref(), 1, ""),
         );
     }
     let _ = writeln!(
         md,
-        "\n### Peak memory (KiB, median / max over valid launches)\n\n\
+        "\n### Peak memory (KiB, median / p95 / max over valid launches)\n\n\
          | Session | Workload | Arm | Launched HWM (sampled) | Reaped tree (`wait4`) | \
          Leaf `memory.peak` (sampled) | Target |\n|---|---|---|---|---|---|---|"
     );
@@ -1500,36 +2037,41 @@ pub fn render_markdown(summary: &Summary) -> String {
             c.session.name(),
             c.workload.name(),
             c.arm.name(),
-            med_max(c.launched_hwm_kib.as_ref()),
-            med_max(c.reaped_tree_maxrss_kib.as_ref()),
-            med_max(c.leaf_peak_kib.as_ref()),
-            med_max(c.target_maxrss_kib.as_ref()),
+            med_p95_max(c.launched_hwm_kib.as_ref()),
+            med_p95_max(c.reaped_tree_maxrss_kib.as_ref()),
+            med_p95_max(c.leaf_peak_kib.as_ref()),
+            med_p95_max(c.target_maxrss_kib.as_ref()),
         );
     }
     let _ = writeln!(
         md,
         "\n### Events and losses\n\n\
-         Event counts: the receipt's `coverage.<class>.observed_count`, median over valid \
-         launches. Losses: over every measured launch of the arm, valid or not.\n\n\
-         | Session | Workload | Arm | exec | fs.write | fs.deny | net | proxy.net | Trace \
-         frames | Observer gaps (lost) | Coverage gaps (lost) | Receipt errors | Incomplete \
-         traces | Trace notes (all kinds) |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+         Event counts: the receipt's `coverage.<class>.observed_count` over valid launches, \
+         median (min–max). Losses: over every measured launch of the arm, valid or not; a \
+         count that differs from the workload's exact one excludes the launch \
+         (`count_mismatch`).\n\n\
+         | Session | Workload | Arm | Excluded | exec | fs.write | fs.deny | net | proxy.net \
+         | Trace frames | Observer gaps (lost) | Coverage gaps (lost) | Receipt errors | \
+         Incomplete traces | Trace notes (all kinds) |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     );
     for c in summary.cells.iter().filter(|c| c.arm != Arm::Direct) {
-        let count = |k: &str| num(c.coverage_counts.get(k).map(|d| d.median), 0);
+        let count = |k: &str| med_range(c.coverage_counts.get(k));
         let l = &c.losses;
         let _ = writeln!(
             md,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} ({}) | {} ({}) | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} ({}) | {} ({}) | {} | {} | \
+             {} |",
             c.session.name(),
             c.workload.name(),
             c.arm.name(),
+            c.excluded,
             count("exec"),
             count("fs.write"),
             count("fs.deny"),
             count("net"),
             count("proxy.net"),
-            num(c.trace_frames.as_ref().map(|d| d.median), 0),
+            med_range(c.trace_frames.as_ref()),
             l.observer_gaps,
             l.observer_lost,
             l.coverage_gaps,
@@ -1548,9 +2090,10 @@ pub fn render_markdown(summary: &Summary) -> String {
     let _ = writeln!(
         md,
         "\n## backend-evaluation.md §4, `tool`\n\n\
-         Startup: p95 added against direct. Wall: median overhead against direct (work phase \
-         in brackets). Peak RSS: supervisor sampled HWM median (KiB). Events: median trace \
-         frames. Losses: observer + coverage gaps over all launches.\n"
+         Startup: p95 added against direct. Overheads: median against direct, work phase / \
+         post-start / end-to-end wall, each with its verdict. Peak RSS: supervisor sampled \
+         HWM median / p95 (KiB). Events: median trace frames. Losses: observer + coverage \
+         gaps, receipt errors, incomplete traces and excluded launches, over all launches.\n"
     );
     for session in [Session::Plain, Session::Scope] {
         let rows: Vec<&Comparison> = summary
@@ -1567,8 +2110,9 @@ pub fn render_markdown(summary: &Summary) -> String {
         }
         let _ = writeln!(
             md,
-            "{} session:\n\n| Workload | Observe | Startup p95 added | Wall median overhead | \
-             Peak RSS | Event count | Losses |\n|---|---|---|---|---|---|---|",
+            "{} session:\n\n| Workload | Observe | Valid (excl.) | Startup p95 added | Work \
+             phase | Post-start | End-to-end wall | Peak RSS | Event count | Losses (gaps / \
+             errors / incomplete / excluded) |\n|---|---|---|---|---|---|---|---|---|---|",
             session.name()
         );
         for c in rows {
@@ -1580,24 +2124,50 @@ pub fn render_markdown(summary: &Summary) -> String {
                 Arm::Jailed(_, o) => o.name(),
                 Arm::Direct => "-",
             };
+            let median = |d: &Option<Dist>| d.as_ref().map(|d| d.median);
             let _ = writeln!(
                 md,
-                "| {} | {} | {} ms | {}% ({}%) | {} | {} | {} |",
+                "| {} | {} | {} ({}) | {} | {} | {} | {} | {} | {} | {} |",
                 c.workload.name(),
                 observe,
-                num(c.added_startup_ms.as_ref().map(|d| d.p95), 1),
-                num(c.wall_overhead_pct.as_ref().map(|d| d.median), 1),
-                num(c.work_overhead_pct.as_ref().map(|d| d.median), 1),
-                num(
-                    cell.and_then(|x| x.launched_hwm_kib.as_ref())
-                        .map(|d| d.median),
-                    0
+                c.subject_valid,
+                c.subject_excluded,
+                verdict_text(
+                    c.startup_verdict,
+                    c.added_startup_ms.as_ref().map(|d| d.p95),
+                    " ms"
+                ),
+                verdict_text(c.work_verdict, median(&c.work_overhead_pct), "%")
+                    .replace("n/a", &format!("{}%", num(median(&c.work_overhead_pct), 1))),
+                verdict_text(
+                    c.post_start_verdict,
+                    median(&c.post_start_overhead_pct),
+                    "%"
+                )
+                .replace(
+                    "n/a",
+                    &format!("{}%", num(median(&c.post_start_overhead_pct), 1))
+                ),
+                verdict_text(c.wall_verdict, median(&c.wall_overhead_pct), "%")
+                    .replace("n/a", &format!("{}%", num(median(&c.wall_overhead_pct), 1))),
+                cell.and_then(|x| x.launched_hwm_kib.as_ref()).map_or_else(
+                    || "n/a".to_owned(),
+                    |d| format!("{:.0} / {:.0}", d.median, d.p95)
                 ),
                 num(
                     cell.and_then(|x| x.trace_frames.as_ref()).map(|d| d.median),
                     0
                 ),
-                cell.map_or(0, |x| x.losses.observer_gaps + x.losses.coverage_gaps),
+                cell.map_or_else(
+                    || "n/a".to_owned(),
+                    |x| format!(
+                        "{} / {} / {} / {}",
+                        x.losses.observer_gaps + x.losses.coverage_gaps,
+                        x.losses.receipt_errors,
+                        x.losses.incomplete_traces,
+                        x.excluded
+                    )
+                ),
             );
         }
         let _ = writeln!(md);
@@ -1625,22 +2195,25 @@ fn comparison_table(
     let _ = write!(
         md,
         "| Session | Profile | Workload | Subject / baseline | Valid (excl.) subject | Valid \
-         (excl.) baseline | Baseline median startup / wall / work ms | Added startup ms | Wall \
-         overhead % | Work overhead % |"
+         (excl.) baseline | Max load | Baseline median startup / work / teardown / wall ms | \
+         Added startup ms | Added teardown ms | Work overhead % | Post-start overhead % | Wall \
+         overhead % |"
     );
     if verdicts {
         let _ = write!(
             md,
-            " p95 added startup < 250 ms | Median wall overhead < 20% | Median work overhead < 20% |"
+            " p95 added startup < 250 ms | Work phase < 20% (integrator's reading) | Post-start \
+             (work + teardown) < 20% | End-to-end wall < 20% |"
         );
     }
     let _ = writeln!(md);
-    let cols = if verdicts { 13 } else { 10 };
+    let cols = if verdicts { 17 } else { 13 };
     let _ = writeln!(md, "|{}", "---|".repeat(cols));
     for c in rows {
         let _ = write!(
             md,
-            "| {} | {} | {} | {} / {} | {} ({}) | {} ({}) | {} / {} / {} | {} | {} | {} |",
+            "| {} | {} | {} | {} / {} | {} ({}) | {} ({}) | {} | {} / {} / {} / {} | {} | {} | {} \
+             | {} | {} |",
             c.session.name(),
             c.profile.name(),
             c.workload.name(),
@@ -1658,32 +2231,34 @@ fn comparison_table(
             },
             c.baseline_valid,
             c.baseline_excluded,
+            num(c.load1_max, 2),
             num(c.baseline_startup_median_ms, 1),
-            num(c.baseline_wall_median_ms, 1),
             num(c.baseline_work_median_ms, 1),
+            num(c.baseline_teardown_median_ms, 1),
+            num(c.baseline_wall_median_ms, 1),
             pair(c.added_startup_ms.as_ref(), 1, ""),
-            pair(c.wall_overhead_pct.as_ref(), 1, ""),
+            pair(c.added_teardown_ms.as_ref(), 1, ""),
             pair(c.work_overhead_pct.as_ref(), 1, ""),
+            pair(c.post_start_overhead_pct.as_ref(), 1, ""),
+            pair(c.wall_overhead_pct.as_ref(), 1, ""),
         );
         if verdicts {
+            let median = |d: &Option<Dist>| d.as_ref().map(|d| d.median);
             let _ = write!(
                 md,
-                " {} | {} | {} |",
+                " {} | {} | {} | {} |",
                 verdict_text(
                     c.startup_verdict,
                     c.added_startup_ms.as_ref().map(|d| d.p95),
                     " ms"
                 ),
+                verdict_text(c.work_verdict, median(&c.work_overhead_pct), "%"),
                 verdict_text(
-                    c.wall_verdict,
-                    c.wall_overhead_pct.as_ref().map(|d| d.median),
+                    c.post_start_verdict,
+                    median(&c.post_start_overhead_pct),
                     "%"
                 ),
-                verdict_text(
-                    c.work_verdict,
-                    c.work_overhead_pct.as_ref().map(|d| d.median),
-                    "%"
-                ),
+                verdict_text(c.wall_verdict, median(&c.wall_overhead_pct), "%"),
             );
         }
         let _ = writeln!(md);
@@ -1698,8 +2273,9 @@ fn comparison_table(
 pub fn main(cli: Cli) -> ExitCode {
     let result = match cli.action {
         Action::Run(args) => run(*args),
-        Action::Summarize { dir } => write_summary(&dir).map(|md| {
+        Action::Summarize { dir } => write_summary(&dir).and_then(|(md, problems)| {
             println!("{md}");
+            integrity_result(&problems)
         }),
     };
     match result {
@@ -1717,6 +2293,8 @@ struct Plan {
     out: PathBuf,
     jail: PathBuf,
     fixture: PathBuf,
+    /// The arm-order seed, given or drawn from the clock; recorded.
+    seed: u64,
 }
 
 fn absolute(p: &Path) -> Result<PathBuf, String> {
@@ -1762,12 +2340,44 @@ fn resolve(args: &RunArgs) -> Result<Plan, String> {
     if args.launches == 0 {
         return Err("--launches must be at least 1".to_owned());
     }
+    if args.max_load.is_none() && !args.allow_loaded {
+        return Err(
+            "--max-load is required (or --allow-loaded, which gives no verdict)".to_owned(),
+        );
+    }
+    let seed = args.seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+    });
     Ok(Plan {
         args: args.clone(),
         out,
         jail,
         fixture,
+        seed,
     })
+}
+
+/// `run` writes a new directory: it never appends to an earlier run's raw
+/// file, which would mix binaries, hosts and parameters under one summary.
+/// Only the internal scope pass appends, to the directory its own outer run
+/// just created.
+///
+/// # Errors
+/// When `out` exists and is not an empty directory, outside the scope pass.
+pub fn check_out_dir(out: &Path, inner: bool) -> Result<(), String> {
+    if inner || !out.exists() {
+        return Ok(());
+    }
+    let mut entries = std::fs::read_dir(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    if entries.next().is_some() {
+        return Err(format!(
+            "{} is not empty: refusing to append to an earlier run; choose a new --out",
+            out.display()
+        ));
+    }
+    Ok(())
 }
 
 /// The argv the scope pass re-executes this program with.
@@ -1806,6 +2416,13 @@ pub fn inner_argv(args: &RunArgs, out: &Path, jail: &Path, fixture: &Path) -> Ve
         argv.push("--max-load".into());
         argv.push(load.to_string().into());
     }
+    if args.allow_loaded {
+        argv.push("--allow-loaded".into());
+    }
+    if let Some(seed) = args.seed {
+        argv.push("--seed".into());
+        argv.push(seed.to_string().into());
+    }
     if let Some(rev) = &args.revision {
         argv.push("--revision".into());
         argv.push(rev.into());
@@ -1827,6 +2444,9 @@ fn parameters(plan: &Plan) -> Value {
         "sample_ms": a.sample_ms,
         "deadline_ms": a.deadline_ms,
         "max_load": a.max_load,
+        "allow_loaded": a.allow_loaded,
+        "seed": plan.seed,
+        "arm_order": "a seeded Fisher-Yates permutation per round (SplitMix64 of seed, session, workload, round)",
         "jail": plan.jail,
         "fixture": plan.fixture,
         "trace_sink": "the default local trace.ndjson (no --trace-fd consumer)",
@@ -1840,7 +2460,19 @@ fn run(args: RunArgs) -> Result<(), String> {
     if !cfg!(target_os = "linux") {
         return Err("`perf run` measures on Linux; run it on the reference host".to_owned());
     }
-    let plan = resolve(&args)?;
+    let mut plan = resolve(&args)?;
+    // The scope pass must use the outer run's seed.
+    plan.args.seed = Some(plan.seed);
+    check_out_dir(&plan.out, args.inner.is_some())?;
+    if args.inner.is_none()
+        && let (Some(max), Some(now)) = (plan.args.max_load, load1())
+        && now > max
+    {
+        return Err(format!(
+            "the 1-minute load average is {now}, above --max-load {max}: the host is not \
+             quiet; nothing was started"
+        ));
+    }
     std::fs::create_dir_all(&plan.out)
         .map_err(|e| format!("cannot create {}: {e}", plan.out.display()))?;
     if args.inner.is_some() {
@@ -1857,6 +2489,7 @@ fn run(args: RunArgs) -> Result<(), String> {
             out: plan.out.clone(),
             jail: plan.jail.clone(),
             fixture: plan.fixture.clone(),
+            seed: plan.seed,
         })?;
     }
     if plan.args.sessions.contains(&Session::Scope) {
@@ -1877,13 +2510,24 @@ fn run(args: RunArgs) -> Result<(), String> {
             return Err(format!("the scope pass failed: {status}"));
         }
     }
-    let md = write_summary(&plan.out)?;
+    let (md, problems) = write_summary(&plan.out)?;
     println!("{md}");
     eprintln!(
         "xtask perf: summary in {}",
         plan.out.join("summary.md").display()
     );
-    Ok(())
+    integrity_result(&problems)
+}
+
+fn integrity_result(problems: &[String]) -> Result<(), String> {
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the raw data has {} problem(s), so no verdict was taken: {}",
+        problems.len(),
+        problems.join(" | ")
+    ))
 }
 
 fn write_json(path: &Path, v: &Value) -> Result<(), String> {
@@ -1899,8 +2543,8 @@ fn read_json(path: &Path) -> Value {
 }
 
 /// Read `launches.ndjson`, summarise, and write `summary.json` and
-/// `summary.md`. Returns the Markdown.
-fn write_summary(dir: &Path) -> Result<String, String> {
+/// `summary.md`. Returns the Markdown and the raw data's problems.
+fn write_summary(dir: &Path) -> Result<(String, Vec<String>), String> {
     let raw = std::fs::read(dir.join(RAW_FILE))
         .map_err(|e| format!("{}: {e}", dir.join(RAW_FILE).display()))?;
     let mut records = Vec::new();
@@ -1914,17 +2558,31 @@ fn write_summary(dir: &Path) -> Result<String, String> {
                 .map_err(|e| format!("{RAW_FILE} line {}: {e}", i + 1))?,
         );
     }
-    let summary = summarize(
+    let mut summary = summarize(
         &records,
         read_json(&dir.join(PARAMETERS_FILE)),
         read_json(&dir.join(HOST_FILE)),
     );
+    summary.provenance = json!({
+        "raw_file": RAW_FILE,
+        "raw_bytes": raw.len(),
+        "raw_records": records.len(),
+        "raw_sha256": sha256(&dir.join(RAW_FILE)),
+        "summarized_at": crate::stamp::rfc3339_from_unix(crate::stamp::unix_now()),
+        "summarizer": {
+            "xtask_version": env!("CARGO_PKG_VERSION"),
+            "record_schema": RECORD_SCHEMA,
+            "source_revision": command_text("git", &["rev-parse", "HEAD"])
+                .map(|t| t.trim().to_owned())
+                .filter(|t| t.len() == 40),
+        },
+    });
     let v = serde_json::to_value(&summary).map_err(|e| e.to_string())?;
     write_json(&dir.join("summary.json"), &v)?;
     let md = render_markdown(&summary);
     std::fs::write(dir.join("summary.md"), &md)
         .map_err(|e| format!("{}: {e}", dir.join("summary.md").display()))?;
-    Ok(md)
+    Ok((md, summary.integrity))
 }
 
 fn own_uid() -> Option<u32> {
@@ -1982,8 +2640,30 @@ fn command_text(program: &str, args: &[&str]) -> Option<String> {
 }
 
 fn sha256(path: &Path) -> Option<String> {
-    let text = command_text("sha256sum", &[path.to_str()?])?;
-    text.split_whitespace().next().map(str::to_owned)
+    let p = path.to_str()?;
+    let text =
+        command_text("sha256sum", &[p]).or_else(|| command_text("shasum", &["-a", "256", p]))?;
+    let hex = text.split_whitespace().next()?;
+    (hex.len() == 64).then(|| hex.to_owned())
+}
+
+/// `/proc/pressure/cpu`'s `some` line: (avg10 in percent, total in µs).
+#[must_use]
+pub fn parse_cpu_pressure(text: &str) -> Option<(f64, u64)> {
+    let line = text.lines().find(|l| l.starts_with("some "))?;
+    let field = |k: &str| {
+        line.split_whitespace()
+            .find_map(|w| w.strip_prefix(k))
+            .map(str::to_owned)
+    };
+    Some((
+        field("avg10=")?.parse().ok()?,
+        field("total=")?.parse().ok()?,
+    ))
+}
+
+fn cpu_pressure() -> Option<(f64, u64)> {
+    parse_cpu_pressure(&std::fs::read_to_string("/proc/pressure/cpu").ok()?)
 }
 
 fn host_facts(plan: &Plan) -> Value {
@@ -2100,14 +2780,10 @@ fn append_line(path: &Path, v: &impl Serialize) -> Result<(), String> {
 }
 
 fn run_pass(plan: &Plan, session: Session) -> Result<(), String> {
+    // No load refusal here: a pass refused after another pass ran would leave
+    // a half run behind. The outer run refuses before anything starts, and a
+    // verdict needs every counted launch at or below --max-load.
     let cgroup = check_session(session)?;
-    if let (Some(max), Some(now)) = (plan.args.max_load, load1())
-        && now > max
-    {
-        return Err(format!(
-            "the 1-minute load average is {now}, above --max-load {max}: the host is not quiet"
-        ));
-    }
     let started = crate::stamp::rfc3339_from_unix(crate::stamp::unix_now());
     let load_start = loadavg();
     let base = plan.out.join(session.name());
@@ -2151,6 +2827,8 @@ fn run_pass(plan: &Plan, session: Session) -> Result<(), String> {
             states.insert(*arm, st);
         }
         let total = plan.args.warmup + plan.args.launches;
+        let seed = cell_seed(plan.seed, session, *workload);
+        let mut previous: Option<Arm> = None;
         for round in 0..total {
             let warmup = round < plan.args.warmup;
             let index = if warmup {
@@ -2158,9 +2836,9 @@ fn run_pass(plan: &Plan, session: Session) -> Result<(), String> {
             } else {
                 round - plan.args.warmup
             };
-            for arm in round_order(&arm_list, round) {
+            for arm in round_order(&arm_list, seed, round) {
                 let st = states.get_mut(&arm).ok_or("an arm without state")?;
-                let rec = launch(
+                let mut rec = launch(
                     plan,
                     session,
                     *workload,
@@ -2172,6 +2850,8 @@ fn run_pass(plan: &Plan, session: Session) -> Result<(), String> {
                     &scratch,
                     st,
                 )?;
+                rec.predecessor = previous;
+                previous = Some(arm);
                 progress(&rec);
                 append_line(&raw, &rec)?;
             }
@@ -2199,19 +2879,23 @@ fn progress(rec: &LaunchRecord) {
         if rec.warmup { "warm-up " } else { "" },
         rec.round
     );
+    let load = rec
+        .load1_before
+        .map_or_else(|| "load ?".to_owned(), |l| format!("load {l:.2}"));
     match timings(rec) {
         Some(t) if rec.validity.valid => eprintln!(
-            "{tag} startup {:.1} ms wall {:.1} ms work {:.1} ms{}",
+            "{tag} startup {:.1} ms wall {:.1} ms work {:.1} ms teardown {:.1} ms {load}{}",
             ms(t.startup),
             ms(t.wall),
             ms(t.work),
+            ms(t.teardown),
             if rec.validity.flags.is_empty() {
                 String::new()
             } else {
                 format!(" flags {:?}", rec.validity.flags)
             }
         ),
-        _ => eprintln!("{tag} EXCLUDED {:?}", rec.validity.reasons),
+        _ => eprintln!("{tag} EXCLUDED {:?} {load}", rec.validity.reasons),
     }
 }
 
@@ -2230,6 +2914,8 @@ fn launch(
 ) -> Result<LaunchRecord, String> {
     let mut rec = LaunchRecord::new(session, workload, arm, round, warmup);
     rec.load1_before = load1();
+    let pressure_before = cpu_pressure();
+    rec.cpu_pressure_before = pressure_before.map(|(avg10, _)| avg10);
     let result_path = scratch.join("result.json");
     let stdout_path = scratch.join("stdout");
     let stderr_path = scratch.join("stderr");
@@ -2271,7 +2957,11 @@ fn launch(
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr);
-    match cmd.status() {
+    let status = cmd.status();
+    if let (Some((_, before)), Some((_, after))) = (pressure_before, cpu_pressure()) {
+        rec.cpu_stall_us = Some(after.saturating_sub(before));
+    }
+    match status {
         Ok(status) if status.success() => {}
         Ok(status) => rec.launch_error = Some(format!("perf-launch exited {status}")),
         Err(e) => rec.launch_error = Some(format!("perf-launch did not start: {e}")),
@@ -2312,24 +3002,48 @@ fn launch(
         rec.stderr_tail = Some(String::from_utf8_lossy(tail).into_owned());
     }
 
-    // Keep the data directory warm and empty: remove what this launch left
-    // once it is settled and cleaned up; otherwise keep it for inspection
-    // and give the arm a fresh data directory.
+    // Keep the data directory warm and empty: remove what a valid launch
+    // left once it is settled and cleaned up. An excluded launch keeps its
+    // attempt (receipt, trace, state) where it is, so `gc` still finds it
+    // and the exclusion can be audited; the arm moves to a fresh data
+    // directory. Its stdout and stderr are kept beside the raw file.
+    if !rec.validity.valid {
+        let kept = plan.out.join("kept").join(format!(
+            "{}-{}-{}-{}{}",
+            session.name(),
+            workload.name(),
+            arm.dir_name(),
+            if warmup { "warmup-" } else { "" },
+            round
+        ));
+        std::fs::create_dir_all(&kept).map_err(|e| format!("{}: {e}", kept.display()))?;
+        let _ = std::fs::copy(&stdout_path, kept.join("stdout"));
+        let _ = std::fs::copy(&stderr_path, kept.join("stderr"));
+        let _ = std::fs::copy(&result_path, kept.join("perf-launch.json"));
+    }
+    if !attempts.is_empty() {
+        if keep_attempt(&rec) || attempts.len() != 1 {
+            rec.kept_attempt = Some(state.data().display().to_string());
+            state.generation += 1;
+            state.prepare()?;
+        } else {
+            std::fs::remove_dir_all(&attempts[0].dir)
+                .map_err(|e| format!("remove {}: {e}", attempts[0].dir))?;
+        }
+    }
+    Ok(rec)
+}
+
+/// Whether a launch's attempt directory must be kept: always for an
+/// excluded launch (its receipt and trace are the evidence of why), and for
+/// any attempt not settled and cleaned up.
+#[must_use]
+pub fn keep_attempt(rec: &LaunchRecord) -> bool {
     let cleaned = rec.receipt.as_ref().is_some_and(|r| {
         r.phase == "settled"
             && matches!(r.state_cleanup.as_deref(), Some("complete" | "not_needed"))
     });
-    if !attempts.is_empty() {
-        if cleaned && attempts.len() == 1 {
-            std::fs::remove_dir_all(&attempts[0].dir)
-                .map_err(|e| format!("remove {}: {e}", attempts[0].dir))?;
-        } else {
-            rec.kept_attempt = Some(state.data().display().to_string());
-            state.generation += 1;
-            state.prepare()?;
-        }
-    }
-    Ok(rec)
+    !validate(rec).valid || !cleaned
 }
 
 // --------------------------------------------------------------------- tests
@@ -2351,7 +3065,22 @@ mod tests {
             ok: Some(true),
             maxrss_kib: Some(2000),
             children_maxrss_kib: Some(0),
-            summary: None,
+            // What the fixed workload reports after 5,000 clean rounds.
+            summary: Some(json!({"rounds": 5000, "created": 5000, "renamed": 5000,
+                                 "unlinked": 5000, "ok": true})),
+        }
+    }
+
+    /// The parameters of a run with a quiet-host threshold of 1.0; every
+    /// helper record was taken at load 0.5.
+    fn quiet() -> Value {
+        json!({ "max_load": 1.0 })
+    }
+
+    fn test_gate() -> Gate {
+        Gate {
+            max_load: Some(1.0),
+            integrity_ok: true,
         }
     }
 
@@ -2387,6 +3116,28 @@ mod tests {
         }
     }
 
+    /// The trace a clean fileops launch leaves: exact counts, as measured.
+    fn fileops_trace(observe: Observe) -> TraceFacts {
+        let mut t = TraceFacts {
+            state: "complete".to_owned(),
+            frames: 5,
+            ..TraceFacts::default()
+        };
+        t.by_source.insert("wrapper".to_owned(), 5);
+        t.by_operation.insert("jail.receipt".to_owned(), 3);
+        t.by_operation.insert("note".to_owned(), 2);
+        if observe == Observe::On {
+            t.frames += 15_002;
+            t.by_source.insert("audit".to_owned(), 15_002);
+            for op in ["fs.create", "fs.rename", "fs.unlink"] {
+                t.by_operation.insert(op.to_owned(), 5000);
+            }
+            t.by_operation.insert("proc.exec".to_owned(), 1);
+            t.by_operation.insert("proc.exit".to_owned(), 1);
+        }
+        t
+    }
+
     fn class(status: &str, count: Option<u64>) -> ClassFacts {
         ClassFacts {
             status: status.to_owned(),
@@ -2399,11 +3150,16 @@ mod tests {
     fn settled(profile: &str, observe: &str, scope: &str) -> ReceiptFacts {
         let active = observe == "on";
         let mut coverage = BTreeMap::new();
-        for c in CLOSED_SET {
+        for (c, count) in [
+            ("exec", 2),
+            ("fs.write", 15_000),
+            ("fs.deny", 0),
+            ("net", 0),
+        ] {
             coverage.insert(
                 c.to_owned(),
                 if active {
-                    class("active", Some(2))
+                    class("active", Some(count))
                 } else {
                     class("unsupported", None)
                 },
@@ -2435,6 +3191,7 @@ mod tests {
         let mut r = LaunchRecord::new(session, Workload::Fileops, Arm::Direct, 0, false);
         r.launcher = Some(launcher(t1));
         r.target = target(start, t1 - 1_000_000);
+        r.load1_before = Some(0.5);
         r
     }
 
@@ -2442,7 +3199,9 @@ mod tests {
     fn jailed(observe: Observe, startup_ms: u64, wall_ms: u64) -> LaunchRecord {
         let mut r = direct(Session::Plain, startup_ms, wall_ms);
         r.arm = Arm::Jailed(Profile::Tool, observe);
-        r.launcher.as_mut().unwrap().attempts = Some(vec![complete_attempt()]);
+        let mut attempt = complete_attempt();
+        attempt.trace = fileops_trace(observe);
+        r.launcher.as_mut().unwrap().attempts = Some(vec![attempt]);
         r.receipt = Some(settled("tool", observe.name(), "entered"));
         r
     }
@@ -2590,7 +3349,8 @@ mod tests {
     #[test]
     fn a_jailed_launch_needs_one_settled_receipt_of_its_own_arm() {
         let mut r = jailed(Observe::On, 100, 900);
-        r.launcher.as_mut().unwrap().attempts = Some(vec![complete_attempt(), complete_attempt()]);
+        let one = r.launcher.as_ref().unwrap().attempts.as_ref().unwrap()[0].clone();
+        r.launcher.as_mut().unwrap().attempts = Some(vec![one.clone(), one]);
         assert_eq!(reasons(&r), vec![Reason::AttemptCount]);
 
         let mut r = jailed(Observe::On, 100, 900);
@@ -2781,9 +3541,14 @@ mod tests {
         let wall = cell.wall_ms.unwrap();
         assert_eq!((wall.n, wall.max), (3, 100.0), "the outlier is not in it");
 
-        records[0].load1_before = Some(0.5);
-        records[1].load1_before = Some(2.5);
-        records[4].load1_before = Some(9.0);
+        for (i, (r, load)) in records
+            .iter_mut()
+            .zip([0.5, 2.5, 1.0, 1.0, 9.0])
+            .enumerate()
+        {
+            r.round = u32::try_from(i).unwrap();
+            r.load1_before = Some(load);
+        }
         let summary = summarize(&records, Value::Null, Value::Null);
         assert_eq!(
             summary.warmup_launches, 1,
@@ -2792,10 +3557,10 @@ mod tests {
         let load = summary.load1.as_ref().unwrap();
         assert_eq!(
             (load.n, load.min, load.max),
-            (2, 0.5, 2.5),
+            (4, 0.5, 2.5),
             "warm-up load excluded"
         );
-        assert!(render_markdown(&summary).contains("0.50 / 1.50 / 2.50"));
+        assert!(render_markdown(&summary).contains("0.50 / 1.00 / 2.50"));
         assert_eq!(summary.cells.len(), 1);
         assert_eq!(summary.cells[0].launched, 4);
     }
@@ -2813,8 +3578,15 @@ mod tests {
         assert_eq!(cell.valid, 0);
     }
 
+    /// N launches of one arm, rounds 0..N, as a run records them.
     fn many(f: impl Fn(u64) -> LaunchRecord, n: u64) -> Vec<LaunchRecord> {
-        (0..n).map(f).collect()
+        (0..n)
+            .map(|i| {
+                let mut r = f(i);
+                r.round = u32::try_from(i).unwrap();
+                r
+            })
+            .collect()
     }
 
     #[test]
@@ -2832,6 +3604,7 @@ mod tests {
             CompareKind::OffVsDirect,
             (Arm::Jailed(Profile::Tool, Observe::Off), &s),
             (Arm::Direct, &b),
+            &test_gate(),
         );
         assert_eq!(c.baseline_startup_median_ms, Some(15.5));
         let added = c.added_startup_ms.as_ref().unwrap();
@@ -2863,6 +3636,7 @@ mod tests {
             CompareKind::OnVsDirect,
             (on, &s),
             (Arm::Direct, &b),
+            &test_gate(),
         );
         assert_eq!(c.added_startup_ms.as_ref().unwrap().p95, 250.0);
         assert_eq!(c.startup_verdict, Some(Verdict::Fail));
@@ -2875,6 +3649,7 @@ mod tests {
             CompareKind::OnVsDirect,
             (on, &s[..29]),
             (Arm::Direct, &b),
+            &test_gate(),
         );
         assert_eq!(c.startup_verdict, Some(Verdict::Insufficient));
         assert_eq!(c.wall_verdict, Some(Verdict::Insufficient));
@@ -2885,6 +3660,7 @@ mod tests {
             CompareKind::OnVsDirect,
             (on, &s),
             (Arm::Direct, &b[..29]),
+            &test_gate(),
         );
         assert_eq!(c.startup_verdict, Some(Verdict::Insufficient));
     }
@@ -2907,7 +3683,7 @@ mod tests {
         let on = many(|_| jailed(Observe::On, 60, 900), 30);
         let summary = summarize(
             &[base.clone(), off.clone(), on.clone()].concat(),
-            Value::Null,
+            quiet(),
             Value::Null,
         );
         let find = |kind| {
@@ -2936,7 +3712,7 @@ mod tests {
         for r in &mut noop_off {
             r.workload = Workload::Noop;
         }
-        let summary = summarize(&[noop, noop_off].concat(), Value::Null, Value::Null);
+        let summary = summarize(&[noop, noop_off].concat(), quiet(), Value::Null);
         let c = &summary.comparisons[0];
         assert_eq!(c.kind, CompareKind::OffVsDirect);
         assert_eq!(
@@ -2998,16 +3774,21 @@ mod tests {
         let base = many(|i| direct(Session::Plain, 1 + i % 3, 100), 30);
         let off = many(|_| jailed(Observe::Off, 50, 200), 30);
         let on = many(|_| jailed(Observe::On, 60, 900), 30);
-        let summary = summarize(&[base, off, on].concat(), Value::Null, Value::Null);
+        let summary = summarize(&[base, off, on].concat(), quiet(), Value::Null);
         let md = render_markdown(&summary);
         for needle in [
-            "## Budgets: the jail's own overhead",
-            "### Observation on against observation off",
-            "### Observation on against direct",
+            "## Verdict roll-up",
+            "## `--observe off` against direct: the jail's own overhead (`tool`)",
+            "## `--observe on` against direct: the budgets with observation (`tool`)",
+            "## Observation cost: `--observe on` against `--observe off`",
             "tool/off / direct",
             "tool/on / tool/off",
             "fail (100.0%)",
             "pass (",
+            "Work phase < 20% (integrator's reading)",
+            "Post-start (work + teardown) < 20%",
+            "End-to-end wall < 20%",
+            "`--max-load 1`",
             "## Definitions",
         ] {
             assert!(md.contains(needle), "missing `{needle}` in\n{md}");
@@ -3095,22 +3876,31 @@ not json
     // ---------------------------------------------------------------- runner
 
     #[test]
-    fn every_arm_runs_once_per_round_in_a_rotating_order() {
+    fn every_arm_runs_once_per_round_in_a_seeded_order() {
         let a = arms(&[Profile::Tool, Profile::Agent]);
         assert_eq!(
             a.iter().map(|x| x.name()).collect::<Vec<_>>(),
             ["direct", "tool/off", "tool/on", "agent/off", "agent/on"]
         );
-        for round in 0..7 {
-            let mut order = round_order(&a, round);
-            assert_eq!(order.len(), a.len());
-            assert_eq!(order[0], a[round as usize % a.len()]);
+        let mut firsts = std::collections::BTreeSet::new();
+        for round in 0..20 {
+            let mut order = round_order(&a, 42, round);
+            firsts.insert(order[0]);
             order.sort();
             let mut all = a.clone();
             all.sort();
             assert_eq!(order, all, "round {round} runs every arm once");
         }
-        assert!(round_order(&[], 3).is_empty());
+        assert!(firsts.len() > 2, "the first arm varies: {firsts:?}");
+        assert!(round_order(&[], 1, 3).is_empty());
+        assert_ne!(
+            cell_seed(7, Session::Plain, Workload::Noop),
+            cell_seed(7, Session::Scope, Workload::Noop)
+        );
+        assert_ne!(
+            cell_seed(7, Session::Plain, Workload::Noop),
+            cell_seed(7, Session::Plain, Workload::Fileops)
+        );
     }
 
     #[test]
@@ -3135,6 +3925,8 @@ not json
             sample_ms: 3,
             deadline_ms: 9999,
             max_load: Some(1.5),
+            allow_loaded: false,
+            seed: Some(9),
             jail: None,
             fixture: None,
             out: None,
@@ -3163,6 +3955,15 @@ not json
     }
 
     #[test]
+    fn cpu_pressure_is_read_from_the_some_line() {
+        let text = "some avg10=1.25 avg60=0.50 avg300=0.10 total=123456\n\
+                    full avg10=0.00 avg60=0.00 avg300=0.00 total=99\n";
+        assert_eq!(parse_cpu_pressure(text), Some((1.25, 123_456)));
+        assert_eq!(parse_cpu_pressure("full avg10=0.00 total=1\n"), None);
+        assert_eq!(parse_cpu_pressure("some avg10=x total=1\n"), None);
+    }
+
+    #[test]
     fn the_user_manager_is_recognised_by_its_unit_component() {
         assert!(under_user_manager(
             "/user.slice/user-1001.slice/user@1001.service/app.slice/run-u1.scope",
@@ -3186,7 +3987,14 @@ not json
             #[command(flatten)]
             args: RunArgs,
         }
-        let t = Top::try_parse_from(["x"]).unwrap();
+        assert!(
+            Top::try_parse_from(["x"]).is_err(),
+            "a quiet-host threshold or --allow-loaded is required"
+        );
+        assert!(Top::try_parse_from(["x", "--max-load", "1", "--allow-loaded"]).is_err());
+        assert!(Top::try_parse_from(["x", "--allow-loaded"]).is_ok());
+        let t = Top::try_parse_from(["x", "--max-load", "2"]).unwrap();
+        assert_eq!(t.args.max_load, Some(2.0));
         assert_eq!(t.args.launches, 30);
         assert_eq!(t.args.warmup, 1);
         assert_eq!(t.args.sessions, vec![Session::Plain, Session::Scope]);
@@ -3199,9 +4007,338 @@ not json
             vec![Workload::Noop, Workload::SpawnTree, Workload::Fileops]
         );
         assert_eq!((t.args.fileops_rounds, t.args.spawn_count), (5000, 200));
-        let t =
-            Top::try_parse_from(["x", "--profiles", "none,tool", "--workloads", "noop"]).unwrap();
+        let t = Top::try_parse_from([
+            "x",
+            "--allow-loaded",
+            "--profiles",
+            "none,tool",
+            "--workloads",
+            "noop",
+        ])
+        .unwrap();
         assert_eq!(t.args.profiles, vec![Profile::None, Profile::Tool]);
         assert_eq!(t.args.workloads, vec![Workload::Noop]);
+    }
+
+    // ------------------------------------------------ J5-E adversarial review
+    // The review of b8d4f5a0 (scratchpad j5/rev-E) shipped these as passing
+    // tests, each pinning a defect. They now assert the fixed behaviour.
+    mod review_e {
+        use super::*;
+
+        fn off_vs_direct(summary: &Summary, w: Workload) -> &Comparison {
+            summary
+                .comparisons
+                .iter()
+                .find(|c| {
+                    c.kind == CompareKind::OffVsDirect
+                        && c.workload == w
+                        && c.profile == Profile::Tool
+                })
+                .unwrap()
+        }
+
+        fn fileops_pair(n: u64) -> Vec<LaunchRecord> {
+            let base = many(|_| direct(Session::Plain, 2, 200), n);
+            let off = many(|_| jailed(Observe::Off, 100, 330), n);
+            let on = many(|_| jailed(Observe::On, 100, 330), n);
+            [base, off, on].concat()
+        }
+
+        /// F4: the arm order is a seeded permutation per round, so no arm
+        /// keeps one predecessor; the same seed gives the same order.
+        #[test]
+        fn a_seeded_order_varies_each_arms_predecessor() {
+            let arm_list = arms(&[Profile::Tool, Profile::Agent, Profile::None]);
+            let sequence = |seed: u64| {
+                let mut seq: Vec<(Arm, bool)> = Vec::new();
+                for round in 0..31 {
+                    let order = round_order(&arm_list, seed, round);
+                    let mut sorted = order.clone();
+                    sorted.sort();
+                    let mut all = arm_list.clone();
+                    all.sort();
+                    assert_eq!(sorted, all, "round {round} is a permutation");
+                    seq.extend(order.into_iter().map(|a| (a, round < 1)));
+                }
+                seq
+            };
+            let seq = sequence(0x5eed);
+            assert_eq!(seq, sequence(0x5eed), "the seed fixes the order");
+            assert_ne!(seq, sequence(0x5eee), "another seed, another order");
+            let mut pred: BTreeMap<(String, String), usize> = BTreeMap::new();
+            for w in seq.windows(2) {
+                if !w[1].1 {
+                    *pred.entry((w[1].0.name(), w[0].0.name())).or_default() += 1;
+                }
+            }
+            let worst = pred.values().max().copied().unwrap_or(0);
+            assert!(worst <= 12, "one predecessor {worst} of 30 times: {pred:?}");
+            let get = |a: &str, p: &str| pred.get(&(a.to_owned(), p.to_owned())).copied();
+            assert!(get("direct", "none/on").unwrap_or(0) < 26, "{pred:?}");
+            assert!(get("tool/off", "direct").unwrap_or(0) < 25, "{pred:?}");
+        }
+
+        /// F1: teardown after the workload's last reading is in a verdict:
+        /// the post-start figure (work + teardown) against direct's.
+        #[test]
+        fn teardown_is_in_the_post_start_figure() {
+            // Direct: start 2 ms, work 200 ms, teardown 0 ms.
+            let mut recs = many(|_| direct(Session::Plain, 2, 202), 30);
+            for r in &mut recs {
+                r.target.end_ns = Some(T0 + 202_000_000);
+            }
+            // tool/off: start 100 ms, work 210 ms (+5%), teardown 40 ms.
+            recs.extend(many(
+                |_| {
+                    let mut r = jailed(Observe::Off, 100, 350);
+                    r.target.end_ns = Some(T0 + 310_000_000);
+                    r
+                },
+                30,
+            ));
+            let s = summarize(&recs, quiet(), Value::Null);
+            let c = off_vs_direct(&s, Workload::Fileops);
+            assert_eq!(c.startup_verdict, Some(Verdict::Pass));
+            assert_eq!(c.work_verdict, Some(Verdict::Pass));
+            let post = c.post_start_overhead_pct.as_ref().unwrap();
+            assert!((post.median - 25.0).abs() < 1e-9, "{post:?}");
+            assert_eq!(c.post_start_verdict, Some(Verdict::Fail));
+            let teardown = c.added_teardown_ms.as_ref().unwrap();
+            assert!((teardown.median - 40.0).abs() < 1e-9, "{teardown:?}");
+            let md = render_markdown(&s);
+            assert!(md.contains("post-start"), "{md}");
+            assert!(md.contains("work phase"), "{md}");
+        }
+
+        /// F5: a verdict needs every counted launch at or below --max-load.
+        #[test]
+        fn a_verdict_needs_every_counted_launch_on_a_quiet_host() {
+            let pair = |n: u64| {
+                let base = many(|_| direct(Session::Plain, 2, 200), n);
+                let off = many(|_| jailed(Observe::Off, 100, 330), n);
+                [base, off].concat()
+            };
+            let verdict_of = |recs: &[LaunchRecord], params: Value| {
+                off_vs_direct(&summarize(recs, params, Value::Null), Workload::Fileops)
+                    .startup_verdict
+            };
+            let recs = pair(30);
+            assert_eq!(verdict_of(&recs, quiet()), Some(Verdict::Pass));
+            let mut one_loud = recs.clone();
+            one_loud[3].load1_before = Some(1.5);
+            assert_eq!(verdict_of(&one_loud, quiet()), Some(Verdict::Loaded));
+            let mut unknown = recs.clone();
+            unknown[40].load1_before = None;
+            assert_eq!(verdict_of(&unknown, quiet()), Some(Verdict::Loaded));
+            assert_eq!(
+                verdict_of(&recs, json!({"allow_loaded": true})),
+                Some(Verdict::Loaded),
+                "--allow-loaded gives numbers, never a verdict"
+            );
+            assert_eq!(verdict_of(&recs, Value::Null), Some(Verdict::Loaded));
+            let md = render_markdown(&summarize(&one_loud, quiet(), Value::Null));
+            assert!(md.contains("loaded (no verdict"), "{md}");
+        }
+
+        /// F6: an excluded launch keeps its attempt directory.
+        #[test]
+        fn an_excluded_launch_keeps_its_attempt() {
+            let valid = jailed(Observe::On, 100, 900);
+            assert!(
+                !keep_attempt(&valid),
+                "a valid, cleaned-up attempt is removed"
+            );
+            let mut bad = valid.clone();
+            bad.receipt.as_mut().unwrap().errors = vec!["evidence_lost".to_owned()];
+            assert!(keep_attempt(&bad), "an excluded launch keeps its evidence");
+            let mut pending = valid.clone();
+            pending.receipt.as_mut().unwrap().state_cleanup = Some("pending".to_owned());
+            assert!(keep_attempt(&pending));
+            let mut none = valid;
+            none.receipt = None;
+            assert!(keep_attempt(&none));
+        }
+
+        /// F2: `run` never appends to an existing run directory.
+        #[test]
+        fn a_run_refuses_a_non_empty_out() {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-perf-out-{}-{}",
+                std::process::id(),
+                crate::stamp::unix_now()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(check_out_dir(&dir, false).is_ok(), "absent is fine");
+            std::fs::create_dir_all(&dir).unwrap();
+            assert!(check_out_dir(&dir, false).is_ok(), "empty is fine");
+            std::fs::write(dir.join(RAW_FILE), b"{}\n").unwrap();
+            let e = check_out_dir(&dir, false).unwrap_err();
+            assert!(e.contains("not empty"), "{e}");
+            assert!(
+                check_out_dir(&dir, true).is_ok(),
+                "the scope pass appends by design"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// F3: every count is exact for the workload and agrees with the trace.
+        #[test]
+        fn counts_must_match_the_workload_and_the_trace() {
+            assert!(validate(&jailed(Observe::On, 100, 900)).valid);
+            let bump = |f: &dyn Fn(&mut LaunchRecord)| {
+                let mut r = jailed(Observe::On, 100, 900);
+                f(&mut r);
+                validate(&r).reasons
+            };
+            for class in ["exec", "fs.write", "fs.deny", "net", "limits"] {
+                let reasons = bump(&|r| {
+                    let c = r.receipt.as_mut().unwrap().coverage.get_mut(class).unwrap();
+                    c.observed_count = Some(c.observed_count.unwrap() + 1);
+                });
+                assert_eq!(reasons, vec![Reason::CountMismatch], "{class}");
+            }
+            for op in ["fs.create", "proc.exec", "proc.exit"] {
+                let reasons = bump(&|r| {
+                    let t = &mut r.launcher.as_mut().unwrap().attempts.as_mut().unwrap()[0].trace;
+                    *t.by_operation.get_mut(op).unwrap() -= 1;
+                });
+                assert_eq!(reasons, vec![Reason::CountMismatch], "trace {op}");
+            }
+            let reasons = bump(&|r| {
+                let t = &mut r.launcher.as_mut().unwrap().attempts.as_mut().unwrap()[0].trace;
+                *t.by_source.get_mut("audit").unwrap() += 1;
+            });
+            assert_eq!(reasons, vec![Reason::CountMismatch], "audit frames");
+            // Observation off: no audit frame may appear.
+            let mut off = jailed(Observe::Off, 100, 300);
+            assert!(validate(&off).valid);
+            off.launcher.as_mut().unwrap().attempts.as_mut().unwrap()[0]
+                .trace
+                .by_source
+                .insert("audit".to_owned(), 1);
+            assert_eq!(validate(&off).reasons, vec![Reason::CountMismatch]);
+        }
+
+        /// F2: duplicates, a foreign schema, a count off the parameters and a
+        /// changed validity rule are named problems that block every verdict.
+        #[test]
+        fn the_raw_file_is_checked_before_any_verdict() {
+            let five = fileops_pair(5);
+            let doubled: Vec<LaunchRecord> = [five.clone(), five.clone()].concat();
+            let s = summarize(
+                &doubled,
+                json!({"launches": 5, "max_load": 1.0}),
+                Value::Null,
+            );
+            assert!(
+                s.integrity.iter().any(|p| p.contains("duplicate")),
+                "{:?}",
+                s.integrity
+            );
+            let s = summarize(&five, json!({"launches": 6, "max_load": 1.0}), Value::Null);
+            assert!(
+                s.integrity.iter().any(|p| p.contains("expected 6")),
+                "{:?}",
+                s.integrity
+            );
+            let s = summarize(&five, json!({"launches": 5, "max_load": 1.0}), Value::Null);
+            assert!(s.integrity.is_empty(), "{:?}", s.integrity);
+            let mut drifted = five.clone();
+            drifted[0].validity = Validity {
+                valid: false,
+                reasons: vec![Reason::Errors],
+                flags: vec![],
+            };
+            let s = summarize(
+                &drifted,
+                json!({"launches": 5, "max_load": 1.0}),
+                Value::Null,
+            );
+            assert!(
+                s.integrity.iter().any(|p| p.contains("validity")),
+                "{:?}",
+                s.integrity
+            );
+            let md = render_markdown(&s);
+            assert!(md.contains("Not the §5 measurement"), "{md}");
+        }
+
+        /// F2: six copies of an N=5 raw file are not 30 launches.
+        #[test]
+        fn duplicated_records_never_reach_a_verdict() {
+            let five = fileops_pair(5);
+            let six_copies: Vec<LaunchRecord> = (0..6).flat_map(|_| five.iter().cloned()).collect();
+            let s = summarize(&six_copies, json!({"launches": 5}), Value::Null);
+            let c = off_vs_direct(&s, Workload::Fileops);
+            assert_ne!(c.startup_verdict, Some(Verdict::Pass));
+            assert_ne!(c.startup_verdict, Some(Verdict::Fail));
+            let md = render_markdown(&s);
+            assert!(md.contains("Not the §5 measurement"), "{md}");
+        }
+
+        /// F3: an observer that silently drops events (no gap) is excluded.
+        #[test]
+        fn a_silent_undercount_is_excluded() {
+            let mut r = jailed(Observe::On, 100, 900);
+            r.receipt
+                .as_mut()
+                .unwrap()
+                .coverage
+                .get_mut("fs.write")
+                .unwrap()
+                .observed_count = Some(1); // the fileops workload makes 15,000
+            r.receipt
+                .as_mut()
+                .unwrap()
+                .coverage
+                .get_mut("exec")
+                .unwrap()
+                .observed_count = Some(0);
+            assert!(!validate(&r).valid, "{:?}", validate(&r));
+        }
+
+        /// F8: the exec-confirmation flag accepts only the tool-failure code 1.
+        #[test]
+        fn the_unconfirmed_flag_accepts_only_exit_1() {
+            for code in [2, 126, 127, 137, 255] {
+                let mut r = jailed(Observe::Off, 100, 300);
+                let rc = r.receipt.as_mut().unwrap();
+                rc.outcome_kind = "unknown".to_owned();
+                rc.outcome_code = None;
+                rc.outcome_cause = Some(EXEC_UNCONFIRMED.to_owned());
+                r.launcher.as_mut().unwrap().status.code = Some(code);
+                assert!(!validate(&r).valid, "exit {code}");
+            }
+        }
+
+        /// F7: a verdict is never taken over the survivors of an exclusion.
+        #[test]
+        fn survivors_of_an_exclusion_get_no_verdict() {
+            let mut recs = many(|_| direct(Session::Plain, 2, 200), 40);
+            for i in 0..40 {
+                let slow = i >= 30;
+                let mut r = jailed(Observe::Off, if slow { 900 } else { 100 }, 1200);
+                if slow {
+                    r.launcher.as_mut().unwrap().timed_out = true;
+                }
+                recs.push(r);
+            }
+            let s = summarize(&recs, Value::Null, Value::Null);
+            let c = off_vs_direct(&s, Workload::Fileops);
+            assert_eq!((c.subject_valid, c.subject_excluded), (30, 10));
+            assert_eq!(c.startup_verdict, Some(Verdict::Insufficient));
+        }
+
+        /// F2/F9: a record of another schema is not summarised as this one.
+        #[test]
+        fn a_foreign_record_schema_is_refused() {
+            let mut r = direct(Session::Plain, 2, 200);
+            r.schema = "xtask.perf.launch/999".to_owned();
+            let line = serde_json::to_vec(&r).unwrap();
+            let back: LaunchRecord = serde_json::from_slice(&line).unwrap();
+            let s = summarize(&[back], Value::Null, Value::Null);
+            assert!(s.cells.iter().all(|c| c.valid == 0), "{:?}", s.cells);
+        }
     }
 }
