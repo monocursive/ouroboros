@@ -220,6 +220,21 @@ fn assert_kinds(run: &Run, profile: Profile, expected: &[&str]) {
     }
 }
 
+/// What a failed exit-code assertion needs: stderr, the last receipt's
+/// outcome and errors, and the fixture's last lines.
+fn explain(run: &Run) -> String {
+    let last = run.receipts().last().cloned().unwrap_or(Value::Null);
+    let stdout = run.stdout_text();
+    let tail: Vec<&str> = stdout.lines().rev().take(4).collect();
+    format!(
+        "stderr {:?}; receipt phase {} outcome {} errors {}; fixture tail {tail:?}",
+        run.stderr_text(),
+        last["phase"],
+        last["outcome"],
+        last["errors"]
+    )
+}
+
 fn control_kinds(run: &Run) -> Vec<String> {
     run.control_messages()
         .iter()
@@ -303,7 +318,7 @@ fn observed_profile(profile: Profile) {
         run.code(),
         Some(0),
         "{profile:?}: the fixture's expectations held: {}",
-        run.stderr_text()
+        explain(&run)
     );
     common::assert_run_records(&run);
     assert_kinds(&run, profile, OBSERVED_KINDS);
@@ -366,7 +381,7 @@ fn j5_agent_records_pass_the_frozen_contract() {
         run.code(),
         Some(0),
         "the fixture's expectations held: {}",
-        run.stderr_text()
+        explain(&run)
     );
     assert_eq!(refused.stop().len(), 0, "the refused origin saw nothing");
     let _ = allowed.stop();
@@ -421,7 +436,11 @@ fn j5_a_refused_release_writes_records_that_pass_the_frozen_contract() {
 }
 
 /// `--observe off` (O05): no audit source at all, and what the wrapper and
-/// the receipt say still passes the contract.
+/// the receipt say still passes the contract. The fixture ends within
+/// milliseconds, so without an observer its exec is sometimes confirmed and
+/// sometimes not (measured on the reference host: unconfirmed in each of 8
+/// runs after the other tests of this file, confirmed in the one run alone);
+/// both are valid records.
 #[test]
 fn j5_observation_off_records_pass_the_frozen_contract() {
     if !Profile::Tool.available() {
@@ -430,8 +449,16 @@ fn j5_observation_off_records_pass_the_frozen_contract() {
     let c = case(Profile::Tool, &["--observe", "off"]);
     let steps = Value::from(steps(&c));
     let run = c.run(&steps, &Release::Valid);
-    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
     common::assert_run_records(&run);
+    // Without an observer a target that ends quickly can end before its exec
+    // is confirmed: the outcome is then `unknown` and the run exits 1 (§6.4, a
+    // post-launch tool failure), which the records must say consistently.
+    let settled = run.receipt_phase("settled").expect("a settled receipt");
+    match settled["outcome"]["kind"].as_str() {
+        Some("exited") => assert_eq!(run.code(), Some(0), "{}", explain(&run)),
+        Some("unknown") => assert_eq!(run.code(), Some(1), "{}", explain(&run)),
+        other => panic!("an unexpected outcome {other:?}: {}", explain(&run)),
+    }
     let found = kinds(&run);
     assert!(
         found.iter().all(|kind| !kind.starts_with("audit ")),
