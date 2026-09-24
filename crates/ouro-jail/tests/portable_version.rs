@@ -317,3 +317,20 @@ fn every_wire_schema_is_frozen_with_the_identifiers_the_binary_announces() {
         );
     }
 }
+
+/// J5-C: `version --json` says the identifiers it announces are frozen, and
+/// the binary's constant is the one the freeze file backs.
+#[test]
+fn version_announces_the_wire_schemas_are_frozen() {
+    let announced = version_json();
+    assert_eq!(
+        announced["frozen"],
+        serde_json::Value::Bool(ouro_jail::records::SCHEMAS_FROZEN),
+        "version --json announces the freeze: {announced:#}"
+    );
+    assert!(ouro_jail::records::SCHEMAS_FROZEN);
+    assert!(
+        !frozen_entries().is_empty(),
+        "the freeze file lists the frozen schemas"
+    );
+}

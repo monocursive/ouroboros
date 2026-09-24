@@ -194,6 +194,8 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             "version": env!("CARGO_PKG_VERSION"),
             "platform": platform_json(&platform),
             "schemas": schema_identifiers(),
+            // J5-C: the announced wire identifiers are frozen (jail-v1 §13)
+            "frozen": ouro_jail::records::SCHEMAS_FROZEN,
             "observation": { "closed_set": closed_set() },
             // J5-D
             "build": build_json(),
@@ -220,6 +222,9 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             ("doctor", SCHEMA_DOCTOR),
         ] {
             println!("schema {name} {value}");
+        }
+        if ouro_jail::records::SCHEMAS_FROZEN {
+            println!("schemas frozen (milestone 1)");
         }
         // J5-D
         print_build_text();
