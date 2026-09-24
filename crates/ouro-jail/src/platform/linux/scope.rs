@@ -60,6 +60,8 @@ pub enum Seam {
     AssumeOutsideNoBusctl,
     /// The outside branch, with the call given an unreachable bus.
     AssumeOutsideNoBus,
+    /// The outside branch, with lingering treated as off.
+    AssumeOutsideNoLinger,
 }
 
 impl Seam {
@@ -70,6 +72,7 @@ impl Seam {
             Seam::AssumeOutside => "assume-outside",
             Seam::AssumeOutsideNoBusctl => "assume-outside-no-busctl",
             Seam::AssumeOutsideNoBus => "assume-outside-no-bus",
+            Seam::AssumeOutsideNoLinger => "assume-outside-no-linger",
         }
     }
 
@@ -80,6 +83,7 @@ impl Seam {
             Seam::AssumeOutside,
             Seam::AssumeOutsideNoBusctl,
             Seam::AssumeOutsideNoBus,
+            Seam::AssumeOutsideNoLinger,
         ]
         .into_iter()
         .find(|seam| seam.as_str() == value)
@@ -165,6 +169,11 @@ pub enum Reason {
     /// The call succeeded but this process was not seen in the requested
     /// scope, inside the delegated subtree, within the budget.
     MoveNotObserved,
+    /// Lingering is off: the user manager stops at the last logout and would
+    /// take a moved supervisor with it.
+    NoLinger,
+    /// Lingering could not be established; treated as off.
+    LingerUnknown,
 }
 
 impl Reason {
@@ -180,6 +189,8 @@ impl Reason {
             Reason::CallFailed => "scope_call_failed",
             Reason::CallTimedOut => "scope_call_timed_out",
             Reason::MoveNotObserved => "scope_move_not_observed",
+            Reason::NoLinger => "no_linger",
+            Reason::LingerUnknown => "linger_unknown",
         }
     }
 }
@@ -335,6 +346,10 @@ pub struct CallFailure {
 pub trait Host {
     /// Where this process is now.
     fn position(&mut self) -> Position;
+    /// Whether this uid's user manager outlives its sessions (lingering).
+    fn lingering(&mut self) -> Linger {
+        Linger::Yes
+    }
     /// The `busctl` to run, if there is one.
     fn busctl(&mut self) -> Option<PathBuf>;
     /// Ask for `unit` containing this process, through `busctl` on `bus`.
@@ -346,6 +361,23 @@ pub trait Host {
     fn expired(&self) -> bool;
     /// Wait a little before looking again.
     fn pause(&mut self);
+}
+
+/// Whether the user manager outlives the user's sessions.
+///
+/// Without lingering, logind stops `user@<uid>.service` once the last session
+/// ends, and every scope under it with it; a process left in its session
+/// scope survives logout (Ubuntu's `KillUserProcesses=no`). A supervisor
+/// moved into a user scope would therefore die at logout, so the step moves
+/// it only when the manager is known to linger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Linger {
+    /// The manager outlives the sessions.
+    Yes,
+    /// It stops with the last session.
+    No,
+    /// It could not be established; treated as `No`.
+    Unknown(String),
 }
 
 /// The name of the unit this process asks for: `ouro-jail-<pid>-<16 hex>.scope`.
@@ -463,6 +495,38 @@ pub fn decide<H: Host>(host: &mut H, seam: SeamSetting, unit: &str) -> Outcome {
         }
         Position::Inside(cgroup) | Position::Outside(cgroup) => cgroup,
     };
+    // A moved supervisor belongs to the user manager, which stops at the last
+    // logout unless it lingers; one left in its session scope survives
+    // logout. Trading that for the scope's kill-on-death would turn a rare
+    // leak into a common kill, so without lingering the step stays put.
+    let linger = if applied == Some(Seam::AssumeOutsideNoLinger) {
+        Linger::No
+    } else {
+        host.lingering()
+    };
+    match linger {
+        Linger::Yes => {}
+        Linger::No => {
+            return Outcome::unavailable(
+                Reason::NoLinger,
+                "lingering is off for this user, so the user manager stops when the last \
+                 session ends and would take a moved supervisor with it; the supervisor stays \
+                 in its session (`loginctl enable-linger` lets it enter a delegated scope)",
+                None,
+                Some(start),
+                seam,
+            );
+        }
+        Linger::Unknown(why) => {
+            return Outcome::unavailable(
+                Reason::LingerUnknown,
+                format!("whether the user manager lingers could not be established ({why})"),
+                None,
+                Some(start),
+                seam,
+            );
+        }
+    }
     let busctl = match applied {
         Some(Seam::AssumeOutsideNoBusctl) => None,
         _ => host.busctl(),
@@ -617,7 +681,58 @@ mod linux {
         line
     }
 
+    /// Where logind records lingering: one empty file per user name.
+    const LINGER_DIR: &str = "/var/lib/systemd/linger";
+
+    /// The user name of `uid`, from the password database.
+    fn user_name(uid: u32) -> Option<std::ffi::OsString> {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut buffer = vec![0_u8; 16 * 1024];
+        // SAFETY: `passwd` is a plain C struct; all-zero is a valid value
+        // that getpwuid_r overwrites before it is read.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer is to a live local, the length is the
+        // buffer's own, and getpwuid_r writes only within them.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &raw mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &raw mut result,
+            )
+        };
+        if rc != 0 || result.is_null() || entry.pw_name.is_null() {
+            return None;
+        }
+        // SAFETY: getpwuid_r succeeded, so pw_name is a NUL-terminated
+        // string inside `buffer`, which is still alive.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) };
+        Some(std::ffi::OsString::from_vec(name.to_bytes().to_vec()))
+    }
+
+    /// Lingering as logind records it for `uid`.
+    pub(super) fn lingering_of(uid: u32, dir: &Path) -> super::Linger {
+        let Some(name) = user_name(uid) else {
+            return super::Linger::Unknown(format!("uid {uid} has no user name"));
+        };
+        match std::fs::symlink_metadata(dir.join(&name)) {
+            Ok(meta) if meta.is_file() => super::Linger::Yes,
+            Ok(_) => super::Linger::Unknown(format!(
+                "{} is not a regular file",
+                dir.join(&name).display()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => super::Linger::No,
+            Err(error) => super::Linger::Unknown(format!("{}: {error}", dir.display())),
+        }
+    }
+
     impl Host for LinuxHost {
+        fn lingering(&mut self) -> super::Linger {
+            lingering_of(self.uid, Path::new(LINGER_DIR))
+        }
+
         fn position(&mut self) -> Position {
             let own = match cgroup::own_cgroup() {
                 Ok(own) => own,
@@ -755,6 +870,24 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// logind's record: a regular file named for the user lingers; no
+        /// file does not; anything else is unknown, and counts as off.
+        #[test]
+        fn lingering_is_read_from_loginds_record() {
+            let uid = unsafe { libc::getuid() };
+            let name = user_name(uid).expect("the test's uid has a name");
+            let dir = tempfile::tempdir().unwrap();
+            assert_eq!(lingering_of(uid, dir.path()), super::super::Linger::No);
+            std::fs::write(dir.path().join(&name), b"").unwrap();
+            assert_eq!(lingering_of(uid, dir.path()), super::super::Linger::Yes);
+            std::fs::remove_file(dir.path().join(&name)).unwrap();
+            std::fs::create_dir(dir.path().join(&name)).unwrap();
+            assert!(matches!(
+                lingering_of(uid, dir.path()),
+                super::super::Linger::Unknown(_)
+            ));
+        }
 
         #[test]
         fn a_missing_busctl_is_not_found_and_no_path_lookup_happens() {
@@ -917,6 +1050,7 @@ mod tests {
         requests: Vec<(PathBuf, String, Bus)>,
         polls: usize,
         paused: usize,
+        linger: Linger,
     }
 
     impl Fake {
@@ -929,6 +1063,7 @@ mod tests {
                 requests: Vec::new(),
                 polls: 3,
                 paused: 0,
+                linger: Linger::Yes,
             }
         }
     }
@@ -941,6 +1076,9 @@ mod tests {
         }
         fn busctl(&mut self) -> Option<PathBuf> {
             self.busctl.clone()
+        }
+        fn lingering(&mut self) -> Linger {
+            self.linger.clone()
         }
         fn request(&mut self, busctl: &Path, unit: &str, bus: Bus) -> Result<(), CallFailure> {
             self.requests
@@ -964,6 +1102,45 @@ mod tests {
     }
 
     const UNIT: &str = "ouro-jail-42-0123456789abcdef.scope";
+
+    /// Without lingering the user manager stops at the last logout and
+    /// would take a moved supervisor with it; one left in its session scope
+    /// survives logout. So the step asks for no scope then.
+    #[test]
+    fn without_lingering_no_scope_is_requested() {
+        let mut host = Fake::new(vec![outside()]);
+        host.linger = Linger::No;
+        let outcome = decide(&mut host, SeamSetting::Unset, UNIT);
+        assert!(
+            host.requests.is_empty(),
+            "a scope was requested without lingering"
+        );
+        assert_eq!(outcome.state, State::Unavailable);
+        assert_eq!(outcome.reason, Some(Reason::NoLinger));
+        assert_eq!(outcome.cgroup.as_deref(), Some(SESSION));
+    }
+
+    /// Lingering that cannot be established counts as off.
+    #[test]
+    fn unknown_lingering_is_treated_as_off() {
+        let mut host = Fake::new(vec![outside()]);
+        host.linger = Linger::Unknown("no linger directory".to_owned());
+        let outcome = decide(&mut host, SeamSetting::Unset, UNIT);
+        assert!(
+            host.requests.is_empty(),
+            "a scope was requested with unknown lingering"
+        );
+        assert_eq!(outcome.reason, Some(Reason::LingerUnknown));
+    }
+
+    /// An already delegated supervisor needs no lingering check.
+    #[test]
+    fn already_delegated_ignores_lingering() {
+        let mut host = Fake::new(vec![inside("app.slice/run-1.scope")]);
+        host.linger = Linger::No;
+        let outcome = decide(&mut host, SeamSetting::Unset, UNIT);
+        assert_eq!(outcome.state, State::AlreadyDelegated);
+    }
 
     #[test]
     fn already_delegated_takes_no_action() {

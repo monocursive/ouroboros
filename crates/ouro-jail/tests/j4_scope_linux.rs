@@ -406,6 +406,20 @@ fn j4_scope_a_missing_busctl_leaves_the_attempt_unchanged() {
     assert_unchanged("assume-outside-no-busctl", "busctl_missing", false);
 }
 
+/// Lingering off: the user manager would stop at the last logout and take a
+/// moved supervisor with it, so no scope is requested and the attempt is the
+/// same (the reference host lingers, so the seam stands in for a host that
+/// does not).
+#[test]
+fn j4_scope_without_lingering_the_supervisor_stays_put() {
+    if !live() {
+        return;
+    }
+    let record = assert_unchanged("assume-outside-no-linger", "no_linger", false);
+    let reason = record["reason"].as_str().unwrap();
+    assert!(reason.contains("enable-linger"), "{reason}");
+}
+
 /// A seam value the product does not know is ignored and says so.
 #[test]
 fn j4_scope_an_unknown_seam_value_is_ignored_and_recorded() {
