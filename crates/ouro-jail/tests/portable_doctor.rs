@@ -514,6 +514,36 @@ fn the_doctor_schema_rejects_what_it_must() {
         .into_iter()
         .find(|(name, _)| name == "doctor-macos.json")
         .expect("the macOS example");
+    // The macOS cases carry the Linux example's own, valid `host` and
+    // `supervisor_scope`, so the only rule that can reject them is the
+    // platform partition.
+    let mut macos_with_host = macos.clone();
+    macos_with_host["host"] = linux["host"].clone();
+    let mut macos_with_scope = macos.clone();
+    macos_with_scope["supervisor_scope"] = linux["supervisor_scope"].clone();
+    let mut macos_with_backend = macos.clone();
+    macos_with_backend["binaries"]["bwrap"] = linux["binaries"]["bwrap"].clone();
+    for (label, record) in [
+        ("macOS with a host", &macos_with_host),
+        ("macOS with a supervisor scope", &macos_with_scope),
+        ("macOS with a backend record", &macos_with_backend),
+    ] {
+        assert!(
+            !schema_errors(record).is_empty(),
+            "the schema accepts {label}"
+        );
+    }
+    // And each Linux-only part, removed from the Linux example, is missed.
+    let mut linux_without_scope = linux.clone();
+    linux_without_scope
+        .as_object_mut()
+        .unwrap()
+        .remove("supervisor_scope");
+    assert!(
+        !schema_errors(&linux_without_scope).is_empty(),
+        "the schema accepts Linux without a supervisor scope"
+    );
+
     type Change = fn(&mut serde_json::Value);
     let cases: [(&str, &serde_json::Value, Change); 12] = [
         ("another identifier", &linux, |r| {
