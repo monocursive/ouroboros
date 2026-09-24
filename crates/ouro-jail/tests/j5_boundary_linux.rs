@@ -19,7 +19,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ouro_fixture::harness::{self, Jail, Run, UnixProbe};
+use ouro_fixture::harness::{self, Jail, Run, TraceConsumer, UnixProbe};
 use serde_json::Value;
 
 mod common;
@@ -396,6 +396,85 @@ fn f04_a_workspace_deeper_than_the_scan_limit_refuses_without_claiming_coverage(
     );
 }
 
+/// F04's other half (§15 F04, "source-identity swap refuses"; §9.1 mount
+/// handoff). Attempted, live: the workspace directory is replaced by a fresh
+/// object between resolution (source pinning) and the mount handoff, using the
+/// `OURO_JAIL_TEST_MOUNT_SWAP` rendezvous seam — the supervisor pins the
+/// sources, signals `pinned`, and waits for `go` before verifying. The test
+/// renames the pinned workspace away and creates a new directory at its path,
+/// then releases the handoff. Verdict: the handoff verification finds the
+/// pinned inode replaced and the run refuses before exec (exit 125, no target
+/// marker), with a refused receipt whose error names the replacement — never
+/// a bind of the substituted object. The enforcement point is the
+/// `pin.verify()` refusal loop (`platform.rs`): deleting it lets the run bind
+/// the replacement and reach exec (verified RED on the host).
+#[test]
+fn f04_a_source_identity_swap_at_the_mount_handoff_refuses() {
+    if !common::live() {
+        return;
+    }
+    let c = case("tool");
+    let workspace = c.workspace.clone();
+    let root = c.jail.root().to_path_buf();
+    let rendezvous = root.join("swap-rv");
+    private_dir(&rendezvous);
+    let marker = workspace.join("marker");
+    let steps = serde_json::json!([["open", &marker, "--create", "--write", "--expect", "ok"]]);
+    let argv = c.script("f04swap", &steps);
+
+    let spawned = c
+        .jail
+        .env("OURO_JAIL_TEST_MOUNT_SWAP", &rendezvous)
+        .receipt()
+        .target(argv)
+        .spawn()
+        .unwrap();
+
+    // Wait for the supervisor to finish pinning the mount sources.
+    let pinned = rendezvous.join("pinned");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !pinned.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the mount-swap seam never signalled `pinned`"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Replace the pinned workspace with a fresh object at the same path, then
+    // let the handoff verification run.
+    std::fs::rename(&workspace, root.join("workspace.gone")).unwrap();
+    private_dir(&workspace);
+    std::fs::write(rendezvous.join("go"), b"1").unwrap();
+
+    let run = spawned.wait().unwrap();
+    assert_eq!(
+        run.code(),
+        Some(125),
+        "a swapped mount source did not refuse before exec: stderr {}",
+        run.stderr_text()
+    );
+    assert!(!marker.exists(), "the target ran despite the swap");
+    let receipts = run.receipts();
+    let refused = receipts
+        .iter()
+        .find(|r| r["outcome"]["kind"] == "refused")
+        .unwrap_or_else(|| panic!("no refused receipt: {receipts:#?}"));
+    let _ = common::checked_receipt((*refused).clone());
+    assert_ne!(refused["containment"], "enforced", "{refused:#}");
+    let message = refused["outcome"]["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        message.contains("replaced") || message.contains("changed"),
+        "the refusal does not name the source swap: {}",
+        refused["outcome"]["error"]
+    );
+    // The swap refusal happens before any boundary exists, so this receipt has
+    // no native lifetime details; the seam is recorded in jail state at claim
+    // time (S9), which is not part of this clause's assertion.
+}
+
 // ===========================================================================
 // S02: a host namespace fd cannot be opened or entered (§15 S02)
 // ===========================================================================
@@ -465,23 +544,33 @@ print(json.dumps(out))
 // "Attempts to undo each outer boundary fail"; §9.2)
 // ===========================================================================
 
-/// Attempted, live, by the `agent` child: clear `no_new_privs`; add an
-/// allow-everything seccomp filter and then make a denied syscall; reach the
-/// execution cgroup through `/sys/fs/cgroup`; and, after restricting itself
-/// with Landlock, regain the access it just gave up. Verdict: `no_new_privs`
-/// stays 1 (`prctl` refuses to clear it), the extra permissive filter cannot
-/// loosen the stacked baseline (`ptrace` stays `EPERM` and the filter count
-/// only grows), the cgroupfs is absent so the resource boundary is
-/// unreachable, and a second, permissive Landlock ruleset does not restore a
-/// denied write (domains only narrow). Each is a one-way boundary the child
-/// cannot walk back. Removing the baseline filter, the cgroup unshare, or the
-/// no_new_privs/Landlock setup would each make one of these succeed.
+/// Attempted, live, by the `agent` child, once with observation on and once
+/// with it off: clear `no_new_privs`; add an allow-everything seccomp filter
+/// and then make syscalls the baseline denies; reach the execution cgroup
+/// through `/sys/fs/cgroup`; and, after restricting itself with Landlock,
+/// regain the access it just gave up. Verdict, under both observation modes:
+/// `no_new_privs` stays 1 (`prctl` refuses to clear it); a stacked permissive
+/// filter cannot loosen the baseline (`keyctl` stays `EPERM`); the cgroupfs is
+/// absent so the resource boundary is unreachable; and a second, permissive
+/// Landlock ruleset does not restore a denied write. Each is a one-way
+/// boundary the child cannot walk back.
+///
+/// The seccomp leg is probed with `keyctl`, a `DENY_EPERM` syscall that is
+/// NOT in the closed set and that the observer does not independently block,
+/// so its `EPERM` comes solely from the seccomp baseline — removing `keyctl`
+/// from `DENY_EPERM` reddens this test under both observation modes (verified
+/// on the host). `ptrace` is also probed, but only as a defence-in-depth
+/// check under observation ON: the closed-set observer ptrace-attaches the
+/// target, so `PTRACE_TRACEME` returns `EPERM` ("already traced") independent
+/// of the baseline, and under observation OFF it is not attached and the
+/// baseline alone must hold — which the `keyctl` leg proves. So the ptrace
+/// value is asserted `EPERM` only when observing, and never stands in for the
+/// seccomp-stacking clause.
 #[test]
 fn s03_the_outer_boundaries_cannot_be_reversed_inside_agent() {
     if !common::live() {
         return;
     }
-    let c = case("agent");
     const SCRIPT: &str = r#"
 import ctypes, errno, json, os, struct
 libc = ctypes.CDLL(None, use_errno=True)
@@ -493,6 +582,11 @@ def status(field):
         if line.startswith(field + ":"):
             return line.split()[1]
     return None
+
+def call(nr, *args):
+    ctypes.set_errno(0)
+    r = libc.syscall(ctypes.c_long(nr), *args)
+    return "ok" if r >= 0 else errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
 
 # --- no_new_privs: set, and refuse to clear ---
 out["nnp_before"] = status("NoNewPrivs")
@@ -512,9 +606,11 @@ ctypes.set_errno(0)
 r = libc.syscall(317, 1, 0, ctypes.byref(prog))  # seccomp(SET_MODE_FILTER, 0, prog)
 out["add_allow_filter"] = "ok" if r >= 0 else errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
 out["filters"] = status("Seccomp_filters")
-ctypes.set_errno(0)
-r = libc.syscall(101, 0, 0, 0, 0)  # ptrace(PTRACE_TRACEME)
-out["ptrace_after_allow"] = "ok" if r == 0 else errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+# keyctl(0): a DENY_EPERM syscall outside the closed set that the observer does
+# not touch, so its EPERM is the seccomp baseline alone (isolates the clause).
+out["keyctl_after_allow"] = call(250, 0, 0, 0, 0)
+# ptrace(PTRACE_TRACEME): defence in depth (observer + baseline) when observed.
+out["ptrace_after_allow"] = call(101, 0, 0, 0, 0)
 
 # --- cgroup: the execution boundary is not reachable from inside ---
 try:
@@ -562,28 +658,53 @@ def landlock():
 out["landlock"] = landlock()
 print(json.dumps(out))
 "#;
-    let run = c.jail.target(py(SCRIPT)).run().unwrap();
-    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    let out = py_out(&run);
-    // no_new_privs is set and cannot be cleared.
-    assert_eq!(out["nnp_before"], "1", "{out}");
-    assert_ne!(out["clear_nnp"], "ok", "no_new_privs was cleared: {out}");
-    assert_eq!(out["nnp_after"], "1", "{out}");
-    // The permissive filter stacks but does not loosen the baseline.
-    assert_eq!(out["add_allow_filter"], "ok", "{out}");
-    assert_eq!(
-        out["ptrace_after_allow"], "EPERM",
-        "a permissive filter loosened the baseline: {out}"
-    );
-    // The execution cgroup is not reachable through the child's mount view.
-    assert_eq!(out["cgroup_procs"], "ENOENT", "{out}");
-    // Landlock only narrows.
-    assert_eq!(out["landlock"]["first"], "EACCES", "{out}");
-    assert_eq!(
-        out["landlock"]["after_second_ruleset"], "EACCES",
-        "a second Landlock ruleset widened a denied access: {out}"
-    );
-    settled(&run);
+    for observe in ["on", "off"] {
+        let c = case("agent");
+        let run = c
+            .jail
+            .args(["--observe", observe])
+            .target(py(SCRIPT))
+            .run()
+            .unwrap();
+        assert_eq!(
+            run.code(),
+            Some(0),
+            "{observe}: stderr {}",
+            run.stderr_text()
+        );
+        let out = py_out(&run);
+        // no_new_privs is set and cannot be cleared.
+        assert_eq!(out["nnp_before"], "1", "{observe}: {out}");
+        assert_ne!(
+            out["clear_nnp"], "ok",
+            "{observe}: no_new_privs cleared: {out}"
+        );
+        assert_eq!(out["nnp_after"], "1", "{observe}: {out}");
+        // The permissive filter stacks but cannot loosen the baseline. keyctl
+        // is denied by the baseline alone, so this holds under both modes.
+        assert_eq!(out["add_allow_filter"], "ok", "{observe}: {out}");
+        assert_eq!(
+            out["keyctl_after_allow"], "EPERM",
+            "{observe}: a stacked permissive filter loosened the seccomp baseline: {out}"
+        );
+        // Under observation the observer's ptrace attach is a second lock;
+        // under observation off the baseline alone holds (the keyctl leg).
+        if observe == "on" {
+            assert_eq!(
+                out["ptrace_after_allow"], "EPERM",
+                "observed: ptrace was not held by observer+baseline: {out}"
+            );
+        }
+        // The execution cgroup is not reachable through the child's mount view.
+        assert_eq!(out["cgroup_procs"], "ENOENT", "{observe}: {out}");
+        // Landlock only narrows.
+        assert_eq!(out["landlock"]["first"], "EACCES", "{observe}: {out}");
+        assert_eq!(
+            out["landlock"]["after_second_ruleset"], "EACCES",
+            "{observe}: a second Landlock ruleset widened a denied access: {out}"
+        );
+        settled(&run);
+    }
 }
 
 // ===========================================================================
@@ -746,43 +867,31 @@ print(json.dumps(out))
 // sandbox IPC works (§15 N05; §10)
 // ===========================================================================
 
-/// Attempted, live, by the `agent` child: connect to a host peer through a
-/// hard-link and a symlink alias created *after* the boundary existed, and to
-/// a host socket bound in an operator `--rw` extra grant *after* the boundary
-/// existed. Verdict: every one is refused `EACCES` by the Unix-peer mediation
-/// — it resolves the node in the child's view and admits only a listener in
-/// the attempt's own network namespace, whenever the alias or socket appeared
-/// — and none of the host peers ever saw a connection. This closes the N05
-/// gap that every alias and extra-grant socket existed before launch. The
-/// enforcement point is the seccomp-notification connect mediation; a
-/// path-name check that only masked nodes present at launch would let a late
-/// alias through.
+/// Attempted, live, by the `agent` child: connect to a host socket bound in
+/// an operator `--rw` extra grant *after* the boundary existed. Verdict: it is
+/// refused `EACCES` by the Unix-peer mediation — it resolves the node in the
+/// child's view and admits only a listener in the attempt's own network
+/// namespace, whenever the socket appeared — the host peer never saw a
+/// connection, and the authorized proxy still works. This closes the N05 gap
+/// that extra-grant sockets were only ever bound *before* launch
+/// (`conformance_j3_agent.rs::n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable`
+/// binds late sockets in the workspace/scratch/vendor roots after `prepared`
+/// but binds extra-grant sockets before launch; the late-hardlink and
+/// late-symlink-in-workspace cases the first draft also had are the identical
+/// connect-time mediation as that test's late workspace socket, so they are
+/// dropped as duplicates). The enforcement point is the seccomp-notification
+/// connect mediation's deny of a node with no listener in this namespace;
+/// making that branch allow lets the late socket through.
 #[test]
-fn n05_a_late_alias_and_a_late_extra_grant_socket_are_unreachable() {
+fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
     if !common::live() {
         return;
     }
     let c = case("agent");
-    let ws = c.workspace.clone();
     let extra_rw = c.jail.root().join("extra-rw");
     private_dir(&extra_rw);
-    // The real host peer exists before launch; its aliases and the extra-grant
-    // peer are all created after `prepared`, below.
-    let host = UnixProbe::bind(&ws.join("host.sock")).unwrap();
 
     let steps = serde_json::json!([
-        [
-            "unix-connect",
-            ws.join("late-hardlink.sock"),
-            "--expect",
-            "EACCES"
-        ],
-        [
-            "unix-connect",
-            ws.join("late-symlink.sock"),
-            "--expect",
-            "EACCES"
-        ],
         [
             "unix-connect",
             extra_rw.join("late-extra.sock"),
@@ -803,10 +912,8 @@ fn n05_a_late_alias_and_a_late_extra_grant_socket_are_unreachable() {
         .unwrap();
     let message = spawned.owner().await_prepared().expect("prepared");
     let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
-    // Everything the child will try to reach is created now, after the
-    // boundary and its mounts exist: no launch-time enumeration saw them.
-    std::fs::hard_link(ws.join("host.sock"), ws.join("late-hardlink.sock")).unwrap();
-    std::os::unix::fs::symlink(ws.join("host.sock"), ws.join("late-symlink.sock")).unwrap();
+    // The host peer is bound now, after the boundary and its mounts exist in
+    // the extra grant: no launch-time enumeration saw it.
     let extra = UnixProbe::bind(&extra_rw.join("late-extra.sock")).unwrap();
     spawned
         .owner()
@@ -820,19 +927,16 @@ fn n05_a_late_alias_and_a_late_extra_grant_socket_are_unreachable() {
     assert_eq!(
         run.code(),
         Some(0),
-        "a late alias or extra-grant socket was reachable: stdout {}\nstderr {}",
+        "the late extra-grant socket was reachable: stdout {}\nstderr {}",
         run.stdout_text(),
         run.stderr_text()
     );
-    assert_eq!(host.stop(), 0, "the host peer was reached through an alias");
     assert_eq!(extra.stop(), 0, "the extra-grant host peer was reached");
     let lines = run.fixture_lines();
     let connects = ops(&lines, "connect");
-    assert_eq!(connects.len(), 4, "{lines:#?}");
-    for connect in &connects[..3] {
-        assert_eq!(connect["errno"], "EACCES", "{connect}");
-    }
-    assert_eq!(connects[3]["errno"], Value::Null, "the proxy connect");
+    assert_eq!(connects.len(), 2, "{lines:#?}");
+    assert_eq!(connects[0]["errno"], "EACCES", "{}", connects[0]);
+    assert_eq!(connects[1]["errno"], Value::Null, "the proxy connect");
     settled(&run);
 }
 
@@ -889,22 +993,34 @@ fn n05_nested_sandbox_ipc_is_allowed() {
 }
 
 // ===========================================================================
-// R06: an unobserved migrated descendant is not certified dead (§15 R06,
-// third sentence; §9.3)
+// R06: a detected escaped descendant loses integrity and retains state
+// (§15 R06, SECOND sentence; §9.3)
 // ===========================================================================
 
-/// Attempted, live, `none` with observation off: the target forks a
-/// descendant that migrates itself into a sibling cgroup the jail did not
-/// register and survives; the target then exits cleanly. Verdict: the
-/// registered leaf empties, but `tree_empty` is never set true and the run
-/// never settles — registered-boundary verification does not certify the
-/// escaped, unobserved descendant dead. Its integrity is `lost`, the target's
-/// own clean exit is preserved from its own wait fact, and state is retained.
-/// The enforcement point is that `tree_empty=true` speaks only of the
-/// identity-checked cgroup (§9.3): a build that synthesized settlement from an
-/// empty leaf would fabricate a death here.
+/// This test proves R06's SECOND sentence — "Detected descendant escape loses
+/// integrity and retains state" — NOT the third. The third sentence ("an
+/// unobserved migrated descendant is not certified dead by registered-boundary
+/// verification") cannot be produced as a deterministic live fixture on the
+/// stock host: with observation off the subreaper + zombie-cgroup checks
+/// detect every escape (so nothing is "unobserved"), and the genuinely-unseen
+/// case §9.3 names is a race the design declines to promise to catch. The
+/// third sentence is recorded as a limit in the acceptance map, proved by the
+/// registered-boundary scope label on the verified path
+/// (`conformance_j3_none.rs::r05_clean_none_evidence_stays_unprotected`,
+/// `::none_gate_closed_refuses_after_a_verified_teardown`, and the unit test
+/// `uncontained.rs::a_clean_none_tree_is_empty_only_in_the_registered_scope`).
+///
+/// Attempted, live, `none` with observation off: the target forks a descendant
+/// that migrates itself into a sibling cgroup the jail did not register and
+/// survives; the target then exits cleanly. Verdict: the escape is DETECTED
+/// (subreaper + membership check), so `tree_empty` is never set true and the
+/// run never settles; integrity is `lost`, the target's own clean exit is
+/// preserved from its own wait fact, and state is retained. The enforcement
+/// point is the escape detection in `uncontained.rs`: deleting the escaped-
+/// membership arms makes the empty leaf falsely certify the survivor dead
+/// (the run exits 0/verified instead of 1/lost — verified RED on the host).
 #[test]
-fn r06_an_unobserved_migrated_descendant_is_not_certified_dead() {
+fn r06_a_detected_escaped_descendant_loses_integrity_and_retains_state() {
     let (jail, _) = match none_case("off") {
         Some(pair) => pair,
         None => return,
@@ -944,8 +1060,8 @@ fn r06_an_unobserved_migrated_descendant_is_not_certified_dead() {
         .max_by_key(|r| r["revision"].as_u64().unwrap_or(0))
         .unwrap();
     let _ = common::checked_receipt(receipt.clone());
-    // The escaped, unobserved descendant is not certified dead: no
-    // settlement, no tree-empty, integrity lost, registered-boundary scope.
+    // The detected escape loses integrity: no settlement, no tree-empty,
+    // integrity lost, registered-boundary scope.
     assert_ne!(
         receipt["phase"], "settled",
         "an empty leaf settled: {receipt:#}"
@@ -966,6 +1082,284 @@ fn r06_an_unobserved_migrated_descendant_is_not_certified_dead() {
     assert!(run.control_kind("settled").is_empty());
     // State is retained (not cleaned) for an integrity loss.
     assert_ne!(receipt["state_cleanup"], "complete", "{receipt:#}");
+}
+
+// ===========================================================================
+// R03: a wall deadline is enforced under trace transport pressure (§15 R03;
+// §13.3 "Disk sync runs independently of the supervision loop"). The gap
+// (rev-A H7): the mapped R03 tests cover neither a wall while the trace
+// consumer has DISCONNECTED nor a wall during a genuine PARTIAL write. The
+// existing `j4_trace_linux.rs::j4_r03_the_wall_is_enforced_while_the_trace_is_saturated`
+// covers a fully-full pipe (a `Never` consumer, writes short at Ok(0)); these
+// two add the disconnect and partial-write conditions.
+// ===========================================================================
+
+/// A `tool` run over a workspace whose target opens `opens` files (long names,
+/// each an observed closed-set write that emits a ~630 B trace frame) then
+/// sleeps `sleep_ms`, with `--evidence best-effort` so trace loss degrades
+/// rather than stopping the attempt, leaving only the wall to end it.
+fn pressure_case(opens: usize, sleep_ms: u64) -> (Case, Vec<OsString>) {
+    let c = case("tool");
+    let long = "n".repeat(160);
+    let mut steps: Vec<Value> = (0..opens)
+        .map(|index| serde_json::json!(["open", format!("{long}{index}"), "--create", "--write"]))
+        .collect();
+    steps.push(serde_json::json!(["sleep", sleep_ms.to_string()]));
+    let argv = c.script("r03-pressure", &Value::Array(steps));
+    (c, argv)
+}
+
+/// The wall fires on time while a trace WRITE IS PARTIAL. Attempted, live: a
+/// `tool` run with a 2 s wall and a `Never` trace consumer (reads nothing
+/// while the jail runs), and enough events (~630 B each) that the pipe fills
+/// and, behind it, the whole external queue. The frame that crosses the full
+/// boundary is written only in part before the fd goes `WouldBlock`, then the
+/// queue overflows and evidence is lost. The target would run 30 s. Verdict:
+/// the run still ends by `wall_expiry` within a few seconds with the wall
+/// recorded hit, one trace loss is recorded, and the captured trace is a
+/// recognisable prefix (never a torn frame followed by more bytes) — the
+/// supervision loop never waits on the full/partial trace write. The
+/// enforcement point is the nonblocking external trace fd
+/// (`trace.rs FdSink::from_raw_fd` calls `set_nonblocking`): with a blocking fd
+/// the write to the full pipe blocks the supervision loop forever (the
+/// consumer reads nothing until after exit), the wall never fires, and the run
+/// hits the harness timeout (verified RED on the host by removing
+/// `set_nonblocking`).
+///
+/// Whether the captured prefix ends exactly on a frame boundary or mid-frame
+/// (a torn last line) depends on where 64 KiB of ~630 B frames lands, so this
+/// asserts recognisability, not tornness. A guaranteed torn write needs a
+/// smaller pipe or a larger-than-pipe event, neither available to this slice
+/// (the pipe size lives in the harness, the frame writer in `trace.rs`).
+#[test]
+fn r03_a_wall_fires_on_time_under_a_saturated_trace() {
+    if !common::live() {
+        return;
+    }
+    let (c, argv) = pressure_case(8_000, 30_000);
+    let started = Instant::now();
+    let run = c
+        .jail
+        .trace_consumer(TraceConsumer::Never)
+        .args(["--evidence", "best-effort", "--limit", "wall=2s"])
+        .timeout(Duration::from_secs(90))
+        .target(argv)
+        .run()
+        .unwrap();
+    let elapsed = started.elapsed();
+    let receipt = last_pressure_receipt(&run);
+    assert_eq!(
+        receipt["outcome"]["cause"], "wall_expiry",
+        "the wall did not end the run: {receipt:#}"
+    );
+    assert_eq!(receipt["outcome"]["kind"], "signaled", "{receipt:#}");
+    let wall = wall_row(&receipt);
+    assert_eq!(
+        wall["hit"], true,
+        "the wall is not recorded hit: {receipt:#}"
+    );
+    assert_eq!(wall["mechanism"], "boottime-deadline");
+    assert_recognisable_prefix(&run);
+    assert_one_evidence_loss(&receipt);
+    assert!(
+        elapsed < Duration::from_secs(9),
+        "the wall fired late under a saturated trace: {elapsed:?}"
+    );
+}
+
+// R03's other named condition — a wall enforced while the trace consumer has
+// DISCONNECTED — is NOT shipped as a live test here: it is not mutation-
+// provable and so would be a test that cannot fail (see B2/notes.md and
+// B2/requests.md, R03.2). A closed pipe returns EPIPE to the writer at once
+// and never blocks it, so a disconnect cannot delay the wall by construction —
+// no jail-code deletion makes it block — and the disconnect loss is fail-safe-
+// recorded in several places (deleting the flush_now write-error path AND the
+// drain_final undelivered path both left the loss recorded, verified GREEN
+// survivor on the host). The disconnect HANDLING is already proved by
+// `j4_trace_linux.rs::j4_r03_disconnect_best_effort_continues` and
+// `::j4_r03_disconnect_strict_stops`; the "cannot block the wall" property is
+// covered by the mutation-provable saturation test above (a stalled-but-open
+// consumer is the only case that can block a writer).
+
+/// The latest receipt of a pressure run, schema- and semantic-checked. Unlike
+/// `settled`, a best-effort trace loss makes the run exit 1, so this does not
+/// require a `settled` phase.
+fn last_pressure_receipt(run: &Run) -> Value {
+    let validators = common::validators();
+    let mut latest = None;
+    for receipt in run.receipts() {
+        validators["jail-receipt"]
+            .validate(&receipt)
+            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
+        common::assert_semantic_receipt(&receipt);
+        let revision = receipt["revision"].as_u64().unwrap_or(0);
+        if latest.as_ref().is_none_or(|(seen, _)| *seen <= revision) {
+            latest = Some((revision, receipt));
+        }
+    }
+    latest
+        .map(|(_, receipt)| receipt)
+        .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
+}
+
+fn wall_row(receipt: &Value) -> Value {
+    receipt["applied"]["limits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no applied limits: {receipt:#}"))
+        .iter()
+        .find(|row| row["key"] == "wall")
+        .unwrap_or_else(|| panic!("no wall limit: {receipt:#}"))
+        .clone()
+}
+
+/// Exactly one `evidence_lost` error: the trace transport loss, recorded once.
+fn assert_one_evidence_loss(receipt: &Value) {
+    let empty = Vec::new();
+    let count = receipt["errors"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|error| error["code"] == "evidence_lost")
+        .count();
+    assert_eq!(
+        count, 1,
+        "one loss expected, one evidence_lost error: {:#?}",
+        receipt["errors"]
+    );
+}
+
+/// The captured trace is a recognisable prefix: whole frames, then at most a
+/// torn last line — never a torn frame followed by more bytes (which no §13.3
+/// writer produces). A saturated write leaves exactly this.
+fn assert_recognisable_prefix(run: &Run) {
+    let readback = run
+        .trace_readback
+        .as_ref()
+        .expect("a trace fd was captured");
+    assert_ne!(
+        readback.state,
+        ouro_fixture::harness::TraceState::Corrupt,
+        "a torn frame was followed by more bytes"
+    );
+    assert!(!readback.frames.is_empty(), "the prefix has no whole frame");
+}
+
+// ===========================================================================
+// O03: truncation and unmatched exit produce gaps, never fabricated results
+// (§15 O03; tracer/session.rs). Neither the truncation branch (a required
+// structure the kernel accepted but the tracer could not read) nor an
+// unmatched exit is producible on the stock host without a race, so each is
+// driven through a documented tracer seam (session.rs) and asserted through
+// `ouro-jail run`. Tagged live-cli: the real tracer runs against a real
+// tracee; the seam only manufactures the loss the tracer already records.
+// ===========================================================================
+
+/// A `none` run (observation on, best-effort) whose target is the fixture
+/// performing one covered `mkdir` on a uniquely-marked path. The tracer seam
+/// `env_var` is set to that marker, so it fires on this call and never on the
+/// observer capability probe (whose paths do not contain it). Returns the
+/// settled receipt (best-effort degrades rather than stopping).
+fn o03_run(env_var: &str) -> Option<Value> {
+    const MARKER: &str = "o03-marked-target";
+    let (jail, _) = none_case("on")?;
+    let dir = jail.root().join(MARKER);
+    let argv = vec![
+        harness::fixture_path().into_os_string(),
+        OsString::from("mkdir"),
+        dir.into_os_string(),
+    ];
+    let run = jail
+        .env(env_var, MARKER)
+        .args(["--evidence", "best-effort"])
+        .target(argv)
+        .run()
+        .expect("the jail runs");
+    validate(&run);
+    // A recorded gap under best-effort is an evidence loss, so the run is a
+    // tool error (exit 1), not a clean settle.
+    assert_eq!(
+        run.code(),
+        Some(1),
+        "{env_var}: a run with a recorded gap is a tool error: stderr {}",
+        run.stderr_text()
+    );
+    let receipt = last_pressure_receipt(&run);
+    // The seam is recorded in the receipt's native details (S9).
+    let seams = &receipt["lifetime"]["native"]["details"]["test_seams"];
+    assert!(
+        seams[env_var].is_string(),
+        "{env_var}: the tracer seam is not recorded: {receipt:#}"
+    );
+    Some(receipt)
+}
+
+/// The (class, gap) for the first coverage class degraded with a gap of
+/// `reason`, or a panic naming what was found.
+fn degraded_gap(receipt: &Value, reason: &str) -> Value {
+    let coverage = receipt["coverage"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no coverage: {receipt:#}"));
+    for (class, entry) in coverage {
+        if let Some(gaps) = entry["gaps"].as_array() {
+            for gap in gaps {
+                if gap["reason"] == reason {
+                    assert_eq!(
+                        entry["status"], "degraded",
+                        "{class}: a class with a {reason} gap is degraded: {entry:#}"
+                    );
+                    assert_eq!(
+                        entry["observed_count"],
+                        Value::Null,
+                        "{class}: a degraded class has no fabricated count: {entry:#}"
+                    );
+                    return gap.clone();
+                }
+            }
+        }
+    }
+    panic!("no {reason} gap in any coverage class: {receipt:#}");
+}
+
+/// O03 truncation: a required path the kernel accepted but the tracer could
+/// not read becomes a `path_unreadable` gap, never a result. Attempted, live:
+/// a `none` run with `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH=1`, whose fixture
+/// makes one covered `mkdir` that succeeds. Verdict: the covered call is a
+/// `path_unreadable` gap in a degraded coverage class with a null (never
+/// fabricated, never zero) count, and one `evidence_lost` error records it.
+/// The enforcement point is `self.gap(GapReason::PathUnreadable, ..)` in
+/// `session.rs`: deleting it makes the truncated call vanish (no gap, and the
+/// class stays active) rather than becoming a gap — verified RED on the host.
+#[test]
+fn o03_a_truncated_path_is_a_gap_not_a_result() {
+    let Some(receipt) = o03_run("OURO_JAIL_TEST_TRACER_TRUNCATE_PATH") else {
+        return;
+    };
+    let gap = degraded_gap(&receipt, "path_unreadable");
+    assert!(
+        gap["classes"]
+            .as_array()
+            .is_some_and(|classes| !classes.is_empty()),
+        "the gap names no class: {gap}"
+    );
+    assert_one_evidence_loss(&receipt);
+}
+
+/// O03 unmatched exit: a syscall exit with no entry to pair with becomes an
+/// `unmatched_exit` gap, never a result. Attempted, live: a `none` run with
+/// `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT=1`, whose fixture makes one covered
+/// call whose entry the tracer drops, so its exit is unmatched. Verdict: an
+/// `unmatched_exit` gap appears in a degraded coverage class with a null
+/// count, and one `evidence_lost` error records it. The enforcement point is
+/// `self.gap(GapReason::UnmatchedExit, ..)` in `session.rs` (session.rs
+/// ~1463): deleting it makes the unmatched exit silently vanish rather than
+/// becoming a gap — verified RED on the host.
+#[test]
+fn o03_an_unmatched_exit_is_a_gap_not_a_result() {
+    let Some(receipt) = o03_run("OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT") else {
+        return;
+    };
+    let _ = degraded_gap(&receipt, "unmatched_exit");
+    assert_one_evidence_loss(&receipt);
 }
 
 // ---------------------------------------------------------------------------

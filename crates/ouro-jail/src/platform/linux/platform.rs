@@ -1007,6 +1007,10 @@ impl Boundary {
 
         let mut command = Command::new(&exe);
         command.arg("__backend").args(&rendered.argv);
+        // J5-B2 seam: give a test a deterministic window between pinning and
+        // the mount-handoff verification below to replace a pinned source, so
+        // the source-identity-swap refusal (F04) can be proved through the CLI.
+        mount_swap_rendezvous();
         // §9.1 mount-handoff verification: the workspace and every pinned
         // protected segment must still resolve to the objects that were
         // scanned, or the run refuses rather than bind a replacement.
@@ -2423,6 +2427,34 @@ type MountPreparation = (
     Vec<(OwnedFd, RawFd)>,
     Vec<Placeholder>,
 );
+
+/// `OURO_JAIL_TEST_MOUNT_SWAP=<dir>`: a test seam (J5-B2) that opens a
+/// deterministic window at the §9.1 mount handoff. When the variable names a
+/// directory, the supervisor writes `<dir>/pinned` once every mount source has
+/// been pinned and then waits (bounded, 10 s) for `<dir>/go` before running the
+/// handoff verification. A test replaces a pinned object in that window to
+/// prove the verification refuses the replacement (F04 source-identity swap).
+///
+/// Test-only. It can only delay the verification that is already there — never
+/// widen anything — and, like every `OURO_JAIL_TEST_*` variable, it is recorded
+/// in jail state and in every receipt with native details
+/// (`state::persist::test_seams`, S9). A value that is not a usable directory
+/// makes the write and the poll no-ops, so a stray setting cannot hang a run.
+pub const MOUNT_SWAP_SEAM: &str = "OURO_JAIL_TEST_MOUNT_SWAP";
+
+fn mount_swap_rendezvous() {
+    let Some(dir) = std::env::var_os(MOUNT_SWAP_SEAM) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    if std::fs::write(dir.join("pinned"), b"1").is_err() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !dir.join("go").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
 
 /// Pin every source once, scan the pinned writable roots, then give each bind
 /// its own descriptor. Bubblewrap validates the mounted inode against that fd.

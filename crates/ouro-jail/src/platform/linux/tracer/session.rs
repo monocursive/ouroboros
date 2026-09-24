@@ -438,6 +438,48 @@ struct CoalescedGap {
     count: Option<u64>,
 }
 
+// J5-B2 O03 seams (tracer gaps) begin.
+/// `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH=<substring>`: every covered non-exec
+/// call whose path contains `<substring>` reports "the kernel accepted the
+/// call but the tracer could not read the path" — the truncation case O03
+/// names — so that call, when it succeeds, becomes a `path_unreadable` gap
+/// rather than a result.
+///
+/// The substring gates the seam to the test's own target path so the observer
+/// capability probe (whose paths never match) is untouched. A test seam (S9):
+/// read once when the session starts, empty/unset leaves the tracer unchanged
+/// (the release binary is unaffected), and, like every `OURO_JAIL_TEST_*`
+/// variable, it is recorded in jail state and in every receipt with native
+/// details (`state::persist::test_seams`). It can only MANUFACTURE a gap the
+/// tracer already records for real truncation — never hide a result or widen
+/// authority — so a run under it ends exactly as a run with that real loss would.
+pub const TRUNCATE_PATH_SEAM: &str = "OURO_JAIL_TEST_TRACER_TRUNCATE_PATH";
+
+/// `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT=<substring>`: every covered non-exec
+/// entry whose path contains `<substring>` is followed to its exit stop
+/// without being recorded, so its exit has no entry to pair with and is an
+/// `unmatched_exit` gap. A path-gated test seam (S9), read once when the
+/// session starts, recorded like every `OURO_JAIL_TEST_*` variable; it
+/// manufactures only a gap the tracer already records.
+pub const UNMATCHED_EXIT_SEAM: &str = "OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT";
+
+fn seam_marker(name: &str) -> Option<Vec<u8>> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(String::into_bytes)
+}
+
+fn path_has_marker(snapshot: Option<&PathSnapshot>, marker: &[u8]) -> bool {
+    snapshot.is_some_and(|snapshot| {
+        snapshot
+            .bytes
+            .windows(marker.len())
+            .any(|window| window == marker)
+    })
+}
+// J5-B2 O03 seams end.
+
 struct Session {
     config: TracerConfig,
     tx: SyncSender<TracerEvent>,
@@ -484,6 +526,11 @@ struct Session {
     scratch: Vec<u8>,
     /// Where task identity comes from: `/proc`, or a test's script.
     procfs: Box<dyn ProcView>,
+    // J5-B2 O03 seams: the path substrings that mark a covered call whose path
+    // read is forced unreadable, or whose entry is dropped so its exit is
+    // unmatched. `None` in the release binary unless the seam is set.
+    force_truncate_marker: Option<Vec<u8>>,
+    force_unmatched_marker: Option<Vec<u8>>,
 }
 
 impl Session {
@@ -521,6 +568,8 @@ impl Session {
             inflight: 0,
             scratch,
             procfs,
+            force_truncate_marker: seam_marker(TRUNCATE_PATH_SEAM),
+            force_unmatched_marker: seam_marker(UNMATCHED_EXIT_SEAM),
         }
     }
 
@@ -1531,6 +1580,19 @@ impl Session {
             return;
         }
         let op = pending.entry.op;
+        // J5-B2 O03 seam: when this covered call's path matches the seam
+        // marker, treat its exit as unmatched — the entry might never have been
+        // seen — so it becomes an `unmatched_exit` gap, never a result. The
+        // in-flight slot is already released above, so this matches a genuinely
+        // unmatched exit. Gated to a non-exec op.
+        if op != ClosedOp::Exec
+            && let Some(marker) = &self.force_unmatched_marker
+            && path_has_marker(pending.args.path.as_ref(), marker)
+        {
+            self.summary.loss.unmatched_exits += 1;
+            self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
+            return;
+        }
         // An argument the observer could not read is only a hole in coverage
         // when the kernel could read it. When the kernel rejected the same
         // pointer or structure, there was no covered operation to miss, and
@@ -1946,6 +2008,22 @@ impl Session {
             let (snapshot, unreadable) = self.read_path(tid, raw[index as usize]);
             args.path = snapshot;
             path_unreadable = unreadable;
+        }
+        // J5-B2 O03 seam: force this covered call's path to be
+        // kernel-accepted-but-unreadable — the truncation case O03 names —
+        // when its path matches the seam marker. Gated to a non-exec op (an
+        // exec never returns to the normal exit path where a `path_unreadable`
+        // gap is emitted). When the call then succeeds it becomes a
+        // `path_unreadable` gap.
+        if entry.op != ClosedOp::Exec
+            && let Some(marker) = &self.force_truncate_marker
+            && path_has_marker(args.path.as_ref(), marker)
+        {
+            args.path = Some(PathSnapshot {
+                bytes: Vec::new(),
+                complete: false,
+            });
+            path_unreadable = true;
         }
         if let Some(index) = entry.path2 {
             let (snapshot, unreadable) = self.read_path(tid, raw[index as usize]);
