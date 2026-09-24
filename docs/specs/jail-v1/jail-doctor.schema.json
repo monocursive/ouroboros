@@ -1,0 +1,669 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:jail-doctor:1",
+  "title": "Ouro jail doctor report v1",
+  "description": "The record `ouro-jail doctor --json` prints (jail-v1 §3.2, §14.1): the measured capabilities, the host manifest that supersedes host-manifest.sh, the binaries and the build that produced it. On Linux it carries `host`, `supervisor_scope` and the resolved bubblewrap; on macOS, where execution is unsupported in this milestone, it carries none of them.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.jail.doctor/1"
+    },
+    "component": {
+      "const": "ouro-jail"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "build": {
+      "$ref": "#/$defs/build"
+    },
+    "platform": {
+      "type": "object",
+      "properties": {
+        "os": {
+          "enum": [
+            "linux",
+            "macos"
+          ]
+        },
+        "arch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kernel": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "kernel"
+      ],
+      "additionalProperties": false
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/capability"
+      }
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "launch": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/launch"
+        }
+      ]
+    },
+    "supervisor_scope": {
+      "$ref": "#/$defs/supervisor_scope"
+    },
+    "binaries": {
+      "type": "object",
+      "properties": {
+        "ouro-jail": {
+          "$ref": "#/$defs/binary"
+        },
+        "bwrap": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/backend_binary"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ouro-jail"
+      ],
+      "additionalProperties": false
+    },
+    "host": {
+      "$ref": "#/$defs/host"
+    }
+  },
+  "required": [
+    "schema",
+    "component",
+    "version",
+    "build",
+    "platform",
+    "requirements",
+    "capabilities",
+    "ready",
+    "launch",
+    "binaries"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "os": {
+                "const": "linux"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "host",
+          "supervisor_scope"
+        ],
+        "properties": {
+          "binaries": {
+            "required": [
+              "ouro-jail",
+              "bwrap"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "os": {
+                "const": "macos"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "host"
+              ]
+            },
+            {
+              "required": [
+                "supervisor_scope"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "binaries": {
+            "propertyNames": {
+              "const": "ouro-jail"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "native_string": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "encoding": {
+              "const": "base64"
+            },
+            "data": {
+              "type": "string",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            }
+          },
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "build": {
+      "description": "What built this binary (jail-v1 §16 build provenance). `revision` and `dirty` come from the build environment and are null when it did not name them.",
+      "type": "object",
+      "properties": {
+        "revision": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          ]
+        },
+        "dirty": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rustc": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "enum": [
+            "release",
+            "debug"
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "dirty",
+        "rustc",
+        "target",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "capability": {
+      "description": "jail-v1 §3.1 Capability.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "available",
+            "unavailable",
+            "unsupported",
+            "error",
+            "skipped"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "process",
+            "tree",
+            "host"
+          ]
+        },
+        "mechanism": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_:.-]*$"
+            }
+          ]
+        },
+        "measured_at": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "format": "date-time"
+            }
+          ]
+        },
+        "evidence_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "scope",
+        "mechanism",
+        "reason_code",
+        "measured_at",
+        "evidence_ref"
+      ],
+      "additionalProperties": false
+    },
+    "launch": {
+      "description": "`doctor --launch NAME` (§14.1): the launch profile's support status apart from the host probes, and each credential by the profile's own names; never a source path or a value.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "support": {
+          "enum": [
+            "experimental",
+            "supported"
+          ]
+        },
+        "support_reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_:.-]*$"
+        },
+        "credentials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mode": {
+                "enum": [
+                  "copy_rw",
+                  "bind_ro"
+                ]
+              },
+              "dest": {
+                "$ref": "#/$defs/native_string"
+              },
+              "status": {
+                "enum": [
+                  "available",
+                  "unavailable"
+                ]
+              },
+              "reason_code": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_:.-]*$"
+              }
+            },
+            "required": [
+              "id",
+              "mode",
+              "dest",
+              "status",
+              "reason_code"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "name",
+        "support",
+        "support_reason",
+        "credentials"
+      ],
+      "additionalProperties": false
+    },
+    "supervisor_scope": {
+      "description": "What §9.3's supervisor scope step did for this doctor (Linux).",
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "already_delegated",
+            "entered",
+            "unavailable"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_:.-]*$"
+            }
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cgroup": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "test_seam": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "unit",
+        "reason_code",
+        "reason",
+        "cgroup"
+      ],
+      "additionalProperties": false
+    },
+    "binary": {
+      "description": "A binary this doctor vouches for: the path it runs from and the SHA-256 of its bytes (on Linux, of the running image), null when they could not be read.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "backend_binary": {
+      "description": "The bubblewrap the product resolved on the operator's PATH, as a run would execute it; the whole record is null when there is none.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "host": {
+      "description": "The host manifest of jail-v1 §3.2, read-only; an unreadable fact is null. The architecture is `platform.arch`.",
+      "type": "object",
+      "properties": {
+        "kernel_release": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "distribution": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sysctls": {
+          "type": "object",
+          "properties": {
+            "kernel.apparmor_restrict_unprivileged_userns": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.unprivileged_bpf_disabled": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.perf_event_paranoid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.yama.ptrace_scope": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user.max_user_namespaces": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.io_uring_disabled": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kernel.apparmor_restrict_unprivileged_userns",
+            "kernel.unprivileged_bpf_disabled",
+            "kernel.perf_event_paranoid",
+            "kernel.yama.ptrace_scope",
+            "user.max_user_namespaces",
+            "kernel.io_uring_disabled"
+          ],
+          "additionalProperties": false
+        },
+        "apparmor_userns_restriction": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": [
+                "on",
+                "off",
+                "absent"
+              ]
+            },
+            "profile_files": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "profile_files"
+          ],
+          "additionalProperties": false
+        },
+        "cgroup": {
+          "type": "object",
+          "properties": {
+            "delegated_root": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^/"
+                }
+              ]
+            },
+            "controllers": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "delegated_root",
+            "controllers"
+          ],
+          "additionalProperties": false
+        },
+        "linger": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "operator_identity": {
+          "enum": [
+            "root",
+            "set_id",
+            "capable",
+            "unprivileged",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "kernel_release",
+        "kernel_version",
+        "distribution",
+        "sysctls",
+        "apparmor_userns_restriction",
+        "cgroup",
+        "linger",
+        "operator_identity"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

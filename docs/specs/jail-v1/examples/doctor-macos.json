@@ -1,0 +1,99 @@
+{
+  "binaries": {
+    "ouro-jail": {
+      "path": "/usr/local/bin/ouro-jail",
+      "sha256": "d875595b2542d8aed8034af0892dc1dca36486d75347aca0a5adb2cfb11bc29f"
+    }
+  },
+  "build": {
+    "dirty": true,
+    "profile": "release",
+    "revision": "a243b2c49359078b11a4ccdee2cbb2dce6b7c801",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "target": "aarch64-apple-darwin"
+  },
+  "capabilities": [
+    {
+      "evidence_ref": null,
+      "measured_at": null,
+      "mechanism": null,
+      "name": "tree_termination",
+      "reason_code": "unsupported_platform",
+      "scope": "tree",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": null,
+      "measured_at": null,
+      "mechanism": null,
+      "name": "closed_set_observation",
+      "reason_code": "unsupported_platform",
+      "scope": "tree",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": null,
+      "measured_at": null,
+      "mechanism": null,
+      "name": "filesystem_containment",
+      "reason_code": "unsupported_platform",
+      "scope": "tree",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": null,
+      "measured_at": null,
+      "mechanism": null,
+      "name": "syscall_filter",
+      "reason_code": "unsupported_platform",
+      "scope": "process",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": null,
+      "measured_at": null,
+      "mechanism": null,
+      "name": "network_none",
+      "reason_code": "unsupported_platform",
+      "scope": "tree",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": null,
+      "measured_at": null,
+      "mechanism": null,
+      "name": "protected_coverage:existing_and_root",
+      "reason_code": "unsupported_platform",
+      "scope": "tree",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": null,
+      "measured_at": null,
+      "mechanism": null,
+      "name": "limit:wall",
+      "reason_code": "unsupported_platform",
+      "scope": "tree",
+      "status": "unsupported"
+    }
+  ],
+  "component": "ouro-jail",
+  "launch": null,
+  "platform": {
+    "arch": "aarch64",
+    "kernel": "Darwin 27.0.0",
+    "os": "macos"
+  },
+  "ready": false,
+  "requirements": [
+    "tree_termination",
+    "closed_set_observation",
+    "filesystem_containment",
+    "syscall_filter",
+    "network_none",
+    "protected_coverage:existing_and_root",
+    "limit:wall"
+  ],
+  "schema": "ouro.jail.doctor/1",
+  "version": "0.1.0"
+}

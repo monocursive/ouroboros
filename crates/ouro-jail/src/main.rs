@@ -479,8 +479,41 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             ouro_jail::platform::linux::scope::details(),
         );
     }
+    // J5-D begin: the host manifest (§3.2) and the binaries (§14.1)
+    if let Some(object) = value.as_object_mut() {
+        object.insert("binaries".to_owned(), binaries_json());
+        #[cfg(target_os = "linux")]
+        object.insert(
+            "host".to_owned(),
+            ouro_jail::platform::linux::host::manifest(),
+        );
+    }
+    // J5-D end
     value
 }
+
+// J5-D begin
+/// The binaries this `doctor` vouches for: itself, and on Linux the
+/// bubblewrap the platform resolved. `LinuxPlatform::new` repeats the exact
+/// lookup the context's platform made (the first `bwrap` on this process's
+/// `PATH`, which nothing changes in between), so the record names the file
+/// a run would execute, not a guess at a well-known location.
+fn binaries_json() -> serde_json::Value {
+    let mut binaries = serde_json::Map::new();
+    binaries.insert(
+        "ouro-jail".to_owned(),
+        ouro_jail::platform::linux::host::own_binary(),
+    );
+    #[cfg(target_os = "linux")]
+    binaries.insert(
+        "bwrap".to_owned(),
+        ouro_jail::platform::linux::host::bwrap_binary(
+            ouro_jail::platform::linux::platform::LinuxPlatform::new().bwrap(),
+        ),
+    );
+    serde_json::Value::Object(binaries)
+}
+// J5-D end
 
 fn print_doctor_text(report: &DoctorReport) {
     println!(
