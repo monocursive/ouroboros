@@ -190,11 +190,17 @@ fn the_filter_digests_are_the_frozen_ones() {
             "{REGENERATE}"
         );
     }
+    assert_eq!(
+        seccomp::mediation_filter().expect("builds").digest(),
+        mediation,
+        "the mediation filter as this build makes it: {REGENERATE}"
+    );
+    // The launcher installs it through unixpeer, which exists on Linux.
     #[cfg(target_os = "linux")]
     assert_eq!(
         ouro_jail::platform::linux::unixpeer::filter_digest(),
         mediation,
-        "the mediation filter as this build makes it: {REGENERATE}"
+        "the mediation filter the launcher installs: {REGENERATE}"
     );
     for (name, text) in [
         ("seccomp-table-tool-x86_64.txt", &tool),
