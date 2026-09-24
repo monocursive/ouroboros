@@ -971,6 +971,8 @@ pub struct Summary {
     pub parameters: Value,
     pub host: Value,
     pub warmup_launches: usize,
+    /// The 1-minute load average read before each measured launch.
+    pub load1: Option<Dist>,
     pub cells: Vec<CellSummary>,
     pub comparisons: Vec<Comparison>,
 }
@@ -1245,6 +1247,12 @@ pub fn summarize(records: &[LaunchRecord], parameters: Value, host: Value) -> Su
         parameters,
         host,
         warmup_launches: records.iter().filter(|r| r.warmup).count(),
+        load1: dist(
+            records
+                .iter()
+                .filter(|r| !r.warmup)
+                .filter_map(|r| r.load1_before),
+        ),
         cells: cells.iter().map(|(k, v)| summarize_cell(*k, v)).collect(),
         comparisons,
     }
@@ -1385,6 +1393,19 @@ pub fn render_markdown(summary: &Summary) -> String {
         p["spawn_count"],
         p["sample_ms"],
     );
+    let _ = writeln!(
+        md,
+        "Host load: the 1-minute load average before each measured launch was {} (min / \
+         median / max; the host has {} CPUs). A noisy host inflates every jailed arm more \
+         than direct execution.\n",
+        summary.load1.as_ref().map_or_else(
+            || "not recorded".to_owned(),
+            |d| format!("{:.2} / {:.2} / {:.2}", d.min, d.median, d.max)
+        ),
+        summary.host["cpus"]
+            .as_u64()
+            .map_or("?".to_owned(), |n| n.to_string()),
+    );
     let short = summary.cells.iter().any(|c| c.valid < SPEC_MIN_LAUNCHES)
         || summary
             .comparisons
@@ -1432,6 +1453,7 @@ pub fn render_markdown(summary: &Summary) -> String {
         "## Informational profiles: `--observe off` against direct\n"
     );
     for profile in [Profile::Agent, Profile::None] {
+        let _ = writeln!(md, "### `{}`\n", profile.name());
         comparison_table(
             &mut md,
             summary,
@@ -2759,11 +2781,21 @@ mod tests {
         let wall = cell.wall_ms.unwrap();
         assert_eq!((wall.n, wall.max), (3, 100.0), "the outlier is not in it");
 
+        records[0].load1_before = Some(0.5);
+        records[1].load1_before = Some(2.5);
+        records[4].load1_before = Some(9.0);
         let summary = summarize(&records, Value::Null, Value::Null);
         assert_eq!(
             summary.warmup_launches, 1,
             "the warm-up is recorded, not summarised"
         );
+        let load = summary.load1.as_ref().unwrap();
+        assert_eq!(
+            (load.n, load.min, load.max),
+            (2, 0.5, 2.5),
+            "warm-up load excluded"
+        );
+        assert!(render_markdown(&summary).contains("0.50 / 1.50 / 2.50"));
         assert_eq!(summary.cells.len(), 1);
         assert_eq!(summary.cells[0].launched, 4);
     }
