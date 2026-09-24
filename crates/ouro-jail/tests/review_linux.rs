@@ -68,19 +68,30 @@ fn fixture_lines(run: &Run) -> Vec<Value> {
 }
 
 fn audit_events(run: &Run) -> Vec<&Value> {
-    run.trace_events
+    run.trace_events()
         .iter()
         .filter(|event| event.get("source").and_then(Value::as_str) == Some("audit"))
         .collect()
 }
 
+/// Every receipt the run left, each checked against the schema and the rules
+/// it cannot state (`common::check_receipt`). J4 W2-H: the reviewer's checks
+/// read receipts field by field; a receipt breaking its contract fails here.
+fn checked_receipts(run: &Run) -> Vec<Value> {
+    run.receipts()
+        .into_iter()
+        .map(common::checked_receipt)
+        .collect()
+}
+
 fn settled(run: &Run) -> Value {
+    let _ = checked_receipts(run);
     run.receipt_phase("settled")
         .unwrap_or_else(|| panic!("no settled receipt; receipts: {:?}", phases(run)))
 }
 
 fn phases(run: &Run) -> Vec<String> {
-    run.receipts()
+    checked_receipts(run)
         .iter()
         .filter_map(|r| r.get("phase").and_then(Value::as_str))
         .map(ToOwned::to_owned)
@@ -548,7 +559,7 @@ fn r2_an_unrecognised_executable_is_not_handed_to_a_shell() {
         .target([target.to_str().unwrap()])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "exit={:?} stdout={:?} phase={:?} outcome={}",
@@ -583,7 +594,7 @@ fn r2_a_proved_exec_failure_is_an_exec_error_outcome() {
         .target([missing.to_str().unwrap()])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!("{}", serde_json::to_string_pretty(last).unwrap());
     assert_eq!(
@@ -600,14 +611,14 @@ fn r2_a_proved_exec_failure_is_an_exec_error_outcome() {
 
 #[allow(dead_code)] // a reviewer's helper, kept for the next check that needs it
 fn last_outcome(run: &Run) -> Option<Value> {
-    run.receipts()
+    checked_receipts(run)
         .last()
         .and_then(|r| r.get("outcome").cloned())
 }
 
 /// The four exec failures must at least be distinguishable from one another.
 fn exec_failure_facts(run: &Run, name: &str) -> (String, String, String) {
-    let receipts = run.receipts();
+    let receipts = checked_receipts(run);
     let last = receipts
         .last()
         .unwrap_or_else(|| panic!("{name}: no receipt at all"));
@@ -635,7 +646,7 @@ fn exec_failure_facts(run: &Run, name: &str) -> (String, String, String) {
 
 #[allow(dead_code)] // a reviewer's helper, kept for the next check that needs it
 fn check_exec_error(run: &Run, name: &str, errno: &str) {
-    let receipts = run.receipts();
+    let receipts = checked_receipts(run);
     let last = receipts
         .last()
         .unwrap_or_else(|| panic!("{name}: no receipt at all"));
@@ -1108,7 +1119,7 @@ fn r4_receipt_revisions_advance_and_phases_carry_their_tuples() {
         .run()
         .expect("run");
     let mut by_phase: Vec<(String, u64)> = Vec::new();
-    for event in &run.trace_events {
+    for event in run.trace_events() {
         if event.get("operation").and_then(Value::as_str) == Some("jail.receipt") {
             let phase = event
                 .pointer("/fields/phase")
@@ -1119,7 +1130,7 @@ fn r4_receipt_revisions_advance_and_phases_carry_their_tuples() {
         }
     }
     eprintln!("receipt notes in the trace: {by_phase:?}");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     for receipt in &receipts {
         eprintln!(
             "phase={:?} revision={:?} containment={:?} protection={:?} exec_observed={:?} \
@@ -1247,7 +1258,7 @@ fn receipt_in(root: &Path) -> Option<Value> {
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(value) = serde_json::from_str::<Value>(&text)
         {
-            return Some(value);
+            return Some(common::checked_receipt(value));
         }
     }
     None
@@ -1691,51 +1702,12 @@ fn r8_a_second_run_with_the_same_attempt_id_refuses() {
     let _ = first.wait();
 }
 
-/// §7: a receipt is replaced atomically — a SIGKILL mid-run leaves either the
-/// prepared or the enforced receipt, never a truncated file.
-#[test]
-fn r8_receipts_are_never_left_truncated() {
-    if !live() {
-        return;
-    }
-    let mut checked = 0;
-    for attempt in 0..8 {
-        let c = case();
-        let mut spawned = c
-            .jail
-            .target([c.fixture.to_str().unwrap(), "sleep", "5000"])
-            .spawn()
-            .expect("spawn");
-        // Let preparation get somewhere, then kill at a varying offset.
-        std::thread::sleep(std::time::Duration::from_millis(40 + attempt * 35));
-        let _ = spawned.kill();
-        let root = spawned.root().to_path_buf();
-        let _ = spawned.wait();
-        let attempts = root.join("data/attempts");
-        let Ok(entries) = std::fs::read_dir(&attempts) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path().join("jail.json");
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            checked += 1;
-            let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-                panic!("a receipt was left unparsable after a kill: {e}\n{text}")
-            });
-            let phase = value.get("phase").and_then(Value::as_str).unwrap_or("?");
-            eprintln!("attempt {attempt}: phase {phase} ({} bytes)", text.len());
-            assert!(
-                ["prepared", "enforced", "refused", "settled"].contains(&phase),
-                "unexpected phase {phase}"
-            );
-        }
-        // Reap anything the kill orphaned.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    eprintln!("receipts checked: {checked}");
-}
+// §7: "a receipt is replaced atomically". `r8_receipts_are_never_left_truncated`
+// killed the jail after a sleep of varying length and could pass without having
+// checked any receipt (J4 finding N10). It is superseded by
+// `j4_records_linux::j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file`,
+// which aborts the supervisor at each named point of each persistence site
+// through `OURO_JAIL_TEST_ABORT_AT` and fails when a point is never reached.
 
 // ===========================================================================
 // Batch 2
@@ -1954,7 +1926,7 @@ fn r4_killing_the_backend_leaves_an_honest_receipt() {
     unsafe { libc::kill(bwrap, libc::SIGKILL) };
 
     let run = spawned.wait().expect("wait");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!("{}", serde_json::to_string_pretty(last).unwrap());
     eprintln!("exit={:?}", run.code());
@@ -1992,7 +1964,7 @@ fn r2_observe_off_keeps_an_ambiguous_exit_unknown() {
         .target([c.fixture.to_str().unwrap(), "raise", "TERM"])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "signal death, observe off: exit={:?} outcome={}",
@@ -2013,7 +1985,7 @@ fn r2_observe_off_keeps_an_ambiguous_exit_unknown() {
         .target([c.fixture.to_str().unwrap(), "exit", "130"])
         .run()
         .expect("run");
-    let receipts = run.receipts();
+    let receipts = checked_receipts(&run);
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "exit 130, observe off: exit={:?} outcome={}",
@@ -2270,11 +2242,44 @@ fn r6_path_reporting_by_class() {
             serde_json::to_string(event.get("fields").unwrap_or(&Value::Null)).unwrap()
         );
     }
-    let raw = serde_json::to_string(&run.trace_events).unwrap();
+    let raw = serde_json::to_string(run.trace_events()).unwrap();
     assert!(
         !raw.contains(workspace.to_str().unwrap()),
         "a raw host path appears in the trace"
     );
+    // J4 N9: each class, as §11.3 reports it, not only the absence of the
+    // raw path. The four opens are the four closed-set results, in order.
+    let opens: Vec<&Value> = audit_events(&run)
+        .into_iter()
+        .filter(|e| e.pointer("/fields/syscall").and_then(Value::as_str) == Some("openat"))
+        .collect();
+    let paths: Vec<Value> = opens
+        .iter()
+        .map(|e| e.pointer("/fields/path").cloned().unwrap_or(Value::Null))
+        .collect();
+    let digest = crate_digest(b"/etc/ld.so.cache");
+    assert_eq!(
+        paths,
+        vec![
+            serde_json::json!({"kind": "workspace_relative", "value": "abs.txt"}),
+            serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"}),
+            serde_json::json!({"kind": "scratch_relative", "value": "scr.txt"}),
+            serde_json::json!({"kind": "digest", "digest": digest, "reason": "outside_known_roots"}),
+        ],
+        "one result per open, each path in its class"
+    );
+    for event in &opens {
+        assert_eq!(
+            event.pointer("/fields/path_basis").and_then(Value::as_str),
+            Some("argument_snapshot"),
+            "{event}"
+        );
+    }
+}
+
+/// The digest §11.3 emits for a path outside every known root.
+fn crate_digest(bytes: &[u8]) -> String {
+    ouro_jail::canonical::sha256_prefixed(bytes)
 }
 
 /// §11.2/§11.4: a denied `connect` is counted once, under `fs.deny`.
@@ -2342,13 +2347,24 @@ fn r6_a_foreign_dirfd_is_not_resolved_against_a_cwd() {
     let workspace = c.workspace.clone();
     std::fs::create_dir_all(workspace.join("sub")).unwrap();
     let ops = workspace.join("dirfd.json");
+    let sub = workspace.join("sub");
     std::fs::write(
         &ops,
         serde_json::to_vec(&serde_json::json!([
             ["open", "sub", "--expect", "ok"],
-            // `--via openat` with a dirfd: the fixture opens the directory
-            // first and uses its descriptor.
-            ["mkdir", "sub/made", "--via", "mkdirat"]
+            // A relative name against AT_FDCWD: the cwd is not observed.
+            ["mkdir", "sub/made", "--via", "mkdirat"],
+            // J4 N9: a relative name against a real directory descriptor,
+            // which the fixture opens (read-only, so outside the set) and
+            // reports before the call that uses it.
+            [
+                "mkdir",
+                "made2",
+                "--via",
+                "mkdirat",
+                "--dirfd",
+                sub.to_str().unwrap()
+            ]
         ]))
         .unwrap(),
     )
@@ -2369,6 +2385,53 @@ fn r6_a_foreign_dirfd_is_not_resolved_against_a_cwd() {
             serde_json::to_string(event.get("fields").unwrap_or(&Value::Null)).unwrap()
         );
     }
+    // J4 N9: what the two results say, not only that the run happened.
+    assert!(workspace.join("sub/made").is_dir() && workspace.join("sub/made2").is_dir());
+    let lines = fixture_lines(&run);
+    let dirfd = lines
+        .iter()
+        .filter(|l| l["op"] == "mkdirat")
+        .nth(1)
+        .and_then(|l| l.pointer("/args/dirfd"))
+        .and_then(Value::as_i64)
+        .expect("the fixture reports the descriptor it used");
+    let mkdirs: Vec<&Value> = audit_events(&run)
+        .into_iter()
+        .filter(|e| e.pointer("/fields/syscall").and_then(Value::as_str) == Some("mkdirat"))
+        .collect();
+    assert_eq!(mkdirs.len(), 2, "{mkdirs:?}");
+    assert_eq!(
+        mkdirs[0].pointer("/fields/path"),
+        Some(&serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"})),
+        "{}",
+        mkdirs[0]
+    );
+    assert!(
+        mkdirs[0].pointer("/fields/path_dirfd").is_none(),
+        "AT_FDCWD is not a descriptor"
+    );
+    assert_eq!(
+        mkdirs[1].pointer("/fields/path"),
+        Some(&serde_json::json!({"kind": "unavailable", "reason": "relative_to_dirfd"})),
+        "{}",
+        mkdirs[1]
+    );
+    assert_eq!(
+        mkdirs[1]
+            .pointer("/fields/path_dirfd")
+            .and_then(Value::as_i64),
+        Some(dirfd),
+        "the event names the descriptor, never the directory it resolved to"
+    );
+    // The read-only open of `sub` and the descriptor's own open are
+    // outside the set: two results in all, both of them the mkdirs.
+    assert_eq!(
+        audit_events(&run)
+            .iter()
+            .filter(|e| e["fields"]["syscall"] == "openat")
+            .count(),
+        0
+    );
 }
 
 /// I03/§6.2: the contained child must not be able to reach the supervisor's
@@ -2730,7 +2793,7 @@ fn r9_a_symlinked_root_git_refuses_rather_than_downgrade() {
         .expect("run");
     assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
     assert!(!marker.exists(), "the target ran despite the refusal");
-    let receipt = run.receipt_phase("refused").expect("a receipt");
+    let receipt = common::checked_receipt(run.receipt_phase("refused").expect("a receipt"));
     let codes: Vec<&str> = receipt
         .pointer("/errors")
         .and_then(Value::as_array)

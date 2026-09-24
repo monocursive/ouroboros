@@ -621,6 +621,7 @@ impl AgentNet {
         audit.record_mediated_connect(&MediatedConnect {
             tid: record.pid,
             tgid: record.tgid,
+            tgid_start: record.tgid_start, // J4-O: the birth identity (slice O)
             family: record.family,
             address_complete: record.address_complete,
             ret,

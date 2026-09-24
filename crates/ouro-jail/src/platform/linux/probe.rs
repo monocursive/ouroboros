@@ -571,13 +571,15 @@ fn probe_user_notification() -> ProbeResult {
     if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return ProbeResult::error(NAME, MECHANISM, format!("pipe2: {}", errno_name(last())));
     }
+    let parent = own_pid();
     // SAFETY: fork; the child calls only async-signal-safe functions
-    // (prctl, seccomp, write, pause, _exit) over data built before the fork.
+    // (prctl, getppid, seccomp, write, pause, _exit) over data built before
+    // the fork.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         // SAFETY: as above; `program` is live and never freed in the child.
         unsafe {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+            exec::die_with_parent_after_fork(parent);
             libc::close(pipe[0]);
             let listener =
                 super::unixpeer::install_program(&program, super::unixpeer::FLAG_NEW_LISTENER)
@@ -676,10 +678,15 @@ fn own_pid() -> libc::pid_t {
 fn probe_ptrace_seize() -> ProbeResult {
     const NAME: &str = "ptrace_seize_descendant";
     const MECHANISM: &str = "ptrace";
+    let parent = own_pid();
     // SAFETY: fork in a process that may be multithreaded; the child below
-    // calls only `pause`, which is async-signal-safe, and never returns.
+    // calls only prctl, getppid and `pause`, which are async-signal-safe, and
+    // never returns.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
+        // SAFETY: first call in the forked child; `parent` was read before
+        // the fork. The probe must not leave a fixture on doctor death.
+        unsafe { exec::die_with_parent_after_fork(parent) };
         loop {
             // SAFETY: pause takes no arguments and is async-signal-safe.
             unsafe { libc::pause() };
@@ -789,14 +796,14 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
             );
         }
     };
-    // SAFETY: fork; the child calls only `pause`, which is
-    // async-signal-safe, and never returns.
+    let parent = own_pid();
+    // SAFETY: fork; the child calls only prctl, getppid and `pause`, which
+    // are async-signal-safe, and never returns.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
-        // The probe must not leave a fixture on doctor death.
-        unsafe {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
-        }
+        // SAFETY: first call in the forked child; `parent` was read before
+        // the fork. The probe must not leave a fixture on doctor death.
+        unsafe { exec::die_with_parent_after_fork(parent) };
         loop {
             // SAFETY: pause takes no arguments and is async-signal-safe.
             unsafe { libc::pause() };

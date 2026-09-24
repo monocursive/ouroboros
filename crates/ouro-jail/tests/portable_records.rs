@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonschema::{Registry, Resource, Validator};
+
+mod common;
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
@@ -163,6 +165,12 @@ fn r01_every_example_validates_against_its_schema() {
         };
         let failures = errors(&validators[key], &record);
         assert!(failures.is_empty(), "{name}: {failures:?}");
+        // J4-R, R01: the rules the schema cannot state, as validate_contract.py
+        // checks them.
+        if key == "jail-receipt" {
+            common::semantic_receipt(&record)
+                .unwrap_or_else(|error| panic!("{name} fails the semantic checks: {error}"));
+        }
     }
 }
 
@@ -175,7 +183,7 @@ fn r01_every_validation_case_gets_the_verdict_the_corpus_expects() {
     let validators = validators();
     let cases = read_json(&specs_dir().join("fixtures/validation-cases.json"));
     let cases = cases.as_array().expect("the corpus is an array");
-    assert!(cases.len() >= 32, "the corpus is present");
+    assert!(cases.len() >= 44, "the corpus is present");
     let mut positive = 0usize;
     let mut negative = 0usize;
     for case in cases {
@@ -209,6 +217,12 @@ fn r01_every_validation_case_gets_the_verdict_the_corpus_expects() {
             expected_valid,
             "case `{name}` expected valid={expected_valid}, errors: {failures:?}"
         );
+        // J4-R, R01: as validate_contract.py does, a receipt the schema
+        // accepts also passes the semantic checks.
+        if failures.is_empty() && schema == "jail-receipt" {
+            common::semantic_receipt(&record)
+                .unwrap_or_else(|error| panic!("case `{name}` fails the semantic checks: {error}"));
+        }
         if expected_valid {
             positive += 1;
         } else {
@@ -558,5 +572,161 @@ fn a_receipt_always_announces_the_schema_identifier() {
         Phase::Refused,
     ] {
         assert_eq!(record.receipt(phase).schema, SCHEMA_RECEIPT);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// J4-R, R01 hardening
+// ---------------------------------------------------------------------------
+
+/// The semantic port is not vacuous: each rule rejects a receipt the schema
+/// accepts, exactly as `validate_contract.py`'s `semantic_receipt` would.
+#[test]
+fn r01_the_semantic_checks_reject_what_the_schema_accepts() {
+    let validators = validators();
+    let base = read_json(&specs_dir().join("examples/receipt-agent-proxy-only.json"));
+    let native = read_json(&specs_dir().join("examples/receipt-native-path.json"));
+    let tool = read_json(&specs_dir().join("examples/receipt-tool.json"));
+    common::semantic_receipt(&base).expect("the base is semantically valid");
+    type Mutation = fn(&mut serde_json::Value);
+    let cases: [(&str, &serde_json::Value, Mutation); 6] = [
+        ("duplicate credential id", &base, |record| {
+            let first = record["credentials"][0].clone();
+            record["credentials"][1]["id"] = first["id"].clone();
+        }),
+        ("duplicate limit key", &base, |record| {
+            record["applied"]["limits"][1]["key"] = "wall".into();
+        }),
+        (
+            "coverage from a source the observer calls unsupported",
+            &tool,
+            |record| {
+                record["observer"]["sources"]["wrapper"] = "unsupported".into();
+            },
+        ),
+        ("byte form of valid UTF-8", &native, |record| {
+            record["policy"]["grants"][0]["value"]["data"] = "L3dvcms=".into();
+        }),
+        ("noncanonical base64", &native, |record| {
+            // Nonzero trailing bits: the schema's pattern accepts it; Python's
+            // lenient decoder needs the re-encoding comparison to reject it,
+            // the strict Rust decoder already refuses it.
+            record["policy"]["grants"][0]["value"]["data"] = "L3dvcmsv/x==".into();
+        }),
+        ("a NUL in a native string", &native, |record| {
+            record["policy"]["grants"][0]["value"]["data"] = "L3dvcgD/".into();
+        }),
+    ];
+    for (label, base, mutate) in cases {
+        let mut record = (*base).clone();
+        mutate(&mut record);
+        let failures = errors(&validators["jail-receipt"], &record);
+        assert!(
+            failures.is_empty(),
+            "{label}: the schema must accept it for this to test the semantic rule: {failures:?}"
+        );
+        assert!(
+            common::semantic_receipt(&record).is_err(),
+            "{label}: the semantic checks must reject it"
+        );
+    }
+}
+
+/// §13.2 row 4: "Refusal after setup or proved exec error | refused | actual
+/// application state | false | actual boundary / actual scope | true /
+/// timestamp only after teardown verification; otherwise null / null".
+#[test]
+fn tuple_refusal_after_setup_or_proved_exec_error() {
+    let validators = validators();
+    let error = JailError::new(
+        ErrorCode::ExecFailed,
+        ErrorStage::Released,
+        Remediation::Configuration,
+        "the target exec failed with ENOENT".to_owned(),
+    );
+    let setup = |teardown_verified: bool, exec_error: bool| {
+        let mut record = base_record(Containment::Enforced, Os::Linux);
+        record.applied = contained_application();
+        record.process = Some(fixture_process());
+        record.lifetime = Lifetime {
+            boundary: "pid_namespace".to_owned(),
+            native: Some(NativeLifetime {
+                os: Os::Linux,
+                details: serde_json::Map::new(),
+            }),
+            tree_empty: teardown_verified.then_some(true),
+            verified_at: teardown_verified.then(|| rfc3339_utc(SystemTime::UNIX_EPOCH)),
+            verification_scope: Some("attempt_tree".to_owned()),
+            integrity: "verified".to_owned(),
+        };
+        record.outcome = if exec_error {
+            Outcome {
+                error: Some(error.to_object()),
+                ..Outcome::exec_error("ENOENT")
+            }
+        } else {
+            Outcome::refused(&error)
+        };
+        record.errors.push(error.to_object());
+        record
+    };
+    for (teardown_verified, exec_error) in
+        [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let label = format!("teardown verified {teardown_verified}, exec error {exec_error}");
+        let receipt = setup(teardown_verified, exec_error).receipt(Phase::Refused);
+        assert_eq!(receipt.phase, Phase::Refused, "{label}");
+        assert_eq!(receipt.containment, Containment::Enforced, "{label}");
+        assert_eq!(
+            receipt.child_protection,
+            ChildProtection::Enforced,
+            "{label}"
+        );
+        assert!(!receipt.exec_observed, "{label}");
+        assert_eq!(receipt.lifetime.boundary, "pid_namespace", "{label}");
+        assert_eq!(
+            receipt.lifetime.verification_scope.as_deref(),
+            Some("attempt_tree"),
+            "{label}"
+        );
+        assert_eq!(
+            receipt.lifetime.tree_empty,
+            teardown_verified.then_some(true),
+            "{label}"
+        );
+        assert_eq!(
+            receipt.lifetime.verified_at.is_some(),
+            teardown_verified,
+            "{label}"
+        );
+        assert_eq!(
+            receipt.outcome.kind,
+            if exec_error {
+                OutcomeKind::ExecError
+            } else {
+                OutcomeKind::Refused
+            },
+            "{label}"
+        );
+        assert_valid(&receipt, &validators, &label);
+        let value = serde_json::to_value(&receipt).expect("serializes");
+        common::semantic_receipt(&value).expect("semantically valid");
+
+        // The row's negative space: a verified tree without its time, and a
+        // refusal that claims the target ran, are both rejected.
+        if teardown_verified {
+            let mut untimed = value.clone();
+            untimed["lifetime"]["verified_at"] = serde_json::Value::Null;
+            assert!(
+                !errors(&validators["jail-receipt"], &untimed).is_empty(),
+                "{label}: tree_empty true needs its verification time"
+            );
+        }
+        let mut ran = value.clone();
+        ran["exec_observed"] = true.into();
+        assert!(
+            !errors(&validators["jail-receipt"], &ran).is_empty(),
+            "{label}: a refusal never observed the target's exec"
+        );
     }
 }

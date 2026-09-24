@@ -67,7 +67,9 @@ profile contract; the mutable probe results and chosen backend are separate.
 All arrays here are sets except environment bindings and credentials, which
 are keyed collections. Reject duplicate keys in those collections. Deduplicate
 set elements by their canonical bytes, then sort every array lexicographically
-by each element's RFC 8785 UTF-8 bytes. No array in a policy snapshot encodes
+by each element's RFC 8785 UTF-8 bytes. Keyed collections are sorted the same
+way, by their elements' canonical bytes and not by key; a credential's
+canonical bytes begin with `dest`. No array in a policy snapshot encodes
 ordering; argv ordering is handled separately below. Decimal strings have no
 sign or leading zeroes, and positive values are bounded by unsigned 64-bit.
 
@@ -103,6 +105,13 @@ padding or newline. Hash all literal arguments including PROGRAM before PATH
 lookup; do not replace argv[0] with the resolved executable. The public digest
 uses the same sha256 prefix. Credential content hashes are ordinary SHA-256 of
 the copied bytes, not policy/argv hashes. Digests of guesses remain guessable.
+
+A receipt digest, as a `jail.receipt` trace note carries it, is `sha256:` over
+the receipt's RFC 8785 canonical bytes, with no domain prefix: the receipt
+already names its schema. A consumer recomputes it from `jail.json` (which is
+written pretty-printed) by parsing the document and canonicalizing it; the
+file's own bytes are not the preimage. No receipt field is a floating-point
+number, so the integer-only encoding above covers every receipt.
 
 ## Golden inputs and expected results
 

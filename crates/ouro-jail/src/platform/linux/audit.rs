@@ -19,8 +19,6 @@ use crate::trace::{Priority, SharedTrace};
 
 use super::tracer::{Args, ClosedOp, GapReason, OpSet, PathSnapshot, TracerSummary};
 
-/// `O_CREAT` on Linux.
-const O_CREAT: u64 = 0o100;
 /// `AT_FDCWD`.
 const AT_FDCWD: i32 = -100;
 
@@ -48,6 +46,9 @@ pub struct MediatedConnect {
     pub tid: libc::pid_t,
     /// Its thread group, when `/proc` said.
     pub tgid: Option<libc::pid_t>,
+    /// That thread group's birth (field 22 of `/proc/<tgid>/stat`), read in
+    /// the same window as `tgid`: with it, the process's name (§11.3).
+    pub tgid_start: Option<u64>,
     /// The address family the child named.
     pub family: Option<u16>,
     /// Whether the whole address was read.
@@ -170,9 +171,14 @@ impl AuditWriter {
     /// One completed closed-set call.
     ///
     /// `ret` is the signed raw return, so a failure is `-errno`.
+    /// `pid_start_ticks` is the birth of process `pid` (§11.3): with the
+    /// receipt's `boot_id` it names the process where `pid` alone would
+    /// name whichever process holds that number now.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_syscall(
         &mut self,
         pid: libc::pid_t,
+        pid_start_ticks: Option<u64>,
         tid: libc::pid_t,
         op: ClosedOp,
         syscall: &str,
@@ -185,12 +191,13 @@ impl AuditWriter {
             None
         };
         let denied = matches!(errno, Some(libc::EACCES | libc::EPERM));
-        let base = base_operation(op, args.flags);
+        let base = op.audit_operation(args.flags);
         let operation = if denied { "fs.deny" } else { base };
 
         let mut fields = Map::new();
         fields.insert("syscall".to_owned(), Value::from(syscall.to_owned()));
         fields.insert("pid".to_owned(), Value::from(i64::from(pid)));
+        insert_birth(&mut fields, pid_start_ticks);
         fields.insert("tid".to_owned(), Value::from(i64::from(tid)));
         // §11.3: the snapshot is the argument as it was in the tracee's memory,
         // never a kernel-resolved path.
@@ -288,6 +295,7 @@ impl AuditWriter {
                 .tgid
                 .map_or(Value::Null, |pid| Value::from(i64::from(pid))),
         );
+        insert_birth(&mut fields, record.tgid.and(record.tgid_start));
         fields.insert("tid".to_owned(), Value::from(i64::from(record.tid)));
         fields.insert(
             "path_basis".to_owned(),
@@ -372,15 +380,23 @@ impl AuditWriter {
     /// `image` is the pathname argument of the `execve` that produced the
     /// transition, when the observer witnessed that entry. `None` means it
     /// did not, and the event says so rather than naming an image it never
-    /// saw.
+    /// saw. `syscall` names that entry's call (`execve` or `execveat`), so
+    /// the two successful variants stay distinguishable (O01); it is absent
+    /// when the entry was not witnessed.
     pub fn record_exec(
         &mut self,
         pid: libc::pid_t,
+        pid_start_ticks: Option<u64>,
+        syscall: Option<&str>,
         image: Option<&PathSnapshot>,
         dirfd: Option<i32>,
     ) {
         let mut fields = Map::new();
+        if let Some(syscall) = syscall {
+            fields.insert("syscall".to_owned(), Value::from(syscall.to_owned()));
+        }
         fields.insert("pid".to_owned(), Value::from(i64::from(pid)));
+        insert_birth(&mut fields, pid_start_ticks);
         // §11.3: a descendant's argv is only digested when every byte was
         // captured; this observer captures none, so it says so.
         fields.insert("argv_digest".to_owned(), Value::Null);
@@ -418,11 +434,12 @@ impl AuditWriter {
     }
 
     /// Final thread-group death of a process that was seen to exec.
-    pub fn record_exit(&mut self, pid: libc::pid_t, status: i32) {
+    pub fn record_exit(&mut self, pid: libc::pid_t, pid_start_ticks: Option<u64>, status: i32) {
         let exited = libc::WIFEXITED(status);
         let signaled = libc::WIFSIGNALED(status);
         let mut fields = Map::new();
         fields.insert("pid".to_owned(), Value::from(i64::from(pid)));
+        insert_birth(&mut fields, pid_start_ticks);
         fields.insert(
             "termination".to_owned(),
             Value::from(if signaled {
@@ -497,7 +514,10 @@ impl AuditWriter {
                 .collect(),
             source: "audit".to_owned(),
             start_ns: from_ns.to_string(),
-            end_ns: Some(to_ns.to_string()),
+            // A hole whose cause is never observed to end — a child's own
+            // notification listener — has no end the observer can state:
+            // `null`, not the moment it was noticed (§13.1 lets it be).
+            end_ns: (!reason.is_open_ended()).then(|| to_ns.to_string()),
             reason: reason.as_str().to_owned(),
             lost_count: count,
         };
@@ -702,6 +722,17 @@ impl AuditWriter {
     }
 }
 
+/// `fields.pid_start_ticks`: the birth of the process `fields.pid` names —
+/// the start time of its thread-group leader, field 22 of `/proc/<pid>/stat`
+/// in clock ticks since boot, the same reading the receipt's
+/// `linux_boot_start` identity uses. `null` when `/proc` would not say.
+fn insert_birth(fields: &mut Map<String, Value>, start_ticks: Option<u64>) {
+    fields.insert(
+        "pid_start_ticks".to_owned(),
+        start_ticks.map_or(Value::Null, Value::from),
+    );
+}
+
 /// A native value for the event: a string when the bytes are UTF-8, the
 /// base64 object of the native-string codec otherwise.
 fn native_value(bytes: &[u8]) -> Value {
@@ -729,29 +760,10 @@ fn strip_root(path: &[u8], root: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The operation a successful closed-set call is reported as (§11.2).
+/// The operation a successful closed-set call is reported as (§11.2): the
+/// observer's own mapping, which the published table uses too.
 fn base_operation(op: ClosedOp, flags: Option<u64>) -> &'static str {
-    match op {
-        ClosedOp::Exec => "proc.exec",
-        // An O_CREAT open emits one `fs.create`, otherwise a mutation open
-        // emits one `fs.write`; never both. With the flags undecodable the
-        // weaker of the two claims is the one that is made.
-        ClosedOp::Open => {
-            if flags.is_some_and(|value| value & O_CREAT != 0) {
-                "fs.create"
-            } else {
-                "fs.write"
-            }
-        }
-        // §11.2 revision 8: a truncation by path is a mutation of an
-        // existing file, so it is `fs.write` with its own action. `ftruncate`
-        // names a descriptor rather than a path and stays outside the set.
-        ClosedOp::Truncate => "fs.write",
-        ClosedOp::Rename => "fs.rename",
-        ClosedOp::Unlink | ClosedOp::Rmdir => "fs.unlink",
-        ClosedOp::Mkdir | ClosedOp::Mknod | ClosedOp::Link | ClosedOp::Symlink => "fs.create",
-        ClosedOp::Connect => "net.connect",
-    }
+    op.audit_operation(flags)
 }
 
 /// The coverage class an emitted operation is counted under (§11.4).
@@ -787,19 +799,19 @@ fn extend_gap_interval(gap: &mut Gap, from: u64, to: u64) {
         .unwrap_or(from)
         .min(from)
         .to_string();
-    gap.end_ns = Some(
-        gap.end_ns
-            .as_deref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(to)
-            .max(to)
-            .to_string(),
-    );
+    // An open interval stays open: merging a later loss into it cannot give
+    // it an end.
+    if let Some(end) = gap.end_ns.as_deref() {
+        gap.end_ns = Some(end.parse::<u64>().unwrap_or(to).max(to).to_string());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `O_CREAT` on Linux.
+    const O_CREAT: u64 = 0o100;
 
     fn writer() -> AuditWriter {
         AuditWriter::new("att_x", None, b"/work/space", b"/tmp")
@@ -944,9 +956,15 @@ mod tests {
             .unwrap()
             .write_event(&note, Priority::Normal)
             .unwrap();
-        writer.record_exec(10, Some(&snap("/work/space/tool")), None);
+        writer.record_exec(
+            10,
+            Some(1),
+            Some("execve"),
+            Some(&snap("/work/space/tool")),
+            None,
+        );
         writer.record_gap(GapReason::UnmatchedExit, OpSet::ALL, 0, 1, Some(1));
-        writer.record_exit(10, 0);
+        writer.record_exit(10, Some(1), 0);
         trace
             .lock()
             .unwrap()
@@ -1056,6 +1074,7 @@ mod tests {
         let mut writer = writer();
         writer.record_syscall(
             10,
+            Some(1),
             10,
             ClosedOp::Open,
             "openat",
@@ -1093,9 +1112,10 @@ mod tests {
             flags: Some(O_CREAT),
             ..Args::default()
         };
-        writer.record_syscall(10, 10, ClosedOp::Open, "openat", &args, 3);
+        writer.record_syscall(10, Some(1), 10, ClosedOp::Open, "openat", &args, 3);
         writer.record_syscall(
             10,
+            Some(1),
             10,
             ClosedOp::Open,
             "openat",
@@ -1104,14 +1124,21 @@ mod tests {
         );
         writer.record_syscall(
             10,
+            Some(1),
             10,
             ClosedOp::Open,
             "openat",
             &args,
             -i64::from(libc::EACCES),
         );
-        writer.record_exec(10, Some(&snap("/work/space/tool")), None);
-        writer.record_exit(10, 0);
+        writer.record_exec(
+            10,
+            Some(1),
+            Some("execve"),
+            Some(&snap("/work/space/tool")),
+            None,
+        );
+        writer.record_exit(10, Some(1), 0);
         assert_eq!(
             writer.count(CoverageClass::FsWrite),
             2,
@@ -1126,6 +1153,7 @@ mod tests {
         let mut writer = writer();
         writer.record_syscall(
             10,
+            Some(1),
             10,
             ClosedOp::Truncate,
             "truncate",
@@ -1136,6 +1164,115 @@ mod tests {
             0,
         );
         assert_eq!(writer.count(CoverageClass::FsWrite), 1);
+    }
+
+    /// J4 D1: a child's notification listener degrades every audit class,
+    /// with no count and no end — the listener can continue calls unseen
+    /// for as long as anyone holds it — and a merged repeat keeps it open.
+    #[test]
+    fn j4_d1_a_listener_gap_degrades_every_class_and_has_no_end() {
+        let mut writer = writer();
+        writer.record_gap(GapReason::ChildNotificationListener, OpSet::ALL, 5, 9, None);
+        writer.record_gap(
+            GapReason::ChildNotificationListener,
+            OpSet::ALL,
+            3,
+            20,
+            None,
+        );
+        assert_eq!(writer.gaps().len(), 1);
+        let gap = &writer.gaps()[0];
+        assert_eq!(gap.reason, "child_notification_listener");
+        assert_eq!(gap.end_ns, None, "the interval has no end");
+        assert_eq!(gap.start_ns, "3");
+        assert_eq!(gap.lost_count, None);
+        let summary = writer.summary(&TracerSummary::default(), true);
+        for class in [
+            CoverageClass::Exec,
+            CoverageClass::FsWrite,
+            CoverageClass::FsDeny,
+            CoverageClass::Net,
+        ] {
+            assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
+            assert_eq!(summary.classes[&class].observed_count, None);
+        }
+        // A foreign-ABI gap is per call: it has an end.
+        writer.record_gap(GapReason::ForeignAbi, OpSet::ALL, 1, 2, Some(1));
+        let foreign = writer
+            .gaps()
+            .iter()
+            .find(|gap| gap.reason == "foreign_abi")
+            .unwrap();
+        assert_eq!(foreign.end_ns.as_deref(), Some("2"));
+    }
+
+    /// J4 O02: every audit result names its process by pid and birth, and
+    /// a confirmed exec names the call it was.
+    #[test]
+    fn j4_o02_every_result_carries_the_birth_it_was_given() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
+        let mut writer = AuditWriter::new("att_test", Some(trace), b"/work/space", b"/tmp");
+        writer.record_exec(
+            10,
+            Some(4242),
+            Some("execveat"),
+            Some(&snap("/work/space/t")),
+            Some(3),
+        );
+        writer.record_syscall(
+            10,
+            Some(4242),
+            11,
+            ClosedOp::Mkdir,
+            "mkdir",
+            &Args {
+                path: Some(snap("/work/space/d")),
+                ..Args::default()
+            },
+            0,
+        );
+        writer.record_exit(10, None, 0);
+        writer.record_mediated_connect(&MediatedConnect {
+            tid: 12,
+            tgid: Some(12),
+            tgid_start: Some(4343),
+            family: Some(2),
+            address_complete: true,
+            ret: 0,
+            reason: "non_unix",
+        });
+        writer.record_mediated_connect(&MediatedConnect {
+            tid: 13,
+            tgid: None,
+            tgid_start: Some(1),
+            family: Some(2),
+            address_complete: true,
+            ret: 0,
+            reason: "non_unix",
+        });
+        let events: Vec<Value> = std::fs::read_to_string(file.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let births: Vec<&Value> = events
+            .iter()
+            .map(|e| &e["fields"]["pid_start_ticks"])
+            .collect();
+        assert_eq!(
+            births,
+            [
+                &Value::from(4242),
+                &Value::from(4242),
+                &Value::Null,
+                &Value::from(4343),
+                // A birth without the group it belongs to names nothing.
+                &Value::Null,
+            ]
+        );
+        assert_eq!(events[0]["fields"]["syscall"], "execveat");
+        assert_eq!(events[0]["fields"]["path_dirfd"], 3);
     }
 
     #[test]

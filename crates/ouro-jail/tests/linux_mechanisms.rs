@@ -452,6 +452,14 @@ r = libc.syscall(ctypes.c_long(56), ctypes.c_long(0x00020000 | 17), 0, 0, 0, 0)
 if r == 0:
     os._exit(0)
 print("clone_newns=%s" % (errno.errorcode.get(ctypes.get_errno(), "E?") if r < 0 else "ok"))
+# J4 S4: CLONE_UNTRACED | SIGCHLD, a child the observer would never attach to.
+ctypes.set_errno(0)
+r = libc.syscall(ctypes.c_long(56), ctypes.c_long(0x00800000 | 17), 0, 0, 0, 0)
+if r == 0:
+    os._exit(0)
+if r > 0:
+    os.waitpid(r, 0)
+print("clone_untraced=%s" % (errno.errorcode.get(ctypes.get_errno(), "E?") if r < 0 else "ok"))
 "#;
 
 /// Ordinary work that must keep working under the filter.
@@ -593,6 +601,7 @@ fn the_baseline_filter_denies_the_syscalls_the_spec_lists() {
         "ioctl_tiocsti",
         "ptrace_traceme",
         "clone_newns",
+        "clone_untraced",
     ] {
         assert_eq!(
             with.field(name),
@@ -668,6 +677,11 @@ fn the_filter_is_what_denies_them_not_the_host() {
         "ENOSYS",
         "without the filter clone3 exists on this kernel; with it, it must answer ENOSYS"
     );
+    assert_eq!(
+        without.field("clone_untraced"),
+        "ok",
+        "without the filter an untraced clone succeeds; with it, it must answer EPERM"
+    );
 }
 
 #[test]
@@ -729,6 +743,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         ("socket", seccomp::NR_SOCKET),
         ("socketpair", seccomp::NR_SOCKETPAIR),
         ("ioctl", seccomp::NR_IOCTL),
+        ("seccomp", seccomp::NR_SECCOMP),
     ] {
         assert_eq!(table.get(name), Some(&nr), "{name} has the wrong number");
         checked += 1;
@@ -762,7 +777,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         "symlinkat",
         "connect",
     ];
-    let expected: std::collections::BTreeSet<u32> = CLOSED_SET_NAMES
+    let mut expected: std::collections::BTreeSet<u32> = CLOSED_SET_NAMES
         .iter()
         .map(|name| {
             *table
@@ -770,21 +785,38 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
                 .unwrap_or_else(|| panic!("{name} is not in this kernel's syscall table"))
         })
         .collect();
+    // J4 D1: besides the closed set, the narrowing filter stops on
+    // `seccomp(2)` asking for a notification listener.
+    let (listener_name, listener_nr) = tracer::LISTENER_SYSCALL;
+    assert_eq!(
+        table.get(listener_name),
+        Some(&listener_nr),
+        "{listener_name} has the wrong number"
+    );
+    expected.insert(listener_nr);
+    // J4 S4: it also stops on `clone` carrying CLONE_UNTRACED, and answers
+    // `clone3` (whose flags it cannot read) with ENOSYS.
+    for (name, nr) in [tracer::CLONE_SYSCALL, tracer::CLONE3_SYSCALL] {
+        assert_eq!(table.get(name), Some(&nr), "{name} has the wrong number");
+        expected.insert(nr);
+    }
     let installed: std::collections::BTreeSet<u32> = tracer::narrowing_filter()
         .iter()
-        // A `jeq #k` in the narrowing filter is a syscall number it traces;
-        // the architecture compare and the x32 mask are the other immediates.
+        // A `jeq #k` in the narrowing filter is a syscall number it decides
+        // on; the architecture compare is the other `jeq` immediate, and the
+        // x32 bit, the listener flag and CLONE_UNTRACED are `jset` masks.
         .filter(|insn| insn.code == 0x15 && insn.k < 0x4000_0000)
         .map(|insn| insn.k)
         .collect();
     assert_eq!(
         installed, expected,
-        "the narrowing filter does not trace exactly the closed set"
+        "the narrowing filter does not decide on exactly the closed set, the listener \
+         request, clone and clone3"
     );
     checked += expected.len();
     assert_eq!(
         checked,
-        seccomp::DENY_EPERM.len() + 5 + CLOSED_SET_NAMES.len()
+        seccomp::DENY_EPERM.len() + 6 + CLOSED_SET_NAMES.len() + 3
     );
 }
 

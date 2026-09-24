@@ -14,6 +14,8 @@ use libc::{c_int, c_uint, c_void, pid_t};
 // ------------------------------------------------------------ ptrace ABI
 
 pub const PTRACE_CONT: c_uint = 7;
+pub const PTRACE_SINGLESTEP: c_uint = 9;
+pub const PTRACE_GETREGS: c_uint = 12;
 pub const PTRACE_DETACH: c_uint = 17;
 pub const PTRACE_SYSCALL: c_uint = 24;
 pub const PTRACE_GETEVENTMSG: c_uint = 0x4201;
@@ -60,6 +62,23 @@ pub const PTRACE_EVENT_STOP: c_int = 128;
 /// `SIGTRAP | 0x80`: a syscall stop under `PTRACE_O_TRACESYSGOOD`.
 pub const SYSCALL_STOP_SIG: c_int = libc::SIGTRAP | 0x80;
 
+/// `si_code` of the stop the kernel reports at a signal handler's entry
+/// while the tracee is single-stepped (`signal_delivered` →
+/// `ptrace_notify(SIGTRAP, 0)`): the notification's exit code, `SIGTRAP`.
+pub const SI_CODE_HANDLER_ENTRY: c_int = libc::SIGTRAP;
+/// `si_code` of a `SIGTRAP` a single step raises: after one user
+/// instruction (`TRAP_TRACE`), or at the exit of a syscall the kernel ran
+/// while stepping (`TRAP_BRKPT`, `user_single_step_report`).
+pub const TRAP_BRKPT: c_int = 1;
+pub const TRAP_TRACE: c_int = 2;
+
+/// Where an x86_64 signal frame keeps the interrupted `rax` and `rip`,
+/// relative to the `ucontext` the kernel passes a handler in `rdx`:
+/// `uc_mcontext` (a `struct sigcontext`) follows `uc_flags`, `uc_link` and
+/// the 24-byte `uc_stack`, and `rax` and `rip` are its 14th and 17th words.
+pub const FRAME_RAX: u64 = 40 + 13 * 8;
+pub const FRAME_RIP: u64 = 40 + 16 * 8;
+
 /// `struct ptrace_syscall_info.op`.
 pub const SYSCALL_INFO_NONE: u8 = 0;
 pub const SYSCALL_INFO_ENTRY: u8 = 1;
@@ -67,9 +86,21 @@ pub const SYSCALL_INFO_EXIT: u8 = 2;
 pub const SYSCALL_INFO_SECCOMP: u8 = 3;
 
 /// The in-kernel restart codes. They are visible to a tracer at a syscall
-/// exit stop and never to user space: the kernel re-enters the syscall
-/// afterwards, so treating one as a result would double-count the call
-/// (jail-v1 §11.2, "Syscall restarts must not create duplicate successes").
+/// exit stop and never to user space. None of them is a result yet: when
+/// the thread next returns to user space the kernel either re-enters the
+/// call or turns the code into `EINTR`, depending on the code and on the
+/// signal being delivered (`arch/x86/kernel/signal.c`):
+///
+/// | code | a handler runs | no handler runs |
+/// |---|---|---|
+/// | `ERESTARTSYS` | `EINTR`, or re-entered under `SA_RESTART` | re-entered |
+/// | `ERESTARTNOINTR` | re-entered | re-entered |
+/// | `ERESTARTNOHAND` | `EINTR` | re-entered |
+/// | `ERESTART_RESTARTBLOCK` | `EINTR` | continued by `restart_syscall` |
+///
+/// Taking a code for a result would double-count a re-entered call (jail-v1
+/// §11.2, "Syscall restarts must not create duplicate successes"); taking
+/// every code for a re-entry loses the `EINTR` result (J4 O-2).
 pub const ERESTARTSYS: i64 = 512;
 pub const ERESTARTNOINTR: i64 = 513;
 pub const ERESTARTNOHAND: i64 = 514;
@@ -100,12 +131,23 @@ pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 pub const BPF_LD_W_ABS: u16 = 0x20;
 pub const BPF_JEQ_K: u16 = 0x15;
-pub const BPF_JGE_K: u16 = 0x35;
+pub const BPF_JSET_K: u16 = 0x45;
 pub const BPF_RET_K: u16 = 0x06;
 
 /// Byte offsets into `struct seccomp_data`.
 pub const SECCOMP_DATA_NR: u32 = 0;
 pub const SECCOMP_DATA_ARCH: u32 = 4;
+/// The low word of `args[0]` on a little-endian host.
+pub const SECCOMP_DATA_ARG0_LOW: u32 = 16;
+/// The low word of `args[1]` on a little-endian host.
+pub const SECCOMP_DATA_ARG1_LOW: u32 = 24;
+/// `SECCOMP_RET_ERRNO`, with the errno in the data bits.
+pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+/// Linux `ENOSYS`, spelled out because the filter targets the Linux ABI.
+pub const LINUX_ENOSYS: u32 = 38;
+/// `SECCOMP_RET_DATA`: the low sixteen bits of a verdict, which
+/// `PTRACE_GETEVENTMSG` reports at a `PTRACE_EVENT_SECCOMP` stop.
+pub const SECCOMP_RET_DATA: u32 = 0x0000_ffff;
 
 // ------------------------------------------------------------ ptrace calls
 
@@ -280,32 +322,40 @@ pub fn event_msg(pid: pid_t) -> io::Result<u64> {
 pub struct SyscallInfo {
     pub op: u8,
     pub arch: u32,
+    /// The user instruction pointer: at an entry or seccomp stop, the
+    /// address just past the instruction that made the call.
+    pub ip: u64,
     pub nr: u64,
     pub args: [u64; 6],
     pub rval: i64,
 }
 
 /// `struct ptrace_syscall_info` as the kernel lays it out on x86_64:
-/// `op` at 0, `arch` at 4, then the union at 24 (`nr` + six args for an
-/// entry or seccomp stop, `rval` for an exit stop).
+/// `op` at 0, `arch` at 4, `instruction_pointer` at 8, `stack_pointer` at
+/// 16, then the union at 24 (`nr` + six args for an entry or seccomp stop,
+/// `rval` for an exit stop).
 const SYSCALL_INFO_LEN: usize = 88;
 
-pub fn syscall_info(pid: pid_t) -> Option<SyscallInfo> {
+/// # Errors
+/// The `errno` of `PTRACE_GET_SYSCALL_INFO`: `ESRCH` when the tracee is no
+/// longer in the stop — at a stop the tracer has not resumed, only a
+/// `SIGKILL` does that — and `EIO` when the kernel described nothing.
+pub fn syscall_info(pid: pid_t) -> io::Result<SyscallInfo> {
     let mut buf = [0u8; SYSCALL_INFO_LEN];
     let n = ptrace_raw(
         PTRACE_GET_SYSCALL_INFO,
         pid,
         as_ptr(buf.len() as u64),
         buf.as_mut_ptr().cast::<c_void>(),
-    )
-    .ok()?;
+    )?;
     if n <= 0 {
-        return None;
+        return Err(io::Error::from_raw_os_error(libc::EIO));
     }
     let word = |off: usize| u64::from_ne_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]));
     let mut info = SyscallInfo {
         op: buf[0],
         arch: u32::from_ne_bytes(buf[4..8].try_into().unwrap_or([0; 4])),
+        ip: word(8),
         ..SyscallInfo::default()
     };
     match info.op {
@@ -318,7 +368,61 @@ pub fn syscall_info(pid: pid_t) -> Option<SyscallInfo> {
         SYSCALL_INFO_EXIT => info.rval = word(24) as i64,
         _ => {}
     }
-    Some(info)
+    Ok(info)
+}
+
+/// `si_signo` and `si_code` of the siginfo a stopped tracee reports.
+///
+/// # Errors
+/// The `errno` of `PTRACE_GETSIGINFO` (`EINVAL` for a group-stop).
+pub fn siginfo(pid: pid_t) -> io::Result<(c_int, c_int)> {
+    // SAFETY: an all-zero `siginfo_t` is a valid value of the type; the
+    // kernel overwrites it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    ptrace_raw(
+        PTRACE_GETSIGINFO,
+        pid,
+        std::ptr::null_mut(),
+        (&raw mut info).cast::<c_void>(),
+    )?;
+    Ok((info.si_signo, info.si_code))
+}
+
+/// The four general registers the handler-entry check reads.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Regs {
+    pub rax: u64,
+    pub rdx: u64,
+    pub rdi: u64,
+    pub rsp: u64,
+}
+
+/// A stopped tracee's general registers (`PTRACE_GETREGS`).
+///
+/// # Errors
+/// The `errno` of the request; `ENOSYS` off x86_64, where the observer
+/// refuses to attach anyway.
+#[cfg(target_arch = "x86_64")]
+pub fn regs(pid: pid_t) -> io::Result<Regs> {
+    // SAFETY: `user_regs_struct` is plain integers; all-zero is valid.
+    let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    ptrace_raw(
+        PTRACE_GETREGS,
+        pid,
+        std::ptr::null_mut(),
+        (&raw mut regs).cast::<c_void>(),
+    )?;
+    Ok(Regs {
+        rax: regs.rax,
+        rdx: regs.rdx,
+        rdi: regs.rdi,
+        rsp: regs.rsp,
+    })
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn regs(_pid: pid_t) -> io::Result<Regs> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
 // ------------------------------------------------------- remote memory
@@ -409,6 +513,9 @@ mod tests {
     #[test]
     fn ptrace_constants_match_libc() {
         assert_eq!(u64::from(PTRACE_CONT), libc::PTRACE_CONT as u64);
+        assert_eq!(u64::from(PTRACE_SINGLESTEP), libc::PTRACE_SINGLESTEP as u64);
+        assert_eq!(u64::from(PTRACE_GETREGS), libc::PTRACE_GETREGS as u64);
+        assert_eq!(u64::from(PTRACE_GETSIGINFO), libc::PTRACE_GETSIGINFO as u64);
         assert_eq!(u64::from(PTRACE_DETACH), libc::PTRACE_DETACH as u64);
         assert_eq!(u64::from(PTRACE_SYSCALL), libc::PTRACE_SYSCALL as u64);
         assert_eq!(
@@ -463,6 +570,38 @@ mod tests {
         );
         assert_eq!(SECCOMP_RET_ALLOW, libc::SECCOMP_RET_ALLOW);
         assert_eq!(SECCOMP_RET_TRACE, libc::SECCOMP_RET_TRACE);
+        assert_eq!(SECCOMP_RET_DATA, libc::SECCOMP_RET_DATA);
+        assert_eq!(
+            super::super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            u32::try_from(libc::SECCOMP_FILTER_FLAG_NEW_LISTENER).unwrap()
+        );
+        assert_eq!(
+            i64::from(super::super::filter::LISTENER_SYSCALL.1),
+            libc::SYS_seccomp
+        );
+        assert_eq!(
+            u32::from(BPF_JSET_K),
+            libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K
+        );
+        // `args[1]` starts 16 + 8 bytes into `struct seccomp_data`.
+        assert_eq!(
+            SECCOMP_DATA_ARG1_LOW as usize,
+            std::mem::offset_of!(libc::seccomp_data, args) + 8
+        );
+    }
+
+    /// The signal-frame offsets are glibc's view of the same kernel layout:
+    /// `uc_mcontext` inside `ucontext_t`, and `REG_RAX`/`REG_RIP` in its
+    /// `gregs`.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_signal_frame_offsets_match_the_ucontext_layout() {
+        let mcontext = std::mem::offset_of!(libc::ucontext_t, uc_mcontext) as u64;
+        let gregs = std::mem::offset_of!(libc::mcontext_t, gregs) as u64;
+        assert_eq!(FRAME_RAX, mcontext + gregs + 8 * libc::REG_RAX as u64);
+        assert_eq!(FRAME_RIP, mcontext + gregs + 8 * libc::REG_RIP as u64);
+        assert_eq!(TRAP_BRKPT, libc::TRAP_BRKPT);
+        assert_eq!(TRAP_TRACE, libc::TRAP_TRACE);
     }
 
     #[test]
@@ -519,9 +658,14 @@ mod tests {
     #[test]
     fn ptrace_helpers_refuse_a_process_we_do_not_trace() {
         let me = std::process::id() as pid_t;
+        let err = syscall_info(me).expect_err("we are not stopped and not our own tracee");
+        assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");
+        let err = siginfo(me).expect_err("not a tracee");
+        assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");
+        let err = regs(me).expect_err("not a tracee");
         assert!(
-            syscall_info(me).is_none(),
-            "we are not stopped and not our own tracee"
+            matches!(err.raw_os_error(), Some(libc::ESRCH | libc::ENOSYS)),
+            "{err}"
         );
         let err = event_msg(me).expect_err("not a tracee");
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");

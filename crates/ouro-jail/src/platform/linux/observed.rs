@@ -7,12 +7,148 @@
 //! the gap bookkeeping when the observer stops, cannot drift apart between
 //! them. Each caller decides what a fact means for its own lifecycle.
 
+use std::ffi::OsString;
 use std::time::Duration;
 
 use libc::pid_t;
+use serde_json::{Map, Value};
 
 use super::audit::AuditWriter;
-use super::tracer::{GapReason, OpSet, PathSnapshot, Tracer, TracerEvent, TracerSummary};
+use super::tracer::{
+    GapReason, OpSet, PathSnapshot, Tracer, TracerConfig, TracerEvent, TracerSummary,
+};
+
+/// Test seam (J4 decision S9): a smaller in-flight bound, so a live test can
+/// reach map exhaustion through the product. Shrink-only.
+pub const INFLIGHT_SEAM: &str = "OURO_JAIL_TEST_TRACER_INFLIGHT";
+
+/// Test seam (J4 decision S9): a smaller user-space event queue budget, in
+/// bytes, so a live test can reach ring loss through the product.
+/// Shrink-only.
+pub const QUEUE_BYTES_SEAM: &str = "OURO_JAIL_TEST_TRACER_QUEUE_BYTES";
+
+/// The §11.4 bounds an attempt's observer runs with: its "observer plan".
+///
+/// §11.4 names the initial bounds and says "Record actual values in the
+/// observer plan"; this is where they are decided, once per attempt, and
+/// [`ObserverPlan::details`] is what the receipt records. The two test seams
+/// can only lower a bound, which can only lose more evidence — and that loss
+/// is then reported like any other. They never widen authority, leave the
+/// policy digest alone, and each one set is named in the receipt with the
+/// value it took, or `null` when it was set but not a shrink and so ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserverPlan {
+    config: TracerConfig,
+    /// Every seam that was set: its name and the bound it applied, or `None`
+    /// when its value was not a shrink of the default.
+    seams: Vec<(&'static str, Option<u64>)>,
+}
+
+impl ObserverPlan {
+    /// The plan for this process's environment.
+    #[must_use]
+    pub fn from_env() -> ObserverPlan {
+        ObserverPlan::with_lookup(|name| std::env::var_os(name))
+    }
+
+    /// The plan, reading the seams through `lookup`.
+    #[must_use]
+    pub fn with_lookup(lookup: impl Fn(&str) -> Option<OsString>) -> ObserverPlan {
+        let mut config = TracerConfig::default();
+        let mut seams = Vec::new();
+        let mut shrink = |name: &'static str, bound: &mut usize| {
+            let Some(value) = lookup(name) else {
+                return;
+            };
+            let applied = shrunk(&value, *bound);
+            if let Some(value) = applied {
+                *bound = value;
+            }
+            seams.push((name, applied.and_then(|value| u64::try_from(value).ok())));
+        };
+        shrink(INFLIGHT_SEAM, &mut config.inflight_max);
+        shrink(QUEUE_BYTES_SEAM, &mut config.queue_bytes_max);
+        ObserverPlan { config, seams }
+    }
+
+    /// The tracer's configuration, with gap intervals counted from
+    /// `epoch_boottime_ns` (§13.1).
+    #[must_use]
+    pub fn tracer_config(&self, epoch_boottime_ns: u64) -> TracerConfig {
+        TracerConfig {
+            epoch_boottime_ns,
+            ..self.config
+        }
+    }
+
+    /// The receipt's record of the plan (`lifetime.native.details.observer_plan`).
+    ///
+    /// The ptrace observer has no kernel ring: the §11.4 ring bound is
+    /// recorded as `null`, and its two user-space counterparts are the
+    /// in-flight bound ("map exhaustion") and the queue ("ring loss").
+    ///
+    /// The queue's figures are the bounds in force, from the same
+    /// [`TracerConfig::queue_bounds`] the tracer applies (J4 W3, loss review
+    /// finding 4): `queue_bytes_max` bounds everything held for the
+    /// consumer, the handoff channel included, and is never below one
+    /// fixed-size event; `queue_result_bytes_max` is what results may bring
+    /// it to, short of `queue_lifecycle_reserve_bytes`.
+    #[must_use]
+    pub fn details(&self) -> Value {
+        let bounds = self.config.queue_bounds();
+        let mut plan = Map::new();
+        plan.insert("backend".to_owned(), Value::from("ptrace"));
+        plan.insert("kernel_ring_bytes".to_owned(), Value::Null);
+        plan.insert(
+            "in_flight_max".to_owned(),
+            Value::from(self.config.inflight_max),
+        );
+        plan.insert("queue_bytes_max".to_owned(), Value::from(bounds.bytes_max));
+        plan.insert(
+            "queue_result_bytes_max".to_owned(),
+            Value::from(bounds.result_bytes_max),
+        );
+        plan.insert(
+            "queue_lifecycle_reserve_bytes".to_owned(),
+            Value::from(bounds.lifecycle_reserve),
+        );
+        plan.insert(
+            "queue_events_max".to_owned(),
+            Value::from(self.config.queue_max),
+        );
+        plan.insert(
+            "path_snapshot_max".to_owned(),
+            Value::from(self.config.path_snapshot_max),
+        );
+        plan.insert(
+            "event_bytes_max".to_owned(),
+            Value::from(crate::trace::EVENT_MAX),
+        );
+        plan.insert(
+            "test_seams".to_owned(),
+            Value::Object(
+                self.seams
+                    .iter()
+                    .map(|(name, applied)| {
+                        ((*name).to_owned(), applied.map_or(Value::Null, Value::from))
+                    })
+                    .collect(),
+            ),
+        );
+        Value::Object(plan)
+    }
+}
+
+/// `value` as a bound in `1..=bound`, or `None`: a seam only ever shrinks.
+fn shrunk(value: &OsString, bound: usize) -> Option<usize> {
+    let text = value.to_str()?;
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<usize>()
+        .ok()
+        .filter(|value| (1..=bound).contains(value))
+}
 
 /// Whose events these are.
 pub struct Target<'a> {
@@ -70,18 +206,27 @@ pub fn is_target_image(images: &[Vec<u8>], path: Option<&PathSnapshot>) -> bool 
 /// Records `event` in `audit` and returns the fact it establishes.
 pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent) -> Fact {
     match event {
+        // J4-O begin: the birth identity and the exec's own call (slice O)
         TracerEvent::Exec {
-            pid, path, dirfd, ..
+            pid,
+            start_ticks,
+            syscall,
+            path,
+            dirfd,
+            ..
         } => {
-            audit.record_exec(*pid, path.as_ref(), *dirfd);
+            audit.record_exec(*pid, *start_ticks, *syscall, path.as_ref(), *dirfd);
+            // J4-O end
             if *pid == target.launcher && is_target_image(target.images, path.as_ref()) {
                 Fact::TargetExec
             } else {
                 Fact::Nothing
             }
         }
+        // J4-O begin: the birth identity (slice O)
         TracerEvent::Syscall {
             pid,
+            start_ticks,
             tid,
             op,
             syscall,
@@ -89,11 +234,17 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             ret,
             ..
         } => {
-            audit.record_syscall(*pid, *tid, *op, syscall, args, *ret);
+            audit.record_syscall(*pid, *start_ticks, *tid, *op, syscall, args, *ret);
             Fact::Nothing
         }
-        TracerEvent::Exit { pid, status, .. } => {
-            audit.record_exit(*pid, *status);
+        TracerEvent::Exit {
+            pid,
+            start_ticks,
+            status,
+            ..
+        } => {
+            audit.record_exit(*pid, *start_ticks, *status);
+            // J4-O end
             if *pid == target.launcher {
                 Fact::TargetExit(*status)
             } else {
@@ -227,6 +378,10 @@ mod tests {
     fn exec(pid: pid_t, path: Option<PathSnapshot>) -> TracerEvent {
         TracerEvent::Exec {
             pid,
+            // J4-O begin
+            start_ticks: None,
+            syscall: None,
+            // J4-O end
             path,
             dirfd: None,
             monotonic_ns: 1,
@@ -273,6 +428,7 @@ mod tests {
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         let exit = |pid| TracerEvent::Exit {
             pid,
+            start_ticks: None, // J4-O
             status: 3 << 8,
             monotonic_ns: 1,
         };
@@ -310,6 +466,7 @@ mod tests {
         );
         let syscall = TracerEvent::Syscall {
             pid: LAUNCHER,
+            start_ticks: None, // J4-O
             tid: LAUNCHER,
             op: ClosedOp::Open,
             syscall: "openat",
@@ -318,5 +475,256 @@ mod tests {
             monotonic_ns: 1,
         };
         assert_eq!(record(&mut audit, &target, &syscall), Fact::Nothing);
+    }
+
+    fn plan_with(pairs: &[(&str, &str)]) -> ObserverPlan {
+        let pairs: Vec<(String, OsString)> = pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+            .collect();
+        ObserverPlan::with_lookup(|name| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        })
+    }
+
+    /// J4 S9: the seams only ever shrink a bound, and every one that is set
+    /// is named in the plan, with the bound it applied or `null`.
+    #[test]
+    fn j4_the_tracer_seams_only_shrink_and_are_always_recorded() {
+        let defaults = TracerConfig::default();
+        let plan = plan_with(&[]);
+        assert_eq!(plan.tracer_config(0), defaults);
+        assert_eq!(plan.details()["test_seams"], serde_json::json!({}));
+        assert_eq!(plan.details()["in_flight_max"], 16_384);
+        assert_eq!(plan.details()["queue_bytes_max"], 4 * 1024 * 1024);
+        assert_eq!(plan.details()["kernel_ring_bytes"], Value::Null);
+
+        let plan = plan_with(&[(INFLIGHT_SEAM, "1"), (QUEUE_BYTES_SEAM, "16384")]);
+        let config = plan.tracer_config(99);
+        assert_eq!(config.inflight_max, 1);
+        assert_eq!(config.queue_bytes_max, 16_384);
+        assert_eq!(config.epoch_boottime_ns, 99);
+        assert_eq!(config.path_snapshot_max, defaults.path_snapshot_max);
+        assert_eq!(
+            plan.details()["test_seams"],
+            serde_json::json!({INFLIGHT_SEAM: 1, QUEUE_BYTES_SEAM: 16_384})
+        );
+
+        for ignored in [
+            "0",
+            "16385",
+            "-1",
+            "+1",
+            " 1",
+            "1k",
+            "",
+            "99999999999999999999999",
+        ] {
+            let plan = plan_with(&[(INFLIGHT_SEAM, ignored)]);
+            assert_eq!(
+                plan.tracer_config(0).inflight_max,
+                defaults.inflight_max,
+                "{ignored:?} must not change the bound"
+            );
+            assert_eq!(
+                plan.details()["test_seams"],
+                serde_json::json!({INFLIGHT_SEAM: null}),
+                "{ignored:?} is recorded as set and ignored"
+            );
+        }
+        let plan = plan_with(&[(QUEUE_BYTES_SEAM, "4194305")]);
+        assert_eq!(
+            plan.tracer_config(0).queue_bytes_max,
+            defaults.queue_bytes_max
+        );
+        let plan = plan_with(&[(QUEUE_BYTES_SEAM, "4194304")]);
+        assert_eq!(
+            plan.details()["test_seams"],
+            serde_json::json!({QUEUE_BYTES_SEAM: 4_194_304}),
+            "the default itself is a (null) shrink"
+        );
+        use std::os::unix::ffi::OsStringExt as _;
+        let plan = ObserverPlan::with_lookup(|name| {
+            (name == INFLIGHT_SEAM).then(|| OsString::from_vec(vec![b'1', 0xff]))
+        });
+        assert_eq!(plan.tracer_config(0).inflight_max, defaults.inflight_max);
+    }
+
+    /// J4 W3 (loss review finding 4): the plan records the queue bounds in
+    /// force, not the figure they were derived from. The byte budget bounds
+    /// everything the observer holds for its consumer, the handoff channel
+    /// included, and cannot be smaller than one fixed-size event; results
+    /// stop short of the lifecycle reserve, which below about 64 KiB leaves
+    /// them room for one fixed-size event and no pathname — and the plan
+    /// says so rather than leave it to be inferred.
+    #[test]
+    fn j4_w3_the_plan_records_the_queue_bounds_in_force() {
+        for (value, bytes, results) in [
+            (None, 4 * 1024 * 1024, 4 * 1024 * 1024 - 64 * 1024),
+            (Some("1048576"), 1024 * 1024, 1024 * 1024 - 64 * 1024),
+            (Some("65536"), 65_536, 256),
+            (Some("16384"), 16_384, 256),
+            (Some("1"), 256, 256),
+        ] {
+            let plan = match value {
+                Some(value) => plan_with(&[(QUEUE_BYTES_SEAM, value)]),
+                None => plan_with(&[]),
+            };
+            let details = plan.details();
+            assert_eq!(details["queue_bytes_max"], bytes, "{value:?}: {details:#}");
+            assert_eq!(
+                details["queue_result_bytes_max"], results,
+                "{value:?}: {details:#}"
+            );
+            assert_eq!(
+                details["queue_lifecycle_reserve_bytes"],
+                64 * 1024,
+                "{value:?}: {details:#}"
+            );
+            let bounds = plan.tracer_config(0).queue_bounds();
+            assert_eq!(details["queue_bytes_max"], bounds.bytes_max);
+            assert_eq!(details["queue_result_bytes_max"], bounds.result_bytes_max);
+        }
+    }
+
+    fn syscall(op: ClosedOp, name: &'static str, path: &[u8], ret: i64) -> TracerEvent {
+        TracerEvent::Syscall {
+            pid: LAUNCHER,
+            tid: LAUNCHER,
+            op,
+            syscall: name,
+            args: Args {
+                path: snapshot(path, true),
+                ..Args::default()
+            },
+            ret,
+            monotonic_ns: 1,
+            start_ticks: None,
+        }
+    }
+
+    fn gap(reason: GapReason, ops: OpSet) -> TracerEvent {
+        TracerEvent::Gap {
+            reason,
+            ops,
+            from_ns: 10,
+            to_ns: 20,
+            count: Some(1),
+        }
+    }
+
+    /// J4 O05: "Directory-operation losses degrade fs.write". Every
+    /// directory-entry operation of the closed set — and the two mutations
+    /// of an existing file — lost to the observer is a loss of `fs.write`
+    /// (and of `fs.deny`, which its result could also have been), a fact
+    /// strict evidence stops for, and nothing else: `exec` and `net` keep
+    /// their exact counts.
+    #[test]
+    fn j4_o05_every_directory_operation_loss_degrades_fs_write() {
+        let images = images();
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        for op in [
+            ClosedOp::Open,
+            ClosedOp::Truncate,
+            ClosedOp::Rename,
+            ClosedOp::Unlink,
+            ClosedOp::Rmdir,
+            ClosedOp::Mkdir,
+            ClosedOp::Mknod,
+            ClosedOp::Link,
+            ClosedOp::Symlink,
+        ] {
+            let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
+            record(
+                &mut audit,
+                &target,
+                &exec(LAUNCHER, snapshot(b"/usr/bin/target", true)),
+            );
+            record(
+                &mut audit,
+                &target,
+                &syscall(ClosedOp::Connect, "connect", b"", -111),
+            );
+            let fact = record(
+                &mut audit,
+                &target,
+                &gap(GapReason::InflightExhausted, OpSet::of(op)),
+            );
+            assert_eq!(
+                fact,
+                Fact::CoverageLost(GapReason::InflightExhausted),
+                "{op:?}"
+            );
+            let summary = audit.summary(&TracerSummary::default(), true);
+            for class in [CoverageClass::FsWrite, CoverageClass::FsDeny] {
+                let entry = &summary.classes[&class];
+                assert_eq!(
+                    entry.status,
+                    crate::records::SourceStatus::Degraded,
+                    "{op:?}: {class:?}"
+                );
+                assert_eq!(entry.observed_count, None, "{op:?}: {class:?}");
+                assert_eq!(entry.gaps.len(), 1, "{op:?}: {class:?}");
+                assert_eq!(entry.gaps[0].reason, "inflight_exhausted");
+            }
+            for (class, count) in [(CoverageClass::Exec, 1), (CoverageClass::Net, 1)] {
+                let entry = &summary.classes[&class];
+                assert_eq!(
+                    entry.status,
+                    crate::records::SourceStatus::Active,
+                    "{op:?}: {class:?}"
+                );
+                assert_eq!(entry.observed_count, Some(count), "{op:?}: {class:?}");
+            }
+        }
+    }
+
+    /// J4 O03: "Coverage cannot return to fully active for the entire run
+    /// after a historical gap." One early loss, then a thousand clean
+    /// results of the same class: still degraded, still no count.
+    #[test]
+    fn j4_o03_a_class_never_returns_to_active_after_an_early_gap() {
+        let images = images();
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
+        record(
+            &mut audit,
+            &target,
+            &gap(GapReason::EntryAbandoned, OpSet::of(ClosedOp::Open)),
+        );
+        for _ in 0..500 {
+            record(
+                &mut audit,
+                &target,
+                &syscall(ClosedOp::Mkdir, "mkdir", b"/work/d", 0),
+            );
+            record(
+                &mut audit,
+                &target,
+                &syscall(ClosedOp::Rmdir, "rmdir", b"/work/d", 0),
+            );
+        }
+        assert_eq!(audit.count(CoverageClass::FsWrite), 1000, "all observed");
+        let summary = audit.summary(&TracerSummary::default(), true);
+        let entry = &summary.classes[&CoverageClass::FsWrite];
+        assert_eq!(entry.status, crate::records::SourceStatus::Degraded);
+        assert_eq!(entry.observed_count, None);
+        assert_eq!(entry.gaps.len(), 1);
+        assert_eq!(entry.gaps[0].end_ns.as_deref(), Some("20"));
+        assert_eq!(
+            summary.sources.audit,
+            crate::records::SourceStatus::Degraded
+        );
+        let coverage = summary.to_coverage();
+        assert_eq!(coverage.fs_write.observed_count, None);
     }
 }

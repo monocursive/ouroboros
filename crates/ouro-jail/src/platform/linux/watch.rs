@@ -5,7 +5,26 @@
 //! readiness can the bootstrap exec bubblewrap. The watcher inherits no stdio or
 //! policy/evidence descriptors and stays outside the execution cgroup. If the
 //! watcher dies, the live supervisor stops the boundary; if the supervisor dies,
-//! the watcher kills the backend even while bubblewrap has cleared PDEATHSIG.
+//! the watcher kills the whole execution cgroup through the leaf's
+//! `cgroup.kill` when the attempt has one, then the backend through its pidfd.
+//! Without a leaf only the backend can be killed, and a namespace init still
+//! waiting on bubblewrap's startup event outlives it (jail-v1 §9.3 limit).
+//!
+//! The supervisor releases the watcher (one byte on a private pipe) as soon as
+//! it sees the backend's end, which also proves the supervisor was alive
+//! then. The supervisor's death shows as its pidfd or as end-of-file on that
+//! pipe. The backend's end without a release starts a short grace instead of
+//! an exit: bubblewrap's parent-death signal follows the supervisor *thread*
+//! that started it, which can die before the rest of a dying supervisor, so
+//! bubblewrap can end while the supervisor still looks alive (measured with an
+//! instrumented watcher, J4). A supervisor still alive when the grace ends
+//! owns what is left, and the watcher leaves, so the observer's wait for its
+//! last child is never held up for long.
+//!
+//! Killing only the backend is not enough (J4, measured 2026-09-23):
+//! bubblewrap's namespace init arms its own parent-death signal late in its
+//! startup and before that waits on an eventfd only the outer process writes,
+//! so an outer process killed in that window left the init alive on pid 1.
 
 use std::ffi::OsString;
 use std::io;
@@ -18,24 +37,56 @@ use std::time::Duration;
 use super::{clock::Deadline, exec, identity};
 
 pub const START_FD: i32 = 15;
+/// Where the watcher receives the leaf's `cgroup.kill`, when there is a leaf.
+pub const CGROUP_KILL_FD: i32 = 6;
+const CGROUP_KILL_ARG: &str = "--cgroup-kill-fd";
+/// Where the watcher receives the read end of its release pipe.
+pub const RELEASE_FD: i32 = 7;
+const RELEASE_ARG: &str = "--release-fd";
+/// The byte that releases the watcher; end-of-file means the supervisor is gone.
+const RELEASED: u8 = 1;
+/// How long the watcher waits, after the backend ended unreleased, for a
+/// dying supervisor's death to show. A supervisor killed with SIGKILL exits
+/// within this on the reference host under load; a live one releases the
+/// watcher within one loop step.
+const UNRELEASED_GRACE: Duration = Duration::from_millis(500);
 
 pub struct Watcher {
     child: Child,
     fd: OwnedFd,
+    /// The release pipe's write end; dropping it unreleased means "kill".
+    release: Option<OwnedFd>,
 }
 
 impl Watcher {
-    pub fn start(exe: &Path, backend: i32, deadline: Deadline) -> io::Result<Self> {
+    /// `cgroup_kill` is the execution leaf's `cgroup.kill`
+    /// ([`super::cgroup::ExecutionCgroup::kill_handle`]); the backend must
+    /// already be placed in that leaf.
+    pub fn start(
+        exe: &Path,
+        backend: i32,
+        cgroup_kill: Option<OwnedFd>,
+        deadline: Deadline,
+    ) -> io::Result<Self> {
         let supervisor = identity::pidfd_open(unsafe { libc::getpid() })?;
         let backend = identity::pidfd_open(backend)?;
         let (ready_r, ready_w) = exec::pipe()?;
+        let (release_r, release_w) = exec::pipe()?;
         let mut fds = exec::FdMap::new();
         fds.add(supervisor, 3)?;
         fds.add(backend, 4)?;
         fds.add(ready_w, 5)?;
+        fds.add(release_r, RELEASE_FD)?;
         let mut command = Command::new(exe);
         command
             .arg("__watch")
+            .arg(RELEASE_ARG)
+            .arg(RELEASE_FD.to_string());
+        if let Some(kill) = cgroup_kill {
+            fds.add(kill, CGROUP_KILL_FD)?;
+            command.arg(CGROUP_KILL_ARG).arg(CGROUP_KILL_FD.to_string());
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -50,7 +101,11 @@ impl Watcher {
             Ok(fd)
         })();
         match result {
-            Ok(fd) => Ok(Self { child, fd }),
+            Ok(fd) => Ok(Self {
+                child,
+                fd,
+                release: Some(release_w),
+            }),
             Err(err) => {
                 let _ = child.kill();
                 exec::reap_until(&mut child, deadline);
@@ -68,12 +123,25 @@ impl Watcher {
     pub fn reap(&mut self) {
         let _ = self.child.try_wait();
     }
+    /// Let the watcher leave without killing anything. Only once the backend
+    /// has ended: until then, the watcher is what ends the tree if this
+    /// supervisor dies. Idempotent.
+    pub fn release(&mut self) {
+        if let Some(fd) = self.release.take() {
+            // SAFETY: a one-byte write from a live byte to an owned pipe; if
+            // it fails, dropping the pipe below still ends the watcher (it
+            // then kills the leaf, which is normally empty once the backend has ended).
+            unsafe { libc::write(fd.as_raw_fd(), [RELEASED].as_ptr().cast(), 1) };
+        }
+    }
 }
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        // Normal settlement has already reaped it. Early preparation errors
-        // still allow the watcher to observe backend death and exit itself.
+        // Normal settlement has released and reaped it. Otherwise closing the
+        // release pipe unreleased makes it kill the leaf and the backend,
+        // which is what an early preparation error needs too.
+        drop(self.release.take());
         exec::reap_until(&mut self.child, Deadline::after(Duration::from_millis(100)));
     }
 }
@@ -132,9 +200,30 @@ pub fn bootstrap_main(args: &[OsString]) -> ! {
     std::process::exit(125);
 }
 
-pub fn watcher_main() -> ! {
+pub fn watcher_main(args: &[OsString]) -> ! {
     // pidfd validity is checked by poll below; malformed direct invocations
     // refuse rather than busy-looping or signalling a numeric pid.
+    let open = |fd: i32| unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;
+    let mut release = false;
+    let mut cgroup_kill = None;
+    for pair in args.chunks(2) {
+        match pair {
+            [flag, fd] if flag == RELEASE_ARG && fd.to_str() == Some(&RELEASE_FD.to_string()) => {
+                release = open(RELEASE_FD);
+            }
+            [flag, fd]
+                if flag == CGROUP_KILL_ARG
+                    && fd.to_str() == Some(&CGROUP_KILL_FD.to_string())
+                    && open(CGROUP_KILL_FD) =>
+            {
+                cgroup_kill = Some(CGROUP_KILL_FD);
+            }
+            _ => std::process::exit(125),
+        }
+    }
+    if !release {
+        std::process::exit(125);
+    }
     let byte = 1u8;
     if unsafe { libc::write(5, (&raw const byte).cast(), 1) } != 1 {
         std::process::exit(125);
@@ -142,6 +231,18 @@ pub fn watcher_main() -> ! {
     unsafe {
         libc::close(5);
     }
+    // The whole leaf first: it also holds what the backend started, including
+    // a namespace init whose own parent-death signal is not armed yet. Then
+    // the backend, in case it never reached the leaf.
+    let end_the_tree = || -> ! {
+        if let Some(fd) = cgroup_kill {
+            // SAFETY: a one-byte write from a live byte to an inherited
+            // descriptor; a failure leaves the pidfd kill below.
+            unsafe { libc::write(fd, b"1".as_ptr().cast(), 1) };
+        }
+        let _ = identity::pidfd_send_signal(4, libc::SIGKILL);
+        std::process::exit(0);
+    };
     let mut fds = [
         libc::pollfd {
             fd: 3,
@@ -153,9 +254,23 @@ pub fn watcher_main() -> ! {
             events: libc::POLLIN,
             revents: 0,
         },
+        libc::pollfd {
+            fd: RELEASE_FD,
+            events: libc::POLLIN,
+            revents: 0,
+        },
     ];
+    let mut grace: Option<std::time::Instant> = None;
     loop {
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, 1000) };
+        let timeout = grace.map_or(1000, |until| {
+            i32::try_from(
+                until
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(0)
+        });
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout) };
         if rc < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
@@ -168,11 +283,28 @@ pub fn watcher_main() -> ! {
         {
             std::process::exit(125);
         }
-        if fds[1].revents & libc::POLLIN != 0 {
-            std::process::exit(0);
-        }
+        // A dead supervisor decides, whatever else happened.
         if fds[0].revents & libc::POLLIN != 0 {
-            let _ = identity::pidfd_send_signal(4, libc::SIGKILL);
+            end_the_tree();
+        }
+        if fds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            let mut byte = 0u8;
+            // SAFETY: a one-byte read into a live byte from an inherited pipe.
+            let n = unsafe { libc::read(RELEASE_FD, (&raw mut byte).cast(), 1) };
+            if n == 1 && byte == RELEASED {
+                std::process::exit(0);
+            }
+            // End-of-file: the supervisor's descriptors are gone.
+            end_the_tree();
+        }
+        if grace.is_none() && fds[1].revents & libc::POLLIN != 0 {
+            grace = Some(std::time::Instant::now() + UNRELEASED_GRACE);
+            // A pidfd stays readable; poll it no more.
+            fds[1].fd = -1;
+        }
+        if grace.is_some_and(|until| std::time::Instant::now() >= until) {
+            // The supervisor outlived the grace: it is alive and owns what is
+            // left of the tree.
             std::process::exit(0);
         }
     }

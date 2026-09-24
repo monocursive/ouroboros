@@ -360,9 +360,13 @@ pub struct PolicySnapshot {
 impl PolicySnapshot {
     /// Serializes the snapshot to the canonical JSON value.
     ///
-    /// Set arrays are deduplicated by canonical bytes and sorted by them;
-    /// keyed collections (environment bindings, credentials) are sorted by
-    /// their key, which is the only order their uniqueness rule admits.
+    /// canonicalization.md: "sort every array lexicographically by each
+    /// element's RFC 8785 UTF-8 bytes". Set arrays are also deduplicated by
+    /// those bytes; keyed collections (environment bindings, credentials) are
+    /// sorted by them too but never deduplicated, since their keys are unique
+    /// and a duplicate is refused where the collection is built. A credential's
+    /// canonical bytes begin with its `dest` (member names sort `dest`, `id`,
+    /// `mode`, `source`), so that order is not id order.
     ///
     /// # Errors
     /// Returns an internal error when the value cannot be canonicalized.
@@ -386,6 +390,14 @@ impl PolicySnapshot {
         ] {
             sort_set_at(&mut value, path)?;
         }
+        // J4-D7 begin: keyed collections follow the same byte order
+        for path in [
+            &["environment", "bindings"][..],
+            &["launch", "credentials"][..],
+        ] {
+            sort_keyed_at(&mut value, path)?;
+        }
+        // J4-D7 end
         Ok(value)
     }
 
@@ -409,6 +421,20 @@ impl PolicySnapshot {
 }
 
 fn sort_set_at(value: &mut serde_json::Value, path: &[&str]) -> Result<(), JailError> {
+    sort_by_canonical_bytes_at(value, path, true)
+}
+
+// J4-D7 begin
+fn sort_keyed_at(value: &mut serde_json::Value, path: &[&str]) -> Result<(), JailError> {
+    sort_by_canonical_bytes_at(value, path, false)
+}
+
+fn sort_by_canonical_bytes_at(
+    value: &mut serde_json::Value,
+    path: &[&str],
+    dedup: bool,
+) -> Result<(), JailError> {
+    // J4-D7 end
     let mut node = value;
     for key in path {
         node = match node.get_mut(key) {
@@ -427,7 +453,9 @@ fn sort_set_at(value: &mut serde_json::Value, path: &[&str]) -> Result<(), JailE
         ));
     }
     encoded.sort_by(|left, right| left.0.cmp(&right.0));
-    encoded.dedup_by(|left, right| left.0 == right.0);
+    if dedup {
+        encoded.dedup_by(|left, right| left.0 == right.0);
+    }
     *items = encoded.into_iter().map(|(_, item)| item).collect();
     Ok(())
 }

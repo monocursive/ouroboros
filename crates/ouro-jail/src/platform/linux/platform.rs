@@ -53,7 +53,7 @@ use super::fs as jfs;
 use super::identity;
 use super::probe::{self, ProbeResult, ProbeStatus};
 use super::seccomp;
-use super::tracer::{Tracer, TracerConfig, TracerEvent, TracerSummary};
+use super::tracer::{Tracer, TracerEvent, TracerSummary};
 
 /// Descriptor the seccomp program is handed to bubblewrap on.
 const SECCOMP_FD: RawFd = 10;
@@ -521,6 +521,9 @@ struct Boundary {
     applied: Applied,
     backend_version: String,
     observe_on: bool,
+    /// The §11.4 bounds the observer runs with, decided once; `None` with
+    /// observation off.
+    observer_plan: Option<super::observed::ObserverPlan>,
     ns_ids: identity::NsIds,
     cgroup: Option<ExecutionCgroup>,
     cgroup_lost: bool,
@@ -545,6 +548,14 @@ impl Boundary {
         self.bwrap_fd
             .as_ref()
             .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
+    }
+    /// The watcher stays until released or until this supervisor is gone
+    /// (§9.3). It is released only once the backend has ended, so its end
+    /// still means the backend's end to the verdicts that wait for it.
+    fn release_watcher_after_backend(&mut self) {
+        if self.backend_exited() {
+            self.watcher.release();
+        }
     }
     fn cgroup_empty(&self) -> bool {
         !self.cgroup_lost
@@ -620,7 +631,10 @@ impl Boundary {
         .flatten()
         .any(|limit| limit.required);
         let mut cgroup_unavailable = None;
-        let cgroup = match ExecutionCgroup::create(&snapshot.limits) {
+        // J4 W2-S: N7 — registered in jail state before `mkdir` and before
+        // anything is placed in it; a failed registration refuses (S5).
+        let created = ExecutionCgroup::create_for_attempt(&snapshot.limits, &plan.attempt_dir)?;
+        let cgroup = match created {
             Ok(leaf) => Some(leaf),
             Err(err) if cgroup_required => {
                 return Err(preparing(
@@ -957,14 +971,27 @@ impl Boundary {
             reap_until(&mut child, deadline);
             return Err(io(err));
         }
-        let watcher = match super::watch::Watcher::start(&exe, child.id() as i32, deadline) {
-            Ok(watcher) => watcher,
+        let cgroup_kill = match cgroup
+            .as_ref()
+            .map(ExecutionCgroup::kill_handle)
+            .transpose()
+        {
+            Ok(kill) => kill,
             Err(err) => {
                 let _ = child.kill();
                 reap_until(&mut child, deadline);
                 return Err(io(err));
             }
         };
+        let watcher =
+            match super::watch::Watcher::start(&exe, child.id() as i32, cgroup_kill, deadline) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    let _ = child.kill();
+                    reap_until(&mut child, deadline);
+                    return Err(io(err));
+                }
+            };
         if let Err(err) = write_all(start_w.as_raw_fd(), &[1]) {
             let _ = child.kill();
             reap_until(&mut child, deadline);
@@ -1032,6 +1059,7 @@ impl Boundary {
             },
             backend_version: String::new(),
             observe_on,
+            observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
             ns_ids: identity::NsIds::default(),
             cgroup,
             cgroup_lost: false,
@@ -1083,15 +1111,13 @@ impl Boundary {
                 format!("target cgroup placement failed: {err}"),
             ));
         }
-        if observe_on {
+        if let Some(plan) = boundary.observer_plan.as_ref() {
             // §13.1: gap intervals count from supervisor start on the same
-            // CLOCK_BOOTTIME base as every other monotonic_ns.
+            // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
+            // bounds are the plan's, which the receipt records.
             match Tracer::attach(
                 boundary.launcher.pid,
-                TracerConfig {
-                    epoch_boottime_ns: clock::mark_supervisor_start(),
-                    ..TracerConfig::default()
-                },
+                plan.tracer_config(clock::mark_supervisor_start()),
             ) {
                 Ok(tracer) => boundary.tracer = Some(tracer),
                 Err(err) => {
@@ -1474,6 +1500,7 @@ impl Boundary {
             reap_until(&mut child, deadline);
         }
         while !self.watcher.ended() && !deadline.expired() {
+            self.release_watcher_after_backend();
             sleep_for(WAIT_STEP);
         }
         self.watcher.reap();
@@ -1623,6 +1650,15 @@ impl Boundary {
                 .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
         };
         loop {
+            // As release_watcher_after_backend, by field: `init_dead` holds
+            // a borrow of the init's pidfd.
+            if self
+                .bwrap_fd
+                .as_ref()
+                .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
+            {
+                self.watcher.release();
+            }
             let settled = init_dead() && self.watcher.ended() && self.cgroup_empty();
             if settled || deadline.expired() {
                 break;
@@ -1739,6 +1775,13 @@ impl Boundary {
             } else {
                 Value::Null
             },
+        );
+        // §11.4: "Record actual values in the observer plan."
+        details.insert(
+            "observer_plan".to_owned(),
+            self.observer_plan
+                .as_ref()
+                .map_or(Value::Null, super::observed::ObserverPlan::details),
         );
         // J3-agent begin: the filter count read back, and the agent network
         details.insert(
@@ -2677,6 +2720,11 @@ impl LinuxRunning {
                 self.evidence_reported = true;
                 self.pending.push(RunEvent::EvidenceLost {
                     reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
+                    // J4 W2-S: R-2 — the target's exit is held back until the
+                    // backend ends too, so a loss in the teardown after it
+                    // (a call the namespace's end interrupted) is queued
+                    // ahead of the exit although it came after it.
+                    after_target_end: self.target_outcome.is_some(),
                 });
             }
             Fact::Finished => self.finished = true,
@@ -2838,10 +2886,18 @@ impl RunningExecution for LinuxRunning {
             // J3-agent begin: mediated connects, helper facts, and a loss of
             // mediation or proxy evidence, which strict evidence stops for
             if let Some(reason) = self.boundary.pump_agent() {
-                self.pending.push(RunEvent::EvidenceLost { reason });
+                // J4 W2-S: R-2 — the target's end as this loop knows it:
+                // the observer's exit, or without one the backend's.
+                let after_target_end = self.target_outcome.is_some()
+                    || (self.boundary.tracer.is_none() && self.bwrap_status.is_some());
+                self.pending.push(RunEvent::EvidenceLost {
+                    reason,
+                    after_target_end,
+                });
             }
             // J3-agent end
             self.pump_status();
+            self.boundary.release_watcher_after_backend();
             self.sample_limits(false);
             self.check_exec_without_tracer();
             self.check_wall();
@@ -2924,6 +2980,9 @@ impl RunningExecution for LinuxRunning {
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
             self.pump_status();
+            // The observer finishes only once every child of this process is
+            // gone, the watcher included.
+            self.boundary.release_watcher_after_backend();
             let tracer_done = self.boundary.tracer.is_none() || self.finished;
             if tracer_done
                 && self.bwrap_status.is_some()
@@ -2958,6 +3017,7 @@ impl RunningExecution for LinuxRunning {
         // J3-agent end
         self.sample_limits(true);
         while !self.boundary.watcher.ended() && !deadline.expired() {
+            self.boundary.release_watcher_after_backend();
             sleep_for(WAIT_STEP);
         }
         self.boundary.watcher.reap();

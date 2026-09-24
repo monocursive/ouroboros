@@ -57,6 +57,32 @@ impl ClosedOp {
         1u16 << (self as u16)
     }
 
+    /// The §11.2 audit operation a result of this family is reported as
+    /// when it is not a denial. `flags` decides the open family: an
+    /// `O_CREAT` open is `fs.create`, any other mutation open `fs.write`, and
+    /// with the flags undecodable the weaker claim, `fs.write`, is made.
+    /// A truncation by path is a mutation of an existing file: `fs.write`
+    /// with its own action. This is the one mapping the audit writer and the
+    /// published table both use.
+    #[must_use]
+    pub fn audit_operation(self, flags: Option<u64>) -> &'static str {
+        match self {
+            ClosedOp::Exec => "proc.exec",
+            ClosedOp::Open => {
+                if flags.is_some_and(|value| value & (libc::O_CREAT as u64) != 0) {
+                    "fs.create"
+                } else {
+                    "fs.write"
+                }
+            }
+            ClosedOp::Truncate => "fs.write",
+            ClosedOp::Rename => "fs.rename",
+            ClosedOp::Unlink | ClosedOp::Rmdir => "fs.unlink",
+            ClosedOp::Mkdir | ClosedOp::Mknod | ClosedOp::Link | ClosedOp::Symlink => "fs.create",
+            ClosedOp::Connect => "net.connect",
+        }
+    }
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

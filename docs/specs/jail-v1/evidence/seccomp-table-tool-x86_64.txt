@@ -40,72 +40,79 @@ open_by_handle_at      304    EPERM
 name_to_handle_at      303    EPERM
 syslog                 103    EPERM
 clone3                 435    ENOSYS  (argument struct not inspectable)
+clone                  56     EPERM when args[0] & 0x00800000 != 0 (CLONE_UNTRACED)
 clone                  56     EPERM when args[0] & 0x7e020080 != 0
 socket                 41     EPERM when args[0] == 1 (AF_UNIX); ALLOW when args[0] in {2 (AF_INET), 10 (AF_INET6)}; else EAFNOSUPPORT
 socketpair             53     EPERM when args[0] == 1 (AF_UNIX); ALLOW when args[0] in {2 (AF_INET), 10 (AF_INET6)}; else EAFNOSUPPORT
 ioctl                  16     EPERM when args[1] == 0x5412 (TIOCSTI)
+seccomp                317    EPERM when args[1] & 0x00000008 (SECCOMP_FILTER_FLAG_NEW_LISTENER)
 
 everything else        ALLOW
 
-instructions: 58
-digest: sha256:fab6d82afaef7a7a7d66f60bf390fb171de81efebb5f60ca653fb586cea7ef53
+instructions: 63
+digest: sha256:d07af2773b3341c4b29dd366c201d492294b4f084744cd1cc023683341dfe237
 
 disassembly
 0000 ld    [4]
-0001 jeq   #0xc000003e  jt 2 jf 55
+0001 jeq   #0xc000003e  jt 2 jf 60
 0002 ld    [0]
-0003 jset  #0x40000000  jt 55 jf 4
-0004 jeq   #0x00000065  jt 55 jf 5
-0005 jeq   #0x00000136  jt 55 jf 6
-0006 jeq   #0x00000137  jt 55 jf 7
-0007 jeq   #0x00000141  jt 55 jf 8
-0008 jeq   #0x0000012a  jt 55 jf 9
-0009 jeq   #0x000000f6  jt 55 jf 10
-0010 jeq   #0x00000140  jt 55 jf 11
-0011 jeq   #0x000000af  jt 55 jf 12
-0012 jeq   #0x00000139  jt 55 jf 13
-0013 jeq   #0x000000b0  jt 55 jf 14
-0014 jeq   #0x000000fa  jt 55 jf 15
-0015 jeq   #0x000000f8  jt 55 jf 16
-0016 jeq   #0x000000f9  jt 55 jf 17
-0017 jeq   #0x000001a9  jt 55 jf 18
-0018 jeq   #0x000001aa  jt 55 jf 19
-0019 jeq   #0x000001ab  jt 55 jf 20
-0020 jeq   #0x000000a5  jt 55 jf 21
-0021 jeq   #0x000000a6  jt 55 jf 22
-0022 jeq   #0x000001ad  jt 55 jf 23
-0023 jeq   #0x000001ac  jt 55 jf 24
-0024 jeq   #0x000001ae  jt 55 jf 25
-0025 jeq   #0x000001b0  jt 55 jf 26
-0026 jeq   #0x000001b1  jt 55 jf 27
-0027 jeq   #0x000001af  jt 55 jf 28
-0028 jeq   #0x000001ba  jt 55 jf 29
-0029 jeq   #0x0000009b  jt 55 jf 30
-0030 jeq   #0x000000a1  jt 55 jf 31
-0031 jeq   #0x00000110  jt 55 jf 32
-0032 jeq   #0x00000134  jt 55 jf 33
-0033 jeq   #0x00000143  jt 55 jf 34
-0034 jeq   #0x00000130  jt 55 jf 35
-0035 jeq   #0x0000012f  jt 55 jf 36
-0036 jeq   #0x00000067  jt 55 jf 37
-0037 jeq   #0x000001b3  jt 56 jf 38
-0038 jeq   #0x00000038  jt 43 jf 39
-0039 jeq   #0x00000029  jt 46 jf 40
-0040 jeq   #0x00000035  jt 46 jf 41
-0041 jeq   #0x00000010  jt 51 jf 42
-0042 ja    54
-0043 ld    [16]
-0044 jset  #0x7e020080  jt 55 jf 45
-0045 ja    54
-0046 ld    [16]
-0047 jeq   #0x00000001  jt 55 jf 48
-0048 jeq   #0x00000002  jt 54 jf 49
-0049 jeq   #0x0000000a  jt 54 jf 50
-0050 ja    57
-0051 ld    [24]
-0052 jeq   #0x00005412  jt 55 jf 53
-0053 ja    54
-0054 ret   #0x7fff0000
-0055 ret   #0x00050001
-0056 ret   #0x00050026
-0057 ret   #0x00050061
+0003 jset  #0x40000000  jt 60 jf 4
+0004 jeq   #0x00000065  jt 60 jf 5
+0005 jeq   #0x00000136  jt 60 jf 6
+0006 jeq   #0x00000137  jt 60 jf 7
+0007 jeq   #0x00000141  jt 60 jf 8
+0008 jeq   #0x0000012a  jt 60 jf 9
+0009 jeq   #0x000000f6  jt 60 jf 10
+0010 jeq   #0x00000140  jt 60 jf 11
+0011 jeq   #0x000000af  jt 60 jf 12
+0012 jeq   #0x00000139  jt 60 jf 13
+0013 jeq   #0x000000b0  jt 60 jf 14
+0014 jeq   #0x000000fa  jt 60 jf 15
+0015 jeq   #0x000000f8  jt 60 jf 16
+0016 jeq   #0x000000f9  jt 60 jf 17
+0017 jeq   #0x000001a9  jt 60 jf 18
+0018 jeq   #0x000001aa  jt 60 jf 19
+0019 jeq   #0x000001ab  jt 60 jf 20
+0020 jeq   #0x000000a5  jt 60 jf 21
+0021 jeq   #0x000000a6  jt 60 jf 22
+0022 jeq   #0x000001ad  jt 60 jf 23
+0023 jeq   #0x000001ac  jt 60 jf 24
+0024 jeq   #0x000001ae  jt 60 jf 25
+0025 jeq   #0x000001b0  jt 60 jf 26
+0026 jeq   #0x000001b1  jt 60 jf 27
+0027 jeq   #0x000001af  jt 60 jf 28
+0028 jeq   #0x000001ba  jt 60 jf 29
+0029 jeq   #0x0000009b  jt 60 jf 30
+0030 jeq   #0x000000a1  jt 60 jf 31
+0031 jeq   #0x00000110  jt 60 jf 32
+0032 jeq   #0x00000134  jt 60 jf 33
+0033 jeq   #0x00000143  jt 60 jf 34
+0034 jeq   #0x00000130  jt 60 jf 35
+0035 jeq   #0x0000012f  jt 60 jf 36
+0036 jeq   #0x00000067  jt 60 jf 37
+0037 jeq   #0x000001b3  jt 61 jf 38
+0038 jeq   #0x00000038  jt 44 jf 39
+0039 jeq   #0x00000029  jt 48 jf 40
+0040 jeq   #0x00000035  jt 48 jf 41
+0041 jeq   #0x00000010  jt 53 jf 42
+0042 jeq   #0x0000013d  jt 56 jf 43
+0043 ja    59
+0044 ld    [16]
+0045 jset  #0x00800000  jt 60 jf 46
+0046 jset  #0x7e020080  jt 60 jf 47
+0047 ja    59
+0048 ld    [16]
+0049 jeq   #0x00000001  jt 60 jf 50
+0050 jeq   #0x00000002  jt 59 jf 51
+0051 jeq   #0x0000000a  jt 59 jf 52
+0052 ja    62
+0053 ld    [24]
+0054 jeq   #0x00005412  jt 60 jf 55
+0055 ja    59
+0056 ld    [24]
+0057 jset  #0x00000008  jt 60 jf 58
+0058 ja    59
+0059 ret   #0x7fff0000
+0060 ret   #0x00050001
+0061 ret   #0x00050026
+0062 ret   #0x00050061

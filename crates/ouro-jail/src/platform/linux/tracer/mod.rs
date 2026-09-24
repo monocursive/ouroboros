@@ -51,11 +51,14 @@ mod filter;
 mod proc;
 mod session;
 mod sys;
+mod table;
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{
+    Receiver, RecvError, RecvTimeoutError, SyncSender, TryRecvError, sync_channel,
+};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -63,9 +66,12 @@ use libc::pid_t;
 
 pub use closed_set::ClosedOp;
 pub use filter::{
-    install_narrowing_filter, narrowing_filter, narrowing_filter_bytes, narrowing_filter_digest,
+    CLONE_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA,
+    SECCOMP_FILTER_FLAG_NEW_LISTENER, install_narrowing_filter, narrowing_filter,
+    narrowing_filter_bytes, narrowing_filter_digest,
 };
 pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
+pub use table::closed_set_table;
 
 /// Bounds on what the observer will hold, from jail-v1 §11.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,11 +89,12 @@ pub struct TracerConfig {
     pub queue_max: usize,
     /// The §11.4 user-space event queue budget, in bytes.
     ///
-    /// It covers everything the observer holds on the consumer's behalf: the
-    /// buffered events and their pathname snapshots, the handoff channel and
-    /// the allocator's rounding. The buffer is therefore admitted against
-    /// three quarters of this figure, and each event is charged a fixed
-    /// [`EVENT_FIXED_BYTES`] on top of the bytes its snapshots hold.
+    /// It covers everything the observer holds on the consumer's behalf:
+    /// the buffered events and their pathname snapshots, and the events
+    /// handed to the channel that the consumer has not taken yet. Each event
+    /// is charged a fixed [`EVENT_FIXED_BYTES`] — the enum, its slot and the
+    /// allocator's rounding — on top of the bytes its snapshots hold. The
+    /// bounds this puts in force are [`TracerConfig::queue_bounds`].
     pub queue_bytes_max: usize,
     /// The `CLOCK_BOOTTIME` reading, in nanoseconds, at which the supervisor
     /// started. Gap endpoints are reported as elapsed time since this epoch
@@ -101,6 +108,66 @@ pub struct TracerConfig {
 /// buffer slot, and the allocator's rounding of two small allocations.
 pub const EVENT_FIXED_BYTES: usize = 256;
 
+/// Bytes of the §11.4 queue budget that results may not consume, so the
+/// lifecycle facts — an `Exec`, a `Fork` — have room to land behind them.
+/// The critical facts (`Exit`, `Gap`, `Finished`) need no reserve: they are
+/// exempt from every bound (J4 D6).
+const LIFECYCLE_RESERVE: usize = 64 * 1024;
+
+/// What an event costs the queue budget: its snapshots plus
+/// [`EVENT_FIXED_BYTES`]. The tracer charges it when an event is buffered
+/// or handed over, and [`Events`] gives it back when the consumer takes it.
+fn event_bytes(event: &TracerEvent) -> usize {
+    let snapshots = match event {
+        TracerEvent::Syscall { args, .. } => {
+            args.path.as_ref().map_or(0, |p| p.bytes.len())
+                + args.path2.as_ref().map_or(0, |p| p.bytes.len())
+        }
+        TracerEvent::Exec { path, .. } => path.as_ref().map_or(0, |p| p.bytes.len()),
+        _ => 0,
+    };
+    EVENT_FIXED_BYTES + snapshots
+}
+
+/// The queue bounds a [`TracerConfig`] puts in force (§11.4, "Record actual
+/// values in the observer plan"). Computed here once, for the tracer that
+/// applies them and for the observer plan that records them, so the record
+/// cannot drift from what is in force (J4 W3, loss review finding 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueBounds {
+    /// Most bytes held for the consumer — buffered, or handed to the channel
+    /// and not yet taken — by every event except the critical facts, which
+    /// §11.4 exempts. `queue_bytes_max`, and never less than one fixed-size
+    /// event, or nothing could ever be delivered.
+    pub bytes_max: usize,
+    /// Most bytes a result may bring that total to: `bytes_max` short of the
+    /// lifecycle reserve, and never less than one fixed-size event. Below a
+    /// budget of about 64 KiB that admits a result with no pathname and
+    /// none with one.
+    pub result_bytes_max: usize,
+    /// The part of `bytes_max` results may not use.
+    pub lifecycle_reserve: usize,
+    /// Most events in the handoff channel at once (their bytes are inside
+    /// `bytes_max`).
+    pub handoff_events: usize,
+}
+
+impl TracerConfig {
+    /// The queue bounds this configuration puts in force.
+    #[must_use]
+    pub fn queue_bounds(&self) -> QueueBounds {
+        let bytes_max = self.queue_bytes_max.max(EVENT_FIXED_BYTES);
+        QueueBounds {
+            bytes_max,
+            result_bytes_max: bytes_max
+                .saturating_sub(LIFECYCLE_RESERVE)
+                .max(EVENT_FIXED_BYTES),
+            lifecycle_reserve: LIFECYCLE_RESERVE,
+            handoff_events: HANDOFF_DEPTH.min(self.queue_max.max(1)) + TERMINAL_RESERVE,
+        }
+    }
+}
+
 /// Slots above the handoff depth kept for the terminal gap and `Finished`.
 const TERMINAL_RESERVE: usize = 2;
 
@@ -109,9 +176,10 @@ const TERMINAL_RESERVE: usize = 2;
 ///
 /// It is a handoff, not the queue: the queue is the tracer's own buffer,
 /// which is bounded in bytes ([`TracerConfig::queue_bytes_max`]) because a
-/// count cannot bound two four-kilobyte pathnames per event. A channel deep
-/// enough to hold `queue_max` events would put the whole backlog somewhere
-/// the tracer cannot measure it.
+/// count cannot bound two four-kilobyte pathnames per event. What sits in
+/// the channel is inside that byte budget too: the tracer charges an event
+/// when it hands it over and [`Events`] credits it back when the consumer
+/// takes it, so a small budget is a small queue however deep the channel.
 const HANDOFF_DEPTH: usize = 64;
 
 impl Default for TracerConfig {
@@ -264,6 +332,32 @@ pub enum GapReason {
     LifecycleDropped,
     /// A tracee died and could not be attributed to a thread group.
     DeathUnattributed,
+    /// A syscall under another ABI — a non-native architecture or the x32
+    /// bit — ran, and this observer decodes only the native table, so it
+    /// cannot say which operation, if any, it was (J4 D2). One the kernel
+    /// refused as nonexistent (`ENOSYS`) had no effect and is not this.
+    ForeignAbi,
+    /// A child installed a seccomp filter with its own notification
+    /// listener (J4 D1). The listener can answer `CONTINUE`, which runs the
+    /// call with no trace stop, so from then on any closed-set call may be
+    /// unobserved; how many is unknown and the interval has no end.
+    ChildNotificationListener,
+    /// A tracee created a task with `clone(CLONE_UNTRACED)` (J4 S4), which
+    /// the kernel does not attach to this tracer. §11.2: an untracked
+    /// descendant is a coverage gap. Its own closed-set calls fail with
+    /// `ENOSYS` (a trace stop with no tracer), but nothing about it is
+    /// observed — not its calls, not its lifetime — so the count is unknown
+    /// and the interval has no end.
+    UntracedDescendant,
+    /// A covered call's syscall exit carried a kernel restart code, and the
+    /// observer could not establish what the kernel then did with it —
+    /// re-entered it, or returned `EINTR` (J4 O-2). Its one result is
+    /// unknown, so it is a hole naming that call's classes. The observer
+    /// follows the call to the kernel's decision, so this is only for a
+    /// decision it could not read: an unreadable or unrecognised signal
+    /// frame, a continuation through `restart_syscall`, which is outside the
+    /// traced set, or a stop out of the sequence the kernel produces.
+    RestartUnresolved,
 }
 
 impl GapReason {
@@ -287,7 +381,22 @@ impl GapReason {
             GapReason::RestartFailed => "restart_failed",
             GapReason::LifecycleDropped => "lifecycle_dropped",
             GapReason::DeathUnattributed => "death_unattributed",
+            GapReason::ForeignAbi => "foreign_abi",
+            GapReason::ChildNotificationListener => "child_notification_listener",
+            GapReason::UntracedDescendant => "untraced_descendant",
+            GapReason::RestartUnresolved => "restart_unresolved",
         }
+    }
+
+    /// A gap that lasts from where it starts to the end of the attempt: the
+    /// condition that opened it is never observed to end. A child's
+    /// notification listener lives as long as some process holds it.
+    #[must_use]
+    pub fn is_open_ended(self) -> bool {
+        matches!(
+            self,
+            GapReason::ChildNotificationListener | GapReason::UntracedDescendant
+        )
     }
 }
 
@@ -326,6 +435,14 @@ pub enum TracerEvent {
     /// A confirmed exec transition. Never inferred from a syscall entry.
     Exec {
         pid: pid_t,
+        /// The birth of process `pid`: the start time the kernel recorded for
+        /// its thread-group leader (field 22 of `/proc/<pid>/stat`, clock
+        /// ticks since boot), read when the tracer first took the process
+        /// on. `None` when `/proc` would not say. See [`TracerEvent::Syscall`].
+        start_ticks: Option<u64>,
+        /// The call whose entry this transition was paired with, `execve` or
+        /// `execveat`; `None` when the entry was not witnessed.
+        syscall: Option<&'static str>,
         /// The pathname argument of the `execve`/`execveat` that produced
         /// this transition, snapshotted at its entry. Descendant argv
         /// digests stay null in J1, so this snapshot is the only way to name
@@ -353,6 +470,17 @@ pub enum TracerEvent {
     Syscall {
         /// The thread group, which is the process the consumer attributes to.
         pid: pid_t,
+        /// The birth of process `pid` (§11.3, "internal attribution includes
+        /// boot/birth identity"): the start time of its thread-group leader,
+        /// field 22 of `/proc/<pid>/stat` in clock ticks since boot, read
+        /// when the tracer first took the process on — at its fork event,
+        /// while it was an unreaped tracee whose number the kernel could not
+        /// yet give to anyone else. A non-leader exec keeps it (the kernel
+        /// gives the exec'ing thread the leader's start time). A task that
+        /// later receives the same number is registered afresh, with its own
+        /// birth: nothing is keyed by the number alone across a death. `None`
+        /// when `/proc` would not say.
+        start_ticks: Option<u64>,
         /// The thread that made the call.
         tid: pid_t,
         op: ClosedOp,
@@ -365,6 +493,8 @@ pub enum TracerEvent {
     /// wait status, so the consumer derives code or signal from it.
     Exit {
         pid: pid_t,
+        /// The birth of process `pid`. See [`TracerEvent::Syscall`].
+        start_ticks: Option<u64>,
         status: i32,
         monotonic_ns: u64,
     },
@@ -479,6 +609,14 @@ pub struct LossCounters {
     pub lifecycle_dropped: u64,
     /// Task deaths that could not be attributed to a thread group.
     pub death_unattributed: u64,
+    /// Syscalls under another ABI that ran and could not be attributed.
+    pub foreign_abi: u64,
+    /// Notification listeners a child installed for itself.
+    pub notification_listeners: u64,
+    /// Tasks a tracee created with `CLONE_UNTRACED`, which nothing traces.
+    pub untraced_descendants: u64,
+    /// Restart-coded syscall exits whose outcome could not be established.
+    pub restart_unresolved: u64,
 }
 
 impl LossCounters {
@@ -502,6 +640,10 @@ impl LossCounters {
             + self.restart_failed
             + self.lifecycle_dropped
             + self.death_unattributed
+            + self.foreign_abi
+            + self.notification_listeners
+            + self.untraced_descendants
+            + self.restart_unresolved
     }
 }
 
@@ -525,7 +667,8 @@ pub struct TracerSummary {
     pub late_fork_races: u64,
     /// `PTRACE_EVENT_EXEC` transitions.
     pub exec_transitions: u64,
-    /// `Gap` events that reached the consumer.
+    /// `Gap` events queued for the consumer. Gaps merged into one
+    /// coalesced summary count once.
     pub gaps: u64,
     /// Events of any kind that reached the consumer.
     pub emitted: u64,
@@ -546,9 +689,43 @@ pub struct TracerSummary {
     /// Direct children of this process that were still unreaped when the
     /// tracer stopped.
     pub unreaped_children: Vec<pid_t>,
-    /// Syscall exits in the `ERESTARTSYS` family. Not loss and not results:
-    /// the kernel re-enters the call, which then produces its one result.
+    /// Syscall exits with a kernel restart code that the kernel then
+    /// re-entered: seen re-entered at the same instruction, or decided at a
+    /// handler's entry (`ERESTARTNOINTR`, or `ERESTARTSYS` under
+    /// `SA_RESTART`). Not loss and not results: the re-entered call produces
+    /// its one result.
     pub restarts: u64,
+    /// Syscall exits with a kernel restart code that the kernel turned into
+    /// `EINTR` at a handler's entry (J4 O-2). Each is a result, `-EINTR`, and
+    /// is counted in [`TracerSummary::ops`] like any other.
+    pub interrupted: u64,
+    /// Syscall exits with a kernel restart code whose thread ended before
+    /// the kernel decided — a fatal signal, or another thread's `execve`. A
+    /// restart code means the call did nothing, and no result was ever
+    /// returned: not a result and not loss.
+    pub restarts_unfinished: u64,
+    /// Entries whose thread was killed at its seccomp stop before the
+    /// observer resumed it (J4 O-3): the stop could not be read, or the
+    /// resume failed with `ESRCH`, which at an unresumed stop only a
+    /// `SIGKILL` causes. The kernel skips a call when a fatal signal is
+    /// pending after the trace event (`__seccomp_filter`), so the call had
+    /// no effect: not loss.
+    pub killed_at_entry: u64,
+    /// Syscalls under another ABI the kernel refused as nonexistent
+    /// (`ENOSYS`): stopped and labelled foreign, but with no effect, so not
+    /// loss — a tracee cannot manufacture a gap by naming a call no table has.
+    pub foreign_rejected: u64,
+    /// Stops another filter asked for — a child's own `SECCOMP_RET_TRACE`,
+    /// recognised by trace data that is not
+    /// [`NARROWING_TRACE_DATA`] — on calls outside the closed set. Continued
+    /// untouched: not a result and not loss.
+    pub requested_by_other_filters: u64,
+    /// Notification-listener requests the kernel refused (`EBUSY` under the
+    /// `agent` mediation listener, for one): no listener, nothing hidden.
+    pub listener_refused: u64,
+    /// `clone(CLONE_UNTRACED)` calls that created no task: no descendant,
+    /// nothing untraced.
+    pub untraced_clone_refused: u64,
     pub loss: LossCounters,
     pub ops: OpCounts,
     /// The tracer thread panicked. Every other field is then unreliable.
@@ -603,10 +780,60 @@ impl fmt::Display for TracerError {
 
 impl std::error::Error for TracerError {}
 
+/// The consumer's end of the event stream.
+///
+/// A receiver that gives each event's bytes back to the queue budget as it
+/// is taken (J4 W3, loss review finding 4): the tracer counts what it has
+/// handed over and not seen taken, so the §11.4 budget bounds the channel
+/// as well as the tracer's own buffer. The three methods are
+/// [`Receiver`]'s own.
+pub struct Events {
+    rx: Receiver<TracerEvent>,
+    handed: Arc<AtomicUsize>,
+}
+
+impl Events {
+    fn new(rx: Receiver<TracerEvent>, handed: Arc<AtomicUsize>) -> Events {
+        Events { rx, handed }
+    }
+
+    fn taken(&self, event: TracerEvent) -> TracerEvent {
+        // The tracer added these bytes before the send this event came
+        // through, so the subtraction never passes zero.
+        self.handed
+            .fetch_sub(event_bytes(&event), Ordering::Relaxed);
+        event
+    }
+
+    /// [`Receiver::recv`].
+    ///
+    /// # Errors
+    /// [`RecvError`] once the tracer is gone and nothing is left.
+    pub fn recv(&self) -> Result<TracerEvent, RecvError> {
+        self.rx.recv().map(|event| self.taken(event))
+    }
+
+    /// [`Receiver::recv_timeout`].
+    ///
+    /// # Errors
+    /// [`RecvTimeoutError`] on timeout or once the tracer is gone.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<TracerEvent, RecvTimeoutError> {
+        self.rx.recv_timeout(timeout).map(|event| self.taken(event))
+    }
+
+    /// [`Receiver::try_recv`].
+    ///
+    /// # Errors
+    /// [`TryRecvError`] when nothing is waiting or the tracer is gone.
+    pub fn try_recv(&self) -> Result<TracerEvent, TryRecvError> {
+        self.rx.try_recv().map(|event| self.taken(event))
+    }
+}
+
 /// A running observer. Dropping it stops the tracer thread and joins it.
 pub struct Tracer {
     launcher: pid_t,
-    events: Receiver<TracerEvent>,
+    events: Events,
     handle: Option<JoinHandle<TracerSummary>>,
     stop: Arc<AtomicBool>,
     /// How long the thread may take to end a live tree once told to stop.
@@ -641,8 +868,9 @@ impl Tracer {
         // `Finished`, so they have somewhere to land the moment the consumer
         // reads anything at all. Everything else waits in the tracer's own
         // byte-bounded buffer.
-        let depth = HANDOFF_DEPTH.min(config.queue_max.max(1)) + TERMINAL_RESERVE;
+        let depth = config.queue_bounds().handoff_events;
         let (tx, rx): (SyncSender<TracerEvent>, Receiver<TracerEvent>) = sync_channel(depth);
+        let handed = Arc::new(AtomicUsize::new(0));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), TracerError>>();
         let stop = Arc::new(AtomicBool::new(false));
         let shutdown_ns = Arc::new(AtomicU64::new(
@@ -653,6 +881,7 @@ impl Tracer {
             stop: Arc::clone(&stop),
             shutdown_ns: Arc::clone(&shutdown_ns),
             tid: Arc::clone(&tid),
+            handed: Arc::clone(&handed),
         };
         let handle = std::thread::Builder::new()
             .name("ouro-jail-tracer".to_string())
@@ -663,7 +892,7 @@ impl Tracer {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Tracer {
                 launcher,
-                events: rx,
+                events: Events::new(rx, handed),
                 handle: Some(handle),
                 stop,
                 shutdown_ns,
@@ -692,7 +921,7 @@ impl Tracer {
     /// still queued when [`Tracer::finish`] consumes the tracer are lost with
     /// it.
     #[must_use]
-    pub fn events(&self) -> &Receiver<TracerEvent> {
+    pub fn events(&self) -> &Events {
         &self.events
     }
 
@@ -785,7 +1014,10 @@ impl Drop for Tracer {
         // panicking, so it is the same bounded shutdown as `finish`.
         let taken = Tracer {
             launcher: self.launcher,
-            events: std::mem::replace(&mut self.events, sync_channel(1).1),
+            events: std::mem::replace(
+                &mut self.events,
+                Events::new(sync_channel(1).1, Arc::default()),
+            ),
             handle: self.handle.take(),
             stop: Arc::clone(&self.stop),
             shutdown_ns: Arc::clone(&self.shutdown_ns),
@@ -886,6 +1118,35 @@ mod tests {
         }
     }
 
+    /// J4 W3 (loss review finding 4): the bounds in force, including for a
+    /// budget too small to hold a pathname or even one event.
+    #[test]
+    fn j4_w3_queue_bounds_are_the_budget_with_a_floor_of_one_event() {
+        let bounds = |queue_bytes_max| {
+            TracerConfig {
+                queue_bytes_max,
+                ..TracerConfig::default()
+            }
+            .queue_bounds()
+        };
+        let default = TracerConfig::default().queue_bounds();
+        assert_eq!(default.bytes_max, 4 * 1024 * 1024);
+        assert_eq!(default.result_bytes_max, 4 * 1024 * 1024 - 64 * 1024);
+        assert_eq!(default.lifecycle_reserve, 64 * 1024);
+        assert_eq!(default.handoff_events, 66);
+        assert_eq!(bounds(65_536 + 256).result_bytes_max, 256);
+        assert_eq!(bounds(65_536 + 4096).result_bytes_max, 4096);
+        assert_eq!(bounds(16_384).bytes_max, 16_384);
+        assert_eq!(bounds(16_384).result_bytes_max, EVENT_FIXED_BYTES);
+        assert_eq!(bounds(1).bytes_max, EVENT_FIXED_BYTES);
+        assert_eq!(bounds(1).result_bytes_max, EVENT_FIXED_BYTES);
+        let shallow = TracerConfig {
+            queue_max: 3,
+            ..TracerConfig::default()
+        };
+        assert_eq!(shallow.queue_bounds().handoff_events, 5);
+    }
+
     #[test]
     fn loss_total_counts_missing_results_and_not_weak_paths() {
         let mut loss = LossCounters {
@@ -933,6 +1194,11 @@ mod tests {
             GapReason::FinalStatusUnknown,
             GapReason::UnexpectedTraceStop,
             GapReason::TraceesAbandoned,
+            GapReason::MediationResponseUndelivered,
+            GapReason::ForeignAbi,
+            GapReason::ChildNotificationListener,
+            GapReason::UntracedDescendant,
+            GapReason::RestartUnresolved,
         ];
         let names: std::collections::BTreeSet<&str> = reasons.iter().map(|r| r.as_str()).collect();
         assert_eq!(names.len(), reasons.len());

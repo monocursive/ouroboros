@@ -250,6 +250,8 @@ fn validators() -> &'static BTreeMap<String, Validator> {
     })
 }
 
+/// Schema validation; a receipt also keeps the rules the schema cannot state
+/// (`common::semantic_receipt`).
 fn assert_schema(name: &str, value: &serde_json::Value) {
     let validator = &validators()[name];
     let errors: Vec<String> = validator
@@ -257,6 +259,9 @@ fn assert_schema(name: &str, value: &serde_json::Value) {
         .map(|e| e.to_string())
         .collect();
     assert!(errors.is_empty(), "{name} rejects {value:#}: {errors:?}");
+    if name == "jail-receipt" {
+        common::assert_semantic_receipt(value);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1798,7 +1803,14 @@ fn explain_prints_credentials_by_id_mode_and_dest_never_by_source() {
             .collect();
         assert_eq!(keys, ["dest", "id", "mode"], "{credential}");
     }
-    assert_eq!(credentials[2]["dest"], "conf/pipe");
+    // J4-D7: the snapshot's arrays are in canonical-byte order, and a
+    // credential's canonical bytes begin with its `dest` (canonicalization.md),
+    // so `conf/pipe` (id `pipe`) comes first, not last as it would by id.
+    let dests: Vec<&str> = credentials
+        .iter()
+        .map(|credential| credential["dest"].as_str().unwrap())
+        .collect();
+    assert_eq!(dests, ["conf/pipe", "good.json", "missing.json"]);
 
     let text = jail_binary(&fixture, &["explain", "--launch", "inspect"]);
     assert!(text.status.success());
@@ -2403,6 +2415,14 @@ fn l1_gc_prints_its_report_even_when_a_cleanup_stays_pending() {
     };
     let report = fixture.run(sim, &["--launch", "plain"]);
     assert_eq!(receipt_json(&report)["state_cleanup"], "pending");
+    // J4-G (§14.2 "foreign-platform resources are retained"): the binary's
+    // gc runs on this host's platform, so the simulated claim is made this
+    // host's before it asks the binary to resume the cleanup.
+    let state_path = attempt_dir(&report).join("jail-state.json");
+    let mut state = jail_state(&report);
+    state["os"] = serde_json::json!(std::env::consts::OS);
+    state["arch"] = serde_json::json!(std::env::consts::ARCH);
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
     let output = jail_binary(&fixture, &["gc", "--json"]);
     assert_eq!(
         output.status.code(),

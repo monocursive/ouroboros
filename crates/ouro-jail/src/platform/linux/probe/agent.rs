@@ -198,6 +198,10 @@ fn run(jail_exe: &Path) -> AgentProbe {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // The probe's run is doctor's fixture (§14.1): if doctor dies, the run's
+    // supervisor dies with it and takes its jail down as any killed
+    // supervisor does, instead of running on to its wall limit on pid 1.
+    super::exec::die_with_parent(&mut command);
     let captured = super::exec::run_captured(&mut command, Deadline::after(AGENT_PROBE_DEADLINE));
     let origin_hits = origin.finish();
     let denied_hits = denied.finish();

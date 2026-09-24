@@ -1,7 +1,24 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 12, 2026-09-23. No implementation
-or backend conformance is claimed by this document. Revision 12 records what
+Status: implementation specification, revision 17, 2026-09-24. No implementation
+or backend conformance is claimed by this document. Revision 17 records J4's
+third wave, the fixes its adversarial reviews forced: the lease held while
+persistence may be in flight, one loss one error, the attempt-named execution
+leaf and gc's association check, gc's intent records and finished attempts, the
+control digest, and the tracer's exec pairing and restart re-entry (§§6.2, 6.4,
+7, 8.1, 8.2, 9.3, 11.2, 11.4, 13.3, 14.2); the J4 evidence and acceptance map
+are in [J4 authority](jail-v1/j4-authority.md). Revision 16 records J4's
+second wave and its reviews: loss reported whatever its timing, the execution
+leaf registered before it exists, gc's own records and leftovers, syscall
+restarts, the receipt digest's preimage, trace framing and the no-leaf limit
+of supervisor death (§§6.4, 7, 9.3, 11.2, 11.4, 13.1, 13.3, 14.2;
+canonicalization.md). Revision 15 records J4's
+first wave: atomic records and persistence, GC reconciliation, closed-set
+attribution and loss handling (§§6.2, 6.4, 7, 8.2, 9.2, 11.2, 11.3, 11.4, 13.2,
+13.3, 14.2). Revision 14 records the
+first J4 fixes to records, observation, supervisor death and the trace (§§6.4,
+9.2, 9.3, 11.2, 11.4, 13.2, 13.3, 14.2; canonicalization.md). Revision 13 opens J4 and
+resolves §8.2's `refused` rule against §8.1 (review-resolutions.md). Revision 12 records what
 the first real agent run required (§§6.2, 10, 12;
 [agent compatibility](jail-v1/agent-compatibility.md)). Revision 11 records what
 the J3 implementation and its reviews settled (§§6.2, 8.1, 9.2, 9.3, 10, 11.4,
@@ -519,7 +536,9 @@ execute anything, and distinguishes requested policy from measured capability.
 Its output carries environment names, never values (canonicalization.md).
 `--label-only` rejects `--gate-fd` and `--attempt-id` as usage errors.
 Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
-stdout/stderr byte streams and has no `--json` stdout mode.
+stdout/stderr byte streams and has no `--json` stdout mode. An error that
+reaches no durable receipt (a terminal receipt that failed to persist, and
+what only it would have recorded) is printed on stderr, one line per error.
 
 `--control-fd` carries structured control messages instead of textual launch
 diagnostics. `--trace-fd` carries events. Each supplied fd must be open, have the
@@ -547,9 +566,28 @@ Apply configuration in this order:
 3. Operator environment settings from a fixed documented allow-list:
    `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
    `OURO_JAIL_EVIDENCE`. No environment-derived path or host grants.
-   `OURO_JAIL_TEST_MEDIATION_QUEUE` is a test-only knob: it can only shrink
-   the unix-peer mediation record queue (1 to 4096), never widens authority,
-   leaves the policy digest unchanged, and is recorded in the receipt.
+   Every `OURO_JAIL_TEST_*` variable is a test-only knob: it can only shrink
+   a bound or end an attempt early, never widens authority, and leaves the
+   policy digest unchanged. At attempt start every such variable set is
+   recorded, name to value (a name set more than once with its first value,
+   the one `getenv` returns and every consumer applies), in `jail-state.json` `test_seams` and in
+   `lifetime.native.details.test_seams` of every receipt that has native
+   details (a refusal before a boundary exists has none, so there only jail
+   state records them). The knobs: `OURO_JAIL_TEST_MEDIATION_QUEUE` (the
+   unix-peer mediation record queue, 1 to 4096), `OURO_JAIL_TEST_TRACE_CAP`
+   (the local trace cap, 4096 bytes to 64 MiB, half of it at most 256 KiB
+   reserve, and named in every loss it causes), `OURO_JAIL_TEST_ABORT_AT`
+   (`<site>:<point>` aborts at one named point, `temp_written`,
+   `temp_synced`, `renamed` or `dir_synced`, of the first write at one
+   persistence site), `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
+   entry bound, reported in gc's `test_seams`), and
+   `OURO_JAIL_TEST_TRACER_INFLIGHT` (1 to 16,384) and
+   `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304; the bound in force,
+   recorded as `observer_plan.queue_bytes_max`, is at least 256 bytes), which
+   are ignored
+   unless the value is decimal digits in range and are also named in the
+   receipt's `observer_plan.test_seams` with the value applied, or null when
+   ignored.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 
@@ -688,7 +726,14 @@ signal-terminated child; 1 for a tool failure; 2 for invalid CLI/config syntax;
 125 for refusal before user exec. A post-launch tool error takes code 1 and
 preserves the separately observed child outcome in the receipt. Deadline or
 requested termination preserves the observed code/signal and records its cause.
-A child exiting 125 is `outcome.kind=exited`, not `refused`.
+`outcome.cause` is the first stop reason the supervisor acted on; a later
+deadline, loss or signal is recorded (its limit's `hit`, `errors[]`) but does
+not replace it. A loss the platform processed after the target's own end is
+recorded (`errors[]`, exit 1) but is not a stop the supervisor acted on: it
+requests no stop and never becomes `outcome.cause`.
+A child exiting 125 is `outcome.kind=exited`, not `refused`. A persistence
+failure (`state_write_failed`) before exec is a refusal (125); after exec it
+is a tool error (1).
 
 Inspection commands use 0 for success, 2 for invalid syntax/config, and 1 for
 an operational failure. `doctor` and `run --label-only` additionally use 125
@@ -732,19 +777,34 @@ Local attempts are not deduplicated operator requests.
   scratch/              default child-writable scratch, not the state parent
 ```
 
-The supervisor holds `jail.lock` through settlement/cleanup. A future owner
+The supervisor holds `jail.lock` through settlement/cleanup, and while any of
+its persistence steps may still be in flight: after a stalled step it never
+unlocks it, and only the end of the supervisor process releases it. A future owner
 uses its own lease, not this lock. An existing attempt root is acceptable only
 with validated ownership/permissions and no previous jail state or jail-owned
-artifacts. Claim it with exclusive creation of `jail-state.json` while holding
-the lock. A prior jail claim, live or dead, refuses `attempt_exists`; the caller
+artifacts. Claim it while holding the lock: `jail-state.json` is written and
+synced under a temporary name and published by an exclusive link, so the claim
+is never visible incomplete. A prior jail claim, live or dead, refuses
+`attempt_exists`; the caller
 reconciles it rather than spawning again. Test concurrent claims and crashes
 after claim creation. The child cannot inherit the lock.
 Register resource ownership before populating credentials
-or launching helpers. State updates use create-new temporary file, write,
+or launching helpers. The execution cgroup is registered in jail state by name
+before it is created (P15) and by device and inode right after, before anything
+is placed in it (P16); a failed registration refuses. The leaf is named
+`ouro-<attempt id>.leaf` after its attempt root, directly under the delegated
+subtree, and created exclusively; the name is the attempt association §9.3
+registers. A leaf that belongs to no attempt (a `doctor` probe's) is named
+`ouro-probe-<token>.leaf`. State updates use create-new temporary file, write,
 file sync, atomic rename, and parent-directory sync. A successful rename alone
 is not a durable acknowledgment. Platform code defines and tests its sync
-guarantee. Failed/ambiguous persistence before exec refuses; after exec it
-stops the tree and leaves an incomplete receipt if necessary.
+guarantee. A failed write removes its temporary file; a crash can leave one
+(`.<name>.<id>.tmp`), which never replaced anything. Every durable write names
+its persistence site (review-resolutions revisions 15 and 16 list P1 to P16), where
+faults and crashes are injected in tests. Failed/ambiguous persistence before
+exec refuses (125, a refused receipt when one can still be written, and
+`refused` only once that receipt is durable); after exec it stops the tree and
+leaves an incomplete receipt if necessary.
 
 `--receipt PATH` is an additional atomically replaced receipt copy; canonical
 state stays under the attempt directory. The path must be outside every
@@ -801,7 +861,9 @@ Preparation steps, in order:
    also have closed that fd. Persist the enforced receipt after confirmed exec.
 8. Monitor child status, evidence, control, limits and lifetime independently.
    Target exit triggers termination of remaining attempt descendants; background
-   children do not become an independent service. Preserve target outcome.
+   children do not become an independent service. Preserve target outcome. The
+   remaining tree is ended as soon as the target exits, before the supervisor
+   waits for receipts still being persisted.
 9. Verify tree death, drain observations through the final boundary, persist
    settled receipt, then clean managed vendor state and update cleanup status.
 
@@ -849,11 +911,16 @@ lifetime limit; there is no new watchdog.
 
 Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id,
 monotonically increasing message number, and kind `prepared`, `exec_confirmed`,
-`refused`, `settled`, or `unsettled`. `refused` is sent only before release;
-`unsettled` is the terminal message after exec when tree death could not be
+`refused`, `settled`, or `unsettled`. `refused` is sent only while the target
+has not executed: before release, or when the released target's `exec` fails,
+which §8.1 counts as a pre-exec failure; once the target has executed, the
+terminal message is `settled` or `unsettled`. `unsettled` is the terminal
+message after exec when tree death could not be
 verified, and the receipt then keeps its last nonsettled phase with
-`tree_empty: null` and the `tree_unknown` error. Messages carry receipt phase/digest and safe outcome,
-never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or
+`tree_empty: null` and the `tree_unknown` error. A control message
+acknowledges only a receipt that is durable. Messages carry the receipt's
+phase and its digest (`sha256:` over its RFC 8785 canonical bytes, the digest
+its `jail.receipt` note names) and safe outcome, never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or
 interactive approval protocol.
 
 ### 8.3 Fds, stdio and supervision
@@ -963,8 +1030,18 @@ installs no such filter and retains the documented closed-set exclusions.
 Cover both legacy and modern mount interfaces and namespace flags in `clone`.
 Because seccomp cannot safely dereference `clone3`'s argument structure, the
 initial tool/build policy returns `ENOSYS` for `clone3` and tests the normal
-thread-creation fallback; it does not pretend to inspect that pointer. Deny
+thread-creation fallback; it does not pretend to inspect that pointer. Every
+contained baseline refuses `clone` with `CLONE_UNTRACED` (EPERM). In `none`
+the observer stops on it, and a created task is an `untraced_descendant` gap
+in every audit class with no count and no end; that task's closed-set calls
+fail with ENOSYS. The observer's filter answers `clone3` with ENOSYS in every
+observed profile, so a runtime that cannot fall back to `clone` does not run
+under observation. Deny
 `AF_UNIX` creation through both `socket` and `socketpair` for those profiles.
+They also refuse `seccomp(2)` whose flags contain
+`SECCOMP_FILTER_FLAG_NEW_LISTENER` (EPERM), because a child's own notification
+listener outranks the observer (§11.4); a filter without a listener stays
+permitted.
 Their network namespace and absence of inherited sockets remain the boundary.
 The reference conformance toolchain uses glibc. Other runtimes must pass their
 own threading fixture; a runtime that cannot fall back is incompatible, not
@@ -1014,24 +1091,51 @@ never signal a PID recovered from a file without revalidating its identity.
 
 For a contained run, record the namespace-init identity and verify the selected
 backend's entire death chain, including any intermediate launcher. Recorded
-limit of the bubblewrap integration (measured 2026-09-22): bubblewrap clears an
-inherited parent-death signal during its own startup before arming its own for
-`--die-with-parent`, so a supervisor killed with SIGKILL inside that window
-leaves bubblewrap's outer process orphaned, holding the run's stdio open; the
-namespace and the target still die. J2 closes this window with a trusted blocked
-bootstrap and an outside watcher holding supervisor/backend pidfds. The bootstrap
+limit of the bubblewrap integration (measured 2026-09-22 and 2026-09-23):
+bubblewrap clears an inherited parent-death signal during its own startup
+before arming its own for `--die-with-parent`, and its namespace init arms its
+own later still, after waiting on an event only the outer process sends. A
+supervisor killed with SIGKILL inside that window therefore leaves bubblewrap's
+outer process, and possibly the namespace init with whatever it started,
+orphaned and holding the run's stdio open. J2 and J4 close the window where the
+attempt has an execution leaf, with a trusted blocked bootstrap and an outside
+watcher holding supervisor/backend pidfds and the leaf's `cgroup.kill` (opened
+by the supervisor after the backend is placed in the leaf). The bootstrap
 cannot exec bubblewrap until the watcher confirms readiness; supervisor death
-makes the watcher kill bubblewrap, and watcher death makes the supervisor stop
-the boundary. A synchronized fixture covers death before bootstrap release and
-after a backend clears its parent-death signal. A stdio consumer must not treat
+makes the watcher kill the whole leaf and then bubblewrap, and watcher death
+makes the supervisor stop the boundary. The supervisor releases the watcher,
+over a private pipe, as soon as it sees the backend's end; the pipe's
+end-of-file, like the supervisor's pidfd, means the supervisor is gone, and a
+supervisor that drops the watcher unreleased on an error path gets the same
+kill by design. The backend's end without a release starts a short grace
+(500 ms) rather than the watcher's exit, because bubblewrap's parent-death
+signal follows the supervisor thread that started it and can fire while the
+rest of a dying supervisor still looks alive: a supervisor that dies within
+the grace still has its leaf killed, and one that outlives it owns the rest.
+Without an execution leaf (a supervisor outside a delegated user scope, where
+no required limit demands one), the watcher can kill only bubblewrap's outer
+process, and a supervisor killed during bubblewrap's startup can leave the
+namespace init, and under `agent` its bridge, alive and holding the run's
+stdout, where `gc` cannot find them (measured 2026-09-23: 6 of 20 synchronized
+kills outside a scope, 0 of 20 inside one). Running a contained profile in a
+delegated user scope (for example `systemd-run --user --scope`) closes it. A
+synchronized fixture covers death before bootstrap release and after a
+backend clears its parent-death signal; a stand-in fixture covers a leaf
+member that is not the backend. Every process `doctor` starts for a probe
+dies with `doctor` (§14.1); the agent probe's jail has the limit above when
+`doctor` runs outside a delegated scope. A stdio consumer must not treat
 EOF as the only sign that a run ended. Linux kills
 remaining namespace processes when its init dies; this is the mechanism behind
 the required parent-death test, not an assumption about process groups.
 See [PID namespace semantics](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
 
-When required by a limit or observer, create a unique cgroup beneath an
-operator-delegated v2 subtree. Keep the supervisor outside that execution leaf.
-Register its path, filesystem identity and attempt association; place the
+For a contained run, create a unique cgroup beneath an operator-delegated v2
+subtree when one is available. A limit that requires it refuses without one;
+otherwise the run proceeds with the cgroup recorded unavailable and without
+what depends on it: preferred limits, the cgroup check of tree emptiness and
+the watcher's whole-leaf kill above. Keep the supervisor outside that execution leaf.
+Register its path, filesystem identity and attempt association (the leaf's
+name, §7); place the
 blocked target inside before release. Delegation must permit the required
 controllers, membership operations, `cgroup.kill` and population checks.
 Do not assume the root of a user's existing service cgroup is an empty leaf.
@@ -1267,7 +1371,18 @@ artifacts from the test runner.
 
 Attach supported native ABI variants of the operations below. The implementation
 must publish its exact hook/syscall table. Calls absent on an architecture are
-identified as absent; equivalent variants that exist must be tested.
+identified as absent; equivalent variants that exist must be tested. The
+x86_64 table is published as
+[`evidence/closed-set-x86_64.txt`](jail-v1/evidence/closed-set-x86_64.txt),
+generated from the observer's rows and by running the installed narrowing
+filter; it names the narrowing-filter digest that receipts record in
+`lifetime.native.details.narrowing_filter_digest`, and conformance compares
+the table with the build and the digest with a live receipt. A successful
+exec's `proc.exec` names its call in `fields.syscall`. A call
+under another ABI (a non-native architecture, or the x32 bit) is never decoded
+from the native table. Contained baselines refuse those ABIs; in `none` the
+observer stops on each, and one the kernel did not reject as nonexistent
+(ENOSYS) is a `foreign_abi` gap in every audit class.
 
 | Operation | Native evidence | Meaning of a result |
 |---|---|---|
@@ -1299,6 +1414,9 @@ identity, thread and in-flight invocation. Record signed raw return and errno.
 Exec success needs special handling: a successful exec replaces the calling
 image and is not an ordinary successful return to it. Use the confirmed kernel
 exec transition and correlate its entry, including non-leader-thread exec.
+At a non-leader exec, the leader's call in flight can no longer return: it is
+an `entry_abandoned` gap of its classes, never paired with the exec's own
+syscall exit, whether or not the exec's entry was followed.
 Fork/clone/exit hooks used for tracking are internal bookkeeping; they do not
 expand the public syscall audit set.
 Emit one `proc.exit` only after the last live thread in a tracked process exits.
@@ -1310,7 +1428,26 @@ status cannot be established, record a gap rather than a worker's status.
 
 An unmatched return, dropped entry, truncated required structure or untracked
 descendant is a coverage gap. Never manufacture a result to fill it. Syscall
-restarts must not create duplicate successes. `openat2` requires decoding only
+restarts must not create duplicate successes, nor hide the result a restart
+turns into. A kernel restart code at a syscall exit is not a result: the
+observer follows the call to the kernel's decision. A re-entry is the call's
+one result; `EINTR` at a signal handler's entry is its result; a thread that
+ends before the decision returned nothing and did nothing, which is neither a
+result nor a gap; a decision the observer cannot establish is a
+`restart_unresolved` gap naming the call's classes. The ptrace observer
+settles a restart code by single-stepping. A restart decided at a handler's
+entry (for `ERESTARTSYS` read from the `rax`/`rip` saved in the handler's
+frame, which the program can rewrite before the observer reads it or before
+`rt_sigreturn` restores it) is believed only at the re-entry itself, the
+thread's next entry stop at the call's own instruction. Any other entry stop
+first, including a covered call made inside an `SA_RESTART` handler, is a
+`restart_unresolved` gap; the thread's end first is such a gap when the frame
+decided, and neither a result nor a gap when the restart code alone decided
+(`ERESTARTNOINTR`). A program that rewrites the frame and then repeats the same
+call from the same instruction is indistinguishable from the re-entry: the
+repeated call's result is reported and the intervening `EINTR` is not. Under
+strict evidence such a gap stops the attempt, for example a handler that exits
+while a blocking covered call waits to restart. `openat2` requires decoding only
 the supported size/flags of its argument structure; unknown or unreadable input
 is unavailable metadata and, if needed for classification, a gap.
 
@@ -1344,7 +1481,18 @@ actually captured. Otherwise `argv_digest=null` with a reason; a prefix hash
 cannot be labelled as the full argv digest. Executable identity records the
 observed process image identity, not a promise that its file contents remain
 unchanged. Public numeric PIDs are diagnostic; internal attribution includes
-boot/birth identity and namespace mapping.
+boot/birth identity and namespace mapping. Every audit result carries
+`fields.pid` (host thread-group id) and `fields.pid_start_ticks`, the start
+time of that group's leader, read when the observer first takes the group on
+(null if unknown); with the receipt's `boot_id` the pair names one process on
+one boot. A non-leader exec keeps it, and a later process given the same
+number has its own. Namespace pids are not recorded per event. PID reuse is
+not forced live: on a stock host `ns_last_pid`, `clone3` `set_tid` and a
+namespace `pid_max` need `CAP_SYS_ADMIN`, so the evidence is the birth on
+every live result plus a unit-level test hook that simulates a recycled tid.
+Nested namespaces are evidenced by `none` running the host's bubblewrap,
+traced one layer down with host pids and matching births; a pid namespace
+inside a contained profile is refused by the host and not claimed.
 
 ### 11.4 Loss and coverage
 
@@ -1355,7 +1503,11 @@ classes, handled exactly as tracer loss: strict stops the attempt. The mediator
 records a syscall result only when the kernel accepts its notification reply.
 If the reply fails, no target return is established: emit no result, record a
 `mediation_response_undelivered` gap for both `net` and `fs.deny`, and apply
-the same strict/best-effort loss rule.
+the same strict/best-effort loss rule. A connect whose notification a signal
+withdraws before any mediation worker received it (every worker busy, and a
+handler without `SA_RESTART`) returns `EINTR` and never runs. It is a named
+exclusion: under `agent`, `net` and `fs.deny` count the connects the mediator
+received, and such a connect is neither a result nor a gap.
 
 Each class has exactly the following source and operation assignment:
 
@@ -1392,6 +1544,27 @@ that attempt. It does not say a kernel probe remains live after settlement.
 Coverage intervals state when observation was active; finishing the observer
 does not erase the historical active interval.
 
+A child's own seccomp filter can outrank the observer's trace stop. Only a
+filter installed with a notification listener can let a call take effect
+without that stop: when the kernel grants a child a listener, record a
+`child_notification_listener` gap in every audit class with a null count and
+no end. A listener request the in-flight bound cannot follow is recorded the
+same way, and a `clone(CLONE_UNTRACED)` it cannot follow is an
+`untraced_descendant` gap: the refused call's return is the only fact that
+would say whether it did anything. A call the child's own filter refuses (errno, trap or kill) before the
+observer's stop had no effect; it is a named exclusion, neither a result nor a
+gap. A trace stop the observer did not request, identified by trace data that
+is not the observer's, is continued (the call then runs, as under any tracer)
+and is neither a result nor a loss.
+
+Only a call the observer must follow takes an in-flight slot: a call outside
+the closed set is classified at its entry and is never `inflight_exhausted`. A
+tracee killed at an entry stop the observer has not resumed made no call (the
+kernel skips a syscall when a fatal signal is pending after the trace event),
+so it is neither a result nor a loss. A call already resumed when the kill
+came, including one killed at its exit stop before its return is read, is one
+`entry_abandoned` gap of its own classes.
+
 Initial bounds: 8 MiB kernel ring, 16,384 in-flight syscall entries, 4 KiB path
 snapshots, 4 MiB user-space event queue accounted in bytes (an event's size is
 chosen by the child, so a count is not a bound), 64 KiB serialized event
@@ -1399,7 +1572,22 @@ maximum. A gap caused by a queue drop names the operation classes of the
 dropped events. An argument the kernel itself rejected (`EFAULT`, or `EINVAL`
 on a structure size) is recorded as unavailable on that result and is not a
 coverage loss: the child cannot stop its own attempt by passing bad pointers.
-Record actual values in the observer plan. Every failed reservation, map
+Record actual values in the observer plan: `lifetime.native.details.observer_plan`
+names the backend and every bound in force (null with observation off). The
+ptrace observer has no kernel ring or map. Its map exhaustion is the in-flight
+bound: an entry past it is not followed and is an `inflight_exhausted` gap
+naming that call's classes (except the listener and untraced-clone requests
+above). `queue_bytes_max` bounds everything the observer holds for its
+consumer, buffered or handed over and not yet taken, except the exempt
+critical facts, and is at least one 256-byte event; the plan also records
+`queue_result_bytes_max` (the budget short of the 64 KiB lifecycle reserve, at
+least 256; below about 64 KiB no result carrying a pathname is admitted) and
+`queue_lifecycle_reserve_bytes`. Its ring loss is the user-space queue: a result
+that cannot be admitted within the one-second bounded wait is dropped into a
+`queue_full` gap naming the dropped results' classes. It steps a tracee to a
+syscall exit only while it holds that tracee's entry, so an unmatched exit
+cannot occur; one would be an `unmatched_exit` gap in every class. Its plan
+records `kernel_ring_bytes: null`. Every failed reservation, map
 insertion, pairing failure or oversized event increments an independent loss
 counter. The [BPF ring-buffer contract](https://docs.kernel.org/bpf/ringbuf.html)
 allows reservation failure; a quiet ring is not proof that no event occurred.
@@ -1407,11 +1595,19 @@ allows reservation failure; a quiet ring is not proof that no event occurred.
 Read loss counters continuously and once more after tree death and drain.
 Bound the affected interval conservatively from the last known healthy point
 to recovery. Counts/ranges are null when exact loss cannot be established.
-Coalesce repeated losses into bounded interval summaries. Coverage cannot
+Coalesce repeated losses into bounded interval summaries. Exit,
+untraced-child exit and observer-end facts are exempt from every queue bound;
+a gap past a bound is merged into one summary per reason, delivered ahead of
+the next fact. Coverage cannot
 return to fully active for the entire run after a historical gap.
 
 On loss under `strict`, stop the attempt and preserve the gap. Under
 `best-effort`, continue with degraded coverage and explicit lost intervals.
+Loss reporting does not depend on timing: any evidence class (the audit
+classes and `proxy.net`) degraded in the observer's final account is an
+`evidence_lost` error and exit 1 in either mode, even when no run event
+carried it. One loss is one error: a class degraded because a lost trace sink
+refused its frames is covered by that trace loss's own `evidence_lost` error.
 An observer that cannot attach always refuses before exec, regardless of
 evidence mode. `--observe off` emits no audit-source events; wrapper lifecycle
 and optional proxy facts still exist with their own limited meaning.
@@ -1562,7 +1758,9 @@ Jail emits only its own facts; `intent.*` is reserved for the future ledger
 owner and rejected for audit/proxy sources. A coverage gap is a wrapper `note`
 with `fields.kind=coverage_gap`, classes, interval, reason and known/null count.
 Receipt updates are wrapper `jail.receipt` events referencing receipt digest
-and phase. Avoid recursively embedding the entire event stream in a receipt.
+and phase; the digest is over the receipt's RFC 8785 canonical bytes
+([canonicalization](jail-v1/canonicalization.md)), so it can be recomputed from
+`jail.json` alone. Avoid recursively embedding the entire event stream in a receipt.
 
 Validate jail output with [jail-event.schema.json](jail-v1/jail-event.schema.json),
 a producer-specific restriction of the shared envelope. Its wrapper operations
@@ -1618,7 +1816,11 @@ run; its `containment` still says none. `settled` requires verified tree death,
 but can preserve unknown execution outcome if evidence was lost. If tree
 death itself is unknown, retain the last nonsettled phase and update its
 outcome/coverage/error as unknown. `state_cleanup` can remain pending after
-settlement. Receipt revision advances on each successful replacement.
+settlement. Receipt revision advances on each replacement and is never
+reused: a number is spent once a replacement carrying it may be visible (from
+the canonical rename on) or once it is handed to the persistence worker, so a
+later failure skips a number. Revisions
+increase strictly but need not be contiguous.
 
 Every applied limit states its scope; every observation count is null when
 unsupported or incomplete. Zero is allowed only for a covered interval with
@@ -1684,18 +1886,52 @@ After the reserve is exhausted, the receipt remains the bounded summary and
 the trace stays visibly incomplete. A local disk-full failure may prevent even
 that summary from persisting; preserve incomplete state and report a tool error.
 
-External writes are nonblocking with a 4 MiB queue and a 1-second no-progress
+External writes are nonblocking with a 4 MiB queue, of which 256 KiB is
+reserved for the final gap and receipt notes, and a 1-second no-progress
 deadline. Broken pipe, partial-record write followed by failure, queue overflow
 or deadline expiry is evidence loss. The writer preserves unwritten offsets;
 it never retries a whole partially written JSON frame as a second event.
 Strict mode stops the tree; best-effort can continue with the sink marked lost.
-A corrupted/truncated last frame must be recognizable at readback.
+The terminal receipt's note is reserve priority whatever its phase. Once a
+trace loss is known, every later receipt records it: the wrapper source is
+degraded, with one `trace_transport_loss` gap on each covered evidence class
+(the audit classes and `proxy.net`), extended on later receipts rather than
+repeated; `limits` keeps what the platform reported, since its count comes from
+the cgroup counters, not the trace.
+After any evidence loss a sink keeps a prefix: it refuses and counts ordinary
+events and accepts only reserve notes (the gap and receipt notes, and at most
+one lifecycle note per `agent` helper, whose end can explain a stop). An
+external frame already partly written when the terminal drain gives up ends
+the stream: nothing is written after its torn bytes, so the consumer sees a
+visibly incomplete last line, never a corrupt one. The first loss writes one wrapper
+`coverage_gap` note (`trace_transport_loss`) with reserve priority, starting
+from the last point every accepted frame had been delivered. A local write that
+fails part-way is truncated back to the last frame boundary; if that fails,
+nothing more is written. A consumer that has already exceeded its deadline gets
+no second one at settlement.
+
+A corrupted/truncated last frame must be recognizable at readback. A trace
+whose last line is not one complete JSON object ending in LF is visibly
+incomplete; a line before the last that is not one is corrupt, which no
+conforming writer produces. A trace is complete only if its last frame is the
+`jail.receipt` note of the attempt's final receipt.
 
 Control uses a separate bounded queue with reserved terminal-message capacity;
-trace backpressure cannot delay a stop. Disk sync runs independently of the
-supervision loop with a 5-second progress budget. If persistence cannot finish,
-stop the child and keep the transition unacknowledged. Do not wait forever for
-a writer while descendants continue running. No disk spool, replay daemon or
+trace backpressure cannot delay a stop. Control is polled on every loop
+iteration and gets a final drain bounded by the 1-second no-progress deadline;
+every message not fully delivered, a partial frame included, is counted as
+dropped. Every durable write after the lease runs on one persistence worker
+with a 5-second no-progress budget: a write is stalled when the worker
+completes no I/O step for 5 s while it is outstanding. Receipts written while
+the target runs are persisted while the loop keeps enforcing deadlines,
+signals and evidence; their control message follows durability, in order. On
+failure or stall, stop the child with cause `state_write_failed`, keep the
+transition unacknowledged, leave the receipt at its last persisted phase, and
+start no further step of abandoned work: a replacement given up on during one
+step never performs the next, and its temporary file is removed; the step
+already in the kernel may still complete, which is why the lease stays held
+(§7). Do not wait forever for a writer while
+descendants continue running. No disk spool, replay daemon or
 external custody service is added to jail v1.
 
 ## 14. Doctor and recovery
@@ -1742,18 +1978,72 @@ for provider sign-in. `explain` shows these as unmeasured requirements.
 ### 14.2 GC and crash handling
 
 `gc --dry-run` enumerates only the registered state root, takes nonblocking
-attempt locks, and reports actions/reasons in the same JSON shape as `gc`.
-Cleanup is bounded per pass (initially 100,000 entries, 128 open directories)
-and resumable; `gc` prints its report even when it exits 1 because a cleanup
+locks on the existing `jail.lock` files of claimed roots only (a root with
+`jail-state.json`), never creates one, and reports actions/reasons in the same
+JSON shape as `gc`. A root with `jail.lock` but no claim is unclaimed: a
+supervisor holds that lock between creating it and claiming, so a lock taken
+there would refuse its claim; gc retains the root untouched and reports it
+with exit 0. `attempts/` must be a private directory, and an entry that is a
+symlink or not a directory is skipped, never followed.
+Cleanup is bounded per invocation, the listing of `attempts/` included
+(initially 100,000 entries, 128 open directories); a listing the bound ends is
+reported incomplete and gc exits 1. Cleanup is resumable; `gc` prints its report even when it exits 1 because a cleanup
 stays pending. It removes a dead attempt's proxy directory only through the
 socket identity recorded at bind, and reports it in a `proxy_dir` field.
 It never discovers deletion targets by searching all of `/tmp`, HOME or cgroupfs.
 Active locks, unverifiable identities or foreign-platform resources are retained.
+An attempt root without a lock has no lease to take: `gc` retains it untouched
+and reports it, so a reserved root stays claimable and a dry run changes
+nothing on disk.
 
 For a dead supervisor, revalidate boot/process identity and every registered
-resource. In the same boot, a populated, positively identified orphan execution
+resource. The recorded owner is dead when its boot is not the current boot, or
+its pid names no process, a process with another birth time, or a zombie
+whose thread group has no other thread (a zombie leader with a live thread is
+alive: the thread may still be completing a write); an
+owner alive with the same boot, pid and birth time is retained whole even
+without the lease, and an owner whose liveness cannot be read keeps its
+cgroup. In the same boot, a populated, positively identified orphan execution
 cgroup may be killed by this explicit GC invocation, as permitted by the north
-star. Record `gc_terminated_orphan` and verify emptiness before deleting state.
+star. Positive identification: the registration names a direct child of the
+operator's delegated subtree with this attempt's execution-leaf name
+(`ouro-<attempt id>.leaf`), on cgroup v2, with the recorded device and inode,
+and every control file is opened relative to that pinned directory; a
+registration naming another attempt's leaf or no execution leaf, by identity or
+by name only, is retained, reported and never probed. A leaf is killed only
+when the supervisor did not verify the tree's end. gc records
+`gc_terminating_orphan` before `cgroup.kill`, verifies emptiness within §9.3's
+5-second budget, records `gc_terminated_orphan`, records `gc_removing_cgroup`
+(the leaf seen empty) before its `rmdir` and `gc_removed_cgroup` after, then
+removes managed scratch (`gc_removed_scratch`). A registered leaf absent after
+an earlier `gc_terminated_orphan` or `gc_removing_cgroup` for it verifies the
+tree's end. Its reconciliation records go to jail state (`gc_actions`) and its
+report, never to the supervisor's receipt; a record gc repeats is kept once with
+`count` and `last_at`. Finishing a pending vendor-state cleanup completes the
+receipt's `state_cleanup` only when that receipt itself permits the cleanup
+(refused, or settled with a verified tree), as J3 specified; permitted only by
+gc's own verification, jail state and gc's report record it and the receipt is
+left as written. gc reads the leaf from jail state, where the
+supervisor registers it by name before creating it and by device and inode
+right after, before anything is placed in it; a receipt naming another leaf is
+a disagreement and is retained. A leaf registered by name only is removed when
+empty, identified by its name and place only, and never killed. gc's records
+go to `gc_actions` (persistence site P14). The bound includes each leased
+attempt root's listing and the vendor-state resumption. When a pass leaves
+nothing for a later one (owner established dead, cgroup settled, no managed
+scratch, temporary file, proxy directory or pending vendor state, nothing
+failed), gc records `gc_finished`, and later passes spend only the attempt's
+name on it. Pending vendor-state
+cleanup is permitted by a receipt proving tree death or by gc's own
+`gc_terminated_orphan` or `gc_removed_cgroup` record of the registered leaf;
+lost integrity refuses. gc removes a crash's temporary files of the root
+records (`.<jail-state.json|policy.json|jail.json>.<id>.tmp`) only under the
+lease of an attempt whose owner it established dead, and reports them in
+`leftover_temp_files`. A cgroup recorded in another boot is never
+probed or touched. Records that disagree about the boot, lost integrity, and a
+replaced, absent or unverifiable leaf are retained and reported; lost integrity
+retains the leaf and managed scratch in every boot. A corrupt
+state file or receipt is §6.4's failed state access (exit 1).
 After host reboot, the old processes cannot be alive, but any reused cgroup
 path must not be treated as the original resource. Never signal from a stale
 PID or delete a directory solely because its name looks like an attempt id.

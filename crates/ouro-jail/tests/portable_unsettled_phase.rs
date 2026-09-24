@@ -152,6 +152,11 @@ fn receipt_validator() -> Validator {
 }
 
 fn run(script: Script) -> Value {
+    run_keeping(script).1
+}
+
+/// As [`run`], keeping the state directory for inspection.
+fn run_keeping(script: Script) -> (tempfile::TempDir, Value) {
     let root = common::private_tempdir();
     let root_path = root.path().canonicalize().unwrap();
     let workspace = root_path.join("workspace");
@@ -192,7 +197,7 @@ fn run(script: Script) -> Value {
     receipt_validator()
         .validate(&receipt)
         .unwrap_or_else(|error| panic!("the receipt fails its schema: {error}\n{receipt:#}"));
-    receipt
+    (root, receipt)
 }
 
 #[test]
@@ -221,4 +226,41 @@ fn an_unsettled_end_after_a_confirmed_exec_stays_enforced() {
     assert_eq!(receipt["exec_observed"], true);
     assert_eq!(receipt["outcome"]["kind"], "signaled");
     assert_eq!(receipt["lifetime"]["integrity"], "lost");
+}
+
+/// §13.3: a `jail.receipt` trace note names its receipt by `sha256:` over
+/// the receipt's RFC 8785 canonical bytes (canonicalization.md), so a
+/// consumer holding only `jail.json` can check it whatever the file's layout
+/// or the writer's field order. Found in J4 wave 2: the digest was over the
+/// product's own compact serialization, which no consumer could reproduce
+/// without its field order.
+#[test]
+fn the_receipt_note_names_the_receipt_by_its_canonical_digest() {
+    let (root, receipt) = run_keeping(Script {
+        confirm_exec: true,
+        integrity: "lost",
+    });
+    let attempts = root.path().canonicalize().unwrap().join("data/attempts");
+    let attempt = std::fs::read_dir(&attempts)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .expect("one attempt directory");
+    let on_disk: Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("jail.json")).unwrap()).unwrap();
+    assert_eq!(on_disk, receipt, "jail.json is the reported receipt");
+    let trace = std::fs::read(attempt.join("trace.ndjson")).unwrap();
+    let note = trace
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+        .rfind(|frame| frame["operation"] == "jail.receipt")
+        .expect("a receipt note in the trace");
+    let canonical = ouro_jail::canonical::to_jcs(&on_disk).expect("a receipt has no floats");
+    assert_eq!(note["fields"]["phase"], on_disk["phase"]);
+    assert_eq!(
+        note["fields"]["receipt_digest"],
+        ouro_jail::canonical::sha256_prefixed(&canonical),
+        "the note's digest is over the receipt's canonical bytes"
+    );
 }

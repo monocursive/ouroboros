@@ -641,6 +641,120 @@ mod imp {
         let r = unsafe { libc::syscall(libc::SYS_ftruncate, fd as c_long, length as c_long) };
         Attempt::finish(r)
     }
+
+    pub(crate) fn chdir(path: *const c_char) -> Attempt {
+        // SAFETY: `path` outlives the call.
+        let r = unsafe { libc::syscall(libc::SYS_chdir, path) };
+        Attempt::finish(r)
+    }
+
+    /// `CLONE_UNTRACED` from `linux/sched.h`.
+    pub(crate) const CLONE_UNTRACED: u64 = 0x0080_0000;
+
+    /// `clone(CLONE_UNTRACED | SIGCHLD)` with no new stack, which makes the
+    /// child a copy of this process (as `fork` would) that the kernel does
+    /// not attach to a tracer. The child makes one raw `mkdir(path)` and
+    /// exits with its errno, 0 on success. Returns the `clone` result and,
+    /// when a child ran, its raw wait status.
+    ///
+    /// x86_64 only: the argument order of `clone` differs between
+    /// architectures, and this is the one the observer's tables describe.
+    pub(crate) fn clone_untraced_mkdir(path: *const c_char) -> (Attempt, Option<c_int>) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let flags = CLONE_UNTRACED | libc::SIGCHLD as u64;
+            // SAFETY: without CLONE_VM and with a null stack the child runs
+            // on a copy of this address space, exactly like `fork`; every
+            // pointer argument is null. The child below calls only raw
+            // syscalls (async-signal-safe) on memory that was live before
+            // the call, then `_exit`s without returning into Rust code.
+            let r = unsafe {
+                libc::syscall(
+                    libc::SYS_clone,
+                    flags as c_long,
+                    0 as c_long,
+                    0 as c_long,
+                    0 as c_long,
+                    0 as c_long,
+                )
+            };
+            if r == 0 {
+                // SAFETY: `path` points into memory copied into this child;
+                // `_exit` never returns.
+                unsafe {
+                    let m = libc::syscall(libc::SYS_mkdir, path, 0o700 as c_long);
+                    let code = if m == 0 { 0 } else { *libc::__errno_location() };
+                    libc::_exit(code & 0xff);
+                }
+            }
+            let attempt = Attempt::finish(r);
+            let status = if r > 0 {
+                let mut status: c_int = 0;
+                // SAFETY: `r` is this process's own child; `status` is live.
+                let w = unsafe { libc::waitpid(r as libc::pid_t, &raw mut status, libc::__WALL) };
+                (w == r as libc::pid_t).then_some(status)
+            } else {
+                None
+            };
+            (attempt, status)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = path;
+            (
+                Attempt::Absent(format!(
+                    "the clone argument order is only spelled out for x86_64, not {}",
+                    std::env::consts::ARCH
+                )),
+                None,
+            )
+        }
+    }
+
+    /// `struct clone_args` up to `set_tid_size` (`CLONE_ARGS_SIZE_VER0`).
+    #[repr(C)]
+    #[derive(Default)]
+    struct CloneArgs {
+        flags: u64,
+        pidfd: u64,
+        child_tid: u64,
+        parent_tid: u64,
+        exit_signal: u64,
+        stack: u64,
+        stack_size: u64,
+        tls: u64,
+    }
+
+    /// A raw `clone3` with no flags and `SIGCHLD` as the exit signal. The
+    /// child `_exit`s at once; the parent reaps it.
+    pub(crate) fn clone3_probe() -> Attempt {
+        const SYS_CLONE3: c_long = 435;
+        let args = CloneArgs {
+            exit_signal: libc::SIGCHLD as u64,
+            ..CloneArgs::default()
+        };
+        // SAFETY: `args` is a live, correctly sized `clone_args` (version 0)
+        // for the whole call. Without CLONE_VM the child runs on a copy of
+        // this address space and only calls `_exit`.
+        let r = unsafe {
+            libc::syscall(
+                SYS_CLONE3,
+                std::ptr::addr_of!(args),
+                size_of::<CloneArgs>() as c_long,
+            )
+        };
+        if r == 0 {
+            // SAFETY: the child of the clone above; `_exit` never returns.
+            unsafe { libc::_exit(0) };
+        }
+        let attempt = Attempt::finish(r);
+        if r > 0 {
+            let mut status: c_int = 0;
+            // SAFETY: `r` is this process's own child; `status` is live.
+            unsafe { libc::waitpid(r as libc::pid_t, &raw mut status, 0) };
+        }
+        attempt
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -908,6 +1022,20 @@ mod imp {
         // SAFETY: `fd` is a descriptor the caller owns; nothing is dereferenced.
         let r = unsafe { libc::ftruncate(fd, length as libc::off_t) };
         Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn chdir(path: *const c_char) -> Attempt {
+        // SAFETY: `path` outlives the call.
+        let r = unsafe { libc::chdir(path) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn clone_untraced_mkdir(_path: *const c_char) -> (Attempt, Option<c_int>) {
+        (linux_only!("clone"), None)
+    }
+
+    pub(crate) fn clone3_probe() -> Attempt {
+        linux_only!("clone3")
     }
 }
 

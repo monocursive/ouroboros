@@ -195,3 +195,200 @@ fn which(program: &str) -> Option<PathBuf> {
             .find(|candidate| candidate.is_file())
     })
 }
+
+// ---------------------------------------------------------------------------
+// J4-R: the receipt checks the schema cannot express (R01)
+// ---------------------------------------------------------------------------
+
+/// The Rust port of `validate_contract.py`'s `semantic_receipt`: the receipt
+/// rules JSON Schema cannot state, checked on a receipt the schema accepted.
+///
+/// - every byte-valued native string is canonical padded base64 of bytes that
+///   are not valid UTF-8 (those must use the string form) and hold no NUL;
+/// - credential ids are unique, and so are `applied.limits` keys;
+/// - a coverage class that is not `unsupported` names a source whose observer
+///   status is not `unsupported` either.
+///
+/// # Errors
+/// The first rule the receipt breaks, with the JSON path.
+pub fn semantic_receipt(record: &serde_json::Value) -> Result<(), String> {
+    check_byte_objects(record, "$")?;
+    let keys = |list: &serde_json::Value, key: &str, what: &str| -> Result<(), String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for item in list
+            .as_array()
+            .ok_or_else(|| format!("{what} is not an array"))?
+        {
+            let value = item[key].to_string();
+            if !seen.insert(value.clone()) {
+                return Err(format!("duplicate {what} {value}"));
+            }
+        }
+        Ok(())
+    };
+    keys(&record["credentials"], "id", "credential id")?;
+    keys(&record["applied"]["limits"], "key", "limit")?;
+    let coverage = record["coverage"]
+        .as_object()
+        .ok_or("coverage is not an object")?;
+    for (name, class) in coverage {
+        if class["status"] == "unsupported" {
+            continue;
+        }
+        let source = class["sources"][0]
+            .as_str()
+            .ok_or_else(|| format!("coverage {name} is not unsupported but names no source"))?;
+        if record["observer"]["sources"][source] == "unsupported" {
+            return Err(format!(
+                "coverage {name} counts from source {source}, which the observer reports unsupported"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_byte_objects(node: &serde_json::Value, at: &str) -> Result<(), String> {
+    match node {
+        serde_json::Value::Object(map) => {
+            if map.get("encoding").and_then(serde_json::Value::as_str) == Some("base64") {
+                return native_bytes(node)
+                    .map(|_| ())
+                    .map_err(|error| format!("{at}: {error}"));
+            }
+            for (key, value) in map {
+                check_byte_objects(value, &format!("{at}.{key}"))?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for (index, value) in items.iter().enumerate() {
+                check_byte_objects(value, &format!("{at}[{index}]"))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The bytes a native string names (canonicalization.md, "Native strings").
+///
+/// # Errors
+/// Why the value is not a canonical native string.
+pub fn native_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let raw = match value {
+        serde_json::Value::String(text) => text.as_bytes().to_vec(),
+        serde_json::Value::Object(map) => {
+            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            if keys != ["data", "encoding"] {
+                return Err(format!("a byte object has the keys {keys:?}"));
+            }
+            if map["encoding"] != "base64" {
+                return Err("a byte object's encoding is not base64".to_owned());
+            }
+            let data = map["data"]
+                .as_str()
+                .ok_or("a byte object's data is not a string")?;
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|error| format!("the base64 does not decode: {error}"))?;
+            if base64::engine::general_purpose::STANDARD.encode(&raw) != data {
+                return Err("the base64 is not canonical".to_owned());
+            }
+            if std::str::from_utf8(&raw).is_ok() {
+                return Err("UTF-8 bytes must use the JSON string form".to_owned());
+            }
+            raw
+        }
+        other => return Err(format!("{other} is not a native string")),
+    };
+    if raw.contains(&0) {
+        return Err("a native value contains NUL".to_owned());
+    }
+    Ok(raw)
+}
+
+/// Every checked-in schema, by stem (`jail-receipt`, `jail-event`, ...), built
+/// once per test binary with the cross-schema registry and format checks.
+pub fn validators() -> &'static std::collections::BTreeMap<String, jsonschema::Validator> {
+    static ONCE: OnceLock<std::collections::BTreeMap<String, jsonschema::Validator>> =
+        OnceLock::new();
+    ONCE.get_or_init(|| {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1");
+        let mut schemas = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(&dir).expect("the specification directory") {
+            let path = entry.expect("an entry").path();
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Some(stem) = name.strip_suffix(".schema.json") {
+                let schema: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).expect("a schema"))
+                        .expect("a JSON schema");
+                schemas.insert(stem.to_owned(), schema);
+            }
+        }
+        let resources: Vec<(String, jsonschema::Resource)> = schemas
+            .values()
+            .map(|schema| {
+                (
+                    schema["$id"].as_str().expect("an $id").to_owned(),
+                    jsonschema::Resource::from_contents(schema.clone()),
+                )
+            })
+            .collect();
+        let registry: &'static jsonschema::Registry = Box::leak(Box::new(
+            jsonschema::Registry::new()
+                .extend(resources)
+                .expect("the registry")
+                .prepare()
+                .expect("the registry"),
+        ));
+        schemas
+            .into_iter()
+            .map(|(name, schema)| {
+                let validator = jsonschema::options()
+                    .with_registry(registry)
+                    .should_validate_formats(true)
+                    .build(&schema)
+                    .expect("a validator");
+                (name, validator)
+            })
+            .collect()
+    })
+}
+
+/// A receipt the product wrote: schema-valid and semantically valid.
+///
+/// # Errors
+/// Every schema error, or the semantic rule it breaks.
+pub fn check_receipt(receipt: &serde_json::Value) -> Result<(), String> {
+    let errors: Vec<String> = validators()["jail-receipt"]
+        .iter_errors(receipt)
+        .map(|error| format!("{} at {}", error, error.instance_path()))
+        .collect();
+    if !errors.is_empty() {
+        return Err(format!("schema: {errors:?}"));
+    }
+    semantic_receipt(receipt).map_err(|error| format!("semantic: {error}"))
+}
+
+/// [`semantic_receipt`] as an assertion, for a product receipt a live test
+/// has already validated against the schema: a failure names the rule and
+/// prints the receipt. It is a product finding, never a reason to relax it.
+pub fn assert_semantic_receipt(receipt: &serde_json::Value) {
+    if let Err(error) = semantic_receipt(receipt) {
+        panic!("a receipt breaks a rule its schema cannot state: {error}\n{receipt:#}");
+    }
+}
+
+/// [`check_receipt`] as an assertion, for a product receipt a live test
+/// reads: schema and semantic rules. Returns the receipt.
+#[must_use]
+pub fn checked_receipt(receipt: serde_json::Value) -> serde_json::Value {
+    if let Err(error) = check_receipt(&receipt) {
+        panic!("a product receipt fails its contract: {error}\n{receipt:#}");
+    }
+    receipt
+}

@@ -472,6 +472,33 @@ impl JailError {
         exit_code_for(self.code)
     }
 
+    // J4-R begin: S5, a persistence failure before exec is a refusal
+    /// The process exit status for this error when it ends an attempt before
+    /// the target executed (§6.4: "125 for refusal before user exec").
+    ///
+    /// J4 decision S5: failed or ambiguous persistence before exec refuses
+    /// (§7), so `state_write_failed` exits 125 there, like every other
+    /// refusal; after exec the same code is a tool error and [`exit_code`]
+    /// (1) applies. Every other code keeps its own status.
+    ///
+    /// [`exit_code`]: JailError::exit_code
+    #[must_use]
+    pub fn refusal_exit_code(&self) -> i32 {
+        match self.code {
+            ErrorCode::StateWriteFailed => 125,
+            _ => self.exit_code(),
+        }
+    }
+
+    /// The same error, raised in `stage`: a persistence step does not know
+    /// which lifecycle stage its caller is in, the caller does.
+    #[must_use]
+    pub fn in_stage(mut self, stage: ErrorStage) -> Self {
+        self.stage = stage;
+        self
+    }
+    // J4-R end
+
     /// The wire form for `errors[]` and `outcome.error`.
     #[must_use]
     pub fn to_object(&self) -> ErrorObject {
@@ -487,19 +514,52 @@ impl JailError {
 
 impl fmt::Display for JailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
+        write_error_line(
             f,
-            "ouro-jail: error {} at {} [{}]: {}",
             self.code.as_str(),
             self.stage.as_str(),
-            remediation_str(self.remediation),
-            self.message
-        )?;
-        if let Some(path) = &self.key_path {
-            write!(f, " (key: {path})")?;
-        }
-        Ok(())
+            self.remediation,
+            &self.message,
+            self.key_path.as_deref(),
+        )
     }
+}
+
+// J4 W3 begin: P5, an error that reached no receipt is printed like any other
+/// The same one-line diagnostic as [`JailError`]'s, for an error known only
+/// in its wire form.
+impl fmt::Display for ErrorObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_error_line(
+            f,
+            &self.code,
+            &self.stage,
+            self.remediation_category,
+            &self.message,
+            self.key_path.as_deref(),
+        )
+    }
+}
+// J4 W3 end
+
+/// §6.1: one line per error on stderr.
+fn write_error_line(
+    f: &mut fmt::Formatter<'_>,
+    code: &str,
+    stage: &str,
+    remediation: Remediation,
+    message: &str,
+    key_path: Option<&str>,
+) -> fmt::Result {
+    write!(
+        f,
+        "ouro-jail: error {code} at {stage} [{}]: {message}",
+        remediation_str(remediation),
+    )?;
+    if let Some(path) = key_path {
+        write!(f, " (key: {path})")?;
+    }
+    Ok(())
 }
 
 impl std::error::Error for JailError {}
