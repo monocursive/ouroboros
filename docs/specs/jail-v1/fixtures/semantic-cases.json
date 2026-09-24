@@ -1060,6 +1060,23 @@
       ]
     },
     {
+      "name": "a repeated message number",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            2,
+            "seq"
+          ],
+          "value": 2
+        }
+      ],
+      "violations": [
+        "control_seq_order"
+      ]
+    },
+    {
       "name": "a refusal after exec",
       "check": "control",
       "base": "fixtures/control-tool.json",
