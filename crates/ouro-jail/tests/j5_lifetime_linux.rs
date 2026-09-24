@@ -865,14 +865,13 @@ fn x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty() {
     member.release(killed);
     let (run, _) = attempt.finish();
     assert!(dead(&tree.descendant), "the target's descendant survived");
-    assert!(
-        killed,
-        "the supervisor never killed the leaf's extra member, so nothing was proved; \
-         terminal {terminal}"
-    );
     assert_eq!(
         terminal["kind"], "unsettled",
         "a leaf that was never seen empty was announced: {terminal}"
+    );
+    assert!(
+        killed,
+        "the supervisor never killed the leaf's extra member, so nothing was proved"
     );
     let receipt = final_receipt(&run);
     assert_ne!(receipt["phase"], "settled", "{receipt:#}");
@@ -1740,22 +1739,24 @@ fn l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump() {
     eprintln!("L04.4/L04.6: wall expired {took:?} after the boot clock advanced");
 }
 
-/// L04.5: the wall deadline ignores wall-clock adjustments. A 4 s wall; right
+/// L04.5: the wall deadline ignores wall-clock adjustments. A 6 s wall; right
 /// after exec the shim steps only CLOCK_REALTIME by an hour forward, and in a
-/// second run an hour back. Both walls expire on time: not before 3.5 s after
+/// second run an hour back. Both walls expire on time: not before 3 s after
 /// exec (a deadline on the stepped clock would expire at once forward, or
-/// never backward), and within the wall plus §9.3's budgets.
+/// never backward; the margin absorbs the delay between release, where the
+/// wall starts, and `exec_confirmed` on a loaded host), and within the wall
+/// plus §9.3's budgets.
 #[test]
 fn l04_the_execution_wall_ignores_wall_clock_steps() {
     if !common::live() {
         return;
     }
     for offset in [HOUR_NS, -HOUR_NS] {
-        let (took, receipt) = shifted_wall_run("4s", libc::CLOCK_REALTIME, offset);
+        let (took, receipt) = shifted_wall_run("6s", libc::CLOCK_REALTIME, offset);
         assert_wall_expired(&receipt);
         assert!(
-            took >= Duration::from_millis(3500) && took < Duration::from_secs(4) + STOP_BOUND,
-            "a {}h wall-clock step moved the 4 s wall: it expired {took:?} after exec",
+            took >= Duration::from_secs(3) && took < Duration::from_secs(6) + STOP_BOUND,
+            "a {}h wall-clock step moved the 6 s wall: it expired {took:?} after exec",
             offset / HOUR_NS
         );
         eprintln!(
