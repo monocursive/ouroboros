@@ -388,7 +388,9 @@ fn ensure_wake_handler() -> bool {
 }
 
 fn seize_and_confirm(launcher: pid_t) -> Result<(), TracerError> {
-    if !cfg!(target_arch = "x86_64") {
+    // J5-D: the one statement of which architecture the tables cover, so
+    // the tracer refuses exactly where `doctor` reports it unsupported.
+    if !super::super::seccomp::tables_cover(std::env::consts::ARCH) {
         return Err(TracerError::UnsupportedArch);
     }
     ensure_wake_handler();
@@ -2930,7 +2932,13 @@ mod tests {
                             libc::O_WRONLY | libc::O_CLOEXEC,
                         );
                     } else {
+                        // J5-D: `mkdir` has no syscall of its own off x86_64;
+                        // the test only runs where the tracer does, but it
+                        // must compile for every Linux target.
+                        #[cfg(target_arch = "x86_64")]
                         libc::syscall(libc::SYS_mkdir, path.as_ptr(), 0o700);
+                        #[cfg(not(target_arch = "x86_64"))]
+                        libc::syscall(libc::SYS_mkdirat, libc::AT_FDCWD, path.as_ptr(), 0o700);
                     }
                     libc::_exit(0);
                 }

@@ -148,6 +148,54 @@ pub fn run_all(jail_exe: &Path, bwrap: &Path) -> Vec<ProbeResult> {
 /// Run one probe by name. An unknown name is `skipped`, never a silent pass.
 #[must_use]
 pub fn run_one(name: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+    run_one_for(name, std::env::consts::ARCH, jail_exe, bwrap)
+}
+
+// J5-D begin: the architecture refusal (§3.2)
+/// The probes whose mechanism is one of this implementation's x86_64
+/// syscall tables, with the mechanism each one names: the `tool` and `agent`
+/// filters, the observer's closed set and narrowing filter, and the
+/// unix-peer mediation filter the `agent` rows run under.
+pub const TABLE_BOUND_PROBES: [(&str, &str); 6] = [
+    ("seccomp_filter_load", "seccomp-bpf"),
+    ("observer_closed_set", "ptrace-seccomp"),
+    ("seccomp_user_notification", "seccomp-user-notification"),
+    ("agent_proxy_bridge", "outside-http-proxy+loopback-bridge"),
+    ("agent_unix_peer_mediation", "seccomp-user-notification"),
+    ("agent_inner_sandbox", "landlock+seccomp"),
+];
+
+/// The result a table-bound probe has on an architecture the tables do not
+/// cover: `unsupported` (the implementation lacks it, §3.1), measured by
+/// nothing. `None` when the probe runs as usual.
+#[must_use]
+pub fn architecture_refusal(name: &str, arch: &str) -> Option<ProbeResult> {
+    if seccomp::tables_cover(arch) {
+        return None;
+    }
+    let (name, mechanism) = TABLE_BOUND_PROBES
+        .iter()
+        .find(|(bound, _)| *bound == name)?;
+    Some(ProbeResult::new(
+        name,
+        ProbeStatus::Unsupported,
+        mechanism,
+        seccomp::REASON_UNSUPPORTED_ARCHITECTURE,
+        format!(
+            "this build is for {arch}; the syscall tables this mechanism rests on are {} only \
+             (Linux {arch} is a later lane, jail-v1 §3.2)",
+            seccomp::TABLE_ARCH
+        ),
+    ))
+}
+
+/// [`run_one`] for a stated architecture, so the refusal is testable on the
+/// architecture the tests run on.
+#[must_use]
+pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+    if let Some(refusal) = architecture_refusal(name, arch) {
+        return refusal;
+    }
     match name {
         "bwrap_present" => probe_bwrap_present(bwrap),
         "user_namespace" => probe_namespace("user_namespace", jail_exe, bwrap),
@@ -179,6 +227,7 @@ pub fn run_one(name: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         ),
     }
 }
+// J5-D end
 
 // ---------------------------------------------------------------------------
 // Probes that need a sandbox
@@ -1283,6 +1332,116 @@ mod tests {
         assert_eq!(result.status, ProbeStatus::Unavailable);
         assert_eq!(result.reason_code, "backend_unavailable");
     }
+
+    // J5-D begin: the architecture refusal (§3.2; gap analysis §2.3b)
+    /// The rows whose mechanism is one of this implementation's x86_64
+    /// syscall tables. Written out, so a probe that drops out of the refusal
+    /// is a failing test, not a silent change.
+    const TABLE_BOUND: [&str; 6] = [
+        "seccomp_filter_load",
+        "observer_closed_set",
+        "seccomp_user_notification",
+        "agent_proxy_bridge",
+        "agent_unix_peer_mediation",
+        "agent_inner_sandbox",
+    ];
+
+    #[test]
+    fn off_x86_64_the_table_bound_probes_are_unsupported_before_running() {
+        for arch in ["aarch64", "riscv64", "x86", "powerpc64"] {
+            for name in PROBE_NAMES {
+                let Some(refusal) = architecture_refusal(name, arch) else {
+                    assert!(
+                        !TABLE_BOUND.contains(&name),
+                        "{arch}: {name} rests on a syscall table and was not refused"
+                    );
+                    continue;
+                };
+                assert!(TABLE_BOUND.contains(&name), "{arch}: {name} was refused");
+                assert_eq!(refusal.name, name);
+                assert_eq!(refusal.status, ProbeStatus::Unsupported, "{arch} {name}");
+                assert_eq!(refusal.reason_code, "unsupported_architecture");
+                assert!(refusal.evidence.contains(arch), "{refusal:?}");
+                // `run_one` consults the refusal before it runs anything:
+                // these paths do not exist, so a probe that ran would say
+                // `error` or `unavailable`, never `unsupported`.
+                assert_eq!(
+                    run_one_for(
+                        name,
+                        arch,
+                        Path::new("/nonexistent"),
+                        Path::new("/nonexistent")
+                    ),
+                    refusal
+                );
+            }
+        }
+        // On the architecture the tables cover, nothing is refused.
+        for name in PROBE_NAMES {
+            assert_eq!(architecture_refusal(name, "x86_64"), None, "{name}");
+        }
+    }
+
+    /// The capability mapping: on a build the tables do not cover, the
+    /// syscall filter and the closed-set observer derive `unsupported` with
+    /// the architecture's reason, which no requirement accepts, so `doctor`
+    /// is not ready and `run` refuses with 125 before preparation.
+    #[test]
+    fn off_x86_64_the_filter_and_observer_capabilities_refuse() {
+        use crate::capability::{CapabilityScope, CapabilityStatus};
+        // Every other probe as if it had succeeded, so the refusal is the
+        // architecture's alone.
+        let results: Vec<ProbeResult> = PROBE_NAMES
+            .iter()
+            .map(|name| {
+                architecture_refusal(name, "aarch64").unwrap_or_else(|| {
+                    ProbeResult::new(name, ProbeStatus::Available, "test", "ok", "")
+                })
+            })
+            .collect();
+        for (requirement, probes, scope) in [
+            (
+                crate::capability::REQ_SYSCALL_FILTER,
+                &["seccomp_filter_load"][..],
+                CapabilityScope::Process,
+            ),
+            (
+                crate::capability::REQ_CLOSED_SET_OBSERVATION,
+                &["ptrace_seize_descendant", "observer_closed_set"][..],
+                CapabilityScope::Tree,
+            ),
+            (
+                crate::capability::REQ_NETWORK_PROXY,
+                &[
+                    "bwrap_present",
+                    "network_namespace",
+                    "seccomp_user_notification",
+                ][..],
+                CapabilityScope::Tree,
+            ),
+        ] {
+            let capability = super::super::platform::shared::capability_from(
+                requirement,
+                probes,
+                "test",
+                scope,
+                &results,
+                "2026-09-24T00:00:00Z",
+            );
+            assert_eq!(
+                capability.status,
+                CapabilityStatus::Unsupported,
+                "{requirement}"
+            );
+            assert_eq!(
+                capability.reason_code.as_deref(),
+                Some("unsupported_architecture"),
+                "{requirement}"
+            );
+            assert!(!capability.satisfies(), "{requirement}");
+        }
+    }
+    // J5-D end
 
     #[test]
     fn statuses_render_as_the_spec_spells_them() {
