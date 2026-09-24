@@ -1203,9 +1203,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     // J5-B1 begin: X05.3 — §8.3 "The supervisor must not retain writable
     // copies that postpone EOF". Every process that needs the caller's stdout
-    // has it by now; `run` itself never writes stdout, so the supervisor's own
-    // copy goes, and a target that closes its stdout gives the caller EOF.
-    release_own_stdout();
+    // has it by now; the `ouro-jail` binary's `run` never writes stdout, so it
+    // lets its copy go and a target that closes its stdout gives the caller
+    // EOF. Only the binary opts in: an in-process caller keeps its stdout.
+    if RELEASE_STDOUT_AFTER_PREPARE.load(std::sync::atomic::Ordering::SeqCst) {
+        release_own_stdout();
+    }
     // J5-B1 end
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
@@ -2141,6 +2144,18 @@ fn child_visible_roots(plan: &Plan) -> Vec<PathBuf> {
 }
 
 // J5-B1 begin: X05.3
+static RELEASE_STDOUT_AFTER_PREPARE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// For the `ouro-jail` binary only, whose stdout is the target's: once an
+/// attempt is prepared, [`run`] points this process's stdout at `/dev/null`
+/// so the supervisor holds no copy that postpones the caller's EOF (§8.3).
+/// A program that calls the library in-process never calls this and keeps
+/// its stdout.
+pub fn release_stdout_after_prepare() {
+    RELEASE_STDOUT_AFTER_PREPARE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Points this process's own stdout at `/dev/null`. Best effort: a failure
 /// leaves the copy in place, which only delays the caller's EOF.
 fn release_own_stdout() {

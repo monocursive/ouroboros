@@ -713,6 +713,8 @@ fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 fn run(context: &Context, args: &RunArgs) -> ExitCode {
+    // J5-B1: X05.3 — this binary's stdout is the target's (§8.3).
+    supervisor::release_stdout_after_prepare();
     let report = supervisor::run(context, args);
     // §6.1: `--label-only` prints the proposed execution label and describes
     // each capability; it executes nothing and copies no credential.
