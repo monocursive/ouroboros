@@ -433,55 +433,196 @@ fn x02_withheld_is_gate_closed_and_a_never_delivered_gate_times_out() {
 }
 
 // ===========================================================================
-// I03: the real jail against an owner that binds the full plan
+// I03: the real jail against an owner whose plan is its own
 // ===========================================================================
 
-/// The scripted owner binds the attempt, policy digest, argv digest and the
-/// applied requirements, and only a matching plan releases the real jail
-/// once; a plan that disagrees on any of them closes the gate with no marker.
-/// This is I03 against `ouro-jail` itself, not the harness stand-in.
+/// A fresh attempt id the owner allocates itself (§7: UUIDv4, RFC 9562
+/// variant, lowercase, `att_` prefix), so the attempt binding does not come
+/// from the proposal being judged.
+fn owner_attempt_id() -> String {
+    use std::io::Read as _;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut bytes))
+        .expect("random bytes");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "att_{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// The owner's expected plan, computed from the owner's own operator inputs
+/// and never from the prepared receipt it will judge (review H3): the policy
+/// digest and requirements from `ouro-jail explain --json` over the profile,
+/// workspace and state it will hand the jail (§6.1: explain resolves without
+/// probing or executing), the argv digest from the argv it asked for through
+/// the canonical argv framing, and the attempt id it allocated.
+fn owner_plan(
+    jail: &Jail,
+    profile: &str,
+    workspace: &Path,
+    argv: &[&OsStr],
+    attempt: &str,
+) -> ExpectedPlan {
+    use std::os::unix::ffi::OsStrExt as _;
+    let output = std::process::Command::new(harness::jail_path())
+        .args(["explain", "--json", "--profile", profile, "--workspace"])
+        .arg(workspace)
+        .env("OURO_DATA_DIR", jail.data_dir())
+        .env("OURO_CONFIG_DIR", jail.config_dir())
+        .output()
+        .expect("explain runs");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "explain: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let explained: Value = serde_json::from_slice(&output.stdout).expect("explain --json");
+    let digest = explained["policy"]["digest"]
+        .as_str()
+        .expect("a policy digest")
+        .to_owned();
+    let requirements: Vec<String> = explained["requirements"]
+        .as_array()
+        .expect("requirements")
+        .iter()
+        .map(|requirement| requirement["name"].as_str().expect("a name").to_owned())
+        .collect();
+    assert!(
+        !requirements.is_empty(),
+        "the operator inputs imply requirements"
+    );
+    let framed: Vec<Vec<u8>> = argv.iter().map(|part| part.as_bytes().to_vec()).collect();
+    ExpectedPlan::complete(
+        attempt,
+        digest,
+        ouro_jail::canonical::argv_digest(&framed),
+        requirements,
+    )
+}
+
+/// One managed `tool` run whose owner planned `plan_tail` and whose jail is
+/// launched with `launch_tail` (the same unless a test models a request
+/// changed after it was authorised). `late_project` is untrusted workspace
+/// data (`ouro.toml`) written after the owner planned, as a submitter could.
+/// Both tails get the fixture path in front and see the target's marker.
+struct Owned {
+    spawned: Spawned,
+    marker: PathBuf,
+    plan: ExpectedPlan,
+    attempt: String,
+}
+
+fn owned_run(
+    tails: impl FnOnce(&Path) -> (Vec<String>, Vec<String>),
+    late_project: Option<&str>,
+) -> Owned {
+    let jail = Jail::new().expect("a private jail harness");
+    let (workspace, fixture) = workspace_with_fixture(jail.root());
+    let marker = workspace.join("target-ran");
+    let (plan_tail, launch_tail) = tails(&marker);
+    let full = |tail: &[String]| -> Vec<std::ffi::OsString> {
+        std::iter::once(fixture.clone().into_os_string())
+            .chain(tail.iter().map(std::ffi::OsString::from))
+            .collect()
+    };
+    let plan_argv = full(&plan_tail);
+    let launch_argv = full(&launch_tail);
+    let attempt = owner_attempt_id();
+    let plan_refs: Vec<&OsStr> = plan_argv
+        .iter()
+        .map(std::ffi::OsString::as_os_str)
+        .collect();
+    let plan = owner_plan(&jail, "tool", &workspace, &plan_refs, &attempt);
+    if let Some(text) = late_project {
+        std::fs::write(workspace.join("ouro.toml"), text).expect("the late project file");
+    }
+    let spawned = jail
+        .arg("run")
+        .args(["--profile", "tool", "--workspace"])
+        .arg(&workspace)
+        .args(["--attempt-id", &attempt])
+        .trace()
+        .control()
+        .gate()
+        .receipt()
+        .target(&launch_argv)
+        .spawn()
+        .expect("the jail starts");
+    Owned {
+        spawned,
+        marker,
+        plan,
+        attempt,
+    }
+}
+
+fn open_marker(marker: &Path) -> Vec<String> {
+    vec![
+        "open".to_owned(),
+        marker.display().to_string(),
+        "--create".to_owned(),
+        "--write".to_owned(),
+    ]
+}
+
+/// The owner judges the proposal against its own plan and, on any mismatch,
+/// closes the gate. Returns the mismatches it found (empty: it released).
+fn owner_decides(owned: &mut Owned) -> Vec<String> {
+    let control = owned.spawned.owner().await_prepared().expect("prepared");
+    let receipt = common::checked_receipt(owned.spawned.receipt_value().expect("a receipt"));
+    match owned
+        .spawned
+        .owner()
+        .authorise(&control, Some(&receipt), &owned.plan)
+    {
+        Ok(proposal) => {
+            let digest = proposal.policy_digest.expect("a policy digest");
+            owned
+                .spawned
+                .owner()
+                .release(&Release::Valid, &owned.attempt, &digest)
+                .expect("release");
+            Vec::new()
+        }
+        Err((_, problems)) => {
+            owned.spawned.owner().withhold();
+            problems
+        }
+    }
+}
+
+/// I03.2 and I03.3: the owner compares the prepared attempt, policy digest,
+/// argv digest and requirements with a plan it computed from its own inputs
+/// (review H3: the plan used to be read from the receipt it judged, so a
+/// product writing a wrong argv digest or dropping a requirement passed).
+/// A matching plan releases the real jail exactly once; a request whose argv
+/// changed after the owner authorised it is not released and runs nothing.
 #[test]
-fn i03_a_full_plan_releases_once_and_any_mismatch_closes_the_gate() {
+fn i03_an_independent_full_plan_releases_once_and_a_mismatch_closes_the_gate() {
     if !common::live() {
         return;
     }
-    // The plan the owner authorises: read the prepared proposal and bind
-    // every field, so the owner is comparing against a real, complete plan.
-    let (mut spawned, marker) = gated_case();
-    let control = spawned.owner().await_prepared().expect("prepared");
-    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
-    let attempt = control["attempt_id"].as_str().unwrap().to_owned();
-    let digest = receipt["policy"]["digest"].as_str().unwrap().to_owned();
-    let argv_digest = receipt["argv_digest"]
-        .as_str()
-        .expect("an argv digest")
-        .to_owned();
-    let requirements: Vec<String> = receipt["policy"]["requirements"]
-        .as_array()
-        .expect("the requirements")
-        .iter()
-        .map(|item| item.as_str().unwrap().to_owned())
-        .collect();
-    assert!(!requirements.is_empty(), "a tool attempt has requirements");
-    let plan = ExpectedPlan::complete(&attempt, &digest, &argv_digest, requirements.clone());
-    let proposal = spawned
-        .owner()
-        .authorise(&control, Some(&receipt), &plan)
-        .unwrap_or_else(|(_, problems)| panic!("the full plan did not match: {problems:?}"));
-    assert_eq!(
-        proposal.requirements,
-        Some({
-            let mut sorted = requirements.clone();
-            sorted.sort();
-            sorted.dedup();
-            sorted
-        })
+    let mut owned = owned_run(|marker| (open_marker(marker), open_marker(marker)), None);
+    assert!(
+        owned.plan.unbound().is_empty(),
+        "the plan binds every field"
     );
-    spawned
-        .owner()
-        .release(&Release::Valid, &attempt, &digest)
-        .expect("release");
-    let run = spawned.wait().expect("the jail finishes");
+    let problems = owner_decides(&mut owned);
+    assert!(
+        problems.is_empty(),
+        "the owner's own plan did not match: {problems:?}"
+    );
+    let marker = owned.marker.clone();
+    let run = owned.spawned.wait().expect("the jail finishes");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
     assert!(marker.is_file(), "the released target did not run");
     let execs = run
@@ -491,84 +632,115 @@ fn i03_a_full_plan_releases_once_and_any_mismatch_closes_the_gate() {
         .count();
     assert_eq!(execs, 1, "one release, one exec");
 
-    // A plan that disagrees on the requirements would not authorise this
-    // proposal, and an owner that withholds on that mismatch runs no target.
-    let dropped = requirements.last().cloned().unwrap();
-    let widened: Vec<String> = requirements
-        .iter()
-        .filter(|name| **name != dropped)
-        .cloned()
-        .collect();
-    let (mut spawned, marker) = gated_case();
-    let control = spawned.owner().await_prepared().expect("prepared");
-    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
-    let attempt = control["attempt_id"].as_str().unwrap().to_owned();
-    let digest = receipt["policy"]["digest"].as_str().unwrap().to_owned();
-    let argv_digest = receipt["argv_digest"].as_str().unwrap().to_owned();
-    let mismatch = ExpectedPlan::complete(&attempt, &digest, &argv_digest, widened);
-    let refused = spawned
-        .owner()
-        .authorise(&control, Some(&receipt), &mismatch);
-    assert!(
-        refused.is_err(),
-        "a requirements mismatch must not authorise"
+    // The request changed after authorisation: one more argument reached the
+    // jail than the owner asked for. The argv digest differs, the owner
+    // closes the gate, and nothing runs.
+    let mut owned = owned_run(
+        |marker| {
+            let asked = open_marker(marker);
+            let mut launched = asked.clone();
+            launched.push("--trunc".to_owned());
+            (asked, launched)
+        },
+        None,
     );
-    spawned.owner().withhold();
-    let run = spawned.wait().expect("the jail finishes");
-    assert_eq!(run.code(), Some(125));
+    let problems = owner_decides(&mut owned);
     assert!(
-        !marker.exists(),
-        "the target ran despite the owner's mismatch"
+        problems
+            .iter()
+            .any(|problem| problem.starts_with("argv_digest:")),
+        "{problems:?}"
     );
+    let marker = owned.marker.clone();
+    let run = owned.spawned.wait().expect("the jail finishes");
+    assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+    assert!(!marker.exists(), "the target ran on a closed gate");
+    assert_eq!(error_code(&run).as_deref(), Some("gate_closed"));
 }
 
-/// A release frame carrying an injected field beyond the four §8.2 names is
-/// rejected, and a valid release leaves the applied policy exactly as the
-/// operator's inputs resolved it: an untrusted request field cannot mutate
-/// the owner's operator inputs (I03, last clause).
+/// I03.4: the fields of the untrusted request — its argv and the project file
+/// in its workspace (§6.2: steps 1-4 are the operator's; the workspace-root
+/// `ouro.toml` is the contained party's) — cannot mutate the owner's operator
+/// inputs. Operator-flag look-alikes in the argv stay literal and the policy
+/// is exactly the owner's; a project file that selects a profile refuses
+/// before anything is prepared; one that only narrows is still a change the
+/// owner did not authorise, so its plan catches it and nothing runs.
 #[test]
-fn i03_an_untrusted_release_field_cannot_change_the_resolved_policy() {
+fn i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs() {
     if !common::live() {
         return;
     }
-    // An injected key on an otherwise valid frame refuses, and no target runs.
-    let (mut spawned, marker) = gated_case();
-    let (attempt, digest) = prepared_binding(&mut spawned);
-    let injected = format!(
-        "{{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":{attempt:?},\
-         \"policy_digest\":{digest:?},\"grants\":[{{\"path\":\"/etc\"}}]}}\n"
+    const LOOK_ALIKES: [&str; 6] = ["--profile", "none", "--rw", "/", "--observe", "off"];
+
+    // (a) The request's argv carries operator flags after `--`.
+    let mut owned = owned_run(
+        |_| {
+            let tail: Vec<String> = std::iter::once("echo-args".to_owned())
+                .chain(std::iter::once("--".to_owned()))
+                .chain(LOOK_ALIKES.iter().map(|part| (*part).to_owned()))
+                .collect();
+            (tail.clone(), tail)
+        },
+        None,
     );
-    spawned
-        .owner()
-        .release(&Release::Raw(injected.into_bytes()), &attempt, &digest)
-        .expect("the frame is written");
-    let run = spawned.wait().expect("the jail finishes");
+    let problems = owner_decides(&mut owned);
+    assert!(
+        problems.is_empty(),
+        "argv look-alikes changed the policy away from the owner's plan: {problems:?}"
+    );
+    let run = owned.spawned.wait().expect("the jail finishes");
+    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+    let settled = settled(&run);
+    assert_eq!(settled["policy"]["name"], "tool");
+    assert_eq!(settled["policy"]["observe"], "on");
+    assert_eq!(settled["policy"]["grants"], serde_json::json!([]));
+    let echoed = run
+        .fixture_lines()
+        .into_iter()
+        .find(|line| line["op"] == "echo-args")
+        .expect("the target echoed its argv");
     assert_eq!(
-        run.code(),
-        Some(125),
-        "an injected field must refuse: {}",
+        echoed["args"]["count"],
+        LOOK_ALIKES.len(),
+        "the look-alikes reached the target literally: {echoed}"
+    );
+
+    // (b) The request's project file tries to select a profile.
+    let mut owned = owned_run(
+        |marker| (open_marker(marker), open_marker(marker)),
+        Some("[jail]\nprofile = \"none\"\n"),
+    );
+    let refused = owned.spawned.owner().await_prepared();
+    assert!(
+        refused.is_err(),
+        "a project file selecting a profile was prepared"
+    );
+    let marker = owned.marker.clone();
+    let run = owned.spawned.wait().expect("the jail finishes");
+    assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+    assert!(!marker.exists());
+    assert!(
+        run.stderr_text().contains("policy_widening") && run.stderr_text().contains("jail.profile"),
+        "{}",
         run.stderr_text()
     );
-    assert!(!marker.exists(), "the injected frame released the target");
-    assert_eq!(error_code(&run).as_deref(), Some("gate_invalid"));
 
-    // A valid release: the applied policy is the resolved one, unchanged by
-    // anything the frame carried. The settled digest equals the prepared one.
-    let (mut spawned, marker) = gated_case();
-    let (attempt, digest) = prepared_binding(&mut spawned);
-    spawned
-        .owner()
-        .release(&Release::Valid, &attempt, &digest)
-        .expect("release");
-    let run = spawned.wait().expect("the jail finishes");
-    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    assert!(marker.is_file());
-    let settled = settled(&run);
-    assert_eq!(
-        settled["policy"]["digest"].as_str(),
-        Some(digest.as_str()),
-        "the release changed the resolved policy digest"
+    // (c) The request's project file only narrows; the owner did not plan it.
+    let mut owned = owned_run(
+        |marker| (open_marker(marker), open_marker(marker)),
+        Some("[jail.filesystem]\nread_only = [\"./ouro-fixture\"]\n"),
     );
+    let problems = owner_decides(&mut owned);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.starts_with("policy_digest:")),
+        "{problems:?}"
+    );
+    let marker = owned.marker.clone();
+    let run = owned.spawned.wait().expect("the jail finishes");
+    assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+    assert!(!marker.exists(), "the target ran on a closed gate");
 }
 
 // ===========================================================================
