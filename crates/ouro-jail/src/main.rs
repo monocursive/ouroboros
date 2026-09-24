@@ -102,8 +102,67 @@ fn schema_identifiers() -> serde_json::Value {
         "gate": SCHEMA_GATE,
         "control": SCHEMA_CONTROL,
         "network": SCHEMA_NETWORK,
+        // J5-D
+        "doctor": SCHEMA_DOCTOR,
     })
 }
+
+// J5-D begin: build provenance (§16) and the doctor record's identifier
+/// The identifier of the `doctor --json` record, whose schema is
+/// `docs/specs/jail-v1/jail-doctor.schema.json` (§3.2: it is the host
+/// manifest every conformance run records).
+const SCHEMA_DOCTOR: &str = "ouro.jail.doctor/1";
+
+/// The source revision the build environment named: a full 40-hex commit,
+/// lowercased. Anything else (unset, abbreviated, not hex) is `None`, so the
+/// record never carries a revision nobody can resolve.
+fn build_revision(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    (raw.len() == 40 && raw.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| raw.to_ascii_lowercase())
+}
+
+/// Whether the build environment said its tree had uncommitted changes:
+/// `true`/`1` or `false`/`0`; anything else is unknown.
+fn build_dirty(raw: Option<&str>) -> Option<bool> {
+    match raw?.trim() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// What built this binary (§16's "build provenance"). The compiler, target
+/// and profile come from `build.rs`; the revision and dirty flag from the
+/// environment of the cargo invocation (the conformance driver sets them,
+/// because it copies the tree without `.git`), null when it did not.
+fn build_json() -> serde_json::Value {
+    serde_json::json!({
+        "revision": build_revision(option_env!("OURO_BUILD_REVISION")),
+        "dirty": build_dirty(option_env!("OURO_BUILD_DIRTY")),
+        "rustc": env!("OURO_BUILD_RUSTC"),
+        "target": env!("OURO_BUILD_TARGET"),
+        "profile": env!("OURO_BUILD_PROFILE"),
+    })
+}
+
+/// The `build` object as text lines, for `version` without `--json`.
+fn print_build_text() {
+    let unknown = || "unknown".to_owned();
+    println!("build {}", env!("OURO_BUILD_RUSTC"));
+    println!(
+        "build target {} {}",
+        env!("OURO_BUILD_TARGET"),
+        env!("OURO_BUILD_PROFILE")
+    );
+    println!(
+        "build revision {} dirty {}",
+        build_revision(option_env!("OURO_BUILD_REVISION")).unwrap_or_else(unknown),
+        build_dirty(option_env!("OURO_BUILD_DIRTY"))
+            .map_or_else(unknown, |dirty| dirty.to_string())
+    );
+}
+// J5-D end
 
 fn platform_json(platform: &PlatformRecord) -> serde_json::Value {
     serde_json::json!({
@@ -136,6 +195,8 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             "platform": platform_json(&platform),
             "schemas": schema_identifiers(),
             "observation": { "closed_set": closed_set() },
+            // J5-D
+            "build": build_json(),
         }));
     } else {
         println!("ouro-jail {}", env!("CARGO_PKG_VERSION"));
@@ -155,9 +216,13 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             ("gate", SCHEMA_GATE),
             ("control", SCHEMA_CONTROL),
             ("network", SCHEMA_NETWORK),
+            // J5-D
+            ("doctor", SCHEMA_DOCTOR),
         ] {
             println!("schema {name} {value}");
         }
+        // J5-D
+        print_build_text();
     }
     ExitCode::SUCCESS
 }
@@ -373,6 +438,9 @@ fn doctor(context: &Context, args: &DoctorArgs) -> ExitCode {
 fn doctor_json(report: &DoctorReport) -> serde_json::Value {
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut value = serde_json::json!({
+        // J5-D: a versioned record (§3.2), with what built this binary
+        "schema": SCHEMA_DOCTOR,
+        "build": build_json(),
         "component": "ouro-jail",
         "version": env!("CARGO_PKG_VERSION"),
         "platform": platform_json(&report.platform),
@@ -759,6 +827,39 @@ mod tests {
             serde_json::Value::Null
         );
         assert!(!gc_text(&report).contains("execution_boundary"));
+    }
+
+    /// §16 build provenance: a revision is a full commit or nothing.
+    #[test]
+    fn a_build_revision_is_a_full_commit_or_null() {
+        let full = "48a229ceaefd4985c50990b14116b6d856af0985";
+        assert_eq!(build_revision(Some(full)).as_deref(), Some(full));
+        assert_eq!(
+            build_revision(Some(&full.to_ascii_uppercase())).as_deref(),
+            Some(full),
+            "hex is recorded lowercased"
+        );
+        assert_eq!(
+            build_revision(Some(&format!(" {full}\n"))).as_deref(),
+            Some(full)
+        );
+        for rejected in [
+            None,
+            Some(""),
+            Some("48a229cea"),
+            Some("48a229ceaefd4985c50990b14116b6d856af09850"),
+            Some("g8a229ceaefd4985c50990b14116b6d856af0985"),
+            Some("HEAD"),
+        ] {
+            assert_eq!(build_revision(rejected), None, "{rejected:?}");
+        }
+        assert_eq!(build_dirty(Some("true")), Some(true));
+        assert_eq!(build_dirty(Some("1")), Some(true));
+        assert_eq!(build_dirty(Some("false")), Some(false));
+        assert_eq!(build_dirty(Some("0")), Some(false));
+        for unknown in [None, Some(""), Some("yes"), Some("dirty")] {
+            assert_eq!(build_dirty(unknown), None, "{unknown:?}");
+        }
     }
 }
 // J5-D end
