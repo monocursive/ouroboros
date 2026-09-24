@@ -375,29 +375,37 @@ fn x02_every_malformed_release_refuses_without_running_the_target() {
     }
 }
 
-/// "Withheld" (the owner closes the gate with nothing) and "timed out" (the
-/// owner holds the gate open and never releases) are the two no-release
-/// outcomes, and they are distinct: withheld reaches EOF and refuses
-/// `gate_closed`; the timeout refuses `prepare_timeout` after the 60-second
-/// gate budget. Both leave the target unrun. This is the slow X02 leg (it
-/// waits the real gate budget once), so it is one test.
+/// X02.1/X02.2/X02.5: a closed gate and a withheld gate put different
+/// bytes on the wire and end differently, and neither runs the target. The
+/// owner that closes says no at once: EOF with no frame, `gate_closed`,
+/// within seconds. The owner that withholds says nothing and keeps the gate
+/// open: no byte and no EOF, so the jail can only reach its 60-second gate
+/// budget and refuse `prepare_timeout`. This is the slow X02 leg (it waits
+/// the real budget once).
 #[test]
-fn x02_withheld_is_gate_closed_and_a_never_delivered_gate_times_out() {
+fn x02_a_closed_and_a_withheld_gate_differ_and_neither_runs_the_target() {
     if !common::live() {
         return;
     }
-    // Withheld: the owner closes the gate with no frame.
+    // Closed: EOF with nothing written.
     let (mut spawned, marker) = gated_case();
-    prepared_binding(&mut spawned);
-    spawned.owner().withhold();
-    let withheld = spawned.wait().expect("the jail finishes");
-    assert_eq!(withheld.code(), Some(125), "{}", withheld.stderr_text());
-    assert!(!marker.exists(), "the target ran after a withheld gate");
-    assert_eq!(error_code(&withheld).as_deref(), Some("gate_closed"));
+    let (attempt, digest) = prepared_binding(&mut spawned);
+    let asked = Instant::now();
+    spawned
+        .owner()
+        .release(&Release::EmptyEof, &attempt, &digest)
+        .expect("the gate is closed");
+    let closed = spawned.wait().expect("the jail finishes");
+    let closed_after = asked.elapsed();
+    assert_eq!(closed.code(), Some(125), "{}", closed.stderr_text());
+    assert!(!marker.exists(), "the target ran after a closed gate");
+    assert_eq!(error_code(&closed).as_deref(), Some("gate_closed"));
+    assert!(
+        closed_after < Duration::from_secs(10),
+        "closed took {closed_after:?}"
+    );
 
-    // Timed out: the owner keeps the gate open and never writes. The jail
-    // refuses at its 60-second gate budget, so the harness deadline is set
-    // above it.
+    // Withheld: the gate stays open with nothing written, past the budget.
     let c = case("tool");
     let marker = c.workspace.join("target-ran");
     let mut spawned = c
@@ -417,19 +425,21 @@ fn x02_withheld_is_gate_closed_and_a_never_delivered_gate_times_out() {
     let held = {
         let mut owner = spawned.owner();
         owner.await_prepared().expect("a prepared message");
-        // Take the gate writer and keep it open past `wait`, so the jail
-        // sees neither a frame nor EOF and must reach its own budget.
         owner.hold().expect("the gate is open")
     };
-    let timed_out = spawned
+    let asked = Instant::now();
+    let withheld = spawned
         .wait()
         .expect("the jail finishes at its gate budget");
+    let withheld_after = asked.elapsed();
     drop(held);
-    assert_eq!(timed_out.code(), Some(125), "{}", timed_out.stderr_text());
+    assert_eq!(withheld.code(), Some(125), "{}", withheld.stderr_text());
     assert!(!marker.exists(), "the target ran without a release");
-    assert_eq!(error_code(&timed_out).as_deref(), Some("prepare_timeout"));
-    // The two no-release outcomes are distinguishable.
-    assert_ne!(error_code(&withheld), error_code(&timed_out));
+    assert_eq!(error_code(&withheld).as_deref(), Some("prepare_timeout"));
+    assert!(
+        withheld_after >= Duration::from_secs(55),
+        "a withheld gate ended after {withheld_after:?}, before the 60 s budget"
+    );
 }
 
 // ===========================================================================
@@ -826,10 +836,16 @@ fn j5_x03_owner_helper() {
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    if mode == "during" {
+    if mode == "during" || mode == "mid-frame" {
         let attempt = prepared["attempt_id"].as_str().unwrap();
         let digest = prepared["policy"]["digest"].as_str().unwrap();
         let frame = ouro_fixture::harness::gate::frame_body(attempt, digest) + "\n";
+        // `mid-frame`: the owner dies having written only the first half.
+        let frame = if mode == "mid-frame" {
+            frame[..frame.len() / 2].to_owned()
+        } else {
+            frame
+        };
         let bytes = frame.as_bytes();
         let mut written = 0;
         while written < bytes.len() {
@@ -963,6 +979,24 @@ fn x03_owner_death_before_release_runs_no_target() {
     assert_eq!(execs, 0, "an exec happened with no release");
 }
 
+/// The owner dies halfway through writing its frame: what reached the gate
+/// is a torn frame and EOF, so the jail refuses and no target runs.
+#[test]
+fn x03_owner_death_mid_frame_runs_no_target() {
+    if !common::live() {
+        return;
+    }
+    let (receipt, marker, execs) = x03_owner_run("mid-frame");
+    assert_eq!(receipt["phase"], "refused", "{receipt:#}");
+    assert_eq!(receipt["exec_observed"], false);
+    assert_eq!(
+        receipt["outcome"]["error"]["code"], "gate_invalid",
+        "{receipt:#}"
+    );
+    assert!(!marker, "the target ran on a torn frame");
+    assert_eq!(execs, 0, "an exec happened on a torn frame");
+}
+
 /// The owner writes exactly one valid frame and dies: the jail releases once,
 /// the target runs once, and the owner's death causes no second exec.
 #[test]
@@ -1036,54 +1070,72 @@ fn x06_every_contained_profile_hands_the_target_an_empty_capability_set() {
 // P03: an edit the child itself makes cannot widen the running attempt
 // ===========================================================================
 
-/// The child rewrites the project file (and a would-be profile file) in its
-/// own workspace after release, and the run's authority does not move: the
-/// settled digest equals the prepared one, and the run-time denial the
-/// project file set still holds — the child cannot read the denied file even
-/// after emptying the file that denied it. The existing P03 test edited
-/// `ouro.toml` from the harness between prepared and release and compared
-/// only the digest; here the child makes the edit and the denial is retested
-/// live (gap analysis §1.2, P03).
+/// P03.2: after release the child itself truncates both files its run was
+/// resolved from — the operator profile file selected with `--profile` (it
+/// sits in the child's writable workspace) and the project `ouro.toml` — and
+/// the run's authority does not move: the settled digest and mounts equal
+/// the prepared ones, and the denials both files set still hold at run time.
+/// (Review MEDIUM: the earlier test edited a profile look-alike the run never
+/// loaded.)
 #[test]
-fn p03_a_child_edit_of_its_project_or_profile_file_does_not_widen_the_run() {
+fn p03_the_child_truncating_its_selected_profile_and_project_file_does_not_widen_the_run() {
     if !common::live() {
         return;
     }
-    let c = case("tool");
-    std::fs::create_dir_all(c.workspace.join("secret")).unwrap();
-    std::fs::write(c.workspace.join("secret/classified"), b"classified\n").unwrap();
+    let jail = Jail::new().expect("a private jail harness");
+    let (workspace, fixture) = workspace_with_fixture(jail.root());
+    for dir in ["by-profile", "by-project"] {
+        std::fs::create_dir_all(workspace.join(dir)).unwrap();
+        std::fs::write(workspace.join(dir).join("classified"), b"classified\n").unwrap();
+    }
+    let profile = workspace.join("profile.toml");
     std::fs::write(
-        c.workspace.join("ouro.toml"),
-        "[jail.filesystem]\ndeny_read = [\"./secret\"]\n",
+        &profile,
+        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n\n[filesystem]\ndeny_read = [\"./by-profile\"]\n",
     )
     .unwrap();
-    // A file shaped like an operator profile, planted in the workspace. It is
-    // never loaded (profiles live in the operator config dir, I02), so the
-    // child editing it changes nothing — the point of testing it.
+    let project = workspace.join("ouro.toml");
     std::fs::write(
-        c.workspace.join("profile.toml"),
-        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n",
+        &project,
+        "[jail.filesystem]\ndeny_read = [\"./by-project\"]\n",
     )
     .unwrap();
-    let script = c.workspace.join("attack.json");
+    let script = workspace.join("attack.json");
     write_script(
         &script,
         &serde_json::json!([
-            // The denial is in force before the child touches anything.
-            ["open", "secret/classified", "--expect", "ENOENT"],
-            // The child empties both the project file and the profile look-alike.
-            ["open", "ouro.toml", "--create", "--write", "--trunc"],
-            ["open", "profile.toml", "--create", "--write", "--trunc"],
-            // The denial still holds at run time.
-            ["open", "secret/classified", "--expect", "ENOENT"],
+            ["open", "by-profile/classified", "--expect", "ENOENT"],
+            ["open", "by-project/classified", "--expect", "ENOENT"],
+            [
+                "open",
+                profile.to_str().unwrap(),
+                "--create",
+                "--write",
+                "--trunc"
+            ],
+            [
+                "open",
+                project.to_str().unwrap(),
+                "--create",
+                "--write",
+                "--trunc"
+            ],
+            ["open", "by-profile/classified", "--expect", "ENOENT"],
+            ["open", "by-project/classified", "--expect", "ENOENT"],
         ]),
     );
-    let mut spawned = c
-        .jail
+    let mut spawned = jail
+        .arg("run")
+        .arg("--profile")
+        .arg(&profile)
+        .arg("--workspace")
+        .arg(&workspace)
+        .trace()
+        .control()
         .gate()
         .receipt()
         .target([
-            c.fixture.as_os_str(),
+            fixture.as_os_str(),
             OsStr::new("script"),
             script.as_os_str(),
         ])
@@ -1092,34 +1144,31 @@ fn p03_a_child_edit_of_its_project_or_profile_file_does_not_widen_the_run() {
     let (attempt, prepared_digest) = prepared_binding(&mut spawned);
     let prepared = spawned.receipt_value().expect("a prepared receipt");
     let prepared_mounts = prepared["applied"]["filesystem"]["mounts"].clone();
+    assert_eq!(
+        prepared["policy"]["name"], "profile",
+        "the run loaded the selected file"
+    );
     spawned
         .owner()
         .release(&Release::Valid, &attempt, &prepared_digest)
         .expect("release");
     let run = spawned.wait().expect("the jail finishes");
-    // Every fixture expectation was met, including the two ENOENT reads.
+    // Every expectation held, including both ENOENT reads after the edits.
     assert_eq!(
         run.code(),
         Some(0),
-        "the run-time denial did not hold: {}",
-        run.stderr_text()
+        "a denial did not hold: {}",
+        run.stdout_text()
     );
     let settled = settled(&run);
     assert_eq!(
         settled["policy"]["digest"].as_str(),
-        Some(prepared_digest.as_str()),
-        "the child's edit changed the active digest"
+        Some(prepared_digest.as_str())
     );
-    assert_eq!(
-        settled["applied"]["filesystem"]["mounts"], prepared_mounts,
-        "the child's edit changed the applied mounts"
-    );
-    // The workspace file really was emptied, so the denial held despite it.
-    assert_eq!(
-        std::fs::read_to_string(c.workspace.join("ouro.toml")).unwrap(),
-        "",
-        "the child never actually truncated the project file"
-    );
+    assert_eq!(settled["applied"]["filesystem"]["mounts"], prepared_mounts);
+    // The child really emptied both files it was resolved from.
+    assert_eq!(std::fs::metadata(&profile).unwrap().len(), 0);
+    assert_eq!(std::fs::metadata(&project).unwrap().len(), 0);
 }
 
 // ===========================================================================
@@ -1244,4 +1293,386 @@ fn observe_off_an_unconfirmed_fast_exec_is_the_coded_error_exec_unconfirmed() {
         assert_eq!(code, Some(0), "{profile}: {stderr:?}");
         assert_eq!(receipt["errors"], serde_json::json!([]), "{profile}");
     }
+}
+
+// ===========================================================================
+// P02.8: a project file selecting or extending a profile refuses, via `run`
+// ===========================================================================
+
+/// Through `ouro-jail run`, a workspace `ouro.toml` that selects a profile or
+/// extends one refuses before anything is prepared, with the exact key path.
+/// The portable P02 test injects the forbidden key into a delta directly, so
+/// deleting the detection in `resolve_plan` left it green (rev-A H5).
+#[test]
+fn p02_a_project_file_selecting_or_extending_a_profile_refuses_through_run() {
+    if !common::live() {
+        return;
+    }
+    for (text, key) in [
+        ("[jail]\nprofile = \"tool\"\n", "jail.profile"),
+        ("[jail]\nextends = \"tool\"\n", "jail.extends"),
+    ] {
+        let c = case("tool");
+        std::fs::write(c.workspace.join("ouro.toml"), text).expect("the project file");
+        let marker = c.workspace.join("target-ran");
+        let run = c
+            .jail
+            .target([
+                c.fixture.as_os_str(),
+                OsStr::new("open"),
+                marker.as_os_str(),
+                OsStr::new("--create"),
+                OsStr::new("--write"),
+            ])
+            .run()
+            .expect("the jail runs");
+        assert_eq!(run.code(), Some(125), "{key}: {}", run.stderr_text());
+        assert!(!marker.exists(), "{key}: the target ran");
+        let stderr = run.stderr_text();
+        assert!(
+            stderr.contains("policy_widening") && stderr.contains(&format!("(key: {key})")),
+            "{key}: {stderr}"
+        );
+        assert!(
+            run.control_kind("prepared").is_empty(),
+            "{key}: it was prepared"
+        );
+    }
+}
+
+// ===========================================================================
+// P01.8: a non-UTF-8 policy path survives execution into the receipt
+// ===========================================================================
+
+/// A `--deny-read` whose name is not UTF-8 is enforced and recorded losslessly:
+/// the run executes, the child cannot see the file beneath it, and the
+/// receipt's grant and applied mask carry the exact bytes as the base64
+/// native-string object (canonicalization.md), not a lossy string.
+#[test]
+fn p01_a_non_utf8_policy_path_survives_execution_into_the_receipt() {
+    if !common::live() {
+        return;
+    }
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    let c = case("tool");
+    let name: &[u8] = b"sec\xffret";
+    let denied = c.workspace.join(OsStr::from_bytes(name));
+    std::fs::create_dir(&denied).expect("the non-UTF-8 directory");
+    std::fs::write(denied.join("file"), b"hidden\n").expect("a file inside");
+    let inside = denied.join("file");
+    let run = c
+        .jail
+        .arg("--deny-read")
+        .arg(&denied)
+        .target([
+            c.fixture.as_os_str(),
+            OsStr::new("open"),
+            inside.as_os_str(),
+            OsStr::new("--expect"),
+            OsStr::new("ENOENT"),
+        ])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(
+        run.code(),
+        Some(0),
+        "the masked read was not ENOENT: {}",
+        run.stdout_text()
+    );
+    let receipt = settled(&run);
+    let want = denied.clone().into_os_string().into_vec();
+    let decodes_to =
+        |value: &Value| common::native_bytes(value).ok().as_deref() == Some(want.as_slice());
+    let grants = receipt["policy"]["grants"].as_array().expect("grants");
+    assert!(
+        grants.iter().any(|grant| decodes_to(&grant["value"])),
+        "the grant does not carry the exact bytes: {grants:#?}"
+    );
+    let mounts = receipt["applied"]["filesystem"]["mounts"]
+        .as_array()
+        .expect("mounts");
+    assert!(
+        mounts.iter().any(|mount| decodes_to(&mount["path"])),
+        "no applied mount carries the exact bytes: {mounts:#?}"
+    );
+}
+
+// ===========================================================================
+// P04: overlaps, symlinks and unsafe state roots refuse before exec, via run
+// ===========================================================================
+
+/// One `tool` run whose target would create a marker, with the harness's
+/// state root replaced by `data` (when given) and `extra` jail arguments.
+/// Returns the exit code, stderr and whether the target ran.
+fn p04_run(data: Option<&Path>, extra: &[&OsStr]) -> (Option<i32>, String, bool) {
+    let c = case("tool");
+    let marker = c.workspace.join("target-ran");
+    let mut jail = c.jail.args(extra.iter().copied());
+    if let Some(data) = data {
+        jail = jail.env("OURO_DATA_DIR", data);
+    }
+    let run = jail
+        .target([
+            c.fixture.as_os_str(),
+            OsStr::new("open"),
+            marker.as_os_str(),
+            OsStr::new("--create"),
+            OsStr::new("--write"),
+        ])
+        .run()
+        .expect("the jail runs");
+    (run.code(), run.stderr_text(), marker.exists())
+}
+
+/// P04.6: the state root overlapping an operator grant refuses before exec,
+/// in both directions: an `--ro` grant of the state root's parent (the root
+/// is beneath the grant) and an `--rw` grant beneath the state root.
+#[test]
+fn p04_a_state_root_overlapping_an_ro_or_rw_grant_refuses() {
+    if !common::live() {
+        return;
+    }
+    let outer = common::private_tempdir();
+    let data = outer.path().join("state");
+    std::fs::create_dir(&data).unwrap();
+    let inner = data.join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    for (label, extra) in [
+        (
+            "--ro over the state root",
+            vec![OsStr::new("--ro"), outer.path().as_os_str()],
+        ),
+        (
+            "--rw beneath the state root",
+            vec![OsStr::new("--rw"), inner.as_os_str()],
+        ),
+    ] {
+        let (code, stderr, ran) = p04_run(Some(&data), &extra);
+        assert_eq!(code, Some(125), "{label}: {stderr}");
+        assert!(!ran, "{label}: the target ran");
+        assert!(stderr.contains("unsafe_state_path"), "{label}: {stderr}");
+    }
+}
+
+/// P04.7: a state root reached through a symlink refuses before exec.
+#[test]
+fn p04_a_symlinked_state_root_refuses_through_run() {
+    if !common::live() {
+        return;
+    }
+    let outer = common::private_tempdir();
+    let real = outer.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = outer.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let (code, stderr, ran) = p04_run(Some(&link), &[]);
+    assert_eq!(code, Some(125), "{stderr}");
+    assert!(!ran, "the target ran");
+    assert!(stderr.contains("unsafe_state_path"), "{stderr}");
+}
+
+/// P04.8: a `--receipt` path that is a symlink refuses before exec, and the
+/// symlink's target is not written.
+#[test]
+fn p04_a_symlinked_receipt_path_refuses() {
+    if !common::live() {
+        return;
+    }
+    let outer = common::private_tempdir();
+    let target = outer.path().join("elsewhere.json");
+    let link = outer.path().join("receipt.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let (code, stderr, ran) = p04_run(None, &[OsStr::new("--receipt"), link.as_os_str()]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(!ran, "the target ran");
+    assert!(
+        stderr.contains("invalid_config") && stderr.contains("--receipt"),
+        "{stderr}"
+    );
+    assert!(!target.exists(), "the symlink's target was written");
+}
+
+/// P04.9: through `run`, a state root with an unsafe mode (writable by
+/// others) or a foreign owner (root's) refuses before exec.
+#[test]
+fn p04_an_unsafe_state_root_mode_or_owner_refuses_through_run() {
+    if !common::live() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let outer = common::private_tempdir();
+    let open = outer.path().join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let (code, stderr, ran) = p04_run(Some(&open), &[]);
+    assert_eq!(code, Some(125), "mode 0777: {stderr}");
+    assert!(!ran);
+    assert!(stderr.contains("unsafe_state_path"), "mode 0777: {stderr}");
+    // A directory owned by root that this account cannot create anything in.
+    let foreign = Path::new("/usr/share");
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(foreign).unwrap()),
+        0
+    );
+    let (code, stderr, ran) = p04_run(Some(foreign), &[]);
+    assert_eq!(code, Some(125), "foreign owner: {stderr}");
+    assert!(!ran);
+    assert!(
+        stderr.contains("unsafe_state_path"),
+        "foreign owner: {stderr}"
+    );
+}
+
+// ===========================================================================
+// X02.8: an attempt id with a wrong RFC 9562 variant or uppercase hex
+// ===========================================================================
+
+/// `--attempt-id` must be a lowercase UUIDv4 with the RFC 9562 variant. A
+/// wrong variant nibble and uppercase hex are usage errors (exit 2) before
+/// anything is allocated, with the gate never read.
+#[test]
+fn x02_an_attempt_id_with_a_wrong_variant_or_uppercase_hex_is_a_usage_error() {
+    if !common::live() {
+        return;
+    }
+    for (label, id) in [
+        ("variant 0", "att_00000000-0000-4000-0000-000000000001"),
+        (
+            "variant c (Microsoft)",
+            "att_00000000-0000-4000-c000-000000000001",
+        ),
+        (
+            "variant e (future)",
+            "att_00000000-0000-4000-e000-000000000001",
+        ),
+        ("uppercase hex", "att_0000000A-0000-4000-8000-00000000000B"),
+    ] {
+        let c = case("tool");
+        let marker = c.workspace.join("target-ran");
+        let run = c
+            .jail
+            .args(["--attempt-id", id])
+            .gate()
+            .target([
+                c.fixture.as_os_str(),
+                OsStr::new("open"),
+                marker.as_os_str(),
+                OsStr::new("--create"),
+                OsStr::new("--write"),
+            ])
+            .run()
+            .expect("the jail runs");
+        assert_eq!(run.code(), Some(2), "{label}: {}", run.stderr_text());
+        assert!(!marker.exists(), "{label}");
+        assert!(
+            run.stderr_text().contains("--attempt-id"),
+            "{label}: {}",
+            run.stderr_text()
+        );
+        assert!(run.control_kind("prepared").is_empty(), "{label}");
+        assert!(
+            !run.data_dir.join("attempts").exists()
+                || std::fs::read_dir(run.data_dir.join("attempts"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "{label}: an attempt directory was allocated"
+        );
+    }
+}
+
+// ===========================================================================
+// X05.3: EOF reaches the caller when the target closes its stdout
+// ===========================================================================
+
+/// When `argv` closes its stdout and then lives for three seconds, how long
+/// after the start the caller saw EOF on stdout and how long until the
+/// process it started exited.
+fn stdout_eof_and_exit(
+    program: &Path,
+    args: &[&OsStr],
+    data: Option<(&Path, &Path)>,
+) -> (Duration, Duration) {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .process_group(0);
+    if let Some((data, config)) = data {
+        command
+            .env("OURO_DATA_DIR", data)
+            .env("OURO_CONFIG_DIR", config);
+    }
+    let start = Instant::now();
+    let mut child = command.spawn().expect("the command starts");
+    let mut stdout = child.stdout.take().expect("a stdout pipe");
+    let reader = std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = stdout.read_to_end(&mut sink);
+        start.elapsed()
+    });
+    let deadline = start + Duration::from_secs(30);
+    let exited = loop {
+        if child.try_wait().expect("wait").is_some() {
+            break start.elapsed();
+        }
+        assert!(Instant::now() < deadline, "the command did not end");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let eof = reader.join().expect("the reader");
+    (eof, exited)
+}
+
+/// X05.3 under `none` (§8.3: "The supervisor must not retain writable copies
+/// that postpone EOF"): a target that closes its stdout and keeps running
+/// delivers EOF to the caller at once, as it does run directly, long before
+/// the target and the jail end. The supervisor used to keep its own copy of
+/// stdout for the whole run. Under the contained profiles bubblewrap's outer
+/// process and namespace init still hold the stdio they hand the child, so
+/// the same test there is a recorded finding, not a claim (notes, X05.3).
+#[test]
+fn x05_under_none_eof_reaches_the_caller_when_the_target_closes_its_stdout() {
+    if !common::live() {
+        return;
+    }
+    let script = "exec >&-; sleep 3";
+    let (direct_eof, direct_exit) = stdout_eof_and_exit(
+        Path::new("/bin/sh"),
+        &[OsStr::new("-c"), OsStr::new(script)],
+        None,
+    );
+    assert!(
+        direct_exit >= Duration::from_secs(3) && direct_eof < Duration::from_secs(1),
+        "direct: eof {direct_eof:?} exit {direct_exit:?}"
+    );
+    let jail = Jail::new().expect("a private jail harness");
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let (eof, exit) = stdout_eof_and_exit(
+        &harness::jail_path(),
+        &[
+            OsStr::new("run"),
+            OsStr::new("--profile"),
+            OsStr::new("none"),
+            OsStr::new("--workspace"),
+            workspace.as_os_str(),
+            OsStr::new("--"),
+            OsStr::new("/bin/sh"),
+            OsStr::new("-c"),
+            OsStr::new(script),
+        ],
+        Some((&jail.data_dir(), &jail.config_dir())),
+    );
+    assert!(
+        exit >= Duration::from_secs(3),
+        "the jail ended early: {exit:?}"
+    );
+    assert!(
+        eof + Duration::from_secs(2) < exit,
+        "stdout EOF at {eof:?} waited for the jail's exit at {exit:?}"
+    );
 }

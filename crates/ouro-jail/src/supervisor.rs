@@ -1201,6 +1201,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     };
 
+    // J5-B1 begin: X05.3 — §8.3 "The supervisor must not retain writable
+    // copies that postpone EOF". Every process that needs the caller's stdout
+    // has it by now; `run` itself never writes stdout, so the supervisor's own
+    // copy goes, and a target that closes its stdout gives the caller EOF.
+    release_own_stdout();
+    // J5-B1 end
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
     // J4-R: §13.2 row 4 — the application is part of the boundary's facts:
@@ -2133,6 +2139,22 @@ fn child_visible_roots(plan: &Plan) -> Vec<PathBuf> {
     }
     roots
 }
+
+// J5-B1 begin: X05.3
+/// Points this process's own stdout at `/dev/null`. Best effort: a failure
+/// leaves the copy in place, which only delays the caller's EOF.
+fn release_own_stdout() {
+    // SAFETY: open takes a NUL-terminated literal; dup2 and close take
+    // descriptor numbers this process owns.
+    unsafe {
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if null >= 0 {
+            libc::dup2(null, libc::STDOUT_FILENO);
+            libc::close(null);
+        }
+    }
+}
+// J5-B1 end
 
 /// Refuses a state root that the child can reach (§7, H7).
 ///

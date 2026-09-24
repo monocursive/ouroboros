@@ -2176,18 +2176,35 @@ fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
 }
 
 /// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`.
+// J5-B1 begin: P01.8 — mountinfo is bytes, not text. It was read with
+// `read_to_string`, so one mount point that is not UTF-8 (a `--deny-read` of
+// such a name, say) made the whole read fail and the receipt claimed an empty
+// mount table.
 fn read_mount_table(pid: libc::pid_t) -> Vec<AppliedMount> {
-    let Ok(raw) = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")) else {
+    let Ok(raw) = std::fs::read(format!("/proc/{pid}/mountinfo")) else {
         return Vec::new();
     };
+    parse_mount_table(&raw)
+}
+
+/// The `(mount point, mode)` rows of a `mountinfo` file's bytes. Fields are
+/// separated by single spaces; a space, tab, newline or backslash inside a
+/// path is an octal escape, so splitting on the byte is exact.
+fn parse_mount_table(raw: &[u8]) -> Vec<AppliedMount> {
     let mut out = Vec::new();
-    for line in raw.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
+    for line in raw.split(|byte| *byte == b'\n') {
+        let fields: Vec<&[u8]> = line
+            .split(|byte| *byte == b' ')
+            .filter(|field| !field.is_empty())
+            .collect();
         let Some(point) = fields.get(4) else { continue };
         let Some(options) = fields.get(5) else {
             continue;
         };
-        let mode = if options.split(',').any(|item| item == "ro") {
+        let mode = if options
+            .split(|byte| *byte == b',')
+            .any(|item| item == b"ro")
+        {
             "ro"
         } else {
             "rw"
@@ -2208,24 +2225,26 @@ fn read_mount_table(pid: libc::pid_t) -> Vec<AppliedMount> {
 }
 
 /// `mountinfo` escapes space, tab, newline and backslash as octal.
-fn decode_mountinfo_path(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
+fn decode_mountinfo_path(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'\\' && index + 3 < bytes.len() {
-            let digits = &text[index + 1..index + 4];
-            if let Ok(value) = u8::from_str_radix(digits, 8) {
-                out.push(value);
-                index += 4;
-                continue;
-            }
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && let Some(value) = std::str::from_utf8(&bytes[index + 1..index + 4])
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 8).ok())
+        {
+            out.push(value);
+            index += 4;
+            continue;
         }
         out.push(bytes[index]);
         index += 1;
     }
     out
 }
+// J5-B1 end
 
 /// The environment names the launcher actually has, read from `/proc`.
 ///
@@ -3797,11 +3816,33 @@ mod tests {
     #[test]
     fn mountinfo_paths_decode_their_octal_escapes() {
         assert_eq!(
-            decode_mountinfo_path("/work/a\\040b"),
+            decode_mountinfo_path(b"/work/a\\040b"),
             b"/work/a b".to_vec()
         );
-        assert_eq!(decode_mountinfo_path("/plain"), b"/plain".to_vec());
+        assert_eq!(decode_mountinfo_path(b"/plain"), b"/plain".to_vec());
     }
+
+    // J5-B1 begin: P01.8
+    #[test]
+    fn a_mount_point_that_is_not_utf8_keeps_the_whole_table() {
+        let raw: &[u8] = b"22 1 0:1 / / ro,nosuid - tmpfs tmpfs ro\n\
+            23 22 0:2 / /work/sec\xffret rw,nosuid - tmpfs tmpfs rw\n\
+            24 22 0:3 / /work/a\\040b ro - tmpfs tmpfs ro\n";
+        let table = parse_mount_table(raw);
+        let rows: Vec<(Vec<u8>, &str)> = table
+            .iter()
+            .map(|mount| (mount.path.as_bytes().to_vec(), mount.mode.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (b"/".to_vec(), "ro"),
+                (b"/work/sec\xffret".to_vec(), "rw"),
+                (b"/work/a b".to_vec(), "ro"),
+            ]
+        );
+    }
+    // J5-B1 end
 
     #[test]
     fn a_requirement_with_no_probe_is_never_available() {
