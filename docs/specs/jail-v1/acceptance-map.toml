@@ -271,7 +271,7 @@ note = "J5 adversarial review (rev-A) §1.2: check_state_isolation covers these;
 [[clause]]
 id = "P04.2"
 gate = "P04"
-clause = "Scratch overlapping a grant or the state root refuses before exec"
+clause = "A scratch root overlapping a writable grant refuses before exec"
 tag = "untested"
 note = "supervisor.rs child_visible_roots includes scratch; no test. Owned by J5-B1."
 
@@ -1591,7 +1591,7 @@ note = "J5 adversarial review (rev-A) §1.2."
 [[clause]]
 id = "L01.3"
 gate = "L01"
-clause = "Operator INT, TERM and HUP to the supervisor of a contained run end at verified tree death, including a SIGTERM-ignoring descendant"
+clause = "Operator INT, TERM and HUP to the supervisor of a contained run each end the tree at verified death"
 tag = "untested"
 note = "portable_signals.rs proves the TERM handler wakes the supervisor; nothing sends INT or HUP. Owned by J5-B1."
 
@@ -1631,6 +1631,13 @@ gate = "L01"
 clause = "A fork storm stopped mid-flight ends at verified tree death"
 tag = "untested"
 note = "Owned by J5-B1."
+
+[[clause]]
+id = "L01.12"
+gate = "L01"
+clause = "A SIGTERM-ignoring descendant of a contained run dies when the operator signals the supervisor"
+tag = "untested"
+note = "Split from L01.3: the operator-signal test runs a target with no SIGTERM-ignoring descendant."
 
 # ------------------------------------------------------------------ L02
 
