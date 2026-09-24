@@ -7,20 +7,22 @@
     },
     "ouro-jail": {
       "path": "/usr/local/bin/ouro-jail",
-      "sha256": "da6c876d8969bc0531f61b97bca5ea3a19ded8caaf1dbf33f36929a6c5fe39cf"
+      "sha256": "e5538a83fbcab9bca27d2070bde57d1f0e607e77404c11b6bd73f805f4856f84"
     }
   },
   "build": {
+    "debug_assertions": false,
     "dirty": true,
-    "profile": "release",
-    "revision": "a243b2c49359078b11a4ccdee2cbb2dce6b7c801",
+    "inputs": "sha256:701fc9d604a5e2d5290410d81bbc9d0d6bd030be001143138674f7fd1f4bb9b7",
+    "opt_level": "3",
+    "revision": "40c87330f22a3b0792731ac9c9ce829001f29741",
     "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
     "target": "x86_64-unknown-linux-gnu"
   },
   "capabilities": [
     {
       "evidence_ref": "bwrap_present,pid_namespace",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "pid-namespace",
       "name": "tree_termination",
       "reason_code": "ok",
@@ -29,7 +31,7 @@
     },
     {
       "evidence_ref": "ptrace_seize_descendant,observer_closed_set",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "ptrace",
       "name": "closed_set_observation",
       "reason_code": "ok",
@@ -38,7 +40,7 @@
     },
     {
       "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "bubblewrap-binds",
       "name": "filesystem_containment",
       "reason_code": "ok",
@@ -47,7 +49,7 @@
     },
     {
       "evidence_ref": "seccomp_filter_load",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "seccomp-bpf",
       "name": "syscall_filter",
       "reason_code": "ok",
@@ -56,7 +58,7 @@
     },
     {
       "evidence_ref": "network_namespace",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "network-namespace",
       "name": "network_none",
       "reason_code": "ok",
@@ -65,7 +67,7 @@
     },
     {
       "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "bubblewrap-binds",
       "name": "protected_coverage:existing_and_root",
       "reason_code": "ok",
@@ -74,7 +76,7 @@
     },
     {
       "evidence_ref": "supervisor",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "boottime-deadline",
       "name": "limit:wall",
       "reason_code": "ok",
@@ -83,7 +85,7 @@
     },
     {
       "evidence_ref": "bubblewrap 0.11.1",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "bubblewrap",
       "name": "bwrap_present",
       "reason_code": "ok",
@@ -92,7 +94,7 @@
     },
     {
       "evidence_ref": "outside 4026531837, inside 4026532459",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "user-namespace",
       "name": "user_namespace",
       "reason_code": "ok",
@@ -100,8 +102,8 @@
       "status": "available"
     },
     {
-      "evidence_ref": "outside 4026531836, inside 4026532460; NSpid 2; /proc shows 1,2",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "evidence_ref": "outside 4026531836, inside 4026532461; NSpid 2; /proc shows 1,2",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "pid-namespace",
       "name": "pid_namespace",
       "reason_code": "ok",
@@ -110,7 +112,7 @@
     },
     {
       "evidence_ref": "interfaces inside: lo",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "network-namespace",
       "name": "network_namespace",
       "reason_code": "ok",
@@ -119,7 +121,7 @@
     },
     {
       "evidence_ref": "write into a read-only bind failed EROFS",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "bubblewrap-binds",
       "name": "mount_readonly_bind",
       "reason_code": "ok",
@@ -128,7 +130,7 @@
     },
     {
       "evidence_ref": "Seccomp mode 2, AF_UNIX socket EPERM, allowed write ok, filter sha256:d07af2773b3341c4b29dd366c201d492294b4f084744cd1cc023683341dfe237",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "seccomp-bpf",
       "name": "seccomp_filter_load",
       "reason_code": "ok",
@@ -136,8 +138,8 @@
       "status": "available"
     },
     {
-      "evidence_ref": "seized pid 3546524, stopped with signal 5, detached",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "evidence_ref": "seized pid 3772679, stopped with signal 5, detached",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "ptrace",
       "name": "ptrace_seize_descendant",
       "reason_code": "ok",
@@ -146,7 +148,7 @@
     },
     {
       "evidence_ref": "attached blocked launcher; one successful create matched the fixture, final exit observed, zero loss",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "ptrace-seccomp",
       "name": "observer_closed_set",
       "reason_code": "ok",
@@ -154,8 +156,8 @@
       "status": "available"
     },
     {
-      "evidence_ref": "entered ouro-jail-3546506-814873c6877f4090.scope cgroup=/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3546506-814873c6877f4090.scope",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "evidence_ref": "entered ouro-jail-3772661-ed5c3fcf2a194b34.scope cgroup=/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3772661-ed5c3fcf2a194b34.scope",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "systemd-user-transient-scope",
       "name": "supervisor_scope",
       "reason_code": "entered",
@@ -164,7 +166,7 @@
     },
     {
       "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "cgroup-v2-delegated",
       "name": "cgroup_delegated_leaf",
       "reason_code": "ok",
@@ -173,7 +175,7 @@
     },
     {
       "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "cgroup-v2-delegated",
       "name": "cgroup_pids",
       "reason_code": "ok",
@@ -182,7 +184,7 @@
     },
     {
       "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "cgroup-v2-delegated",
       "name": "cgroup_memory",
       "reason_code": "ok",
@@ -191,7 +193,7 @@
     },
     {
       "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "cgroup-v2-delegated",
       "name": "cgroup_cpu",
       "reason_code": "ok",
@@ -200,7 +202,7 @@
     },
     {
       "evidence_ref": "/proc/sys/kernel/apparmor_restrict_unprivileged_userns = 1",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "apparmor",
       "name": "apparmor_userns_restriction",
       "reason_code": "restriction_on",
@@ -209,7 +211,7 @@
     },
     {
       "evidence_ref": "a nested bubblewrap exited Some(1): bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.; bare unshare(CLONE_NEWUSER) inside: ok",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "nested-bubblewrap",
       "name": "nested_user_namespace",
       "reason_code": "nested_sandbox_denied",
@@ -218,7 +220,7 @@
     },
     {
       "evidence_ref": "an unprivileged child installed the mediation filter (sha256:28c98e72b91a22c212d5dfdddfcc1f1ca153c5a8e89c15833c26724b263ebeff) with a listener, and pidfd_getfd took it",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "seccomp-user-notification",
       "name": "seccomp_user_notification",
       "reason_code": "ok",
@@ -227,7 +229,7 @@
     },
     {
       "evidence_ref": "through 127.0.0.1:3128: allowed destination 200 (1 origin connection(s)), denied destination 403 (0 connection(s) reached it); direct TCP egress ENETUNREACH; proxy results allow/relayed true, deny/host_not_allowed true",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "outside-http-proxy+loopback-bridge",
       "name": "agent_proxy_bridge",
       "reason_code": "ok",
@@ -236,7 +238,7 @@
     },
     {
       "evidence_ref": "a host socket in the workspace: connect EACCES (0 connection(s) reached it); an attempt-bound socket: connect ok",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "seccomp-user-notification",
       "name": "agent_unix_peer_mediation",
       "reason_code": "ok",
@@ -245,7 +247,7 @@
     },
     {
       "evidence_ref": "landlock:ok,seccomp:ok,write:EACCES,read:EACCES,mkdir:EPERM,remount:EPERM,umount:EPERM,setns:EPERM,unshare:EPERM,egress:ENETUNREACH; nested user namespace unavailable",
-      "measured_at": "2026-09-24T20:16:02Z",
+      "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "landlock+seccomp",
       "name": "agent_inner_sandbox",
       "reason_code": "ok",
@@ -255,14 +257,19 @@
   ],
   "component": "ouro-jail",
   "host": {
+    "apparmor_enabled": true,
     "apparmor_userns_restriction": {
+      "local_files": [
+        "README"
+      ],
       "profile_files": [
         "bwrap-userns-restrict",
         "glycin.bwrap",
         "lxc-usernsexec",
         "unprivileged_userns"
       ],
-      "state": "on"
+      "state": "on",
+      "unpackaged_files": []
     },
     "cgroup": {
       "controllers": [
@@ -270,13 +277,35 @@
         "memory",
         "pids"
       ],
-      "delegated_root": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service"
+      "delegated_root": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service",
+      "root_controllers": [
+        "cpuset",
+        "cpu",
+        "io",
+        "memory",
+        "hugetlb",
+        "pids",
+        "rdma",
+        "misc",
+        "dmem"
+      ],
+      "subtree_control": [
+        "cpu",
+        "memory",
+        "pids"
+      ]
     },
+    "cpus_online": 4,
     "distribution": "Ubuntu 26.04.1 LTS",
     "kernel_release": "7.0.0-31-generic",
     "kernel_version": "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
     "linger": true,
+    "memory": {
+      "mem_total_kib": 3905584,
+      "swap_total_kib": 8388604
+    },
     "operator_identity": "unprivileged",
+    "privileged_groups": [],
     "sysctls": {
       "kernel.apparmor_restrict_unprivileged_userns": "1",
       "kernel.io_uring_disabled": "0",
@@ -284,7 +313,9 @@
       "kernel.unprivileged_bpf_disabled": "2",
       "kernel.yama.ptrace_scope": "1",
       "user.max_user_namespaces": "11829"
-    }
+    },
+    "systemd_version": "systemd 259 (259.5-0ubuntu3.4)",
+    "virtualization": "kvm"
   },
   "launch": null,
   "platform": {
@@ -304,11 +335,11 @@
   ],
   "schema": "ouro.jail.doctor/1",
   "supervisor_scope": {
-    "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3546506-814873c6877f4090.scope",
+    "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3772661-ed5c3fcf2a194b34.scope",
     "reason": null,
     "reason_code": null,
     "state": "entered",
-    "unit": "ouro-jail-3546506-814873c6877f4090.scope"
+    "unit": "ouro-jail-3772661-ed5c3fcf2a194b34.scope"
   },
   "version": "0.1.0"
 }

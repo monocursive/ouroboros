@@ -2,13 +2,15 @@
   "binaries": {
     "ouro-jail": {
       "path": "/usr/local/bin/ouro-jail",
-      "sha256": "d875595b2542d8aed8034af0892dc1dca36486d75347aca0a5adb2cfb11bc29f"
+      "sha256": "3c0ff0ecdac32c7638f527241c89e256c2d4b39db1bc49c0c841101fcc9a2c76"
     }
   },
   "build": {
+    "debug_assertions": false,
     "dirty": true,
-    "profile": "release",
-    "revision": "a243b2c49359078b11a4ccdee2cbb2dce6b7c801",
+    "inputs": "sha256:701fc9d604a5e2d5290410d81bbc9d0d6bd030be001143138674f7fd1f4bb9b7",
+    "opt_level": "3",
+    "revision": "40c87330f22a3b0792731ac9c9ce829001f29741",
     "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
     "target": "aarch64-apple-darwin"
   },

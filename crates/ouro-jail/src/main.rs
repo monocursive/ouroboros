@@ -19,6 +19,11 @@ use ouro_jail::records::{
 };
 use ouro_jail::supervisor::{self, Context, DoctorReport, ExplainReport};
 
+// J5-D: the build provenance rules build.rs applies (one rule, three users:
+// build.rs and xtask use the tree walk, this binary the validation)
+#[allow(dead_code)]
+mod build_provenance;
+
 fn main() -> ExitCode {
     if let Some(code) = internal_subcommand() {
         return code;
@@ -113,54 +118,56 @@ fn schema_identifiers() -> serde_json::Value {
 /// manifest every conformance run records).
 const SCHEMA_DOCTOR: &str = "ouro.jail.doctor/1";
 
-/// The source revision the build environment named: a full 40-hex commit,
-/// lowercased. Anything else (unset, abbreviated, not hex) is `None`, so the
-/// record never carries a revision nobody can resolve.
-fn build_revision(raw: Option<&str>) -> Option<String> {
-    let raw = raw?.trim();
-    (raw.len() == 40 && raw.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| raw.to_ascii_lowercase())
+/// The revision and dirty flag as build.rs validated them (it fails the
+/// build on a malformed or contradictory pair, so an error here cannot
+/// happen in a built binary; it would read as unknown).
+fn build_claims() -> build_provenance::Claims {
+    build_provenance::validate(
+        option_env!("OURO_BUILD_REVISION"),
+        option_env!("OURO_BUILD_DIRTY"),
+    )
+    .unwrap_or(build_provenance::Claims {
+        revision: None,
+        dirty: None,
+    })
 }
 
-/// Whether the build environment said its tree had uncommitted changes:
-/// `true`/`1` or `false`/`0`; anything else is unknown.
-fn build_dirty(raw: Option<&str>) -> Option<bool> {
-    match raw?.trim() {
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
-        _ => None,
-    }
-}
-
-/// What built this binary (§16's "build provenance"). The compiler, target
-/// and profile come from `build.rs`; the revision and dirty flag from the
-/// environment of the cargo invocation (the conformance driver sets them,
-/// because it copies the tree without `.git`), null when it did not.
+/// What built this binary (§16's "build provenance"), measured where it can
+/// be (review F8): the compiler's `rustc -V`, the target, the opt-level and
+/// debug assertions the code was actually compiled with, and the digest of
+/// the build inputs (`build_provenance`). The revision and dirty flag are
+/// the build environment's validated claims, null when it made none; the
+/// inputs digest is what checks them.
 fn build_json() -> serde_json::Value {
+    let claims = build_claims();
     serde_json::json!({
-        "revision": build_revision(option_env!("OURO_BUILD_REVISION")),
-        "dirty": build_dirty(option_env!("OURO_BUILD_DIRTY")),
+        "revision": claims.revision,
+        "dirty": claims.dirty,
         "rustc": env!("OURO_BUILD_RUSTC"),
         "target": env!("OURO_BUILD_TARGET"),
-        "profile": env!("OURO_BUILD_PROFILE"),
+        "opt_level": env!("OURO_BUILD_OPT_LEVEL"),
+        "debug_assertions": cfg!(debug_assertions),
+        "inputs": env!("OURO_BUILD_INPUTS"),
     })
 }
 
 /// The `build` object as text lines, for `version` without `--json`.
 fn print_build_text() {
+    let claims = build_claims();
     let unknown = || "unknown".to_owned();
     println!("build {}", env!("OURO_BUILD_RUSTC"));
     println!(
-        "build target {} {}",
+        "build target {} opt-level {} debug-assertions {}",
         env!("OURO_BUILD_TARGET"),
-        env!("OURO_BUILD_PROFILE")
+        env!("OURO_BUILD_OPT_LEVEL"),
+        cfg!(debug_assertions)
     );
     println!(
         "build revision {} dirty {}",
-        build_revision(option_env!("OURO_BUILD_REVISION")).unwrap_or_else(unknown),
-        build_dirty(option_env!("OURO_BUILD_DIRTY"))
-            .map_or_else(unknown, |dirty| dirty.to_string())
+        claims.revision.unwrap_or_else(unknown),
+        claims.dirty.map_or_else(unknown, |dirty| dirty.to_string())
     );
+    println!("build inputs {}", env!("OURO_BUILD_INPUTS"));
 }
 // J5-D end
 
@@ -891,37 +898,85 @@ mod tests {
         );
     }
 
-    /// §16 build provenance: a revision is a full commit or nothing.
+    /// §16 build provenance: the build environment's claims are validated
+    /// (build.rs fails the build with these same errors; review F8).
     #[test]
-    fn a_build_revision_is_a_full_commit_or_null() {
+    fn build_claims_are_a_full_commit_and_a_consistent_flag() {
+        use build_provenance::{Claims, validate};
         let full = "48a229ceaefd4985c50990b14116b6d856af0985";
-        assert_eq!(build_revision(Some(full)).as_deref(), Some(full));
         assert_eq!(
-            build_revision(Some(&full.to_ascii_uppercase())).as_deref(),
+            validate(Some(full), Some("false")),
+            Ok(Claims {
+                revision: Some(full.to_owned()),
+                dirty: Some(false)
+            })
+        );
+        assert_eq!(
+            validate(Some(&full.to_ascii_uppercase()), Some("1"))
+                .unwrap()
+                .revision
+                .as_deref(),
             Some(full),
             "hex is recorded lowercased"
         );
         assert_eq!(
-            build_revision(Some(&format!(" {full}\n"))).as_deref(),
-            Some(full)
+            validate(Some(&format!(" {full}\n")), None),
+            Ok(Claims {
+                revision: Some(full.to_owned()),
+                dirty: None
+            })
         );
-        for rejected in [
-            None,
-            Some(""),
-            Some("48a229cea"),
-            Some("48a229ceaefd4985c50990b14116b6d856af09850"),
-            Some("g8a229ceaefd4985c50990b14116b6d856af0985"),
-            Some("HEAD"),
+        // Unset and empty are unknown, never an error.
+        for (revision, dirty) in [(None, None), (Some(""), Some("")), (Some(""), None)] {
+            assert_eq!(
+                validate(revision, dirty),
+                Ok(Claims {
+                    revision: None,
+                    dirty: None
+                })
+            );
+        }
+        // Malformed or contradictory claims are refused.
+        for revision in [
+            "48a229cea",
+            "48a229ceaefd4985c50990b14116b6d856af09850",
+            "g8a229ceaefd4985c50990b14116b6d856af0985",
+            "HEAD",
+            "0000000000000000000000000000000000000000",
         ] {
-            assert_eq!(build_revision(rejected), None, "{rejected:?}");
+            assert!(validate(Some(revision), None).is_err(), "{revision}");
         }
-        assert_eq!(build_dirty(Some("true")), Some(true));
-        assert_eq!(build_dirty(Some("1")), Some(true));
-        assert_eq!(build_dirty(Some("false")), Some(false));
-        assert_eq!(build_dirty(Some("0")), Some(false));
-        for unknown in [None, Some(""), Some("yes"), Some("dirty")] {
-            assert_eq!(build_dirty(unknown), None, "{unknown:?}");
+        for dirty in ["yes", "dirty", "no"] {
+            assert!(validate(Some(full), Some(dirty)).is_err(), "{dirty}");
         }
+        assert!(
+            validate(None, Some("false")).is_err(),
+            "a clean claim about no revision"
+        );
+        assert!(validate(Some(""), Some("true")).is_err());
+    }
+
+    /// The inputs digest is the documented construction.
+    #[test]
+    fn the_inputs_digest_is_the_documented_construction() {
+        use sha2::Digest as _;
+        let files: [(&str, &[u8]); 2] = [("a", b"xy"), ("b/c", b"")];
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"a\0");
+        expected.extend_from_slice(&2u64.to_le_bytes());
+        expected.extend_from_slice(b"xy");
+        expected.extend_from_slice(b"b/c\0");
+        expected.extend_from_slice(&0u64.to_le_bytes());
+        let hex: String = sha2::Sha256::digest(&expected)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(build_provenance::digest(files), format!("sha256:{hex}"));
+        // A different path or content is a different digest.
+        assert_ne!(
+            build_provenance::digest([("a", &b"xy"[..])]),
+            build_provenance::digest([("A", &b"xy"[..])])
+        );
     }
 }
 // J5-D end

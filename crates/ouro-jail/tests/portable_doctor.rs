@@ -90,12 +90,98 @@ fn pinned_channel() -> String {
         .to_owned()
 }
 
+/// The build inputs' digest, computed here independently of the product
+/// (review F8: provenance is measured, not asserted). The rule, which
+/// build.rs documents too: SHA-256 over every file under
+/// `crates/ouro-jail/src` plus `crates/ouro-jail/build.rs`,
+/// `crates/ouro-jail/Cargo.toml`, `Cargo.toml`, `Cargo.lock` and
+/// `rust-toolchain.toml`, sorted by their `/`-separated path relative to the
+/// repository root, each as `path NUL u64-LE(length) bytes`.
+fn build_inputs_digest() -> String {
+    use sha2::Digest as _;
+    let root = repo_root();
+    let mut files: Vec<String> = [
+        "crates/ouro-jail/build.rs",
+        "crates/ouro-jail/Cargo.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let mut stack = vec![root.join("crates/ouro-jail/src")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("readable") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                files.push(
+                    path.strip_prefix(&root)
+                        .expect("inside the repository")
+                        .to_str()
+                        .expect("UTF-8")
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    files.sort();
+    let mut hasher = sha2::Sha256::new();
+    for file in &files {
+        let bytes = std::fs::read(root.join(file)).expect("readable");
+        hasher.update(file.as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
+}
+
+/// The opt-level this test (and so the binary, built by the same cargo
+/// invocation and profile) was compiled at, from the workspace manifest.
+fn expected_opt_level() -> String {
+    let workspace = std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("Cargo.toml");
+    let workspace: toml::Value = toml::from_str(&workspace).expect("TOML");
+    let profile = if cfg!(debug_assertions) {
+        "dev"
+    } else {
+        "release"
+    };
+    match workspace
+        .get("profile")
+        .and_then(|profiles| profiles.get(profile))
+        .and_then(|profile| profile.get("opt-level"))
+    {
+        Some(toml::Value::Integer(level)) => level.to_string(),
+        Some(toml::Value::String(level)) => level.clone(),
+        _ if profile == "dev" => "0".to_owned(),
+        _ => "3".to_owned(),
+    }
+}
+
 /// What `build` must say, from facts this test reads independently.
 fn assert_build(build: &serde_json::Value) {
     let object = build.as_object().expect("`build` is an object");
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["dirty", "profile", "revision", "rustc", "target"]);
+    assert_eq!(
+        keys,
+        [
+            "debug_assertions",
+            "dirty",
+            "inputs",
+            "opt_level",
+            "revision",
+            "rustc",
+            "target"
+        ]
+    );
 
     // The compiler: `rustc -V` of the pinned toolchain.
     let rustc = build["rustc"].as_str().expect("rustc is a string");
@@ -117,26 +203,21 @@ fn assert_build(build: &serde_json::Value) {
         "{target} for {arch}{os}"
     );
 
-    // The profile the binary was built with, which is this test's own.
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    assert_eq!(build["profile"], profile);
+    // What the compiler was actually asked to do, not a profile's name.
+    assert_eq!(build["debug_assertions"], cfg!(debug_assertions));
+    assert_eq!(build["opt_level"], expected_opt_level());
+
+    // The inputs the binary was built from, measured.
+    assert_eq!(build["inputs"], build_inputs_digest(), "{build:#}");
 
     // The revision and dirty flag come from the environment of the cargo
     // invocation that built both this test and the binary: null when that
     // environment did not set them, never a guess.
-    match option_env!("OURO_BUILD_REVISION") {
-        Some(revision)
-            if revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()) =>
-        {
-            assert_eq!(build["revision"], revision.to_ascii_lowercase());
-        }
-        _ => assert_eq!(build["revision"], serde_json::Value::Null),
+    match option_env!("OURO_BUILD_REVISION").filter(|value| !value.is_empty()) {
+        Some(revision) => assert_eq!(build["revision"], revision.to_ascii_lowercase()),
+        None => assert_eq!(build["revision"], serde_json::Value::Null),
     }
-    match option_env!("OURO_BUILD_DIRTY") {
+    match option_env!("OURO_BUILD_DIRTY").filter(|value| !value.is_empty()) {
         Some("true" | "1") => assert_eq!(build["dirty"], true),
         Some("false" | "0") => assert_eq!(build["dirty"], false),
         _ => assert_eq!(build["dirty"], serde_json::Value::Null),
@@ -161,15 +242,17 @@ fn version_json_carries_the_build_provenance() {
     for expected in [
         format!("build {}", word(&build["rustc"])),
         format!(
-            "build target {} {}",
+            "build target {} opt-level {} debug-assertions {}",
             word(&build["target"]),
-            word(&build["profile"])
+            word(&build["opt_level"]),
+            word(&build["debug_assertions"])
         ),
         format!(
             "build revision {} dirty {}",
             word(&build["revision"]),
             word(&build["dirty"])
         ),
+        format!("build inputs {}", word(&build["inputs"])),
     ] {
         assert!(
             text.lines().any(|line| line == expected),
@@ -308,14 +391,20 @@ fn doctor_json_carries_the_host_manifest_section_3_2_names() {
     assert_eq!(
         keys,
         [
+            "apparmor_enabled",
             "apparmor_userns_restriction",
             "cgroup",
+            "cpus_online",
             "distribution",
             "kernel_release",
             "kernel_version",
             "linger",
+            "memory",
             "operator_identity",
+            "privileged_groups",
             "sysctls",
+            "systemd_version",
+            "virtualization",
         ]
     );
 
@@ -354,10 +443,11 @@ fn doctor_json_carries_the_host_manifest_section_3_2_names() {
     // AppArmor's user-namespace restriction, as that sysctl states it.
     let apparmor = &host["apparmor_userns_restriction"];
     let expected_state =
-        match proc_text("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").as_deref() {
-            Some("0") => "off",
-            Some(_) => "on",
-            None => "absent",
+        match std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") {
+            Ok(text) if text.trim() == "0" => "off",
+            Ok(_) => "on",
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent",
+            Err(_) => "unknown",
         };
     assert_eq!(apparmor["state"], expected_state, "{apparmor:#}");
     match std::fs::read_dir("/etc/apparmor.d") {
@@ -377,6 +467,115 @@ fn doctor_json_carries_the_host_manifest_section_3_2_names() {
             assert_eq!(apparmor["profile_files"], serde_json::json!(expected));
         }
     }
+    // Every non-empty override under local/ (review F5).
+    match std::fs::read_dir("/etc/apparmor.d/local") {
+        Err(_) => assert_eq!(apparmor["local_files"], serde_json::Value::Null),
+        Ok(entries) => {
+            let mut expected: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file() && m.len() > 0)
+                })
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            expected.sort();
+            assert_eq!(apparmor["local_files"], serde_json::json!(expected));
+        }
+    }
+    // The top-level files no dpkg package lists (operator-installed).
+    let lists: Option<String> = std::fs::read_dir("/var/lib/dpkg/info").ok().map(|entries| {
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".list"))
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect()
+    });
+    match (std::fs::read_dir("/etc/apparmor.d"), lists) {
+        (Ok(entries), Some(lists)) => {
+            let owned: std::collections::BTreeSet<&str> = lists.lines().collect();
+            let mut expected: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file()))
+                .map(|entry| entry.path().to_string_lossy().into_owned())
+                .filter(|path| !owned.contains(path.as_str()))
+                .collect();
+            expected.sort();
+            assert_eq!(apparmor["unpackaged_files"], serde_json::json!(expected));
+        }
+        _ => assert_eq!(apparmor["unpackaged_files"], serde_json::Value::Null),
+    }
+    let expected_enabled = match std::fs::read_to_string("/sys/module/apparmor/parameters/enabled")
+    {
+        Ok(text) if text.trim() == "Y" => serde_json::json!(true),
+        Ok(text) if text.trim() == "N" => serde_json::json!(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!(false),
+        _ => serde_json::Value::Null,
+    };
+    assert_eq!(host["apparmor_enabled"], expected_enabled);
+
+    // Virtualization, CPUs, memory and systemd, read with the ordinary tools.
+    let first_line = |program: &str, args: &[&str]| -> serde_json::Value {
+        Command::new(program)
+            .args(args)
+            .output()
+            .ok()
+            .and_then(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .map(|line| line.trim().to_owned())
+            })
+            .filter(|line| !line.is_empty())
+            .map_or(serde_json::Value::Null, serde_json::Value::String)
+    };
+    assert_eq!(
+        host["virtualization"],
+        first_line("systemd-detect-virt", &[])
+    );
+    assert_eq!(
+        host["systemd_version"],
+        first_line("systemctl", &["--version"])
+    );
+    let cpus = first_line("getconf", &["_NPROCESSORS_ONLN"]);
+    assert_eq!(
+        host["cpus_online"].as_u64().map(|count| count.to_string()),
+        cpus.as_str().map(str::to_owned)
+    );
+    let meminfo = std::fs::read_to_string("/proc/meminfo").expect("meminfo");
+    let kib = |key: &str| -> serde_json::Value {
+        meminfo
+            .lines()
+            .find(|line| line.starts_with(&format!("{key}:")))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u64>().ok())
+            .map_or(serde_json::Value::Null, serde_json::Value::from)
+    };
+    assert_eq!(host["memory"]["mem_total_kib"], kib("MemTotal"));
+    assert_eq!(host["memory"]["swap_total_kib"], kib("SwapTotal"));
+
+    // The groups that confer root-equivalent authority, as facts.
+    let groups = Command::new("id").arg("-Gn").output().expect("id runs");
+    let mut privileged: Vec<String> = String::from_utf8_lossy(&groups.stdout)
+        .split_whitespace()
+        .filter(|name| {
+            [
+                "root",
+                "sudo",
+                "admin",
+                "wheel",
+                "docker",
+                "lxd",
+                "incus-admin",
+                "libvirt",
+                "disk",
+            ]
+            .contains(name)
+        })
+        .map(str::to_owned)
+        .collect();
+    privileged.sort();
+    privileged.dedup();
+    assert_eq!(host["privileged_groups"], serde_json::json!(privileged));
 
     // cgroup v2 delegation as this operator's session sees it.
     let uid = std::fs::metadata("/proc/self").expect("procfs").uid();
@@ -392,10 +591,26 @@ fn doctor_json_carries_the_host_manifest_section_3_2_names() {
             .map(str::to_owned)
             .collect();
         assert_eq!(cgroup["controllers"], serde_json::json!(controllers));
+        let subtree: Vec<String> = proc_text(root.join("cgroup.subtree_control").to_str().unwrap())
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(cgroup["subtree_control"], serde_json::json!(subtree));
     } else {
         assert_eq!(cgroup["delegated_root"], serde_json::Value::Null);
         assert_eq!(cgroup["controllers"], serde_json::Value::Null);
+        assert_eq!(cgroup["subtree_control"], serde_json::Value::Null);
     }
+    let root_controllers: Vec<String> = proc_text("/sys/fs/cgroup/cgroup.controllers")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        cgroup["root_controllers"],
+        serde_json::json!(root_controllers)
+    );
 
     // Lingering, as logind records it: one file per user name.
     let user = Command::new("id").arg("-un").output().expect("id runs");
@@ -426,12 +641,23 @@ fn doctor_json_carries_the_host_manifest_section_3_2_names() {
             .first()
             .is_some_and(|mask| !mask.trim_start_matches('0').is_empty())
     });
-    let expected_identity = if uids[1] == "0" {
+    let initial_namespace = std::fs::read_to_string("/proc/self/uid_map")
+        .expect("uid_map")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        == ["0", "0", "4294967295"];
+    let expected_identity = if !initial_namespace {
+        "user_namespace"
+    } else if uids[1] == "0" {
         "root"
-    } else if uids[0] != uids[1] || gids[0] != gids[1] {
+    } else if uids[..3].iter().any(|uid| *uid != uids[0])
+        || gids[..3].iter().any(|gid| *gid != gids[0])
+    {
         "set_id"
     } else if capable {
         "capable"
+    } else if !privileged.is_empty() {
+        "privileged_group"
     } else {
         "unprivileged"
     };
@@ -514,6 +740,11 @@ fn the_doctor_schema_rejects_what_it_must() {
         .into_iter()
         .find(|(name, _)| name == "doctor-macos.json")
         .expect("the macOS example");
+    // Every case below breaks one rule of a record the schema accepts; a
+    // base that is already invalid would make each case pass vacuously.
+    for (name, base) in [("doctor-linux.json", &linux), ("doctor-macos.json", &macos)] {
+        assert_eq!(schema_errors(base), Vec::<String>::new(), "{name}");
+    }
     // The macOS cases carry the Linux example's own, valid `host` and
     // `supervisor_scope`, so the only rule that can reject them is the
     // platform partition.
@@ -545,7 +776,7 @@ fn the_doctor_schema_rejects_what_it_must() {
     );
 
     type Change = fn(&mut serde_json::Value);
-    let cases: [(&str, &serde_json::Value, Change); 12] = [
+    let cases: &[(&str, &serde_json::Value, Change)] = &[
         ("another identifier", &linux, |r| {
             r["schema"] = "ouro.jail.doctor/2".into()
         }),
@@ -555,8 +786,116 @@ fn the_doctor_schema_rejects_what_it_must() {
         ("an abbreviated revision", &linux, |r| {
             r["build"]["revision"] = "48a229cea".into();
         }),
-        ("a profile that is neither", &linux, |r| {
-            r["build"]["profile"] = "bench".into()
+        ("an all-zero revision", &linux, |r| {
+            r["build"]["revision"] = "0000000000000000000000000000000000000000".into();
+        }),
+        ("an opt-level that is none", &linux, |r| {
+            r["build"]["opt_level"] = "fast".into()
+        }),
+        ("an inputs digest that is not one", &linux, |r| {
+            r["build"]["inputs"] = "sha256:abc".into()
+        }),
+        ("a profile name instead of measured settings", &linux, |r| {
+            r["build"]["profile"] = "release".into()
+        }),
+        // The reviewer's crafted records (rev-D/schema-cases), rebuilt from
+        // the real examples.
+        (
+            "l1: Linux ready with every capability unsupported",
+            &linux,
+            |r| {
+                for row in r["capabilities"].as_array_mut().unwrap() {
+                    row["status"] = "unsupported".into();
+                }
+            },
+        ),
+        (
+            "l1b: Linux ready with one requirement unavailable",
+            &linux,
+            |r| {
+                let row = r["capabilities"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|row| row["name"] == "syscall_filter")
+                    .unwrap();
+                row["status"] = "unavailable".into();
+                row["reason_code"] = "filter_not_enforced".into();
+            },
+        ),
+        ("l2: dirty false without a revision", &linux, |r| {
+            r["build"]["dirty"] = false.into();
+            r["build"]["revision"] = serde_json::Value::Null;
+        }),
+        ("l3: arch aarch64 with an x86_64 target", &linux, |r| {
+            r["platform"]["arch"] = "aarch64".into()
+        }),
+        ("l4: ready without a backend", &linux, |r| {
+            r["binaries"]["bwrap"] = serde_json::Value::Null
+        }),
+        (
+            "l5: restriction absent while the sysctl reads 1",
+            &linux,
+            |r| r["host"]["apparmor_userns_restriction"]["state"] = "absent".into(),
+        ),
+        (
+            "l5b: restriction on while the sysctl reads 0",
+            &linux,
+            |r| r["host"]["sysctls"]["kernel.apparmor_restrict_unprivileged_userns"] = "0".into(),
+        ),
+        (
+            "l5c: restriction off while the sysctl is unreadable",
+            &linux,
+            |r| {
+                r["host"]["sysctls"]["kernel.apparmor_restrict_unprivileged_userns"] =
+                    serde_json::Value::Null;
+                r["host"]["apparmor_userns_restriction"]["state"] = "off".into();
+            },
+        ),
+        ("l6: a missing cgroup fact", &linux, |r| {
+            r["host"].as_object_mut().unwrap().remove("cgroup");
+        }),
+        ("controllers without a delegated root", &linux, |r| {
+            r["host"]["cgroup"]["delegated_root"] = serde_json::Value::Null
+        }),
+        ("unprivileged while in the sudo group", &linux, |r| {
+            r["host"]["privileged_groups"] = serde_json::json!(["sudo"])
+        }),
+        ("privileged_group with no privileged group", &linux, |r| {
+            r["host"]["operator_identity"] = "privileged_group".into()
+        }),
+        ("a group that is not a privileged one", &linux, |r| {
+            r["host"]["privileged_groups"] = serde_json::json!(["users"])
+        }),
+        ("a probe row named as a requirement", &linux, |r| {
+            let rows = r["capabilities"].as_array_mut().unwrap();
+            let row = rows.iter_mut().find(|row| row["scope"] == "host").unwrap();
+            row["name"] = "syscall_filter".into();
+        }),
+        ("m1: macOS carries a Linux probe row", &macos, |r| {
+            r["capabilities"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "cgroup_delegated_leaf", "status": "available", "scope": "tree",
+                    "mechanism": "cgroup-v2-delegated", "reason_code": "ok",
+                    "measured_at": "2026-09-24T00:00:00Z", "evidence_ref": "probe"
+                }));
+        }),
+        ("m2: macOS with the old requirement name", &macos, |r| {
+            r["requirements"]
+                .as_array_mut()
+                .unwrap()
+                .push("execution_cgroup".into());
+        }),
+        (
+            "m2b: a macOS row named as the old requirement",
+            &macos,
+            |r| r["capabilities"][0]["name"] = "execution_cgroup".into(),
+        ),
+        ("m3: macOS ready", &macos, |r| r["ready"] = true.into()),
+        ("m4: macOS with a Linux build target", &macos, |r| {
+            r["build"]["target"] = "x86_64-unknown-linux-gnu".into()
         }),
         ("Linux without a host", &linux, |r| {
             r.as_object_mut().unwrap().remove("host");
@@ -574,7 +913,7 @@ fn the_doctor_schema_rejects_what_it_must() {
                 .to_ascii_uppercase();
             r["binaries"]["ouro-jail"]["sha256"] = upper.into();
         }),
-        ("an unknown identity category", &linux, |r| {
+        ("l7: an unknown identity category", &linux, |r| {
             r["host"]["operator_identity"] = "admin".into();
         }),
         ("a sysctl that is not a string or null", &linux, |r| {
@@ -588,7 +927,7 @@ fn the_doctor_schema_rejects_what_it_must() {
         }),
     ];
     for (label, base, change) in cases {
-        let mut record = base.clone();
+        let mut record = (*base).clone();
         change(&mut record);
         assert!(
             !schema_errors(&record).is_empty(),

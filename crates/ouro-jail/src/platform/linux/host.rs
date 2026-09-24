@@ -53,21 +53,43 @@ pub fn sysctl_path(name: &str) -> String {
     format!("/proc/sys/{}", name.replace('.', "/"))
 }
 
+/// Groups whose members hold root-equivalent authority on a stock host:
+/// root itself, the sudoers groups, container and VM daemons that run what
+/// their members ask as root, and raw disk access. Recorded as facts in
+/// `privileged_groups`; membership makes the identity `privileged_group`.
+pub const PRIVILEGED_GROUPS: [&str; 9] = [
+    "root",
+    "sudo",
+    "admin",
+    "wheel",
+    "docker",
+    "lxd",
+    "incus-admin",
+    "libvirt",
+    "disk",
+];
+
 /// The operator identity category of §14.1: who `doctor` ran as, in the
-/// terms that decide what it could measure.
+/// terms that decide what it could measure. The first that applies wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperatorIdentity {
-    /// Effective uid 0.
+    /// The credentials could not be read.
+    Unknown,
+    /// The process runs in a user namespace other than the initial one:
+    /// its uids and capabilities are that namespace's, not the host's.
+    UserNamespace,
+    /// Effective uid 0 in the initial user namespace.
     Root,
-    /// Real and effective uid or gid differ: a set-id program.
+    /// Real, effective and saved uids (or gids) differ: a set-id program,
+    /// including one that kept a saved set-uid 0 and can regain root.
     SetId,
     /// Not root, but with permitted, effective or ambient capabilities.
     Capable,
-    /// An ordinary account with no capability: the reference host's
-    /// `ouro-ci`, and the identity the product is built for.
+    /// An ordinary account that belongs to a [`PRIVILEGED_GROUPS`] group.
+    PrivilegedGroup,
+    /// An ordinary account with no capability and no privileged group: the
+    /// reference host's `ouro-ci`, and the identity the product is built for.
     Unprivileged,
-    /// The credentials could not be read.
-    Unknown,
 }
 
 impl OperatorIdentity {
@@ -75,18 +97,49 @@ impl OperatorIdentity {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
+            Self::UserNamespace => "user_namespace",
             Self::Root => "root",
             Self::SetId => "set_id",
             Self::Capable => "capable",
+            Self::PrivilegedGroup => "privileged_group",
             Self::Unprivileged => "unprivileged",
-            Self::Unknown => "unknown",
         }
     }
 }
 
-/// Classifies `/proc/<pid>/status` text.
+/// Whether `/proc/<pid>/uid_map` text is the initial user namespace's
+/// identity map (one line, `0 0 4294967295`).
 #[must_use]
-pub fn classify_identity(status: &str) -> OperatorIdentity {
+pub fn is_initial_user_namespace(uid_map: &str) -> bool {
+    let lines: Vec<Vec<&str>> = uid_map
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| !fields.is_empty())
+        .collect();
+    lines == [vec!["0", "0", "4294967295"]]
+}
+
+/// The [`PRIVILEGED_GROUPS`] among `names`, sorted and without repeats.
+#[must_use]
+pub fn privileged_groups<I: IntoIterator<Item = String>>(names: I) -> Vec<String> {
+    let mut out: Vec<String> = names
+        .into_iter()
+        .filter(|name| PRIVILEGED_GROUPS.contains(&name.as_str()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Classifies `/proc/<pid>/status` text, with that process's `uid_map`
+/// (`None` when unreadable) and the names of its privileged groups.
+#[must_use]
+pub fn classify_identity(
+    status: &str,
+    uid_map: Option<&str>,
+    privileged: &[String],
+) -> OperatorIdentity {
     let field = |name: &str| -> Option<Vec<&str>> {
         status.lines().find_map(|line| {
             let rest = line.strip_prefix(name)?.strip_prefix(':')?;
@@ -96,15 +149,19 @@ pub fn classify_identity(status: &str) -> OperatorIdentity {
     let (Some(uids), Some(gids)) = (field("Uid"), field("Gid")) else {
         return OperatorIdentity::Unknown;
     };
-    let (Some(real_uid), Some(effective_uid), Some(real_gid), Some(effective_gid)) =
-        (uids.first(), uids.get(1), gids.first(), gids.get(1))
-    else {
+    if uids.len() < 3 || gids.len() < 3 {
+        return OperatorIdentity::Unknown;
+    }
+    let Some(uid_map) = uid_map else {
         return OperatorIdentity::Unknown;
     };
-    if *effective_uid == "0" {
+    if !is_initial_user_namespace(uid_map) {
+        return OperatorIdentity::UserNamespace;
+    }
+    if uids[1] == "0" {
         return OperatorIdentity::Root;
     }
-    if real_uid != effective_uid || real_gid != effective_gid {
+    if uids[..3].iter().any(|uid| *uid != uids[0]) || gids[..3].iter().any(|gid| *gid != gids[0]) {
         return OperatorIdentity::SetId;
     }
     let mut capable = false;
@@ -119,6 +176,8 @@ pub fn classify_identity(status: &str) -> OperatorIdentity {
     }
     if capable {
         OperatorIdentity::Capable
+    } else if !privileged.is_empty() {
+        OperatorIdentity::PrivilegedGroup
     } else {
         OperatorIdentity::Unprivileged
     }
@@ -159,15 +218,82 @@ pub fn os_release_pretty_name(text: &str) -> Option<String> {
     (!unquoted.is_empty()).then_some(unquoted)
 }
 
-/// The restriction's state, from the sysctl's value: `on` for any value
-/// but `0`, `off` for `0`, `absent` when the kernel has no such sysctl.
-#[must_use]
-pub fn apparmor_state(value: Option<&str>) -> &'static str {
-    match value {
-        None => "absent",
-        Some("0") => "off",
-        Some(_) => "on",
+/// A sysctl read: its value, absent (the kernel has no such sysctl), or
+/// present but unreadable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SysctlRead {
+    /// The trimmed value.
+    Value(String),
+    /// No such file: the kernel does not have this sysctl.
+    Absent,
+    /// It exists but could not be read.
+    Unreadable,
+}
+
+impl SysctlRead {
+    /// Classifies a read of the sysctl's procfs file.
+    #[must_use]
+    pub fn from_read(read: io::Result<String>) -> Self {
+        match read {
+            Ok(text) => Self::Value(text.trim().to_owned()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::Absent,
+            Err(_) => Self::Unreadable,
+        }
     }
+
+    /// The value, when one was read.
+    #[must_use]
+    pub fn value(&self) -> Option<&str> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Absent | Self::Unreadable => None,
+        }
+    }
+}
+
+/// The restriction's state, from the sysctl: `on` for any value but `0`,
+/// `off` for `0`, `absent` when the kernel has no such sysctl and `unknown`
+/// when it exists but cannot be read (review F11: never a guess).
+#[must_use]
+pub fn apparmor_state(read: &SysctlRead) -> &'static str {
+    match read {
+        SysctlRead::Absent => "absent",
+        SysctlRead::Unreadable => "unknown",
+        SysctlRead::Value(value) if value == "0" => "off",
+        SysctlRead::Value(_) => "on",
+    }
+}
+
+/// The `KiB` value of a `/proc/meminfo` line (`MemTotal:  3905584 kB`).
+#[must_use]
+pub fn meminfo_kib(text: &str, key: &str) -> Option<u64> {
+    text.lines().find_map(|line| {
+        let rest = line.strip_prefix(key)?.strip_prefix(':')?;
+        let mut fields = rest.split_whitespace();
+        let value = fields.next()?.parse().ok()?;
+        (fields.next() == Some("kB")).then_some(value)
+    })
+}
+
+/// Files an unprivileged account can see were installed outside the
+/// package manager: those of `candidates` (absolute paths) that no dpkg
+/// file list names, sorted.
+#[must_use]
+pub fn unpackaged<'a, I: IntoIterator<Item = &'a str>>(
+    candidates: &[String],
+    lists: I,
+) -> Vec<String> {
+    let owned: std::collections::BTreeSet<&str> = lists
+        .into_iter()
+        .flat_map(|list| list.lines().map(str::trim))
+        .collect();
+    let mut out: Vec<String> = candidates
+        .iter()
+        .filter(|path| !owned.contains(path.as_str()))
+        .cloned()
+        .collect();
+    out.sort();
+    out
 }
 
 /// The AppArmor profile file names worth recording, sorted.
@@ -233,8 +359,9 @@ mod linux {
     use std::path::Path;
 
     use super::{
-        APPARMOR_DIR, LINGER_DIR, SYSCTLS, apparmor_profile_files, apparmor_state,
-        classify_identity, file_sha256, os_release_pretty_name, sysctl_path,
+        APPARMOR_DIR, LINGER_DIR, SYSCTLS, SysctlRead, apparmor_profile_files, apparmor_state,
+        classify_identity, file_sha256, meminfo_kib, os_release_pretty_name, privileged_groups,
+        sysctl_path, unpackaged,
     };
 
     fn read_trimmed(path: &str) -> Option<String> {
@@ -321,6 +448,133 @@ mod linux {
         (field(&filled.release), field(&filled.version))
     }
 
+    /// A read-only command at the first of `candidates` that exists (never
+    /// a `PATH` lookup), its first stdout line within the probe deadline,
+    /// or `None`.
+    fn command_line(candidates: &[&str], args: &[&str]) -> Option<String> {
+        let program = candidates
+            .iter()
+            .map(Path::new)
+            .find(|path| path.is_file())?;
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .env_clear()
+            .stdin(std::process::Stdio::null());
+        let captured = super::super::exec::run_captured(
+            &mut command,
+            super::super::clock::Deadline::after(super::super::probe::PROBE_DEADLINE),
+        )
+        .ok()?;
+        if captured.timed_out {
+            return None;
+        }
+        let line = captured.stdout.lines().next()?.trim().to_owned();
+        (!line.is_empty()).then_some(line)
+    }
+
+    /// The names of this process's groups (effective and supplementary).
+    fn group_names() -> Option<Vec<String>> {
+        // SAFETY: getgroups(0, NULL) returns the count and writes nothing.
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        let mut gids = vec![0 as libc::gid_t; usize::try_from(count).ok()?];
+        // SAFETY: the buffer holds `count` gids and the length says so.
+        let got = unsafe { libc::getgroups(count, gids.as_mut_ptr()) };
+        gids.truncate(usize::try_from(got).ok()?);
+        // SAFETY: getegid takes no arguments and cannot fail.
+        gids.push(unsafe { libc::getegid() });
+        let mut names = Vec::new();
+        for gid in gids {
+            let mut buffer = vec![0_u8; 16 * 1024];
+            // SAFETY: `group` is a plain C struct; all-zero is valid and
+            // getgrgid_r overwrites it before it is read.
+            let mut entry: libc::group = unsafe { std::mem::zeroed() };
+            let mut result: *mut libc::group = std::ptr::null_mut();
+            // SAFETY: every pointer is to a live local and the length is the
+            // buffer's own.
+            let rc = unsafe {
+                libc::getgrgid_r(
+                    gid,
+                    &raw mut entry,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    &raw mut result,
+                )
+            };
+            if rc != 0 || result.is_null() || entry.gr_name.is_null() {
+                continue;
+            }
+            // SAFETY: getgrgid_r succeeded, so gr_name is a NUL-terminated
+            // string inside `buffer`, which is still alive.
+            let name = unsafe { std::ffi::CStr::from_ptr(entry.gr_name) };
+            names.push(name.to_string_lossy().into_owned());
+        }
+        Some(names)
+    }
+
+    /// Profile files, non-empty `local/` files, unpackaged files.
+    type AppArmorFiles = (
+        Option<Vec<String>>,
+        Option<Vec<String>>,
+        Option<Vec<String>>,
+    );
+
+    /// The AppArmor facts an unprivileged account can read: the profile
+    /// files that bear on the jail, the non-empty `local/` overrides, and
+    /// the top-level files no dpkg package owns (review F5). Each is `None`
+    /// when it cannot be read.
+    fn apparmor_files() -> AppArmorFiles {
+        let top: Option<Vec<std::fs::DirEntry>> = std::fs::read_dir(APPARMOR_DIR)
+            .ok()
+            .map(|entries| entries.filter_map(Result::ok).collect());
+        let profile_files = top.as_ref().map(|entries| {
+            apparmor_profile_files(
+                entries
+                    .iter()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned()),
+            )
+        });
+        let local_files = std::fs::read_dir(Path::new(APPARMOR_DIR).join("local"))
+            .ok()
+            .map(|entries| {
+                let mut names: Vec<String> = entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .metadata()
+                            .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+                    })
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            });
+        let unpackaged_files = top.as_ref().and_then(|entries| {
+            let candidates: Vec<String> = entries
+                .iter()
+                .filter(|entry| entry.metadata().is_ok_and(|meta| meta.is_file()))
+                .map(|entry| entry.path().to_string_lossy().into_owned())
+                .collect();
+            let lists: Vec<String> = std::fs::read_dir("/var/lib/dpkg/info")
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "list"))
+                .map(|path| std::fs::read_to_string(path).ok())
+                .collect::<Option<Vec<String>>>()?;
+            Some(unpackaged(&candidates, lists.iter().map(String::as_str)))
+        });
+        (profile_files, local_files, unpackaged_files)
+    }
+
+    fn controllers(path: &Path) -> Option<Vec<String>> {
+        read_trimmed(&path.to_string_lossy()).map(|text| {
+            text.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+    }
+
     /// The `host` object of `doctor --json`.
     #[must_use]
     pub fn manifest() -> serde_json::Value {
@@ -335,43 +589,74 @@ mod linux {
             .iter()
             .map(|name| ((*name).to_owned(), read_trimmed(&sysctl_path(name)).into()))
             .collect();
-        let restriction = read_trimmed(&sysctl_path(SYSCTLS[0]));
-        let profile_files = std::fs::read_dir(APPARMOR_DIR).ok().map(|entries| {
-            apparmor_profile_files(
-                entries
-                    .filter_map(Result::ok)
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned()),
-            )
-        });
+        let restriction = SysctlRead::from_read(std::fs::read_to_string(sysctl_path(SYSCTLS[0])));
+        let apparmor_enabled =
+            match std::fs::read_to_string("/sys/module/apparmor/parameters/enabled") {
+                Ok(text) => match text.trim() {
+                    "Y" => Some(true),
+                    "N" => Some(false),
+                    _ => None,
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+                Err(_) => None,
+            };
+        let (profile_files, local_files, unpackaged_files) = apparmor_files();
         let delegated_root = super::super::cgroup::delegated_root(uid);
-        let controllers = delegated_root.as_ref().and_then(|root| {
-            read_trimmed(&root.join("cgroup.controllers").to_string_lossy()).map(|text| {
-                text.split_whitespace()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-        });
-        let identity = std::fs::read_to_string("/proc/self/status")
-            .map_or(super::OperatorIdentity::Unknown, |status| {
-                classify_identity(&status)
-            });
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok();
+        // SAFETY: sysconf takes a constant and returns -1 on failure.
+        let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        let groups = group_names().map(privileged_groups);
+        let identity = match (
+            std::fs::read_to_string("/proc/self/status"),
+            std::fs::read_to_string("/proc/self/uid_map").ok(),
+            groups.as_ref(),
+        ) {
+            (Ok(status), uid_map, Some(groups)) => {
+                classify_identity(&status, uid_map.as_deref(), groups)
+            }
+            _ => super::OperatorIdentity::Unknown,
+        };
         serde_json::json!({
             "kernel_release": kernel_release,
             "kernel_version": kernel_version,
             "distribution": distribution,
+            "virtualization": command_line(
+                &["/usr/bin/systemd-detect-virt", "/bin/systemd-detect-virt"],
+                &[],
+            ),
+            "cpus_online": (cpus > 0).then_some(cpus),
+            "memory": {
+                "mem_total_kib": meminfo.as_deref().and_then(|text| meminfo_kib(text, "MemTotal")),
+                "swap_total_kib": meminfo.as_deref().and_then(|text| meminfo_kib(text, "SwapTotal")),
+            },
+            "systemd_version": command_line(
+                &["/usr/bin/systemctl", "/bin/systemctl"],
+                &["--version"],
+            ),
             "sysctls": sysctls,
+            "apparmor_enabled": apparmor_enabled,
             "apparmor_userns_restriction": {
-                "state": apparmor_state(restriction.as_deref()),
+                "state": apparmor_state(&restriction),
                 "profile_files": profile_files,
+                "local_files": local_files,
+                "unpackaged_files": unpackaged_files,
             },
             "cgroup": {
+                "root_controllers": controllers(&Path::new(super::super::cgroup::CGROUP_ROOT)
+                    .join("cgroup.controllers")),
                 "delegated_root": delegated_root
                     .as_ref()
                     .map(|root| root.to_string_lossy().into_owned()),
-                "controllers": controllers,
+                "controllers": delegated_root
+                    .as_ref()
+                    .and_then(|root| controllers(&root.join("cgroup.controllers"))),
+                "subtree_control": delegated_root
+                    .as_ref()
+                    .and_then(|root| controllers(&root.join("cgroup.subtree_control"))),
             },
             "linger": linger(uid),
             "operator_identity": identity.as_str(),
+            "privileged_groups": groups,
         })
     }
 }
@@ -385,39 +670,85 @@ mod tests {
         CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n\
         CapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\n";
 
+    const INITIAL: &str = "         0          0 4294967295\n";
+
+    fn classify(status: &str) -> OperatorIdentity {
+        classify_identity(status, Some(INITIAL), &[])
+    }
+
     #[test]
     fn identity_categories_follow_the_credentials() {
-        assert_eq!(
-            classify_identity(UNPRIVILEGED),
-            OperatorIdentity::Unprivileged
-        );
+        assert_eq!(classify(UNPRIVILEGED), OperatorIdentity::Unprivileged);
         // A full bounding set is every process's; it grants nothing.
         let root = UNPRIVILEGED.replace("Uid:\t1001\t1001", "Uid:\t1001\t0");
-        assert_eq!(classify_identity(&root), OperatorIdentity::Root);
+        assert_eq!(classify(&root), OperatorIdentity::Root);
         let setuid = UNPRIVILEGED.replace("Uid:\t1001\t1001", "Uid:\t1001\t1002");
-        assert_eq!(classify_identity(&setuid), OperatorIdentity::SetId);
+        assert_eq!(classify(&setuid), OperatorIdentity::SetId);
         let setgid = UNPRIVILEGED.replace("Gid:\t1001\t1001", "Gid:\t1001\t27");
-        assert_eq!(classify_identity(&setgid), OperatorIdentity::SetId);
+        assert_eq!(classify(&setgid), OperatorIdentity::SetId);
         for field in ["CapPrm", "CapEff", "CapAmb"] {
             let capable = UNPRIVILEGED.replace(
                 &format!("{field}:\t0000000000000000"),
                 &format!("{field}:\t0000000000200000"),
             );
-            assert_eq!(
-                classify_identity(&capable),
-                OperatorIdentity::Capable,
-                "{field}"
-            );
+            assert_eq!(classify(&capable), OperatorIdentity::Capable, "{field}");
         }
         for broken in [
             "",
             "Uid:\t1001\n",
+            "Uid:\t1001\t1001\nGid:\t1001\t1001\n",
             &UNPRIVILEGED.replace("CapEff:\t0000000000000000\n", ""),
             &UNPRIVILEGED.replace("CapPrm:\t0000000000000000", "CapPrm:\tzz"),
         ] {
-            assert_eq!(classify_identity(broken), OperatorIdentity::Unknown);
+            assert_eq!(classify(broken), OperatorIdentity::Unknown);
         }
+        assert_eq!(
+            classify_identity(UNPRIVILEGED, None, &[]),
+            OperatorIdentity::Unknown,
+            "an unreadable uid_map is not a guess"
+        );
         assert_eq!(OperatorIdentity::SetId.as_str(), "set_id");
+    }
+
+    /// Review F10: the reviewer's three misclassified cases.
+    #[test]
+    fn saved_set_uid_privileged_groups_and_user_namespaces_are_named() {
+        // Real and effective 1001, saved set-uid 0: it can regain root.
+        let saved_root = UNPRIVILEGED.replace("Uid:\t1001\t1001\t1001", "Uid:\t1001\t1001\t0");
+        assert_eq!(classify(&saved_root), OperatorIdentity::SetId);
+        let saved_gid = UNPRIVILEGED.replace("Gid:\t1001\t1001\t1001", "Gid:\t1001\t1001\t0");
+        assert_eq!(classify(&saved_gid), OperatorIdentity::SetId);
+        // Members of sudo and docker, no capability: root-equivalent.
+        let groups =
+            privileged_groups(["ouro-ci", "docker", "sudo", "users", "sudo"].map(str::to_owned));
+        assert_eq!(groups, ["docker", "sudo"]);
+        assert_eq!(
+            classify_identity(UNPRIVILEGED, Some(INITIAL), &groups),
+            OperatorIdentity::PrivilegedGroup
+        );
+        assert_eq!(
+            privileged_groups(["users", "adm", "kvm"].map(str::to_owned)),
+            Vec::<String>::new()
+        );
+        // uid 0 as mapped inside an unprivileged user namespace is not host
+        // root: the map names who it is outside.
+        let mapped = UNPRIVILEGED.replace("Uid:\t1001\t1001\t1001\t1001", "Uid:\t0\t0\t0\t0");
+        for map in ["         0       1001          1\n", "0 100000 65536\n", ""] {
+            assert_eq!(
+                classify_identity(&mapped, Some(map), &[]),
+                OperatorIdentity::UserNamespace,
+                "{map:?}"
+            );
+        }
+        assert!(is_initial_user_namespace(INITIAL));
+        assert!(!is_initial_user_namespace("0 0 4294967295\n1 1 1\n"));
+        // Precedence: capabilities outrank a group, root outranks both.
+        let capable =
+            UNPRIVILEGED.replace("CapEff:\t0000000000000000", "CapEff:\t0000000000000001");
+        assert_eq!(
+            classify_identity(&capable, Some(INITIAL), &groups),
+            OperatorIdentity::Capable
+        );
     }
 
     #[test]
@@ -455,10 +786,50 @@ mod tests {
 
     #[test]
     fn the_restriction_state_follows_the_sysctl() {
-        assert_eq!(apparmor_state(Some("1")), "on");
-        assert_eq!(apparmor_state(Some("2")), "on");
-        assert_eq!(apparmor_state(Some("0")), "off");
-        assert_eq!(apparmor_state(None), "absent");
+        let value = |text: &str| SysctlRead::from_read(Ok(format!("{text}\n")));
+        assert_eq!(apparmor_state(&value("1")), "on");
+        assert_eq!(apparmor_state(&value("2")), "on");
+        assert_eq!(apparmor_state(&value("0")), "off");
+        assert_eq!(value("1").value(), Some("1"));
+        // Review F11: absent and unreadable are different facts.
+        let absent = SysctlRead::from_read(Err(io::Error::from(io::ErrorKind::NotFound)));
+        assert_eq!(apparmor_state(&absent), "absent");
+        let denied = SysctlRead::from_read(Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert_eq!(apparmor_state(&denied), "unknown");
+        assert_eq!(denied.value(), None);
+    }
+
+    #[test]
+    fn meminfo_values_are_read_in_kib() {
+        let text = "MemTotal:        3905584 kB\nMemFree:  12 kB\nSwapTotal:       8388604 kB\nHugePages_Total:       0\n";
+        assert_eq!(meminfo_kib(text, "MemTotal"), Some(3_905_584));
+        assert_eq!(meminfo_kib(text, "SwapTotal"), Some(8_388_604));
+        assert_eq!(meminfo_kib(text, "HugePages_Total"), None, "not in kB");
+        assert_eq!(meminfo_kib(text, "Mem"), None, "a prefix is not a key");
+        assert_eq!(meminfo_kib(text, "Absent"), None);
+    }
+
+    /// Review F5: operator-installed profiles are the files no package owns.
+    #[test]
+    fn unpackaged_files_are_those_no_package_lists() {
+        let candidates = [
+            "/etc/apparmor.d/bwrap-userns-restrict",
+            "/etc/apparmor.d/zz-operator",
+            "/etc/apparmor.d/unpriv_bwrap",
+        ]
+        .map(str::to_owned);
+        let lists = [
+            "/.\n/etc\n/etc/apparmor.d\n/etc/apparmor.d/bwrap-userns-restrict\n",
+            "/usr/bin/other\n",
+        ];
+        assert_eq!(
+            unpackaged(&candidates, lists),
+            [
+                "/etc/apparmor.d/unpriv_bwrap",
+                "/etc/apparmor.d/zz-operator"
+            ]
+        );
+        assert_eq!(unpackaged(&candidates, []).len(), 3);
     }
 
     #[test]
