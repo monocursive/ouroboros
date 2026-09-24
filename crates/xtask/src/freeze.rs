@@ -972,26 +972,9 @@ pub fn generate(
         Some(doctor) => Some(tested_section(root, doctor)?),
         None => {
             let existing = std::fs::read_to_string(root.join(FREEZE_PATH)).unwrap_or_default();
-            match existing.split_once(TESTED_MARKER) {
-                Some((_, section)) => {
-                    let value: toml::Value = toml::from_str(section)
-                        .map_err(|error| format!("the existing tested run: {error}"))?;
-                    match value.get("tested").map(Tested::from_toml) {
-                        Some(tested) if validate_tested(root, &tested).is_ok() => {
-                            Some(section.trim_start_matches('\n').to_owned())
-                        }
-                        _ => {
-                            notes.push(
-                                "the recorded tested run no longer validates against this tree \
-                                 and was dropped; record the next conformance run with --doctor"
-                                    .to_owned(),
-                            );
-                            None
-                        }
-                    }
-                }
-                None => None,
-            }
+            let (kept, note) = kept_tested(root, &existing)?;
+            notes.extend(note);
+            kept
         }
     };
     match tested {
@@ -1011,6 +994,32 @@ pub fn generate(
         }
     }
     Ok((text, notes))
+}
+
+/// The existing file's tested run, kept only while it still validates
+/// against the tree at `root`; otherwise dropped, with a note saying so.
+///
+/// # Errors
+/// A tested section that is not TOML.
+fn kept_tested(root: &Path, existing: &str) -> Result<(Option<String>, Option<String>), String> {
+    let Some((_, section)) = existing.split_once(TESTED_MARKER) else {
+        return Ok((None, None));
+    };
+    let value: toml::Value =
+        toml::from_str(section).map_err(|error| format!("the existing tested run: {error}"))?;
+    match value.get("tested").map(Tested::from_toml) {
+        Some(tested) if validate_tested(root, &tested).is_ok() => {
+            Ok((Some(section.trim_start_matches('\n').to_owned()), None))
+        }
+        _ => Ok((
+            None,
+            Some(
+                "the recorded tested run no longer validates against this tree and was \
+                 dropped; record the next conformance run with --doctor"
+                    .to_owned(),
+            ),
+        )),
+    }
 }
 
 /// `cargo xtask freeze --check`: the milestone gate. The file must be what
@@ -1330,6 +1339,57 @@ mod tests {
         let mut foreign = clean(root);
         foreign.revision = Some("48a229ceaefd4985c50990b14116b6d856af0985".to_owned());
         assert!(validate_tested(root, &foreign).is_err());
+    }
+
+    /// A revision that exists, has exactly the tested inputs and changes no
+    /// frozen input, but is on another branch: only ancestry refuses it.
+    #[test]
+    fn a_revision_outside_heads_history_is_refused() {
+        let dir = tree();
+        let root = dir.path();
+        git_in(root, &["init", "-q", "-b", "main"]);
+        git_in(root, &["add", "-A"]);
+        git_in(root, &["commit", "-q", "-m", "base"]);
+        git_in(root, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(root.join("NOTES"), "side\n").unwrap();
+        git_in(root, &["add", "-A"]);
+        git_in(root, &["commit", "-q", "-m", "side"]);
+        let side = head(root);
+        git_in(root, &["checkout", "-q", "main"]);
+        let mut tested = clean(root);
+        tested.revision = Some(side);
+        let problems = validate_tested(root, &tested).unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("not an ancestor of HEAD"),
+            "{problems:?}"
+        );
+    }
+
+    /// Review F4: regenerating without --doctor never carries a tested run
+    /// that no longer describes the tree.
+    #[test]
+    fn a_stale_tested_run_is_dropped_and_a_valid_one_kept() {
+        let dir = tree();
+        let root = dir.path();
+        let section = |inputs: &str| {
+            format!(
+                "tree values\n\n{TESTED_MARKER}\n[tested]\nready = true\nplatform_os = \"linux\"\n\
+                 platform_arch = \"x86_64\"\ntarget = \"x86_64-unknown-linux-gnu\"\n\
+                 opt_level = \"3\"\ndebug_assertions = false\n\
+                 revision = \"48a229ceaefd4985c50990b14116b6d856af0985\"\ndirty = false\n\
+                 inputs = \"{inputs}\"\n[tested.backend]\npath = \"/usr/bin/bwrap\"\n"
+            )
+        };
+        let current = build_provenance::tree_digest(root).unwrap();
+        let (kept, note) = kept_tested(root, &section(&current)).unwrap();
+        assert!(kept.is_some_and(|text| text.starts_with("[tested]")));
+        assert_eq!(note, None);
+        let (kept, note) =
+            kept_tested(root, &section(&format!("sha256:{}", "b".repeat(64)))).unwrap();
+        assert_eq!(kept, None);
+        assert!(note.is_some_and(|note| note.contains("dropped")));
+        assert_eq!(kept_tested(root, "no tested run\n").unwrap(), (None, None));
     }
 
     /// Review F4: the whole host object is copied, and an unknown fact is

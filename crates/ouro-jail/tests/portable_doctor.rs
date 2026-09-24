@@ -894,6 +894,15 @@ fn the_doctor_schema_rejects_what_it_must() {
             |r| r["capabilities"][0]["name"] = "execution_cgroup".into(),
         ),
         ("m3: macOS ready", &macos, |r| r["ready"] = true.into()),
+        (
+            "m3b: macOS ready with nothing required or measured",
+            &macos,
+            |r| {
+                r["ready"] = true.into();
+                r["requirements"] = serde_json::json!([]);
+                r["capabilities"] = serde_json::json!([]);
+            },
+        ),
         ("m4: macOS with a Linux build target", &macos, |r| {
             r["build"]["target"] = "x86_64-unknown-linux-gnu".into()
         }),
