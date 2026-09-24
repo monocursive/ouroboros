@@ -1541,12 +1541,12 @@ fn p04_an_unsafe_state_root_mode_or_owner_refuses_through_run() {
     assert_eq!(code, Some(125), "mode 0777: {stderr}");
     assert!(!ran);
     assert!(stderr.contains("unsafe_state_path"), "mode 0777: {stderr}");
-    // A directory owned by root that this account cannot create anything in.
-    let foreign = Path::new("/usr/share");
-    assert_eq!(
-        std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(foreign).unwrap()),
-        0
-    );
+    // A directory owned by root with mode 0700, so only the owner rule can
+    // refuse it (a 0755 one would also fail the mode rule).
+    let foreign = Path::new("/root");
+    let metadata = std::fs::symlink_metadata(foreign).unwrap();
+    assert_eq!(std::os::unix::fs::MetadataExt::uid(&metadata), 0);
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
     let (code, stderr, ran) = p04_run(Some(foreign), &[]);
     assert_eq!(code, Some(125), "foreign owner: {stderr}");
     assert!(!ran);
