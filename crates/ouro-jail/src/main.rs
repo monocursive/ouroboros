@@ -173,11 +173,18 @@ fn platform_json(platform: &PlatformRecord) -> serde_json::Value {
 }
 
 // J5-D begin: the running platform's closed set (§3.2)
-/// The closed set this build observes on the platform it runs on: Linux's
-/// `linux-closed-v1`, and none on macOS, where closed-set observation is
-/// unsupported in this milestone (§3.2).
+/// The closed set this build observes: `linux-closed-v1` on Linux built for
+/// an architecture the syscall tables cover, and none anywhere else (macOS,
+/// and a Linux build for another architecture, whose observer reports
+/// `unsupported_architecture`; §3.2).
 fn closed_set() -> Option<&'static str> {
-    cfg!(target_os = "linux").then(CoverageSummary::linux_closed_set)
+    closed_set_for(cfg!(target_os = "linux"), std::env::consts::ARCH)
+}
+
+/// [`closed_set`] for a stated OS and architecture.
+fn closed_set_for(linux: bool, arch: &str) -> Option<&'static str> {
+    (linux && ouro_jail::platform::linux::seccomp::tables_cover(arch))
+        .then(CoverageSummary::linux_closed_set)
 }
 // J5-D end
 
@@ -865,6 +872,24 @@ mod tests {
             serde_json::Value::Null
         );
         assert!(!gc_text(&report).contains("execution_boundary"));
+    }
+
+    /// Review F7: `version` announces the closed set only where this build
+    /// can observe it: Linux on an architecture the syscall tables cover.
+    #[test]
+    fn the_closed_set_is_announced_only_where_the_build_can_observe_it() {
+        assert_eq!(closed_set_for(true, "x86_64"), Some("linux-closed-v1"));
+        for arch in ["aarch64", "riscv64", "x86", ""] {
+            assert_eq!(closed_set_for(true, arch), None, "{arch}");
+        }
+        for arch in ["x86_64", "aarch64"] {
+            assert_eq!(closed_set_for(false, arch), None, "macOS {arch}");
+        }
+        // And the running binary uses exactly that rule.
+        assert_eq!(
+            closed_set(),
+            closed_set_for(cfg!(target_os = "linux"), std::env::consts::ARCH)
+        );
     }
 
     /// §16 build provenance: a revision is a full commit or nothing.
