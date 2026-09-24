@@ -528,23 +528,6 @@ impl<'a> GateOwner<'a> {
             .ok_or_else(|| io::Error::other("the gate was already closed by this owner"))
     }
 
-    /// Write the chosen release variant and keep the gate open: the frame is
-    /// complete, but §8.2 reads through EOF before releasing, so the jail
-    /// waits for a close that the caller controls by holding the writer.
-    pub fn write_unclosed(
-        &mut self,
-        variant: &Release,
-        attempt_id: &str,
-        policy_digest: &str,
-    ) -> io::Result<GateWriter> {
-        let bytes = frame_bytes(variant, attempt_id, policy_digest);
-        let mut writer = self.hold()?;
-        if !bytes.is_empty() {
-            writer.write_all(&bytes)?;
-        }
-        Ok(writer)
-    }
-
     /// Read control messages until the first of `kind`, keeping every
     /// message read. `None` when the channel closed first.
     pub fn await_kind(&mut self, kind: &str) -> io::Result<Option<Value>> {
