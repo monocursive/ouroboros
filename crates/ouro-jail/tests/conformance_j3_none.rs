@@ -928,7 +928,7 @@ fn l03_none_without_a_usable_cgroup_refuses() {
         );
         assert_eq!(receipt["lifetime"]["boundary"], "pending");
         assert!(
-            strings(&receipt["policy"]["requirements"]).contains(&"execution_cgroup".to_owned())
+            strings(&receipt["policy"]["requirements"]).contains(&"execution_boundary".to_owned())
         );
     }
 }

@@ -113,6 +113,15 @@ fn platform_json(platform: &PlatformRecord) -> serde_json::Value {
     })
 }
 
+// J5-D begin: the running platform's closed set (§3.2)
+/// The closed set this build observes on the platform it runs on: Linux's
+/// `linux-closed-v1`, and none on macOS, where closed-set observation is
+/// unsupported in this milestone (§3.2).
+fn closed_set() -> Option<&'static str> {
+    cfg!(target_os = "linux").then(CoverageSummary::linux_closed_set)
+}
+// J5-D end
+
 fn version(context: &Context, args: &VersionArgs) -> ExitCode {
     let identity = context.platform.identity();
     let platform = PlatformRecord {
@@ -126,7 +135,7 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             "version": env!("CARGO_PKG_VERSION"),
             "platform": platform_json(&platform),
             "schemas": schema_identifiers(),
-            "observation": { "closed_set": CoverageSummary::linux_closed_set() },
+            "observation": { "closed_set": closed_set() },
         }));
     } else {
         println!("ouro-jail {}", env!("CARGO_PKG_VERSION"));
@@ -136,7 +145,7 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             platform.arch,
             platform.kernel
         );
-        println!("closed set {}", CoverageSummary::linux_closed_set());
+        println!("closed set {}", closed_set().unwrap_or("none"));
         for (name, value) in [
             ("receipt", SCHEMA_RECEIPT),
             ("event", SCHEMA_EVENT),
@@ -476,7 +485,9 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
             // J4-G begin
             for (key, value) in [
                 ("owner", &entry.owner),
-                ("cgroup", &entry.cgroup),
+                // J5-D: the portable name of what became of the execution
+                // boundary (on Linux, the recorded cgroup leaf).
+                ("execution_boundary", &entry.cgroup),
                 ("scratch", &entry.scratch),
             ] {
                 if let Some(value) = value {
@@ -542,7 +553,8 @@ fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
                 // J3-agent end
                 // J4-G begin
                 "owner": entry.owner,
-                "cgroup": entry.cgroup,
+                // J5-D: portable key; the value is the platform's report
+                "execution_boundary": entry.cgroup,
                 "scratch": entry.scratch,
                 "recorded": entry.recorded,
                 // J4-G end

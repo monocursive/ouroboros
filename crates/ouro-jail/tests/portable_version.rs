@@ -125,10 +125,14 @@ fn the_announced_schema_identifiers_match_the_checked_in_schema_files() {
 #[test]
 fn the_announced_closed_set_is_the_one_the_specification_names() {
     let announced = version_json();
-    assert_eq!(
-        announced["observation"]["closed_set"].as_str(),
-        Some("linux-closed-v1")
-    );
+    // J5-D: the running platform's closed set; macOS has none in this
+    // milestone (§3.2), so it announces null rather than Linux's name.
+    let expected = if cfg!(target_os = "linux") {
+        serde_json::json!("linux-closed-v1")
+    } else {
+        serde_json::Value::Null
+    };
+    assert_eq!(announced["observation"]["closed_set"], expected);
     let spec = std::fs::read_to_string(repo_root().join("docs/specs/jail-v1.md"))
         .expect("the specification is checked in");
     assert!(spec.contains("linux-closed-v1"));

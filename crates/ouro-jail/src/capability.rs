@@ -95,8 +95,19 @@ pub const REQ_SYSCALL_FILTER: &str = "syscall_filter";
 pub const REQ_NETWORK_NONE: &str = "network_none";
 /// Requirement identifier for the mediating proxy.
 pub const REQ_NETWORK_PROXY: &str = "network_proxy";
-/// Requirement identifier for a supervisor-owned execution cgroup.
-pub const REQ_EXECUTION_CGROUP: &str = "execution_cgroup";
+// J5-D begin: the portable name (§3.1, I10; decided 2026-09-24)
+/// Requirement identifier for a supervisor-owned execution boundary: a tree
+/// the supervisor can place the target in, bound resources on, kill as a
+/// whole and verify empty. `none` needs it for lifetime, and every explicit
+/// tree ceiling needs it. How a platform provides it is its own plan (on
+/// Linux, a delegated cgroup v2 leaf); the requirement names the semantic.
+pub const REQ_EXECUTION_BOUNDARY: &str = "execution_boundary";
+/// The Linux platform's spelling of [`REQ_EXECUTION_BOUNDARY`], which it
+/// satisfies with a delegated cgroup. The same value: only the Rust name
+/// differs, so the Linux mapping reads in its own vocabulary. Nothing
+/// renders this name; the wire carries `execution_boundary`.
+pub const REQ_EXECUTION_CGROUP: &str = REQ_EXECUTION_BOUNDARY;
+// J5-D end
 // J3-launch begin: credential staging requirement (§12)
 /// Requirement identifier for staging launch credentials: anchored copies
 /// into vendor state and read-only binds of the exact source objects.
@@ -131,8 +142,9 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
             snapshot.filesystem.protected_coverage.as_str()
         ));
     }
-    // §4.9 of the north star: `none` still needs a cgroup the supervisor can
-    // kill, including with observation off; that is its only lifetime boundary.
+    // §4.9 of the north star: `none` still needs an execution boundary the
+    // supervisor can kill (a cgroup on Linux), including with observation
+    // off; that is its only lifetime boundary.
     let mut needs_cgroup = snapshot.profile == ProfileName::None;
     for key in LimitKey::ALL {
         let ceiling = match key {
@@ -151,7 +163,7 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
         }
     }
     if needs_cgroup {
-        out.push(REQ_EXECUTION_CGROUP.to_owned());
+        out.push(REQ_EXECUTION_BOUNDARY.to_owned());
     }
     // J3-launch begin: a launch profile that declares credentials needs them
     // staged, and a platform that cannot stage them must refuse, not skip.
@@ -293,7 +305,9 @@ mod tests {
     #[test]
     fn none_requires_a_cgroup_but_no_containment() {
         let requirements = requirements(&snapshot_for(ProfileName::None));
-        assert!(requirements.iter().any(|item| item == REQ_EXECUTION_CGROUP));
+        // J5-D: the portable name of the tree boundary (§3.1, I10); how a
+        // platform provides it (a cgroup on Linux) is the platform's plan.
+        assert!(requirements.iter().any(|item| item == "execution_boundary"));
         assert!(
             !requirements
                 .iter()
