@@ -550,6 +550,11 @@ pub struct FdSink {
     /// Whole frames, each ending in its LF; the front one may be partly
     /// written.
     frames: VecDeque<Vec<u8>>,
+    // J5-C begin: fix wave
+    /// Each queued frame's priority, in step with `frames`: a drain that
+    /// drops a reserve note must not let a later one through.
+    priorities: VecDeque<Priority>,
+    // J5-C end
     /// Bytes of the front frame already written.
     front_written: usize,
     /// Bytes still to write, over all queued frames.
@@ -581,6 +586,7 @@ impl FdSink {
         Ok(FdSink {
             file,
             frames: VecDeque::new(),
+            priorities: VecDeque::new(),
             front_written: 0,
             queued: 0,
             queue_max: EXTERNAL_QUEUE_MAX,
@@ -627,6 +633,7 @@ impl FdSink {
                     self.last_progress = Instant::now();
                     if self.front_written == front_len {
                         self.frames.pop_front();
+                        self.priorities.pop_front();
                         self.front_written = 0;
                     }
                 }
@@ -682,8 +689,14 @@ impl FdSink {
             // frame the stream still ends on a frame boundary, so the reserve
             // notes may follow.
             let torn = self.front_written > 0;
+            // J5-C, fix wave: a reserve note dropped here (the loss note
+            // queued behind a stalled consumer's frames) would leave a silent
+            // hole if a later note were delivered after it. Like the local
+            // sink when a reserve note fails, write nothing more: the stream
+            // stays visibly incomplete (§13.3).
+            let reserve_dropped = self.priorities.contains(&Priority::Reserve);
             self.clear_queue();
-            if torn {
+            if torn || reserve_dropped {
                 self.state = FdState::Broken;
             } else if self.state == FdState::Open {
                 self.state = FdState::Lost;
@@ -697,6 +710,7 @@ impl FdSink {
 
     fn clear_queue(&mut self) {
         self.frames.clear();
+        self.priorities.clear();
         self.front_written = 0;
         self.queued = 0;
     }
@@ -767,6 +781,7 @@ impl TraceSink for FdSink {
         owned.push(b'\n');
         self.queued += owned.len();
         self.frames.push_back(owned);
+        self.priorities.push_back(priority);
         self.flush_now()
     }
 
@@ -1072,6 +1087,52 @@ mod tests {
             serde_json::json!(start.to_string())
         );
         assert_eq!(note["fields"]["source"], "wrapper");
+    }
+
+    /// Found by `trace_loss_recorded` on the reference host (J5-C fix wave):
+    /// a consumer that stalls past the no-progress deadline makes the sink
+    /// lost with frames still queued, the loss note queued behind them. The
+    /// terminal drain then dropped the whole queue, the note with it, and
+    /// still delivered the final receipt note written after: a complete-
+    /// looking trace with a silent hole where its loss note belongs. A sink
+    /// that drops a reserve note now writes nothing more, as the local sink
+    /// closes when a reserve note fails (§13.3: after a loss the stream is a
+    /// prefix plus the reserve notes, never a later note after a lost one).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_drain_that_drops_a_reserve_note_writes_nothing_after_it() {
+        use std::os::fd::{IntoRawFd as _, OwnedFd};
+        // On Linux a nonblocking pipe write of at most PIPE_BUF bytes is whole
+        // or refused, so no frame is left partly written (which would end the
+        // stream for a different reason); hence the Linux gate.
+        let (reader, writer) = std::io::pipe().expect("a pipe");
+        let fd = OwnedFd::from(writer).into_raw_fd();
+        // SAFETY: the write end was just created here and handed over whole.
+        let sink = unsafe { FdSink::from_raw_fd(fd) }.expect("nonblocking");
+        let mut sink = sink.with_bounds(EXTERNAL_QUEUE_MAX, Duration::from_millis(50));
+        let frame = vec![b'x'; 1000];
+        while sink.queued() == 0 {
+            sink.write_frame(&frame, Priority::Normal).expect("queued");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            sink.poll().is_err(),
+            "no progress within the deadline is loss"
+        );
+        sink.write_frame(b"{\"loss\":\"note\"}", Priority::Reserve)
+            .expect("the loss note is queued behind the stalled frames");
+        sink.finish();
+        assert_eq!(
+            sink.queued(),
+            0,
+            "the stalled queue was dropped and counted"
+        );
+        assert!(
+            sink.write_frame(b"{\"final\":\"note\"}", Priority::Reserve)
+                .is_err(),
+            "after a dropped reserve note nothing more is written"
+        );
+        drop(reader);
     }
     // J5-C end
 

@@ -32,7 +32,7 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use ouro_fixture::harness::{self, HttpServer, Jail, Release, Run};
+use ouro_fixture::harness::{self, HttpServer, Jail, Release, Run, TraceConsumer};
 use serde_json::Value;
 
 mod common;
@@ -90,6 +90,10 @@ struct Case {
 }
 
 fn case(profile: Profile, extra: &[&str]) -> Case {
+    case_with(profile, "strict", extra)
+}
+
+fn case_with(profile: Profile, evidence: &str, extra: &[&str]) -> Case {
     let jail = Jail::new().expect("a private harness");
     let workspace = jail.root().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -102,7 +106,7 @@ fn case(profile: Profile, extra: &[&str]) -> Case {
         .arg("--profile")
         .arg(profile.name())
         .arg("--evidence")
-        .arg("strict")
+        .arg(evidence)
         .arg("--workspace")
         .arg(&workspace);
     if profile == Profile::Build {
@@ -472,4 +476,67 @@ fn j5_observation_off_records_pass_the_frozen_contract() {
             "wrapper jail.receipt wrapper -",
         ],
     );
+}
+
+/// J5-C review item 15, live: a real trace transport loss. The consumer reads
+/// at most a pipeful at a time and pauses past the one-second no-progress
+/// deadline (§13.3), so the stream loses frames; best-effort lets the target
+/// finish, and the consumer comes back for the reserve notes. The loss note names the classes
+/// this `tool` attempt covers (no `proxy.net`), and the settled receipt
+/// records the same loss from the same start as a wrapper loss: the whole
+/// contract, `trace_loss_recorded` included, holds on the live records.
+#[test]
+fn j5_a_trace_loss_note_and_its_receipt_agree() {
+    if !Profile::Tool.available() {
+        return;
+    }
+    let mut c = case_with(Profile::Tool, "best-effort", &[]);
+    let base = c.base();
+    // About 80 KB of results: more than the 64 KiB pipe, so frames wait in
+    // the queue while the consumer pauses past the deadline; few enough that
+    // its next read takes the rest, loss note included, long before the
+    // target's end, so the terminal drain finds nothing queued and the final
+    // receipt note completes the stream.
+    let mut steps: Vec<Value> = (0..150)
+        .map(|index| serde_json::json!(["open", format!("{base}/f{index}"), "--create", "--write"]))
+        .collect();
+    steps.push(serde_json::json!(["sleep", "3000"]));
+    c.jail = c.jail.trace_consumer(TraceConsumer::Slow {
+        chunk: 64 * 1024,
+        pause: std::time::Duration::from_millis(1500),
+    });
+    let run = c.run(&Value::from(steps), &Release::Valid);
+    assert_eq!(
+        run.code(),
+        Some(1),
+        "evidence loss is a tool error: {}",
+        explain(&run)
+    );
+    common::assert_run_records(&run);
+    let note = run
+        .trace_events()
+        .iter()
+        .find(|event| event["fields"]["reason"] == "trace_transport_loss")
+        .unwrap_or_else(|| panic!("no loss note: {}", explain(&run)))
+        .clone();
+    assert_eq!(
+        note["fields"]["classes"],
+        serde_json::json!(["exec", "fs.write", "fs.deny", "net"]),
+        "the note names what this attempt covers"
+    );
+    let settled = run.receipt_phase("settled").expect("a settled receipt");
+    for class in ["exec", "fs.write", "fs.deny", "net"] {
+        let gap = settled["coverage"][class]["gaps"]
+            .as_array()
+            .and_then(|gaps| {
+                gaps.iter()
+                    .find(|gap| gap["reason"] == "trace_transport_loss")
+            })
+            .unwrap_or_else(|| panic!("{class}: no loss gap: {:#}", settled["coverage"]));
+        assert_eq!(gap["source"], "wrapper", "{class}: {gap}");
+        assert_eq!(
+            gap["start_ns"], note["fields"]["start_ns"],
+            "{class}: {gap}"
+        );
+    }
 }
