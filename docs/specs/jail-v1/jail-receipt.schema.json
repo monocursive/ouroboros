@@ -2090,7 +2090,7 @@
       }
     },
     {
-      "$comment": "jail-v1.md:1872 and :1876-1879 (\u00a713.2): in a refusal before boundary creation every applied field is unapplied, and the network mode is pending (host for none, which the containment rules bind).",
+      "$comment": "jail-v1.md:1872 and :1876-1879 (\u00a713.2): in a refusal before boundary creation every applied field is unapplied. The network mode (pending, or host for none) is bound by the containment rules.",
       "if": {
         "properties": {
           "phase": {
@@ -2125,12 +2125,6 @@
               },
               "network": {
                 "properties": {
-                  "mode": {
-                    "enum": [
-                      "pending",
-                      "host"
-                    ]
-                  },
                   "mechanism": {
                     "type": "null"
                   },
@@ -2578,7 +2572,7 @@
           "type": "string"
         },
         "stage": {
-          "$comment": "jail-v1.md:757 (\u00a76.4): an error has a stable stage, the lifecycle state of \u00a78.1 (jail-v1.md:837-845) it was raised in.",
+          "$comment": "jail-v1.md:757 (\u00a76.4) requires every error to carry a stable stage without naming the values; the lifecycle stages the spec names are the \u00a78.1 states (jail-v1.md:837-845), which the product's ErrorStage uses. Pinning the set is a freeze choice recorded in the J5-C spec proposal \u00a72.",
           "enum": [
             "resolving",
             "probing",
@@ -2626,7 +2620,8 @@
     "native_string": {
       "oneOf": [
         {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[^\\u0000]*$"
         },
         {
           "type": "object",
@@ -2645,7 +2640,8 @@
           ],
           "additionalProperties": false
         }
-      ]
+      ],
+      "$comment": "canonicalization.md \"Native strings\": the UTF-8 form or canonical base64 of bytes that are not UTF-8; no native value contains NUL (the base64 form is checked by the semantic rule native_string)."
     }
   }
 }

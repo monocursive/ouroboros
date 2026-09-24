@@ -414,7 +414,16 @@ def check_frozen(schemas):
             f"{name} changed under its frozen identifier {entry['id']} (sha256 {actual}); "
             "a breaking change needs a new identifier (jail-v1 §13)")
         assert "draft" not in schema["title"].lower(), f"{name} is frozen but titled {schema['title']!r}"
-    return len(frozen)
+    # The artifacts behind the identifiers no schema states (review item 10).
+    artifacts = manifest["frozen_artifact"]
+    assert artifacts, "the freeze lists its artifacts"
+    for entry in artifacts:
+        actual = hashlib.sha256((ROOT / entry["file"]).read_bytes()).hexdigest()
+        assert entry["identifiers"], f"{entry['file']} names the identifiers it defines"
+        assert actual == entry["sha256"], (
+            f"{entry['file']} changed under its frozen identifiers {entry['identifiers']} "
+            f"(sha256 {actual}); a change needs a new identifier (jail-v1 §13)")
+    return len(frozen) + len(artifacts)
 
 
 def hash_bytes(value):
@@ -565,7 +574,7 @@ def main():
     frozen_count = check_frozen(schemas)
     check_canonical_fixtures(validators)
     network_count = check_network_fixtures()
-    print(f"PASS: {len(schemas)} schemas ({frozen_count} frozen), {len(examples)} examples, "
+    print(f"PASS: {len(schemas)} schemas ({frozen_count} frozen files), {len(examples)} examples, "
           f"{len(evidence)} evidence receipts, {len(cases)} validation cases,")
     print(f"      {semantic_count} semantic cases, {gate_count} gate frames, policy/argv golden bytes,")
     print(f"      native codec, and {network_count} address cases.")

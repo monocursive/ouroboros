@@ -216,10 +216,8 @@
                 "const": false
               },
               "errno": {
-                "enum": [
-                  "EACCES",
-                  "EPERM"
-                ]
+                "type": "string",
+                "minLength": 1
               }
             },
             "required": [
@@ -266,12 +264,9 @@
       "then": {
         "properties": {
           "outcome": {
-            "type": "object",
             "required": [
-              "ok",
               "return_value",
-              "errno",
-              "completion"
+              "errno"
             ],
             "properties": {
               "completion": {
@@ -444,7 +439,7 @@
       }
     },
     {
-      "$comment": "jail-v1.md:1445 (\u00a711.2): a syscall return records its signed raw return and errno: success is a non-negative return and no errno, failure a negative return and its errno.",
+      "$comment": "jail-v1.md:1445 (\u00a711.2) and :1808 (\u00a713.1): a syscall return states its raw return and its errno, and a success has no errno while a failure names one. The sign of the raw return is the Linux convention and is in jail-event.schema.json (\u00a713.2:1901-1903).",
       "if": {
         "properties": {
           "outcome": {
@@ -492,9 +487,6 @@
                 },
                 "then": {
                   "properties": {
-                    "return_value": {
-                      "minimum": 0
-                    },
                     "errno": {
                       "type": "null"
                     }
@@ -514,9 +506,6 @@
                 },
                 "then": {
                   "properties": {
-                    "return_value": {
-                      "maximum": -1
-                    },
                     "errno": {
                       "type": "string",
                       "minLength": 1
@@ -525,41 +514,6 @@
                 }
               }
             ]
-          }
-        }
-      }
-    },
-    {
-      "$comment": "jail-v1.md:1427 and :1432-1435 (\u00a711.2): a covered EACCES/EPERM result is one fs.deny, never a success-shaped or failed result of the original operation.",
-      "if": {
-        "properties": {
-          "source": {
-            "const": "audit"
-          },
-          "outcome": {
-            "type": "object",
-            "properties": {
-              "errno": {
-                "enum": [
-                  "EACCES",
-                  "EPERM"
-                ]
-              }
-            },
-            "required": [
-              "errno"
-            ]
-          }
-        },
-        "required": [
-          "outcome",
-          "source"
-        ]
-      },
-      "then": {
-        "properties": {
-          "operation": {
-            "const": "fs.deny"
           }
         }
       }
@@ -617,7 +571,6 @@
       "then": {
         "properties": {
           "outcome": {
-            "type": "object",
             "required": [
               "bytes_in",
               "bytes_out",

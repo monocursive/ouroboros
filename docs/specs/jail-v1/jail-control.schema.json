@@ -65,7 +65,7 @@
   "additionalProperties": false,
   "allOf": [
     {
-      "$comment": "jail-v1.md:865-866 (\u00a78.1 step 5) and :1870-1871 (\u00a713.2): prepared acknowledges the prepared receipt; no target instruction has run.",
+      "$comment": "jail-v1.md:865-866 (\u00a78.1 step 5): prepared acknowledges the prepared receipt. Its outcome is the prepared receipt's: pending, or unknown when the run ends unsettled without a confirmed exec and keeps prepared as its last phase (jail-v1.md:1817-1818, :1849-1850).",
       "if": {
         "properties": {
           "kind": {

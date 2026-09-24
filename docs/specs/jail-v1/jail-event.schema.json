@@ -93,7 +93,7 @@
       }
     },
     {
-      "$comment": "jail-v1.md:1797-1800 (\u00a713.1) and O01: a jail wrapper event states a fact the supervisor established; it has the wrapper completion and carries no proxy counters.",
+      "$comment": "\u00a713.1 names a completion kind for audit results (jail-v1.md:1808-1810) and describes proxy outcomes by their counters (:1811-1813); the spec names no completion for a wrapper fact, and the jail writes `wrapper` on every one of its own facts (records.rs constructors). O01: no event but a proxy result carries byte counters. The value is a producer-contract choice (J5-C spec proposal \u00a72).",
       "if": {
         "properties": {
           "source": {
@@ -190,8 +190,7 @@
                     "limits"
                   ]
                 },
-                "uniqueItems": true,
-                "maxItems": 6
+                "uniqueItems": true
               },
               "source": {
                 "enum": [
@@ -248,9 +247,6 @@
       },
       "then": {
         "properties": {
-          "source": {
-            "const": "wrapper"
-          },
           "fields": {
             "required": [
               "phase",
@@ -317,7 +313,7 @@
       }
     },
     {
-      "$comment": "jail-v1.md:1412-1413 (\u00a711.2): a successful exec's proc.exec names its call in fields.syscall. The name is not required: an exec transition whose entry the observer did not follow (the in-flight bound, or a process seized inside its own execve) has no call to name, and the product writes none (j4_tracer_precision_linux.rs non-leader exec tests); the spec does not say what such a result carries (J5-C spec proposal).",
+      "$comment": "jail-v1.md:1412-1413 (\u00a711.2): a successful exec's proc.exec names its call in fields.syscall. The one exception the product writes is an exec transition whose entry the observer did not follow (the in-flight bound, or a process seized inside its own execve): it has no call and no path to name, so it carries no syscall and the path {unavailable, argument_not_read} (j4_tracer_precision_linux.rs non-leader exec tests; J5-C spec proposal \u00a72).",
       "if": {
         "properties": {
           "source": {
@@ -352,7 +348,27 @@
                 "type": "string",
                 "minLength": 1
               }
-            }
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "syscall"
+                ]
+              },
+              {
+                "properties": {
+                  "path": {
+                    "const": {
+                      "kind": "unavailable",
+                      "reason": "argument_not_read"
+                    }
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            ]
           }
         }
       }
@@ -496,6 +512,143 @@
           }
         }
       }
+    },
+    {
+      "$comment": "jail-v1.md:1445 (\u00a711.2): the observer records the signed raw Linux return: a success is non-negative, a failure is the negated errno (\u00a713.2:1901-1903 keeps that convention out of the shared envelope).",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "syscall_return"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "return_value": {
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "return_value": {
+                      "maximum": -1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1427 and :1432-1435 (\u00a711.2): in linux-closed-v1 a covered EACCES/EPERM result is one fs.deny, never a success-shaped or failed result of the original operation.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "errno": {
+                "enum": [
+                  "EACCES",
+                  "EPERM"
+                ]
+              }
+            },
+            "required": [
+              "errno"
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "fs.deny"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1427 (\u00a711.2): an fs.deny of linux-closed-v1 is a call that returned EACCES or EPERM.",
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "fs.deny"
+          },
+          "outcome": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "operation",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "errno": {
+                "enum": [
+                  "EACCES",
+                  "EPERM"
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "description": "Frozen at jail milestone 1 (jail-v1 \u00a713.1, \u00a717). The restriction of ouro.event/1 to what ouro-jail writes: its wrapper notes, audit fields and proxy results. It carries no identifier of its own: its events are ouro.event/1 events.",
@@ -515,7 +668,8 @@
     "native_string": {
       "oneOf": [
         {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[^\\u0000]*$"
         },
         {
           "type": "object",

@@ -347,3 +347,77 @@ fn version_announces_the_wire_schemas_are_frozen() {
         "the freeze file lists the frozen schemas"
     );
 }
+
+// ---------------------------------------------------------------------------
+// J5-C review item 10: the identifiers without a schema file are frozen too.
+// `ouro.jail.policy/1`, `ouro.jail.policy-file/1` and `ouro.jail.network/1`
+// are defined by prose, fixtures and address tables, and the semantic rules
+// behind every record identifier by the shared corpora; each is pinned by
+// sha256 in `[[frozen_artifact]]`, with the same drift rule as the schemas.
+// ---------------------------------------------------------------------------
+
+/// The frozen artifacts: `(file, identifiers it defines, sha256)`.
+fn frozen_artifacts() -> Vec<(String, Vec<String>, String)> {
+    frozen_manifest()["frozen_artifact"]
+        .as_array()
+        .expect("[[frozen_artifact]] entries")
+        .iter()
+        .map(|entry| {
+            let text = |key: &str| {
+                entry[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a frozen artifact lacks `{key}`: {entry}"))
+                    .to_owned()
+            };
+            let identifiers = entry["identifiers"]
+                .as_array()
+                .unwrap_or_else(|| panic!("a frozen artifact names its identifiers: {entry}"))
+                .iter()
+                .map(|value| value.as_str().expect("an identifier").to_owned())
+                .collect();
+            (text("file"), identifiers, text("sha256"))
+        })
+        .collect()
+}
+
+/// A frozen artifact's bytes are the frozen ones. By rule a change is a new
+/// identifier for what it defines, never a new sha256 under the old one.
+#[test]
+fn a_frozen_artifact_never_changes_under_its_frozen_identifiers() {
+    let artifacts = frozen_artifacts();
+    assert!(!artifacts.is_empty(), "the freeze lists its artifacts");
+    for (file, identifiers, sha256) in &artifacts {
+        let bytes = std::fs::read(specs_dir().join(file))
+            .unwrap_or_else(|error| panic!("reading frozen {file}: {error}"));
+        let actual = sha256_hex(&bytes);
+        assert_eq!(
+            &actual, sha256,
+            "{file} changed (sha256 {actual}, frozen {sha256}) and it defines {identifiers:?}. \
+             A frozen artifact never changes under its identifiers (jail-v1 §13): revert it, \
+             or give what it defines a new identifier."
+        );
+    }
+}
+
+/// Every identifier `version --json` announces is backed by a frozen schema
+/// or a frozen artifact, so `"frozen": true` claims nothing unpinned.
+#[test]
+fn every_announced_identifier_is_backed_by_a_frozen_file() {
+    let backed: std::collections::BTreeSet<String> = frozen_entries()
+        .into_iter()
+        .map(|(_, _, identifier, _)| identifier)
+        .chain(frozen_artifacts().into_iter().flat_map(|(_, ids, _)| ids))
+        .collect();
+    let announced = version_json();
+    for identifier in announced["schemas"]
+        .as_object()
+        .expect("the announced identifiers")
+        .values()
+        .filter_map(serde_json::Value::as_str)
+    {
+        assert!(
+            backed.contains(identifier),
+            "`version --json` announces {identifier} as frozen, but no frozen file backs it"
+        );
+    }
+}

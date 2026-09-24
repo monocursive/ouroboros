@@ -504,25 +504,11 @@ fn r01_every_validation_case_gets_the_verdict_the_corpus_expects() {
         let name = case["name"].as_str().expect("a case name");
         let schema = case["schema"].as_str().expect("a schema name");
         let mut record = read_json(&specs_dir().join(case["base"].as_str().expect("a base")));
+        // A path segment is an object key or an array index; a change sets
+        // (creating a missing final key) or deletes, exactly as
+        // `validate_contract.py`'s `apply` does.
         for change in case["changes"].as_array().expect("changes") {
-            // A path segment is an object key or an array index, and the final
-            // segment may name a key that does not exist yet, exactly as
-            // `validate_contract.py` assigns it.
-            let path = change["path"].as_array().expect("a path");
-            let (last, parents) = path.split_last().expect("a non-empty path");
-            let mut cursor = &mut record;
-            for segment in parents {
-                cursor = step(cursor, segment);
-            }
-            match cursor {
-                serde_json::Value::Array(items) => {
-                    let position = index_of(last);
-                    items[position] = change["value"].clone();
-                }
-                other => {
-                    other[last.as_str().expect("an object key")] = change["value"].clone();
-                }
-            }
+            apply(&mut record, change);
         }
         let expected_valid = case["valid"].as_bool().expect("a verdict");
         let failures = errors(&validators[schema], &record);
