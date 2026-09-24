@@ -830,6 +830,9 @@ impl Uncontained {
             }),
         );
         details.insert("launcher_pid".to_owned(), Value::from(i64::from(self.pid)));
+        // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
+        // made: already delegated, entered a scope of its own, or why not.
+        details.insert("supervisor_scope".to_owned(), super::scope::details());
         // Observation, not containment: the observer's filter is in the
         // target, and the receipt names it by the digest it reports.
         details.insert(
