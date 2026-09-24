@@ -1,0 +1,23 @@
+{
+  "schema": "ouro.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "wrapper",
+  "source_seq": 2,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "110000000",
+  "operation": "note",
+  "stage": "result",
+  "decision": null,
+  "outcome": {
+    "ok": true,
+    "return_value": null,
+    "errno": null,
+    "completion": "wrapper"
+  },
+  "fields": {
+    "kind": "limit",
+    "key": "pids",
+    "applied": false,
+    "reason": "no delegated cgroup"
+  }
+}

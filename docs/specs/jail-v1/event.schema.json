@@ -100,8 +100,8 @@
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ouro:schema:event:1",
-  "title": "Ouro source event v1 (draft)",
-  "description": "Draft envelope. Source-specific semantics, field redaction and payload byte bounds also require the jail specification tests.",
+  "title": "Ouro source event v1",
+  "description": "Frozen at jail milestone 1 (jail-v1 \u00a713, \u00a717). The shared envelope and the meaning of the audit and proxy sources; jail-event.schema.json restricts it to what the jail writes. Stream rules (source_seq, one attempt, receipt-note order) and native byte strings are ouro_jail::records::semantic and validate_contract.py over fixtures/semantic-cases.json.",
   "allOf": [
     {
       "if": {
@@ -243,6 +243,419 @@
             "required": [
               "attempted_operation"
             ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1808-1813 (\u00a713.1) and O01: an audit result's outcome is ok, return_value, errno and a syscall-side completion kind; proxy counters are proxy-only, so no audit event asserts bytes written.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "required": [
+              "ok",
+              "return_value",
+              "errno",
+              "completion"
+            ],
+            "properties": {
+              "completion": {
+                "enum": [
+                  "syscall_return",
+                  "exec_transition",
+                  "process_exit"
+                ]
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "bytes_in"
+                  ]
+                },
+                {
+                  "required": [
+                    "bytes_out"
+                  ]
+                },
+                {
+                  "required": [
+                    "duration_ms"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1809-1810 (\u00a713.1), :1421 and :1446-1448 (\u00a711.2): an exec transition is a confirmed new image: only proc.exec has one, and it is a success without an errno.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "exec_transition"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "proc.exec"
+          },
+          "outcome": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "errno": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1421 (\u00a711.2): never infer exec success from an entry; a successful proc.exec is the confirmed transition, never a syscall return.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "proc.exec"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "completion": {
+                "const": "exec_transition"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1422 (\u00a711.2) and :1454-1455 (\u00a711.4): process_exit is the final thread-group death, which only proc.exit reports.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "process_exit"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "proc.exit"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1422 (\u00a711.2): an audit proc.exit result is a process exit, not a syscall return.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "proc.exit"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "operation",
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "completion": {
+                "const": "process_exit"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1445 (\u00a711.2): a syscall return records its signed raw return and errno: success is a non-negative return and no errno, failure a negative return and its errno.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "syscall_return"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "required": [
+              "return_value",
+              "errno"
+            ],
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "return_value": {
+                "type": "integer"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "return_value": {
+                      "minimum": 0
+                    },
+                    "errno": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "return_value": {
+                      "maximum": -1
+                    },
+                    "errno": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1427 and :1432-1435 (\u00a711.2): a covered EACCES/EPERM result is one fs.deny, never a success-shaped or failed result of the original operation.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "errno": {
+                "enum": [
+                  "EACCES",
+                  "EPERM"
+                ]
+              }
+            },
+            "required": [
+              "errno"
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "fs.deny"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1432-1436 (\u00a711.2): attempted_operation is the classification field of an fs.deny result and of nothing else.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "not": {
+              "const": "fs.deny"
+            }
+          }
+        },
+        "required": [
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "not": {
+              "required": [
+                "attempted_operation"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1811-1813 (\u00a713.1): a proxy connect result describes connect status, counters and duration, closed by the proxy.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          },
+          "operation": {
+            "const": "net.connect"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "operation",
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "required": [
+              "bytes_in",
+              "bytes_out",
+              "duration_ms"
+            ],
+            "properties": {
+              "completion": {
+                "const": "proxy_close"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1811-1813 (\u00a713.1): proxy counters and a proxy close belong to the proxy source; consumers must not equate proxy bytes with file bytes.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "proxy_close"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "const": "proxy"
           }
         }
       }

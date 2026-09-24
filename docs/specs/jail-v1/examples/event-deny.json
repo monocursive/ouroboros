@@ -2,16 +2,16 @@
   "schema": "ouro.event/1",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "source": "audit",
-  "source_seq": 1,
+  "source_seq": 6,
   "observed_at": "2026-09-21T12:00:00Z",
-  "monotonic_ns": "200000000",
-  "operation": "fs.write",
+  "monotonic_ns": "250000000",
+  "operation": "fs.deny",
   "stage": "result",
   "decision": null,
   "outcome": {
-    "ok": true,
-    "return_value": 3,
-    "errno": null,
+    "ok": false,
+    "return_value": -13,
+    "errno": "EACCES",
     "completion": "syscall_return"
   },
   "fields": {
@@ -22,9 +22,10 @@
     "path_basis": "argument_snapshot",
     "path_complete": true,
     "path": {
-      "kind": "workspace_relative",
-      "value": "fixture.txt"
+      "kind": "digest",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "reason": "outside_known_roots"
     },
-    "action": "opened_for_mutation"
+    "attempted_operation": "fs.write"
   }
 }

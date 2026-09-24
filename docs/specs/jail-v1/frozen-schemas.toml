@@ -1,0 +1,64 @@
+# The frozen wire schemas of jail v1, milestone 1 (jail-v1 §13, §17).
+#
+# jail-v1 §13: "After freeze, a breaking semantic change needs a new schema
+# identifier." Each entry pins one schema file by its bytes. A test
+# (crates/ouro-jail/tests/portable_version.rs) and validate_contract.py fail
+# when a frozen file's sha256 differs from the one recorded here:
+#
+# - the file still declares its frozen `$id`: the change is refused. Revert
+#   it; a breaking change gets a new `$id` (`...:2`) and wire identifier
+#   (`.../2`), which is a new entry here, not an edited one;
+# - the file declares a new `$id`: record the new file as its own entry.
+#
+# Every `*.schema.json` beside this file is either `[[frozen]]` or listed as
+# `[[unfrozen]]` with the reason it is not a milestone-1 wire record.
+# `identifier` is the wire `schema` value the records carry and `version
+# --json` announces; the producer restriction carries the envelope's.
+#
+# The same sha256s are recorded in the milestone freeze file
+# (milestone-1-freeze.toml) and the milestone report.
+
+schema = "ouro.jail.frozen-schemas/1"
+milestone = "milestone-1"
+
+# §13.1: the shared source-event envelope
+[[frozen]]
+file = "event.schema.json"
+id = "urn:ouro:schema:event:1"
+identifier = "ouro.event/1"
+sha256 = "a8150159c5d368ea4183e4898a4e7dd37f36eb64a360a239c2737d86547c1d4c"
+
+# §13.1: the jail producer's restriction of ouro.event/1 (no identifier of its own)
+[[frozen]]
+file = "jail-event.schema.json"
+id = "urn:ouro:schema:jail-event:1"
+identifier = "ouro.event/1"
+sha256 = "f26ad6d9876b1748c846cd48ce7aeef0f3aba1fb03663e9686a9b033c4097578"
+
+# §13.2: the receipt
+[[frozen]]
+file = "jail-receipt.schema.json"
+id = "urn:ouro:schema:jail-receipt:1"
+identifier = "ouro.jail.receipt/1"
+sha256 = "f6b3fae4bd82cb28fc096a1dd37034660094a69f5d75937cd40a28c1f41e09eb"
+
+# §6.3, canonicalization.md: the canonical policy snapshot
+[[frozen]]
+file = "policy-snapshot.schema.json"
+id = "urn:ouro:schema:jail-policy-snapshot:1"
+identifier = "ouro.jail.policy-snapshot/1"
+sha256 = "94bc81e85522cfa3b81bc7f2dd9504a8a3fd5f412ccac3938c98bdd018c61da4"
+
+# §8.2: the managed gate release frame
+[[frozen]]
+file = "jail-gate.schema.json"
+id = "urn:ouro:schema:jail-gate:1"
+identifier = "ouro.jail.gate/1"
+sha256 = "cc7156f417929e3e93e842b02ee7630a025025e0856cf6cc3d1eda26666ff201"
+
+# §8.2: the control message
+[[frozen]]
+file = "jail-control.schema.json"
+id = "urn:ouro:schema:jail-control:1"
+identifier = "ouro.jail.control/1"
+sha256 = "9339224696295fcad830ff7f17fc51e2ba8dbbfff4057a678c13f7ac7eb42755"

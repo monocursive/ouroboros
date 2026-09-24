@@ -1,0 +1,34 @@
+{
+  "schema": "ouro.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "audit",
+  "source_seq": 11,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "300000000",
+  "operation": "fs.deny",
+  "stage": "result",
+  "decision": null,
+  "outcome": {
+    "ok": false,
+    "return_value": -13,
+    "errno": "EACCES",
+    "completion": "syscall_return"
+  },
+  "fields": {
+    "syscall": "connect",
+    "pid": 1234,
+    "pid_start_ticks": 123456,
+    "tid": 1234,
+    "path_basis": "argument_snapshot",
+    "path_complete": false,
+    "path": {
+      "kind": "unavailable",
+      "reason": "argument_not_read"
+    },
+    "address_family": 1,
+    "address_complete": true,
+    "observation": "seccomp_user_notification",
+    "mediator_reason": "no_attempt_listener",
+    "attempted_operation": "net.connect"
+  }
+}

@@ -20,10 +20,11 @@ mod common;
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
-    AttemptRecord, ChildProtection, Containment, ErrorCode, ErrorStage, Event, EvidenceMode,
-    JailError, JailRecord, Lifetime, NativeLifetime, NativeString, ObserveMode, Os, Outcome,
-    OutcomeKind, Phase, PlatformRecord, PolicyRecord, ProcessIdentity, ProcessRecord, Receipt,
-    Remediation, SCHEMA_RECEIPT, StateCleanup, rfc3339_utc, rfc3339_utc_from_unix,
+    AttemptRecord, ChildProtection, Containment, ControlMessage, ErrorCode, ErrorStage, Event,
+    EvidenceMode, GateExpectation, GateFrame, JailError, JailRecord, Lifetime, NativeLifetime,
+    NativeString, ObserveMode, Os, Outcome, OutcomeKind, Phase, PlatformRecord, PolicyRecord,
+    ProcessIdentity, ProcessRecord, Receipt, Remediation, SCHEMA_RECEIPT, StateCleanup,
+    parse_release, rfc3339_utc, rfc3339_utc_from_unix, semantic,
 };
 
 fn specs_dir() -> PathBuf {
@@ -40,8 +41,9 @@ fn read_json(path: &Path) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
 }
 
-/// Builds one validator per checked-in schema, with the four registered by
-/// `$id` so that `jail-event.schema.json` can `$ref` the shared envelope.
+/// Builds one validator per checked-in schema, every one registered by `$id`
+/// so that `jail-event.schema.json` can `$ref` the shared envelope and
+/// `jail-control.schema.json` the receipt's outcome and error.
 fn validators() -> BTreeMap<String, Validator> {
     let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     for entry in std::fs::read_dir(specs_dir()).expect("the specification directory is readable") {
@@ -53,7 +55,20 @@ fn validators() -> BTreeMap<String, Validator> {
             schemas.insert(stem.to_owned(), read_json(&path));
         }
     }
-    assert_eq!(schemas.len(), 4, "four schemas accompany the specification");
+    // J5-C: the six wire schemas of §13 and §8.2 (J5-D adds the doctor's).
+    for stem in [
+        "event",
+        "jail-event",
+        "jail-receipt",
+        "policy-snapshot",
+        "jail-gate",
+        "jail-control",
+    ] {
+        assert!(
+            schemas.contains_key(stem),
+            "{stem}.schema.json accompanies the specification"
+        );
+    }
 
     let pairs: Vec<(String, Resource)> = schemas
         .values()
@@ -126,27 +141,63 @@ fn record_files() -> Vec<PathBuf> {
 // Round-trip
 // ---------------------------------------------------------------------------
 
+/// J5-C: the schema an example file is an instance of, by its name's prefix,
+/// exactly as `validate_contract.py` dispatches it. `doctor-*` examples are
+/// J5-D's and carry their own schema; they are not wire records here.
+fn schema_of(name: &str) -> Option<&'static str> {
+    [
+        ("event-", "jail-event"),
+        ("receipt-", "jail-receipt"),
+        ("gate-", "jail-gate"),
+        ("control-", "jail-control"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, schema)| name.starts_with(prefix).then_some(schema))
+}
+
+fn file_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .expect("a file name")
+}
+
 #[test]
 fn r01_every_example_round_trips_through_the_rust_types() {
     let files = record_files();
     assert!(files.len() >= 12, "the corpus is present: {files:?}");
+    let mut typed = 0usize;
     for path in files {
         let original = read_json(&path);
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("a file name");
-        let produced = if name.starts_with("event-") {
-            let event: Event = serde_json::from_value(original.clone())
-                .unwrap_or_else(|error| panic!("{name} does not fit `Event`: {error}"));
-            serde_json::to_value(&event).expect("an event serializes")
-        } else {
-            let receipt: Receipt = serde_json::from_value(original.clone())
-                .unwrap_or_else(|error| panic!("{name} does not fit `Receipt`: {error}"));
-            serde_json::to_value(&receipt).expect("a receipt serializes")
+        let name = file_name(&path);
+        let produced = match schema_of(name) {
+            Some("jail-event") => {
+                let event: Event = serde_json::from_value(original.clone())
+                    .unwrap_or_else(|error| panic!("{name} does not fit `Event`: {error}"));
+                serde_json::to_value(&event).expect("an event serializes")
+            }
+            Some("jail-receipt") => {
+                let receipt: Receipt = serde_json::from_value(original.clone())
+                    .unwrap_or_else(|error| panic!("{name} does not fit `Receipt`: {error}"));
+                serde_json::to_value(&receipt).expect("a receipt serializes")
+            }
+            Some("jail-gate") => {
+                let frame: GateFrame = serde_json::from_value(original.clone())
+                    .unwrap_or_else(|error| panic!("{name} does not fit `GateFrame`: {error}"));
+                serde_json::to_value(&frame).expect("a gate frame serializes")
+            }
+            Some("jail-control") => {
+                let message: ControlMessage = serde_json::from_value(original.clone())
+                    .unwrap_or_else(|error| {
+                        panic!("{name} does not fit `ControlMessage`: {error}")
+                    });
+                serde_json::to_value(&message).expect("a control message serializes")
+            }
+            _ => continue,
         };
+        typed += 1;
         assert_eq!(produced, original, "{name} did not round-trip unchanged");
     }
+    assert!(typed >= 12, "every wire example has a Rust type");
 }
 
 #[test]
@@ -154,23 +205,268 @@ fn r01_every_example_validates_against_its_schema() {
     let validators = validators();
     for path in record_files() {
         let record = read_json(&path);
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("a file name");
-        let key = if name.starts_with("event-") {
-            "jail-event"
-        } else {
-            "jail-receipt"
+        let name = file_name(&path);
+        let Some(key) = schema_of(name) else {
+            continue;
         };
         let failures = errors(&validators[key], &record);
         assert!(failures.is_empty(), "{name}: {failures:?}");
         // J4-R, R01: the rules the schema cannot state, as validate_contract.py
-        // checks them.
-        if key == "jail-receipt" {
-            common::semantic_receipt(&record)
-                .unwrap_or_else(|error| panic!("{name} fails the semantic checks: {error}"));
+        // checks them. J5-C: events too (their native byte strings).
+        let semantic = match key {
+            "jail-receipt" => semantic::receipt(&record),
+            "jail-event" => semantic::event(&record),
+            _ => Vec::new(),
+        };
+        assert!(
+            semantic.is_empty(),
+            "{name} fails the semantic checks: {semantic:?}"
+        );
+    }
+}
+
+/// J5-C, R01 and §17 "Before J5": one example per kind of event the jail
+/// writes, so every source-specific rule is exercised on a positive instance.
+/// A kind is (source, operation, completion) for a result, plus the decision
+/// for a proxy result and `fields.kind` for a wrapper note. The note kinds are
+/// the ones the product writes: `lifecycle` (`supervisor.rs`), `limit`
+/// (`platform/linux/audit.rs`), `lifetime` (`platform/linux/uncontained.rs`),
+/// `helper` (`platform/linux/agent.rs`) and `coverage_gap`
+/// (`platform/linux/audit.rs`, `trace.rs`).
+#[test]
+fn r01_every_event_kind_has_an_example() {
+    let mut kinds = std::collections::BTreeSet::new();
+    for path in record_files() {
+        if schema_of(file_name(&path)) != Some("jail-event") {
+            continue;
         }
+        let event = read_json(&path);
+        let text = |value: &serde_json::Value| value.as_str().unwrap_or("-").to_owned();
+        let detail = match event["source"].as_str() {
+            Some("proxy") => text(&event["decision"]),
+            Some("wrapper") if event["operation"] == "note" => text(&event["fields"]["kind"]),
+            Some("audit") if event["operation"] == "fs.deny" => {
+                text(&event["fields"]["attempted_operation"])
+            }
+            _ => "-".to_owned(),
+        };
+        kinds.insert(format!(
+            "{} {} {} {}",
+            text(&event["source"]),
+            text(&event["operation"]),
+            text(&event["outcome"]["completion"]),
+            detail
+        ));
+    }
+    for expected in [
+        "audit proc.exec exec_transition -",
+        "audit proc.exec syscall_return -",
+        "audit proc.exit process_exit -",
+        "audit fs.create syscall_return -",
+        "audit fs.write syscall_return -",
+        "audit fs.rename syscall_return -",
+        "audit fs.unlink syscall_return -",
+        "audit fs.deny syscall_return fs.write",
+        "audit fs.deny syscall_return net.connect",
+        "audit net.connect syscall_return -",
+        "proxy net.connect proxy_close allow",
+        "proxy net.connect proxy_close deny",
+        "wrapper jail.receipt wrapper -",
+        "wrapper note wrapper lifecycle",
+        "wrapper note wrapper limit",
+        "wrapper note wrapper lifetime",
+        "wrapper note wrapper helper",
+        "wrapper note wrapper coverage_gap",
+    ] {
+        assert!(
+            kinds.contains(expected),
+            "no example of `{expected}`; the examples cover {kinds:#?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// J5-C: the semantic corpus, shared with validate_contract.py
+// ---------------------------------------------------------------------------
+
+/// Applies one corpus change: `{"path": [...], "value": v}` sets (creating a
+/// missing final key), `{"path": [...], "delete": true}` removes a key or an
+/// array element. The same operations as `validate_contract.py`'s `apply`.
+fn apply(record: &mut serde_json::Value, change: &serde_json::Value) {
+    let path = change["path"].as_array().expect("a path");
+    let (last, parents) = path.split_last().expect("a non-empty path");
+    let mut cursor = record;
+    for segment in parents {
+        cursor = step(cursor, segment);
+    }
+    let delete = change["delete"].as_bool().unwrap_or(false);
+    match cursor {
+        serde_json::Value::Array(items) => {
+            let position = index_of(last);
+            if delete {
+                items.remove(position);
+            } else {
+                items[position] = change["value"].clone();
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let key = last.as_str().expect("an object key");
+            if delete {
+                map.remove(key).expect("the deleted key exists");
+            } else {
+                map.insert(key.to_owned(), change["value"].clone());
+            }
+        }
+        other => panic!("cannot change inside {other}"),
+    }
+}
+
+fn corpus_instance(case: &serde_json::Value, key: &str) -> serde_json::Value {
+    let mut record = read_json(&specs_dir().join(case[key].as_str().expect("a base path")));
+    for change in case["changes"].as_array().expect("changes") {
+        apply(&mut record, change);
+    }
+    record
+}
+
+fn rules_of(violations: &[semantic::Violation]) -> std::collections::BTreeSet<String> {
+    violations.iter().map(|v| v.rule.to_owned()).collect()
+}
+
+/// Every case in `fixtures/semantic-cases.json` gets exactly the rule set the
+/// corpus names (empty for a positive case), from the library checker that
+/// every live test uses. `validate_contract.py` runs the same corpus through
+/// its own port, so the two cannot drift apart. A negative case must be one
+/// the schemas accept, or it would test the schema rather than the rule; and
+/// every rule the library knows has a negative case and a citation.
+#[test]
+fn r01_the_semantic_corpus_gets_the_verdicts_it_expects() {
+    let validators = validators();
+    let corpus = read_json(&specs_dir().join("fixtures/semantic-cases.json"));
+    let cited: std::collections::BTreeSet<String> = corpus["rules"]
+        .as_object()
+        .expect("the rule citations")
+        .keys()
+        .cloned()
+        .collect();
+    let known: std::collections::BTreeSet<String> = semantic::RULES
+        .iter()
+        .map(|(rule, _)| (*rule).to_owned())
+        .collect();
+    assert_eq!(
+        cited, known,
+        "the corpus cites exactly the rules the library checks"
+    );
+    let mut negative: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut positive = 0usize;
+    for case in corpus["cases"].as_array().expect("the cases") {
+        let name = case["name"].as_str().expect("a case name");
+        let expected: std::collections::BTreeSet<String> = case["violations"]
+            .as_array()
+            .expect("the expected violations")
+            .iter()
+            .map(|rule| rule.as_str().expect("a rule id").to_owned())
+            .collect();
+        let record = corpus_instance(case, "base");
+        let (schema, instances): (&str, Vec<&serde_json::Value>) =
+            match case["check"].as_str().expect("a check") {
+                "receipt" => ("jail-receipt", vec![&record]),
+                "trace" => (
+                    "jail-event",
+                    record.as_array().expect("a trace").iter().collect(),
+                ),
+                "control" => (
+                    "jail-control",
+                    record.as_array().expect("a transcript").iter().collect(),
+                ),
+                other => panic!("case `{name}`: unknown check {other}"),
+            };
+        for instance in &instances {
+            let failures = errors(&validators[schema], instance);
+            assert!(
+                failures.is_empty(),
+                "case `{name}`: the schema must accept it for this to test a semantic rule: {failures:?}"
+            );
+        }
+        let found = match case["check"].as_str() {
+            Some("receipt") => semantic::receipt(&record),
+            Some("trace") => {
+                let events = record.as_array().expect("a trace");
+                let mut found = semantic::trace(events);
+                // A trace case may name the attempt's final receipt: then the
+                // trace must end on that receipt's note (§13.3).
+                if let Some(receipt) = case.get("receipt").and_then(serde_json::Value::as_str) {
+                    let receipt = read_json(&specs_dir().join(receipt));
+                    found.extend(semantic::trace_ends_with(events, &receipt));
+                }
+                found
+            }
+            _ => semantic::control(record.as_array().expect("a transcript")),
+        };
+        assert_eq!(rules_of(&found), expected, "case `{name}`: {found:#?}");
+        if expected.is_empty() {
+            positive += 1;
+        }
+        negative.extend(expected);
+    }
+    assert!(positive > 0, "the corpus has positive cases");
+    assert_eq!(
+        negative, known,
+        "every rule has at least one negative case, and no case names an unknown rule"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// J5-C, X02: the gate frame corpus, shared with validate_contract.py
+// ---------------------------------------------------------------------------
+
+/// Every frame in `fixtures/gate-frames.json` gets the verdict the corpus
+/// expects from the supervisor's own parser (§8.2); `validate_contract.py`
+/// holds its port to the same corpus and checks the parsed object against
+/// `jail-gate.schema.json`.
+#[test]
+fn x02_the_gate_frame_corpus_gets_the_verdicts_it_expects() {
+    use base64::Engine as _;
+    let corpus = read_json(&specs_dir().join("fixtures/gate-frames.json"));
+    let expected = GateExpectation {
+        attempt_id: corpus["expect"]["attempt_id"]
+            .as_str()
+            .expect("an attempt")
+            .to_owned(),
+        policy_digest: corpus["expect"]["policy_digest"]
+            .as_str()
+            .expect("a digest")
+            .to_owned(),
+    };
+    let validators = validators();
+    let cases = corpus["cases"].as_array().expect("the cases");
+    assert!(cases.len() >= 15, "the corpus is present");
+    for case in cases {
+        let name = case["name"].as_str().expect("a case name");
+        let bytes = match (case.get("frame"), case.get("frame_base64")) {
+            (Some(frame), None) => frame.as_str().expect("a frame").as_bytes().to_vec(),
+            (None, Some(data)) => base64::engine::general_purpose::STANDARD
+                .decode(data.as_str().expect("base64"))
+                .expect("valid base64"),
+            _ => panic!("case `{name}` has one frame"),
+        };
+        let verdict = match parse_release(&bytes, &expected) {
+            Ok(frame) => {
+                let value = serde_json::to_value(&frame).expect("serializes");
+                let failures = errors(&validators["jail-gate"], &value);
+                assert!(
+                    failures.is_empty(),
+                    "case `{name}`: an accepted frame is a schema-valid release: {failures:?}"
+                );
+                "release".to_owned()
+            }
+            Err(error) => error.code.as_str().to_owned(),
+        };
+        assert_eq!(
+            verdict,
+            case["result"].as_str().expect("a result"),
+            "case `{name}`"
+        );
     }
 }
 

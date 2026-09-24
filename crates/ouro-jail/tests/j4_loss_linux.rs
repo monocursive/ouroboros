@@ -29,7 +29,6 @@
 //! suites do). Every process signalled is one these tests started; every
 //! file is under a private temporary directory.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt as _;
@@ -38,7 +37,6 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use jsonschema::{Registry, Resource, Validator};
 use ouro_fixture::harness::{self, Jail, Run};
 use ouro_jail::platform::linux::tracer::{
     GapReason, Tracer, TracerConfig, TracerEvent, TracerSummary, narrowing_filter_bytes,
@@ -1050,67 +1048,19 @@ fn line<'a>(lines: &'a [Line], label: &str) -> &'a Line {
         .unwrap_or_else(|| panic!("no fixture line {label:?} in {lines:#?}"))
 }
 
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/specs/jail-v1")
-        .canonicalize()
-        .expect("the checked-in specification directory exists")
-}
-
-/// One validator per checked-in schema, by stem.
-fn validators() -> &'static BTreeMap<String, Validator> {
-    static ONCE: OnceLock<BTreeMap<String, Validator>> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let mut schemas: BTreeMap<String, Value> = BTreeMap::new();
-        for entry in std::fs::read_dir(specs_dir()).unwrap() {
-            let path = entry.unwrap().path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if let Some(stem) = name.strip_suffix(".schema.json") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                schemas.insert(stem.to_owned(), serde_json::from_str(&text).unwrap());
-            }
-        }
-        let pairs: Vec<(String, Resource)> = schemas
-            .values()
-            .map(|schema| {
-                (
-                    schema["$id"].as_str().unwrap().to_owned(),
-                    Resource::from_contents(schema.clone()),
-                )
-            })
-            .collect();
-        let registry: Registry = Registry::new().extend(pairs).unwrap().prepare().unwrap();
-        let registry: &'static Registry = Box::leak(Box::new(registry));
-        schemas
-            .into_iter()
-            .map(|(name, schema)| {
-                let validator = jsonschema::options()
-                    .with_registry(registry)
-                    .should_validate_formats(true)
-                    .build(&schema)
-                    .unwrap();
-                (name, validator)
-            })
-            .collect()
-    })
-}
-
-/// Every receipt and trace event validated against the checked-in schemas;
-/// returns the receipt of `phase`.
+/// Every record of the run held to its contract, then the receipt of
+/// `phase`.
+///
+/// J5-C: this used to validate receipts and events against their schemas
+/// only, so the live O03, O05 and R04 tests never ran the semantic rules the
+/// J4 authority said every live test runs (gap analysis §1.3.2). Now every
+/// receipt passes the schema and `ouro_jail::records::semantic::receipt`, the
+/// trace passes `jail-event` per event and `semantic::trace` plus
+/// `trace_ends_with` against the final receipt, and the control transcript
+/// passes `jail-control` and `semantic::control` (`common::assert_run_records`).
 fn receipt(run: &Run, phase: &str) -> Value {
     run.assert_channels_complete();
-    for receipt in run.receipts() {
-        validators()["jail-receipt"]
-            .validate(&receipt)
-            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
-    }
-    for event in run.trace_events() {
-        validators()["jail-event"]
-            .validate(event)
-            .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
-    }
+    common::assert_run_records(run);
     run.receipt_phase(phase).unwrap_or_else(|| {
         panic!(
             "no {phase} receipt: exit {:?}, stderr {}",

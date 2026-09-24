@@ -5,7 +5,12 @@
 """Validate specification artifacts, not live jail/backend conformance.
 
 Run: uv run docs/specs/jail-v1/validate_contract.py
-The checked-in fixture corpus is also input to the future Rust P01/R01 suite.
+The checked-in fixture corpus is also input to the Rust P01/R01 suite.
+
+J5-C: the semantic rules below are the port of ouro_jail::records::semantic.
+Both run fixtures/semantic-cases.json and must name the same rule for every
+case; both run fixtures/gate-frames.json against the §8.2 frame rules. The
+frozen wire schemas are pinned by frozen-schemas.toml.
 """
 
 import base64
@@ -60,16 +65,256 @@ def check_byte_objects(node):
             check_byte_objects(value)
 
 
+# ---------------------------------------------------------------------------
+# Semantic rules: the port of ouro_jail::records::semantic (J5-C). Each checker
+# returns every violation as (rule, where, detail); the rule identifiers and
+# their citations are fixtures/semantic-cases.json's "rules".
+# ---------------------------------------------------------------------------
+
+
+def violations_in_bytes(node, at, out):
+    if isinstance(node, dict):
+        if node.get("encoding") == "base64":
+            try:
+                native_bytes(node)
+            except (AssertionError, ValueError, UnicodeError) as error:
+                out.append(("native_string", at, str(error) or "not a canonical native string"))
+            return
+        for key, value in node.items():
+            violations_in_bytes(value, f"{at}.{key}", out)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            violations_in_bytes(value, f"{at}[{index}]", out)
+
+
+def decimal(value):
+    return int(value) if isinstance(value, str) and value.isdigit() else None
+
+
+def gap_interval(gap, at, out):
+    start, end = decimal(gap.get("start_ns")), decimal(gap.get("end_ns"))
+    if start is not None and end is not None and end < start:
+        out.append(("gap_interval_reversed", at, f"ends at {end} before it starts at {start}"))
+
+
 def semantic_receipt(record):
-    check_byte_objects(record)
-    ids = [item["id"] for item in record["credentials"]]
-    assert len(ids) == len(set(ids)), "duplicate credential id"
-    limits = [item["key"] for item in record["applied"]["limits"]]
-    assert len(limits) == len(set(limits)), "duplicate limit"
+    out = []
+    violations_in_bytes(record, "$", out)
+    for path, items, key, rule in [
+        ("$.credentials", record["credentials"], "id", "credential_id_unique"),
+        ("$.applied.limits", record["applied"]["limits"], "key", "limit_key_unique"),
+    ]:
+        seen = set()
+        for index, item in enumerate(items):
+            value = json.dumps(item.get(key))
+            if value in seen:
+                out.append((rule, f"{path}[{index}]", f"duplicate {key} {value}"))
+            seen.add(value)
     for name, coverage in record["coverage"].items():
-        if coverage["status"] != "unsupported":
+        if coverage["status"] != "unsupported" and coverage["sources"]:
             source = coverage["sources"][0]
-            assert record["observer"]["sources"][source] != "unsupported", name
+            if record["observer"]["sources"].get(source) == "unsupported":
+                out.append(("coverage_source_unsupported", f"$.coverage.{name}", source))
+        for index, gap in enumerate(coverage.get("gaps", [])):
+            gap_interval(gap, f"$.coverage.{name}.gaps[{index}]", out)
+    for index, gap in enumerate(record["observer"]["gaps"]):
+        gap_interval(gap, f"$.observer.gaps[{index}]", out)
+    return out
+
+
+def is_note(event, kind):
+    fields = event.get("fields") or {}
+    return event.get("source") == "wrapper" and event.get("operation") == "note" and fields.get("kind") == kind
+
+
+def semantic_event(event):
+    out = []
+    violations_in_bytes(event.get("fields"), "$.fields", out)
+    if is_note(event, "coverage_gap"):
+        gap_interval(event["fields"], "$.fields", out)
+    return out
+
+
+def phase_may_follow(before, after):
+    return before == after or (before, after) in {
+        ("prepared", "enforced"), ("prepared", "settled"), ("prepared", "refused"), ("enforced", "settled")}
+
+
+def semantic_trace(events):
+    out = []
+    for index, event in enumerate(events):
+        out += [(rule, f"[{index}]{at[1:]}", detail) for rule, at, detail in semantic_event(event)]
+    if events:
+        for index, event in enumerate(events):
+            if event.get("attempt_id") != events[0].get("attempt_id"):
+                out.append(("trace_attempt_mixed", f"[{index}]", event.get("attempt_id")))
+    loss = any(is_note(event, "coverage_gap") and event["fields"].get("reason") == "trace_transport_loss"
+               for event in events)
+    for source in ["wrapper", "audit", "proxy"]:
+        numbered = [(index, event["source_seq"]) for index, event in enumerate(events)
+                    if event.get("source") == source and isinstance(event.get("source_seq"), int)]
+        backwards = [pair for pair in zip(numbered, numbered[1:]) if pair[1][1] <= pair[0][1]]
+        if backwards:
+            (_, before), (index, after) = backwards[0]
+            out.append(("source_seq_order", f"[{index}]", f"{source} {after} after {before}"))
+            continue
+        if loss:
+            continue
+        for position, (index, seq) in enumerate(numbered):
+            if seq != position + 1:
+                out.append(("source_seq_gap", f"[{index}]", f"{source} {seq} where {position + 1} was due"))
+                break
+    previous = None
+    for index, event in enumerate(events):
+        phase = (event.get("fields") or {}).get("phase") if event.get("operation") == "jail.receipt" else None
+        if not isinstance(phase, str):
+            continue
+        if previous is not None and not phase_may_follow(previous, phase):
+            out.append(("receipt_note_order", f"[{index}]", f"{phase} after {previous}"))
+        previous = phase
+    return out
+
+
+def receipt_digest(record):
+    return hash_bytes(rfc8785.dumps(record))
+
+
+def trace_ends_with(events, receipt):
+    at = f"[{max(len(events) - 1, 0)}]"
+    if not events:
+        return [("trace_final_receipt", at, "an empty trace for an attempt with a receipt")]
+    last = events[-1]
+    fields = last.get("fields") or {}
+    expected = ("wrapper", "jail.receipt", receipt["attempt_id"], receipt["phase"], receipt_digest(receipt))
+    found = (last.get("source"), last.get("operation"), last.get("attempt_id"),
+             fields.get("phase"), fields.get("receipt_digest"))
+    return [] if found == expected else [("trace_final_receipt", at, f"{found} is not {expected}")]
+
+
+def kind_may_follow(before, after):
+    return (before, after) in {
+        ("prepared", "exec_confirmed"), ("prepared", "refused"), ("prepared", "settled"),
+        ("prepared", "unsettled"), ("exec_confirmed", "settled"), ("exec_confirmed", "unsettled")}
+
+
+def semantic_control(messages):
+    out = []
+    for index, message in enumerate(messages):
+        if message.get("attempt_id") != messages[0].get("attempt_id"):
+            out.append(("control_attempt_mixed", f"[{index}]", message.get("attempt_id")))
+    for index, (before, after) in enumerate(zip(messages, messages[1:]), start=1):
+        if isinstance(before.get("seq"), int) and isinstance(after.get("seq"), int) and after["seq"] <= before["seq"]:
+            out.append(("control_seq_order", f"[{index}]", f"{after['seq']} after {before['seq']}"))
+        if not kind_may_follow(before.get("kind"), after.get("kind")):
+            out.append(("control_kind_order", f"[{index}]", f"{after.get('kind')} after {before.get('kind')}"))
+    return out
+
+
+def assert_clean(found, what):
+    assert not found, (what, found)
+
+
+def apply(record, change):
+    node = record
+    for part in change["path"][:-1]:
+        node = node[part]
+    last = change["path"][-1]
+    if change.get("delete"):
+        del node[last]
+    else:
+        node[last] = change["value"]
+
+
+def check_semantic_corpus(validators):
+    corpus = read("fixtures/semantic-cases.json")
+    rules = set(corpus["rules"])
+    named = set()
+    positive = 0
+    schema_of = {"receipt": "jail-receipt", "trace": "jail-event", "control": "jail-control"}
+    for case in corpus["cases"]:
+        record = read(case["base"])
+        for change in case["changes"]:
+            apply(record, change)
+        instances = [record] if case["check"] == "receipt" else record
+        for instance in instances:
+            errors = [e.message for e in validators[schema_of[case["check"]]].iter_errors(instance)]
+            assert not errors, (case["name"], "the schema must accept it", errors)
+        if case["check"] == "receipt":
+            found = semantic_receipt(record)
+        elif case["check"] == "trace":
+            found = semantic_trace(record)
+            if "receipt" in case:
+                found += trace_ends_with(record, read(case["receipt"]))
+        else:
+            found = semantic_control(record)
+        expected = set(case["violations"])
+        assert {rule for rule, _, _ in found} == expected, (case["name"], found)
+        named |= expected
+        positive += not expected
+    assert positive and named == rules, ("every rule has a negative case", rules - named, named - rules)
+    return len(corpus["cases"])
+
+
+# ---------------------------------------------------------------------------
+# The gate frame (§8.2): the port of ouro_jail::records::parse_release.
+# ---------------------------------------------------------------------------
+
+
+def parse_release(payload, expected, validator):
+    if not payload:
+        return "gate_closed"
+    if len(payload) > 1024 or b"\r" in payload or not payload.endswith(b"\n") or b"\n" in payload[:-1]:
+        return "gate_invalid"
+    def no_duplicates(pairs):
+        keys = [key for key, _ in pairs]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate object key")
+        return dict(pairs)
+    try:
+        frame = json.loads(payload[:-1].decode("utf-8"), object_pairs_hook=no_duplicates)
+    except (UnicodeDecodeError, ValueError):
+        return "gate_invalid"
+    if list(validator.iter_errors(frame)):
+        return "gate_invalid"
+    if frame["attempt_id"] != expected["attempt_id"] or frame["policy_digest"] != expected["policy_digest"]:
+        return "gate_invalid"
+    return "release"
+
+
+def check_gate_frames(validators):
+    corpus = read("fixtures/gate-frames.json")
+    for case in corpus["cases"]:
+        if "frame" in case:
+            payload = case["frame"].encode("utf-8")
+        else:
+            payload = base64.b64decode(case["frame_base64"], validate=True)
+        result = parse_release(payload, corpus["expect"], validators["jail-gate"])
+        assert result == case["result"], (case["name"], result)
+    return len(corpus["cases"])
+
+
+# ---------------------------------------------------------------------------
+# The freeze (§13, §17): every wire schema's bytes are the frozen ones.
+# ---------------------------------------------------------------------------
+
+
+def check_frozen(schemas):
+    manifest = tomllib.loads((ROOT / "frozen-schemas.toml").read_text())
+    assert manifest["schema"] == "ouro.jail.frozen-schemas/1"
+    frozen = {entry["file"]: entry for entry in manifest["frozen"]}
+    unfrozen = {entry["file"] for entry in manifest.get("unfrozen", [])}
+    for file in sorted(ROOT.glob("*.schema.json")):
+        assert file.name in frozen or file.name in unfrozen, f"{file.name} is neither frozen nor unfrozen"
+    for name, entry in frozen.items():
+        raw = (ROOT / name).read_bytes()
+        schema = json.loads(raw)
+        actual = hashlib.sha256(raw).hexdigest()
+        assert schema["$id"] == entry["id"], f"{name} declares {schema['$id']}, frozen as {entry['id']}"
+        assert actual == entry["sha256"], (
+            f"{name} changed under its frozen identifier {entry['id']} (sha256 {actual}); "
+            "a breaking change needs a new identifier (jail-v1 §13)")
+        assert "draft" not in schema["title"].lower(), f"{name} is frozen but titled {schema['title']!r}"
+    return len(frozen)
 
 
 def hash_bytes(value):
@@ -197,29 +442,40 @@ def main():
         name: Draft202012Validator(schema, registry=registry, format_checker=FormatChecker())
         for name, schema in schemas.items()
     }
-    examples = list((ROOT / "examples").glob("*.json"))
-    for file in examples:
+    # J5-C: an example's schema is named by its file's prefix; checked-in
+    # evidence receipts are product output and held to the same contract.
+    prefixes = {"event-": "jail-event", "receipt-": "jail-receipt", "gate-": "jail-gate",
+                "control-": "jail-control", "doctor-": "jail-doctor"}
+    examples = sorted((ROOT / "examples").glob("*.json"))
+    evidence = sorted((ROOT / "evidence").glob("*receipt*.json"))
+    for file in examples + evidence:
         record = json.loads(file.read_text())
-        kind = "jail-event" if file.name.startswith("event-") else "jail-receipt"
-        validators[kind].validate(record)
+        kind = "jail-receipt" if file in evidence else next(
+            schema for prefix, schema in prefixes.items() if file.name.startswith(prefix))
+        errors = [e.message for e in validators[kind].iter_errors(record)]
+        assert not errors, (file.name, errors)
         if kind == "jail-receipt":
-            semantic_receipt(record)
+            assert_clean(semantic_receipt(record), file.name)
+        elif kind == "jail-event":
+            assert_clean(semantic_event(record), file.name)
     cases = read("fixtures/validation-cases.json")
     for case in cases:
         record = read(case["base"])
         for change in case["changes"]:
-            node = record
-            for part in change["path"][:-1]:
-                node = node[part]
-            node[change["path"][-1]] = change["value"]
+            apply(record, change)
         errors = list(validators[case["schema"]].iter_errors(record))
         assert (not errors) == case["valid"], (case["name"], [e.message for e in errors])
         if not errors and case["schema"] == "jail-receipt":
-            semantic_receipt(record)
+            assert_clean(semantic_receipt(record), case["name"])
+    semantic_count = check_semantic_corpus(validators)
+    gate_count = check_gate_frames(validators)
+    frozen_count = check_frozen(schemas)
     check_canonical_fixtures(validators)
     network_count = check_network_fixtures()
-    print(f"PASS: {len(schemas)} schemas, {len(examples)} examples, {len(cases)} validation cases,")
-    print(f"      policy/argv golden bytes, native codec, and {network_count} address cases.")
+    print(f"PASS: {len(schemas)} schemas ({frozen_count} frozen), {len(examples)} examples, "
+          f"{len(evidence)} evidence receipts, {len(cases)} validation cases,")
+    print(f"      {semantic_count} semantic cases, {gate_count} gate frames, policy/argv golden bytes,")
+    print(f"      native codec, and {network_count} address cases.")
     print("No live containment, observer, proxy, or platform execution was tested.")
 
 

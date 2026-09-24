@@ -197,77 +197,30 @@ fn which(program: &str) -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// J4-R: the receipt checks the schema cannot express (R01)
+// J4-R, J5-C: the record checks the schema cannot express (R01)
 // ---------------------------------------------------------------------------
 
-/// The Rust port of `validate_contract.py`'s `semantic_receipt`: the receipt
-/// rules JSON Schema cannot state, checked on a receipt the schema accepted.
-///
-/// - every byte-valued native string is canonical padded base64 of bytes that
-///   are not valid UTF-8 (those must use the string form) and hold no NUL;
-/// - credential ids are unique, and so are `applied.limits` keys;
-/// - a coverage class that is not `unsupported` names a source whose observer
-///   status is not `unsupported` either.
+/// The rules a receipt's schema cannot state, as the library checks them
+/// (`ouro_jail::records::semantic::receipt`, J5-C): canonical native byte
+/// strings, unique credential ids and limit keys, a counted class's source
+/// not unsupported, and gap intervals in order. `validate_contract.py` holds
+/// the port of the same rules, over the same corpus.
 ///
 /// # Errors
-/// The first rule the receipt breaks, with the JSON path.
+/// Every rule the receipt breaks, with its JSON path.
 pub fn semantic_receipt(record: &serde_json::Value) -> Result<(), String> {
-    check_byte_objects(record, "$")?;
-    let keys = |list: &serde_json::Value, key: &str, what: &str| -> Result<(), String> {
-        let mut seen = std::collections::BTreeSet::new();
-        for item in list
-            .as_array()
-            .ok_or_else(|| format!("{what} is not an array"))?
-        {
-            let value = item[key].to_string();
-            if !seen.insert(value.clone()) {
-                return Err(format!("duplicate {what} {value}"));
-            }
-        }
-        Ok(())
-    };
-    keys(&record["credentials"], "id", "credential id")?;
-    keys(&record["applied"]["limits"], "key", "limit")?;
-    let coverage = record["coverage"]
-        .as_object()
-        .ok_or("coverage is not an object")?;
-    for (name, class) in coverage {
-        if class["status"] == "unsupported" {
-            continue;
-        }
-        let source = class["sources"][0]
-            .as_str()
-            .ok_or_else(|| format!("coverage {name} is not unsupported but names no source"))?;
-        if record["observer"]["sources"][source] == "unsupported" {
-            return Err(format!(
-                "coverage {name} counts from source {source}, which the observer reports unsupported"
-            ));
-        }
-    }
-    Ok(())
+    violations(&ouro_jail::records::semantic::receipt(record))
 }
 
-fn check_byte_objects(node: &serde_json::Value, at: &str) -> Result<(), String> {
-    match node {
-        serde_json::Value::Object(map) => {
-            if map.get("encoding").and_then(serde_json::Value::as_str) == Some("base64") {
-                return native_bytes(node)
-                    .map(|_| ())
-                    .map_err(|error| format!("{at}: {error}"));
-            }
-            for (key, value) in map {
-                check_byte_objects(value, &format!("{at}.{key}"))?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Array(items) => {
-            for (index, value) in items.iter().enumerate() {
-                check_byte_objects(value, &format!("{at}[{index}]"))?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
+fn violations(found: &[ouro_jail::records::semantic::Violation]) -> Result<(), String> {
+    if found.is_empty() {
+        return Ok(());
     }
+    Err(found
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; "))
 }
 
 /// The bytes a native string names (canonicalization.md, "Native strings").
@@ -275,37 +228,7 @@ fn check_byte_objects(node: &serde_json::Value, at: &str) -> Result<(), String> 
 /// # Errors
 /// Why the value is not a canonical native string.
 pub fn native_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
-    let raw = match value {
-        serde_json::Value::String(text) => text.as_bytes().to_vec(),
-        serde_json::Value::Object(map) => {
-            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
-            if keys != ["data", "encoding"] {
-                return Err(format!("a byte object has the keys {keys:?}"));
-            }
-            if map["encoding"] != "base64" {
-                return Err("a byte object's encoding is not base64".to_owned());
-            }
-            let data = map["data"]
-                .as_str()
-                .ok_or("a byte object's data is not a string")?;
-            let raw = base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map_err(|error| format!("the base64 does not decode: {error}"))?;
-            if base64::engine::general_purpose::STANDARD.encode(&raw) != data {
-                return Err("the base64 is not canonical".to_owned());
-            }
-            if std::str::from_utf8(&raw).is_ok() {
-                return Err("UTF-8 bytes must use the JSON string form".to_owned());
-            }
-            raw
-        }
-        other => return Err(format!("{other} is not a native string")),
-    };
-    if raw.contains(&0) {
-        return Err("a native value contains NUL".to_owned());
-    }
-    Ok(raw)
+    ouro_jail::records::semantic::native_bytes(value)
 }
 
 /// Every checked-in schema, by stem (`jail-receipt`, `jail-event`, ...), built
@@ -391,4 +314,95 @@ pub fn checked_receipt(receipt: serde_json::Value) -> serde_json::Value {
         panic!("a product receipt fails its contract: {error}\n{receipt:#}");
     }
     receipt
+}
+
+// ---------------------------------------------------------------------------
+// J5-C: traces, control transcripts and whole runs (R01, §8.2, §13.1, §13.3)
+// ---------------------------------------------------------------------------
+
+fn schema_errors(schema: &str, value: &serde_json::Value) -> Vec<String> {
+    validators()[schema]
+        .iter_errors(value)
+        .map(|error| format!("{} at {}", error, error.instance_path()))
+        .collect()
+}
+
+/// A trace the product wrote: every event schema-valid (`jail-event`), and
+/// the stream semantically valid (`ouro_jail::records::semantic::trace`: one
+/// attempt, `source_seq` from 1 per source with no silent hole, receipt
+/// notes in lifecycle order). With the attempt's final receipt, the stream
+/// also ends on that receipt's note (§13.3).
+///
+/// # Errors
+/// Every schema error of the first invalid event, or every semantic rule the
+/// stream breaks.
+pub fn check_trace(
+    events: &[serde_json::Value],
+    final_receipt: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    for (index, event) in events.iter().enumerate() {
+        let errors = schema_errors("jail-event", event);
+        if !errors.is_empty() {
+            return Err(format!("event [{index}] schema: {errors:?}"));
+        }
+    }
+    let mut found = ouro_jail::records::semantic::trace(events);
+    if let Some(receipt) = final_receipt {
+        found.extend(ouro_jail::records::semantic::trace_ends_with(
+            events, receipt,
+        ));
+    }
+    violations(&found).map_err(|error| format!("semantic: {error}"))
+}
+
+/// A control transcript the product wrote: every message schema-valid
+/// (`jail-control`) and the transcript in order
+/// (`ouro_jail::records::semantic::control`).
+///
+/// # Errors
+/// Every schema error of the first invalid message, or every semantic rule
+/// the transcript breaks.
+pub fn check_control(messages: &[serde_json::Value]) -> Result<(), String> {
+    for (index, message) in messages.iter().enumerate() {
+        let errors = schema_errors("jail-control", message);
+        if !errors.is_empty() {
+            return Err(format!("control message [{index}] schema: {errors:?}"));
+        }
+    }
+    violations(&ouro_jail::records::semantic::control(messages))
+        .map_err(|error| format!("semantic: {error}"))
+}
+
+/// Everything a run wrote, held to its contract: every receipt
+/// ([`check_receipt`]), the trace when one was asked for ([`check_trace`],
+/// against the attempt's final receipt) and the control transcript
+/// ([`check_control`]). Panics with the finding and the record: a failure is
+/// a product finding, never a reason to relax a rule.
+///
+/// The trace is read through `Run::trace_events`, which already refuses a
+/// transcript that is not complete in the §13.3 sense; a test about an
+/// incomplete trace reads `trace_readback` itself and does not call this.
+pub fn assert_run_records(run: &harness::Run) {
+    for receipt in run.receipts() {
+        if let Err(error) = check_receipt(&receipt) {
+            panic!("a product receipt fails its contract: {error}\n{receipt:#}");
+        }
+    }
+    if run.trace_readback.is_some() {
+        let final_receipt = run
+            .final_receipt()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
+        if let Err(error) = check_trace(run.trace_events(), final_receipt.as_ref()) {
+            panic!(
+                "a product trace fails its contract: {error}\n{:#}",
+                serde_json::Value::from(run.trace_events().to_vec())
+            );
+        }
+    }
+    if let Err(error) = check_control(run.control_messages()) {
+        panic!(
+            "a product control transcript fails its contract: {error}\n{:#}",
+            serde_json::Value::from(run.control_messages().to_vec())
+        );
+    }
 }

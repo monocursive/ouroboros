@@ -254,6 +254,13 @@
   "cleanup_error": null,
   "created_at": "2026-09-21T12:00:00Z",
   "updated_at": "2026-09-21T12:00:01Z",
-  "errors": [],
+  "errors": [
+    {
+      "code": "evidence_lost",
+      "stage": "reconciling",
+      "message": "Synthetic fixture: exec confirmation was lost before settlement.",
+      "remediation_category": "inspect_state"
+    }
+  ],
   "credentials": []
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ouro:schema:jail-event:1",
-  "title": "Jail v1 producer event (draft)",
+  "title": "Jail v1 producer event",
   "allOf": [
     {
       "$ref": "urn:ouro:schema:event:1"
@@ -91,6 +91,514 @@
           }
         }
       }
+    },
+    {
+      "$comment": "jail-v1.md:1797-1800 (\u00a713.1) and O01: a jail wrapper event states a fact the supervisor established; it has the wrapper completion and carries no proxy counters.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "outcome": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "completion": {
+                "const": "wrapper"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "bytes_in"
+                  ]
+                },
+                {
+                  "required": [
+                    "bytes_out"
+                  ]
+                },
+                {
+                  "required": [
+                    "duration_ms"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1790-1791 (\u00a713.1): a coverage gap is a wrapper note with the classes, the interval, a reason and a known-or-null count.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "coverage_gap"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "fields",
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "classes",
+              "start_ns",
+              "end_ns",
+              "reason",
+              "lost_count"
+            ],
+            "properties": {
+              "classes": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "exec",
+                    "fs.write",
+                    "fs.deny",
+                    "net",
+                    "proxy.net",
+                    "limits"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 6
+              },
+              "source": {
+                "enum": [
+                  "wrapper",
+                  "audit",
+                  "proxy"
+                ]
+              },
+              "start_ns": {
+                "$ref": "#/$defs/decimal"
+              },
+              "end_ns": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/decimal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "lost_count": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1792-1794 (\u00a713.1) and :932-934 (\u00a78.2): a receipt update is a wrapper jail.receipt event naming the receipt's phase and its canonical sha256 digest.",
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "jail.receipt"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "fields": {
+            "required": [
+              "phase",
+              "receipt_digest"
+            ],
+            "properties": {
+              "phase": {
+                "enum": [
+                  "prepared",
+                  "enforced",
+                  "settled",
+                  "refused"
+                ]
+              },
+              "receipt_digest": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1799-1800 (\u00a713.1): a lifecycle note carries a safe named transition: a name, never free text.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "lifecycle"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "fields",
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "transition"
+            ],
+            "properties": {
+              "transition": {
+                "$ref": "#/$defs/name"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1412-1413 (\u00a711.2): a successful exec's proc.exec names its call in fields.syscall.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "proc.exec"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "exec_transition"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "syscall"
+            ],
+            "properties": {
+              "syscall": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1489-1491 (\u00a711.2): an fs.write result always carries its precise action, so it cannot be presented as a content diff.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "fs.write"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "operation",
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1516-1519 (\u00a711.3): every audit result carries fields.pid (host thread-group id) and fields.pid_start_ticks (null if unknown).",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "pid",
+              "pid_start_ticks"
+            ],
+            "properties": {
+              "pid": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pid_start_ticks": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1496-1505 (\u00a711.3): a path is workspace-relative only when that relationship is established, otherwise a digest or an unavailable marker with a reason; its basis and completeness are recorded, and both paths of a two-path call independently.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "path2": {
+                "$ref": "#/$defs/path"
+              },
+              "path_basis": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path_complete": {
+                "type": "boolean"
+              },
+              "path2_complete": {
+                "type": "boolean"
+              },
+              "path_dirfd": {
+                "type": "integer"
+              },
+              "path2_dirfd": {
+                "type": "integer"
+              }
+            },
+            "dependentRequired": {
+              "path": [
+                "path_basis",
+                "path_complete"
+              ],
+              "path2": [
+                "path_basis",
+                "path2_complete"
+              ]
+            }
+          }
+        }
+      }
     }
-  ]
+  ],
+  "description": "Frozen at jail milestone 1 (jail-v1 \u00a713.1, \u00a717). The restriction of ouro.event/1 to what ouro-jail writes: its wrapper notes, audit fields and proxy results. It carries no identifier of its own: its events are ouro.event/1 events.",
+  "$defs": {
+    "decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "native_string": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "encoding": {
+              "const": "base64"
+            },
+            "data": {
+              "type": "string",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            }
+          },
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "path": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "workspace_relative",
+                "scratch_relative"
+              ]
+            },
+            "value": {
+              "$ref": "#/$defs/native_string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "digest"
+            },
+            "digest": {
+              "$ref": "#/$defs/sha256"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "digest",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
 }

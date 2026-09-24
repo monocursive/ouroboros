@@ -1,0 +1,16 @@
+{
+  "schema": "ouro.jail.control/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "seq": 2,
+  "kind": "exec_confirmed",
+  "receipt_phase": "enforced",
+  "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "outcome": {
+    "kind": "pending",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": null
+  },
+  "error": null
+}

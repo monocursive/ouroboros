@@ -516,6 +516,18 @@
                     "const": "audit"
                   },
                   "uniqueItems": true
+                },
+                "gaps": {
+                  "$comment": "jail-v1.md:1563-1564 (\u00a711.4): a gap names the classes it affects explicitly, so a gap listed under a class names that class.",
+                  "items": {
+                    "properties": {
+                      "classes": {
+                        "contains": {
+                          "const": "exec"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -533,6 +545,18 @@
                     "const": "audit"
                   },
                   "uniqueItems": true
+                },
+                "gaps": {
+                  "$comment": "jail-v1.md:1563-1564 (\u00a711.4): a gap names the classes it affects explicitly, so a gap listed under a class names that class.",
+                  "items": {
+                    "properties": {
+                      "classes": {
+                        "contains": {
+                          "const": "fs.write"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -550,6 +574,18 @@
                     "const": "audit"
                   },
                   "uniqueItems": true
+                },
+                "gaps": {
+                  "$comment": "jail-v1.md:1563-1564 (\u00a711.4): a gap names the classes it affects explicitly, so a gap listed under a class names that class.",
+                  "items": {
+                    "properties": {
+                      "classes": {
+                        "contains": {
+                          "const": "fs.deny"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -567,6 +603,18 @@
                     "const": "audit"
                   },
                   "uniqueItems": true
+                },
+                "gaps": {
+                  "$comment": "jail-v1.md:1563-1564 (\u00a711.4): a gap names the classes it affects explicitly, so a gap listed under a class names that class.",
+                  "items": {
+                    "properties": {
+                      "classes": {
+                        "contains": {
+                          "const": "net"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -584,6 +632,18 @@
                     "const": "wrapper"
                   },
                   "uniqueItems": true
+                },
+                "gaps": {
+                  "$comment": "jail-v1.md:1563-1564 (\u00a711.4): a gap names the classes it affects explicitly, so a gap listed under a class names that class.",
+                  "items": {
+                    "properties": {
+                      "classes": {
+                        "contains": {
+                          "const": "limits"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -601,6 +661,18 @@
                     "const": "proxy"
                   },
                   "uniqueItems": true
+                },
+                "gaps": {
+                  "$comment": "jail-v1.md:1563-1564 (\u00a711.4): a gap names the classes it affects explicitly, so a gap listed under a class names that class.",
+                  "items": {
+                    "properties": {
+                      "classes": {
+                        "contains": {
+                          "const": "proxy.net"
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -1137,8 +1209,8 @@
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ouro:schema:jail-receipt:1",
-  "title": "Ouro jail receipt v1 (draft)",
-  "description": "Draft shared shape and principal invariants. Native backend details and lifecycle ordering require the specification semantic tests.",
+  "title": "Ouro jail receipt v1",
+  "description": "Frozen at jail milestone 1 (jail-v1 \u00a713.2, \u00a717). The shared shape, phase tuples and coverage invariants. The rules JSON Schema cannot state (native byte strings, unique ids and keys, gap interval order) are ouro_jail::records::semantic and validate_contract.py over fixtures/semantic-cases.json. lifetime.boundary is a per-OS vocabulary: pid_namespace and supervisor_cgroup on Linux, native_tree elsewhere.",
   "allOf": [
     {
       "if": {
@@ -1861,6 +1933,392 @@
           }
         ]
       }
+    },
+    {
+      "$comment": "jail-v1.md:1555-1558 and :1574-1575 (\u00a711.4): a class is active only once its source was applied; an active audit class means the observer attached for this attempt and the audit source is active or degraded.",
+      "if": {
+        "properties": {
+          "coverage": {
+            "type": "object",
+            "anyOf": [
+              {
+                "properties": {
+                  "exec": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "active"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "exec"
+                ]
+              },
+              {
+                "properties": {
+                  "fs.write": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "active"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "fs.write"
+                ]
+              },
+              {
+                "properties": {
+                  "fs.deny": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "active"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "fs.deny"
+                ]
+              },
+              {
+                "properties": {
+                  "net": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "active"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "net"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "coverage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "observer": {
+            "properties": {
+              "attached": {
+                "const": true
+              },
+              "sources": {
+                "properties": {
+                  "audit": {
+                    "enum": [
+                      "active",
+                      "degraded"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1561-1562 (\u00a711.4): proxy.net can be active only for an applied proxy.",
+      "if": {
+        "properties": {
+          "coverage": {
+            "type": "object",
+            "properties": {
+              "proxy.net": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "active"
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            },
+            "required": [
+              "proxy.net"
+            ]
+          }
+        },
+        "required": [
+          "coverage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "observer": {
+            "properties": {
+              "sources": {
+                "properties": {
+                  "proxy": {
+                    "enum": [
+                      "active",
+                      "degraded"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1872 and :1876-1879 (\u00a713.2): in a refusal before boundary creation every applied field is unapplied, and the network mode is pending (host for none, which the containment rules bind).",
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "refused"
+          },
+          "lifetime": {
+            "type": "object",
+            "properties": {
+              "boundary": {
+                "const": "pending"
+              }
+            },
+            "required": [
+              "boundary"
+            ]
+          }
+        },
+        "required": [
+          "lifetime",
+          "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "applied": {
+            "properties": {
+              "filesystem": {
+                "type": "null"
+              },
+              "syscalls": {
+                "type": "null"
+              },
+              "network": {
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "pending",
+                      "host"
+                    ]
+                  },
+                  "mechanism": {
+                    "type": "null"
+                  },
+                  "allowed_hosts": {
+                    "maxItems": 0
+                  }
+                }
+              },
+              "limits": {
+                "items": {
+                  "properties": {
+                    "applied": {
+                      "const": false
+                    }
+                  }
+                }
+              },
+              "environment_names": {
+                "maxItems": 0
+              },
+              "removed_environment_names": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1837, :1872 and :1876-1878 (\u00a713.2): containment is pending only before the final policy is established, which is a refusal before boundary creation, where the network mode is pending.",
+      "if": {
+        "properties": {
+          "containment": {
+            "const": "pending"
+          }
+        },
+        "required": [
+          "containment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "applied": {
+            "properties": {
+              "network": {
+                "properties": {
+                  "mode": {
+                    "const": "pending"
+                  }
+                }
+              }
+            }
+          },
+          "lifetime": {
+            "properties": {
+              "boundary": {
+                "const": "pending"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1638-1642 (\u00a711.4): any evidence class degraded in the observer's final account is an evidence_lost error, whatever the evidence mode.",
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "settled"
+          },
+          "coverage": {
+            "type": "object",
+            "anyOf": [
+              {
+                "properties": {
+                  "exec": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "degraded"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "exec"
+                ]
+              },
+              {
+                "properties": {
+                  "fs.write": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "degraded"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "fs.write"
+                ]
+              },
+              {
+                "properties": {
+                  "fs.deny": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "degraded"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "fs.deny"
+                ]
+              },
+              {
+                "properties": {
+                  "net": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "degraded"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "net"
+                ]
+              },
+              {
+                "properties": {
+                  "proxy.net": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "const": "degraded"
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  }
+                },
+                "required": [
+                  "proxy.net"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "coverage",
+          "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "errors": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "const": "evidence_lost"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -2025,6 +2483,26 @@
               }
             }
           }
+        },
+        {
+          "$comment": "jail-v1.md:1555-1558, :1563-1564 and :1636-1637 (\u00a711.4), :1830 (\u00a713.2): a degraded class states its missing interval as at least one explicit gap.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "degraded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "gaps": {
+                "minItems": 1
+              }
+            }
+          }
         }
       ]
     },
@@ -2100,7 +2578,19 @@
           "type": "string"
         },
         "stage": {
-          "type": "string"
+          "$comment": "jail-v1.md:757 (\u00a76.4): an error has a stable stage, the lifecycle state of \u00a78.1 (jail-v1.md:837-845) it was raised in.",
+          "enum": [
+            "resolving",
+            "probing",
+            "preparing",
+            "prepared",
+            "released",
+            "running",
+            "stopping",
+            "reconciling",
+            "settled",
+            "refused"
+          ]
         },
         "message": {
           "type": "string"

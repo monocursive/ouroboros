@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:jail-control:1",
+  "title": "Ouro jail control message v1",
+  "description": "Frozen at jail milestone 1 (jail-v1 \u00a78.2, jail-v1.md:923-934). One NDJSON control message: reporting, never approval. It acknowledges only a durable receipt, names it by phase and canonical digest, and carries its safe outcome, never raw argv. The 64 KiB frame bound is the writer's; message order across a transcript is ouro_jail::records::semantic::control and validate_contract.py.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.jail.control/1"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^att_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "kind": {
+      "enum": [
+        "prepared",
+        "exec_confirmed",
+        "refused",
+        "settled",
+        "unsettled"
+      ]
+    },
+    "receipt_phase": {
+      "enum": [
+        "prepared",
+        "enforced",
+        "settled",
+        "refused"
+      ]
+    },
+    "receipt_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "outcome": {
+      "$ref": "urn:ouro:schema:jail-receipt:1#/properties/outcome"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "urn:ouro:schema:jail-receipt:1#/$defs/error"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "attempt_id",
+    "seq",
+    "kind",
+    "receipt_phase",
+    "receipt_digest",
+    "outcome",
+    "error"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "$comment": "jail-v1.md:865-866 (\u00a78.1 step 5) and :1870-1871 (\u00a713.2): prepared acknowledges the prepared receipt; no target instruction has run.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "prepared"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receipt_phase": {
+            "enum": [
+              "prepared"
+            ]
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "pending",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:872 (\u00a78.1 step 7): exec_confirmed follows the enforced receipt persisted after confirmed exec.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "exec_confirmed"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receipt_phase": {
+            "enum": [
+              "enforced"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:925-927 (\u00a78.2) and :1843-1845 (\u00a713.2): refused is sent only while the target has not executed, with the refused receipt.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "refused"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receipt_phase": {
+            "enum": [
+              "refused"
+            ]
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "refused",
+                  "exec_error"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:927-928 (\u00a78.2) and :1874 (\u00a713.2): settled acknowledges the settled receipt.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "settled"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receipt_phase": {
+            "enum": [
+              "settled"
+            ]
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "exited",
+                  "signaled",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:928-931 (\u00a78.2) and :1817-1818 (\u00a713.2): after exec without verified tree death the receipt keeps its last nonsettled phase.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "unsettled"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receipt_phase": {
+            "enum": [
+              "prepared",
+              "enforced"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

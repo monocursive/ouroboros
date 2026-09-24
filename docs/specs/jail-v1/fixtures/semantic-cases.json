@@ -1,0 +1,1211 @@
+{
+  "rules": {
+    "native_string": "canonicalization.md \"Native strings\": a byte object is canonical padded base64 of bytes that are not UTF-8, and no native value holds NUL",
+    "credential_id_unique": "jail-v1.md:1833 (\u00a713.2) and canonicalization.md: staged credentials have unique logical ids",
+    "limit_key_unique": "jail-v1.md:703 and :1895-1897 (\u00a76.4, \u00a713.2): one limit per key, each stating its own scope and hit",
+    "coverage_source_unsupported": "jail-v1.md:1561-1563 (\u00a711.4): an active, supported or degraded class names its assigned source, which cannot then be unsupported",
+    "gap_interval_reversed": "jail-v1.md:1627-1629 (\u00a711.4) and :1791 (\u00a713.1): a gap is the interval from the last healthy point to recovery, so it does not end before it starts",
+    "trace_attempt_mixed": "jail-v1.md:1774 (\u00a713.1) and :1909-1911 (\u00a713.3): a trace is the one stream of one attempt",
+    "source_seq_order": "jail-v1.md:1775-1776 (\u00a713.1): source_seq never restarts within an attempt, so it increases per source",
+    "source_seq_gap": "jail-v1.md:1775-1776 (\u00a713.1) and :1938-1940 (\u00a713.3): each source counts from 1; a missing number is lost evidence, which the stream's first loss records as a trace_transport_loss note",
+    "receipt_note_order": "jail-v1.md:837-851 (\u00a78.1) and :1817-1821, :1846-1849 (\u00a713.2): receipt notes follow the lifecycle; nothing after exec is a refusal, nothing leaves settled or refused",
+    "trace_final_receipt": "jail-v1.md:1792-1795 (\u00a713.1) and :1948-1949 (\u00a713.3): a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest",
+    "control_attempt_mixed": "jail-v1.md:923-924 (\u00a78.2): control output carries one attempt's messages",
+    "control_seq_order": "jail-v1.md:923-924 (\u00a78.2): the message number increases monotonically",
+    "control_kind_order": "jail-v1.md:923-931 (\u00a78.2) and :847-851 (\u00a78.1): prepared, then exec_confirmed, then one terminal message; refused never after exec; nothing after a terminal message"
+  },
+  "cases": [
+    {
+      "name": "receipt-tool is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "receipt-agent-proxy-only is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-agent-proxy-only.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "receipt-native-path is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-native-path.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "receipt-settled-unknown is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-settled-unknown.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "receipt-exec-refused is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-exec-refused.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "receipt-macos-refused is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-macos-refused.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "receipt-none is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-none.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "receipt-prepared is semantically valid",
+      "check": "receipt",
+      "base": "examples/receipt-prepared.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "duplicate credential id",
+      "check": "receipt",
+      "base": "examples/receipt-agent-proxy-only.json",
+      "changes": [
+        {
+          "path": [
+            "credentials",
+            1,
+            "id"
+          ],
+          "value": "fixture.auth"
+        }
+      ],
+      "violations": [
+        "credential_id_unique"
+      ]
+    },
+    {
+      "name": "duplicate limit key",
+      "check": "receipt",
+      "base": "examples/receipt-agent-proxy-only.json",
+      "changes": [
+        {
+          "path": [
+            "applied",
+            "limits",
+            1,
+            "key"
+          ],
+          "value": "wall"
+        }
+      ],
+      "violations": [
+        "limit_key_unique"
+      ]
+    },
+    {
+      "name": "coverage from a source the observer calls unsupported",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "observer",
+            "sources",
+            "wrapper"
+          ],
+          "value": "unsupported"
+        }
+      ],
+      "violations": [
+        "coverage_source_unsupported"
+      ]
+    },
+    {
+      "name": "byte form of valid UTF-8",
+      "check": "receipt",
+      "base": "examples/receipt-native-path.json",
+      "changes": [
+        {
+          "path": [
+            "policy",
+            "grants",
+            0,
+            "value",
+            "data"
+          ],
+          "value": "L3dvcms="
+        }
+      ],
+      "violations": [
+        "native_string"
+      ]
+    },
+    {
+      "name": "noncanonical base64",
+      "check": "receipt",
+      "base": "examples/receipt-native-path.json",
+      "changes": [
+        {
+          "path": [
+            "policy",
+            "grants",
+            0,
+            "value",
+            "data"
+          ],
+          "value": "L3dvcmsv/x=="
+        }
+      ],
+      "violations": [
+        "native_string"
+      ]
+    },
+    {
+      "name": "a NUL in a native string",
+      "check": "receipt",
+      "base": "examples/receipt-native-path.json",
+      "changes": [
+        {
+          "path": [
+            "policy",
+            "grants",
+            0,
+            "value",
+            "data"
+          ],
+          "value": "L3dvcgD/"
+        }
+      ],
+      "violations": [
+        "native_string"
+      ]
+    },
+    {
+      "name": "a gap ending where it starts is an interval",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "status"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "observed_count"
+          ],
+          "value": null
+        },
+        {
+          "path": [
+            "observer",
+            "sources",
+            "audit"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "errors"
+          ],
+          "value": [
+            {
+              "code": "evidence_lost",
+              "stage": "reconciling",
+              "message": "Synthetic fixture: coverage was lost before settlement.",
+              "remediation_category": "inspect_state"
+            }
+          ]
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "10",
+              "end_ns": "10",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        },
+        {
+          "path": [
+            "observer",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "10",
+              "end_ns": "10",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "an open gap has no end to order",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "status"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "observed_count"
+          ],
+          "value": null
+        },
+        {
+          "path": [
+            "observer",
+            "sources",
+            "audit"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "errors"
+          ],
+          "value": [
+            {
+              "code": "evidence_lost",
+              "stage": "reconciling",
+              "message": "Synthetic fixture: coverage was lost before settlement.",
+              "remediation_category": "inspect_state"
+            }
+          ]
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "10",
+              "end_ns": null,
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        },
+        {
+          "path": [
+            "observer",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "10",
+              "end_ns": null,
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a class gap that ends before it starts",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "status"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "observed_count"
+          ],
+          "value": null
+        },
+        {
+          "path": [
+            "observer",
+            "sources",
+            "audit"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "errors"
+          ],
+          "value": [
+            {
+              "code": "evidence_lost",
+              "stage": "reconciling",
+              "message": "Synthetic fixture: coverage was lost before settlement.",
+              "remediation_category": "inspect_state"
+            }
+          ]
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "20",
+              "end_ns": "10",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        },
+        {
+          "path": [
+            "observer",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "0",
+              "end_ns": "20",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "gap_interval_reversed"
+      ]
+    },
+    {
+      "name": "an observer gap that ends before it starts",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "status"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "observed_count"
+          ],
+          "value": null
+        },
+        {
+          "path": [
+            "observer",
+            "sources",
+            "audit"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "errors"
+          ],
+          "value": [
+            {
+              "code": "evidence_lost",
+              "stage": "reconciling",
+              "message": "Synthetic fixture: coverage was lost before settlement.",
+              "remediation_category": "inspect_state"
+            }
+          ]
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "0",
+              "end_ns": "20",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        },
+        {
+          "path": [
+            "observer",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "100",
+              "end_ns": "99",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        }
+      ],
+      "violations": [
+        "gap_interval_reversed"
+      ]
+    },
+    {
+      "name": "gap order is numeric, not lexicographic",
+      "check": "receipt",
+      "base": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "status"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "observed_count"
+          ],
+          "value": null
+        },
+        {
+          "path": [
+            "observer",
+            "sources",
+            "audit"
+          ],
+          "value": "degraded"
+        },
+        {
+          "path": [
+            "errors"
+          ],
+          "value": [
+            {
+              "code": "evidence_lost",
+              "stage": "reconciling",
+              "message": "Synthetic fixture: coverage was lost before settlement.",
+              "remediation_category": "inspect_state"
+            }
+          ]
+        },
+        {
+          "path": [
+            "coverage",
+            "fs.write",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "9",
+              "end_ns": "10",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        },
+        {
+          "path": [
+            "observer",
+            "gaps"
+          ],
+          "value": [
+            {
+              "classes": [
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "9",
+              "end_ns": "10",
+              "reason": "fixture_loss",
+              "lost_count": null
+            }
+          ]
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a complete tool trace",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "receipt": "examples/receipt-tool.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "an event with a byte path",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "path",
+            "value"
+          ],
+          "value": {
+            "encoding": "base64",
+            "data": "Zml4/w=="
+          }
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "an event byte path that is UTF-8",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            5,
+            "fields",
+            "path",
+            "value"
+          ],
+          "value": {
+            "encoding": "base64",
+            "data": "Zml4"
+          }
+        }
+      ],
+      "violations": [
+        "native_string"
+      ]
+    },
+    {
+      "name": "a coverage gap note that ends before it starts",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            1
+          ],
+          "value": {
+            "schema": "ouro.event/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "source": "wrapper",
+            "source_seq": 2,
+            "observed_at": "2026-09-21T12:00:00Z",
+            "monotonic_ns": "330000000",
+            "operation": "note",
+            "stage": "result",
+            "decision": null,
+            "outcome": {
+              "ok": true,
+              "return_value": null,
+              "errno": null,
+              "completion": "wrapper"
+            },
+            "fields": {
+              "kind": "coverage_gap",
+              "classes": [
+                "fs.deny",
+                "fs.write"
+              ],
+              "source": "audit",
+              "start_ns": "20",
+              "end_ns": "19",
+              "reason": "queue_full",
+              "lost_count": 2
+            }
+          }
+        }
+      ],
+      "violations": [
+        "gap_interval_reversed"
+      ]
+    },
+    {
+      "name": "an event of another attempt",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            6,
+            "attempt_id"
+          ],
+          "value": "att_00000000-0000-4000-8000-000000000002"
+        }
+      ],
+      "violations": [
+        "trace_attempt_mixed"
+      ]
+    },
+    {
+      "name": "a source that restarts",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            6,
+            "source_seq"
+          ],
+          "value": 1
+        }
+      ],
+      "violations": [
+        "source_seq_order"
+      ]
+    },
+    {
+      "name": "a source that repeats a number",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            3,
+            "source_seq"
+          ],
+          "value": 2
+        }
+      ],
+      "violations": [
+        "source_seq_order"
+      ]
+    },
+    {
+      "name": "a source that does not start at 1",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            2,
+            "source_seq"
+          ],
+          "value": 2
+        },
+        {
+          "path": [
+            5,
+            "source_seq"
+          ],
+          "value": 3
+        },
+        {
+          "path": [
+            6,
+            "source_seq"
+          ],
+          "value": 4
+        }
+      ],
+      "violations": [
+        "source_seq_gap"
+      ]
+    },
+    {
+      "name": "a silent hole in a source",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            7,
+            "source_seq"
+          ],
+          "value": 6
+        }
+      ],
+      "violations": [
+        "source_seq_gap"
+      ]
+    },
+    {
+      "name": "a silent hole in the proxy source",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            6
+          ],
+          "value": {
+            "schema": "ouro.event/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "source": "proxy",
+            "source_seq": 2,
+            "observed_at": "2026-09-21T12:00:00Z",
+            "monotonic_ns": "310000000",
+            "operation": "net.connect",
+            "stage": "result",
+            "decision": "allow",
+            "outcome": {
+              "ok": true,
+              "return_value": null,
+              "errno": null,
+              "completion": "proxy_close",
+              "bytes_in": 4096,
+              "bytes_out": 512,
+              "duration_ms": 120
+            },
+            "fields": {
+              "request_id": 1,
+              "kind": "connect",
+              "destination": "api.example.test:443",
+              "reason": "relayed",
+              "connected_address": "192.0.2.10:443",
+              "discarded_bytes": 0,
+              "end": "client_closed"
+            }
+          }
+        }
+      ],
+      "violations": [
+        "source_seq_gap"
+      ]
+    },
+    {
+      "name": "a hole after a recorded transport loss",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            6
+          ],
+          "value": {
+            "schema": "ouro.event/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "source": "wrapper",
+            "source_seq": 6,
+            "observed_at": "2026-09-21T12:00:00Z",
+            "monotonic_ns": "330000000",
+            "operation": "note",
+            "stage": "result",
+            "decision": null,
+            "outcome": {
+              "ok": true,
+              "return_value": null,
+              "errno": null,
+              "completion": "wrapper"
+            },
+            "fields": {
+              "kind": "coverage_gap",
+              "classes": [
+                "exec",
+                "fs.write",
+                "fs.deny",
+                "net",
+                "proxy.net"
+              ],
+              "source": "wrapper",
+              "start_ns": "390000000",
+              "end_ns": null,
+              "reason": "trace_transport_loss",
+              "lost_count": null
+            }
+          }
+        },
+        {
+          "path": [
+            7,
+            "source_seq"
+          ],
+          "value": 8
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a receipt note going back to prepared",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            7,
+            "fields",
+            "phase"
+          ],
+          "value": "prepared"
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "a refusal after exec",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            7,
+            "fields",
+            "phase"
+          ],
+          "value": "refused"
+        }
+      ],
+      "violations": [
+        "receipt_note_order"
+      ]
+    },
+    {
+      "name": "a refusal straight after prepared",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "changes": [
+        {
+          "path": [
+            4,
+            "fields",
+            "phase"
+          ],
+          "value": "refused"
+        },
+        {
+          "path": [
+            7,
+            "fields",
+            "phase"
+          ],
+          "value": "refused"
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a trace that stops before the final note",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "receipt": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            7
+          ],
+          "delete": true
+        }
+      ],
+      "violations": [
+        "trace_final_receipt"
+      ]
+    },
+    {
+      "name": "a final note naming another receipt",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "receipt": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            7,
+            "fields",
+            "receipt_digest"
+          ],
+          "value": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      ],
+      "violations": [
+        "trace_final_receipt"
+      ]
+    },
+    {
+      "name": "a final note naming another phase",
+      "check": "trace",
+      "base": "fixtures/trace-tool.json",
+      "receipt": "examples/receipt-tool.json",
+      "changes": [
+        {
+          "path": [
+            7,
+            "fields",
+            "phase"
+          ],
+          "value": "enforced"
+        }
+      ],
+      "violations": [
+        "trace_final_receipt"
+      ]
+    },
+    {
+      "name": "a complete control transcript",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [],
+      "violations": []
+    },
+    {
+      "name": "a transcript missing a dropped message",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            1
+          ],
+          "delete": true
+        }
+      ],
+      "violations": []
+    },
+    {
+      "name": "a message of another attempt",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            2,
+            "attempt_id"
+          ],
+          "value": "att_00000000-0000-4000-8000-000000000002"
+        }
+      ],
+      "violations": [
+        "control_attempt_mixed"
+      ]
+    },
+    {
+      "name": "a message number that goes back",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            2,
+            "seq"
+          ],
+          "value": 1
+        }
+      ],
+      "violations": [
+        "control_seq_order"
+      ]
+    },
+    {
+      "name": "a refusal after exec",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            2
+          ],
+          "value": {
+            "schema": "ouro.jail.control/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "seq": 3,
+            "kind": "refused",
+            "receipt_phase": "refused",
+            "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "outcome": {
+              "kind": "refused",
+              "code": null,
+              "signal": null,
+              "cause": null,
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            },
+            "error": {
+              "code": "gate_invalid",
+              "stage": "prepared",
+              "message": "gate frame carries a different policy digest",
+              "remediation_category": "configuration"
+            }
+          }
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "a second terminal message",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            1
+          ],
+          "value": {
+            "schema": "ouro.jail.control/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "seq": 2,
+            "kind": "unsettled",
+            "receipt_phase": "enforced",
+            "receipt_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "outcome": {
+              "kind": "exited",
+              "code": 0,
+              "signal": null,
+              "cause": null,
+              "error": null
+            },
+            "error": null
+          }
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "a second prepared message",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            1
+          ],
+          "value": {
+            "schema": "ouro.jail.control/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "seq": 2,
+            "kind": "prepared",
+            "receipt_phase": "prepared",
+            "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "outcome": {
+              "kind": "pending",
+              "code": null,
+              "signal": null,
+              "cause": null,
+              "error": null
+            },
+            "error": null
+          }
+        }
+      ],
+      "violations": [
+        "control_kind_order"
+      ]
+    },
+    {
+      "name": "a refused transcript",
+      "check": "control",
+      "base": "fixtures/control-tool.json",
+      "changes": [
+        {
+          "path": [
+            1
+          ],
+          "delete": true
+        },
+        {
+          "path": [
+            1
+          ],
+          "value": {
+            "schema": "ouro.jail.control/1",
+            "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+            "seq": 2,
+            "kind": "refused",
+            "receipt_phase": "refused",
+            "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "outcome": {
+              "kind": "refused",
+              "code": null,
+              "signal": null,
+              "cause": null,
+              "error": {
+                "code": "gate_invalid",
+                "stage": "prepared",
+                "message": "gate frame carries a different policy digest",
+                "remediation_category": "configuration"
+              }
+            },
+            "error": {
+              "code": "gate_invalid",
+              "stage": "prepared",
+              "message": "gate frame carries a different policy digest",
+              "remediation_category": "configuration"
+            }
+          }
+        }
+      ],
+      "violations": []
+    }
+  ]
+}
