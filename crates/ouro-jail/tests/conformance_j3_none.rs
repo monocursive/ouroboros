@@ -847,7 +847,10 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
 
 /// §9.3 / north star §4.2: "If the cgroup cannot be created, the run exits
 /// 125. It does not fall back to a process-group kill." Outside the delegated
-/// subtree (a plain login session) this runs the jail directly. Inside it,
+/// subtree (a plain login session) this runs the jail directly, with the
+/// supervisor scope step held to the no-lingering branch: where the user
+/// manager lingers the step would otherwise move the supervisor into a
+/// delegated scope, and the cgroup would be usable after all. Inside it,
 /// where the driver runs every test, the jail runs in a fresh cgroup
 /// namespace rooted at the test's own scope (one bubblewrap user namespace,
 /// host view otherwise): the delegated subtree is then outside its
@@ -889,7 +892,10 @@ fn l03_none_without_a_usable_cgroup_refuses() {
                 ])
                 .arg(harness::jail_path())
         } else {
-            Jail::new().expect("a private harness")
+            Jail::new().expect("a private harness").env(
+                "OURO_JAIL_TEST_SUPERVISOR_SCOPE",
+                "assume-outside-no-linger",
+            )
         };
         let workspace = jail.root().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
