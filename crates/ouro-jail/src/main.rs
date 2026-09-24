@@ -475,54 +475,7 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     if args.json {
         print_json(&gc_json(&report));
     } else {
-        for entry in &report.entries {
-            println!("{} {} {}", entry.attempt_id, entry.action, entry.reason);
-            // J3-agent begin
-            if let Some(proxy_dir) = &entry.proxy_dir {
-                println!("{} proxy_dir {proxy_dir}", entry.attempt_id);
-            }
-            // J3-agent end
-            // J4-G begin
-            for (key, value) in [
-                ("owner", &entry.owner),
-                // J5-D: the portable name of what became of the execution
-                // boundary (on Linux, the recorded cgroup leaf).
-                ("execution_boundary", &entry.cgroup),
-                ("scratch", &entry.scratch),
-            ] {
-                if let Some(value) = value {
-                    println!("{} {key} {value}", entry.attempt_id);
-                }
-            }
-            for action in &entry.recorded {
-                println!("{} recorded {action}", entry.attempt_id);
-            }
-            // J4-G end
-            // J4 W2-S begin
-            for name in &entry.leftover_temp_files {
-                println!("{} leftover_temp_file {name}", entry.attempt_id);
-            }
-            if let Some(temp_files) = &entry.temp_files {
-                println!("{} temp_files {temp_files}", entry.attempt_id);
-            }
-            // J4 W2-S end
-        }
-        println!("scanned {}", report.entries.len());
-        // J4-G begin: S7, S9
-        println!(
-            "entries {} of {}{}",
-            report.budget.charged,
-            report.budget.max_entries,
-            if report.budget.listing_complete {
-                ""
-            } else {
-                " (listing incomplete)"
-            }
-        );
-        for (name, value) in &report.test_seams {
-            println!("test_seam {name}={value}");
-        }
-        // J4-G end
+        print!("{}", gc_text(&report));
     }
     // J3-launch begin: §6.4 — a cleanup that stopped again exits 1, after the
     // report is printed (J3 review L1).
@@ -535,6 +488,67 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     }
     // J3-launch end
     ExitCode::SUCCESS
+}
+
+// J5-D: the text rendering as a function, so its keys are unit-tested
+/// Renders `gc`'s text report, one line per fact.
+fn gc_text(report: &ouro_jail::gc::Report) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for entry in &report.entries {
+        let _ = writeln!(
+            out,
+            "{} {} {}",
+            entry.attempt_id, entry.action, entry.reason
+        );
+        // J3-agent begin
+        if let Some(proxy_dir) = &entry.proxy_dir {
+            let _ = writeln!(out, "{} proxy_dir {proxy_dir}", entry.attempt_id);
+        }
+        // J3-agent end
+        // J4-G begin
+        for (key, value) in [
+            ("owner", &entry.owner),
+            // J5-D: the portable name of what became of the execution
+            // boundary (on Linux, the recorded cgroup leaf).
+            ("execution_boundary", &entry.cgroup),
+            ("scratch", &entry.scratch),
+        ] {
+            if let Some(value) = value {
+                let _ = writeln!(out, "{} {key} {value}", entry.attempt_id);
+            }
+        }
+        for action in &entry.recorded {
+            let _ = writeln!(out, "{} recorded {action}", entry.attempt_id);
+        }
+        // J4-G end
+        // J4 W2-S begin
+        for name in &entry.leftover_temp_files {
+            let _ = writeln!(out, "{} leftover_temp_file {name}", entry.attempt_id);
+        }
+        if let Some(temp_files) = &entry.temp_files {
+            let _ = writeln!(out, "{} temp_files {temp_files}", entry.attempt_id);
+        }
+        // J4 W2-S end
+    }
+    let _ = writeln!(out, "scanned {}", report.entries.len());
+    // J4-G begin: S7, S9
+    let _ = writeln!(
+        out,
+        "entries {} of {}{}",
+        report.budget.charged,
+        report.budget.max_entries,
+        if report.budget.listing_complete {
+            ""
+        } else {
+            " (listing incomplete)"
+        }
+    );
+    for (name, value) in &report.test_seams {
+        let _ = writeln!(out, "test_seam {name}={value}");
+    }
+    // J4-G end
+    out
 }
 
 fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
@@ -692,3 +706,59 @@ fn internal_subcommand() -> Option<ExitCode> {
         _ => None,
     }
 }
+
+// J5-D begin: unit tests of the renderings this binary owns
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gc_report(boundary: Option<&str>) -> ouro_jail::gc::Report {
+        ouro_jail::gc::Report {
+            entries: vec![ouro_jail::gc::Entry {
+                attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+                action: "retained".to_owned(),
+                reason: "a reason".to_owned(),
+                cgroup: boundary.map(str::to_owned),
+                ..ouro_jail::gc::Entry::default()
+            }],
+            dry_run: true,
+            incomplete: Vec::new(),
+            budget: ouro_jail::gc::Budget {
+                max_entries: 10,
+                charged: 1,
+                exhausted: false,
+                listing_complete: true,
+            },
+            test_seams: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Decision 2026-09-24: gc names what became of the execution boundary
+    /// in portable terms, in both renderings; a Linux cgroup is the value's
+    /// business, not the key's.
+    #[test]
+    fn gc_names_the_execution_boundary_in_both_renderings() {
+        let report = gc_report(Some("removed"));
+        let json = gc_json(&report);
+        let entry = json["entries"][0].as_object().expect("an entry");
+        assert_eq!(entry["execution_boundary"], "removed", "{json:#}");
+        assert!(!entry.contains_key("cgroup"), "{json:#}");
+
+        let text = gc_text(&report);
+        assert!(
+            text.lines().any(|line| line
+                == "att_00000000-0000-4000-8000-000000000001 execution_boundary removed"),
+            "{text}"
+        );
+        assert!(!text.contains(" cgroup "), "{text}");
+
+        // Absent is rendered as null in JSON and as no line in text.
+        let report = gc_report(None);
+        assert_eq!(
+            gc_json(&report)["entries"][0]["execution_boundary"],
+            serde_json::Value::Null
+        );
+        assert!(!gc_text(&report).contains("execution_boundary"));
+    }
+}
+// J5-D end
