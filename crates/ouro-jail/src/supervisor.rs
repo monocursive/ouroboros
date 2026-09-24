@@ -1048,6 +1048,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     let mut control = open_control(args)?;
     let trace = open_trace(args, &attempt_dir)?;
+    // J5-C begin: review item 15, a loss note names what this attempt covers
+    if let Ok(mut writer) = trace.lock() {
+        writer.set_stream_classes(&stream_classes(&plan));
+    }
+    // J5-C end
     let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
     // J4-R begin: N6
     if let Err(error) = policy_written {
@@ -1744,7 +1749,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         outcome_error.get_or_insert(error);
     }
     if journal.loss.is_some() {
-        degrade_trace_coverage(&mut record);
+        degrade_trace_coverage(&mut record, &journal);
     }
     let receipt = match persist_terminal(
         state::Site::TerminalReceipt,
@@ -1886,8 +1891,33 @@ fn wall_deadline(plan: &Plan) -> Option<Instant> {
 /// from the cgroup counters, not from the trace (§11.4: no `limit.hit`
 /// event in v1), so no frame of it can have been lost, and it keeps what the
 /// platform reported.
-fn degrade_trace_coverage(record: &mut AttemptRecord) {
+// J5-C begin: review item 15
+/// The evidence classes whose frames this attempt's trace carries (§11.4):
+/// the audit classes with observation on, `proxy.net` with a proxy. A trace
+/// loss can take these and no other.
+fn stream_classes(plan: &Plan) -> Vec<&'static str> {
+    let mut classes = Vec::new();
+    if plan.resolved.snapshot.observation.mode == crate::records::ObserveMode::On {
+        classes.extend(["exec", "fs.write", "fs.deny", "net"]);
+    }
+    if plan.resolved.snapshot.network.mode == NetworkMode::Proxy.as_str() {
+        classes.push("proxy.net");
+    }
+    classes
+}
+// J5-C end
+
+fn degrade_trace_coverage(record: &mut AttemptRecord, journal: &Journal) {
     use crate::records::{Gap, SourceStatus};
+    // J5-C, review item 15: the loss the stream's note records (§13.3), from
+    // the same start and as the same (wrapper) loss. A loss the sink never
+    // noted (a poisoned trace lock) has no known start: the whole attempt.
+    let start = journal
+        .trace
+        .lock()
+        .ok()
+        .and_then(|writer| writer.loss_start_ns())
+        .map_or_else(|| "0".to_owned(), |start| start.to_string());
     record.observer.sources.wrapper = SourceStatus::Degraded;
     for status in [
         &mut record.observer.sources.audit,
@@ -1929,12 +1959,8 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
         }
         let gap = Gap {
             classes: vec![name.to_owned()],
-            source: entry
-                .sources
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "wrapper".to_owned()),
-            start_ns: "0".to_owned(),
+            source: "wrapper".to_owned(),
+            start_ns: start.clone(),
             end_ns: end,
             reason: trace::TRANSPORT_LOSS_REASON.to_owned(),
             lost_count: None,
@@ -2438,7 +2464,7 @@ fn submit_receipt(
 ) -> Result<InFlight, JailError> {
     // J4 W2-S: (B) — as in `persist_noted`.
     if journal.loss.is_some() {
-        degrade_trace_coverage(record);
+        degrade_trace_coverage(record, journal);
     }
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
@@ -3133,7 +3159,7 @@ fn persist_noted(
     // J4 W2-S: (B) — a trace loss already known is in every receipt written
     // after it, not only in the one the settlement writes.
     if journal.loss.is_some() {
-        degrade_trace_coverage(record);
+        degrade_trace_coverage(record, journal);
     }
     let io = state::current_io();
     let receipt = write_receipt_at(
@@ -3169,7 +3195,7 @@ fn persist_terminal(
     }
     if let Some(error) = journal.take_new_loss() {
         record.errors.push(error.to_object());
-        degrade_trace_coverage(record);
+        degrade_trace_coverage(record, journal);
         let io = state::current_io();
         let corrected = write_receipt_at(
             site,
@@ -3938,6 +3964,120 @@ mod tests {
         assert!(journal.take_new_loss().is_some());
         assert!(journal.loss.is_some());
     }
+
+    // J5-C begin: review item 15
+    fn test_record(coverage: crate::records::Coverage) -> AttemptRecord {
+        use crate::records::{
+            AppliedNetwork, EvidenceMode, JailRecord, ObserveMode, PlatformRecord, PolicyRecord,
+        };
+        let now = SystemTime::now();
+        AttemptRecord {
+            attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+            revision: 1,
+            platform: PlatformRecord {
+                os: Os::Linux,
+                arch: "x86_64".to_owned(),
+                kernel: "test".to_owned(),
+            },
+            jail: JailRecord {
+                component: "ouro-jail".to_owned(),
+                version: "0.0.0".to_owned(),
+                backend: None,
+                backend_version: None,
+            },
+            policy: PolicyRecord {
+                name: "tool".to_owned(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                observe: ObserveMode::On,
+                evidence: EvidenceMode::BestEffort,
+                requirements: Vec::new(),
+                grants: Vec::new(),
+            },
+            containment: crate::records::Containment::Enforced,
+            exec_observed: true,
+            argv_digest: None,
+            applied: crate::records::Applied {
+                filesystem: None,
+                network: AppliedNetwork {
+                    mode: "none".to_owned(),
+                    mechanism: None,
+                    allowed_hosts: Vec::new(),
+                },
+                syscalls: None,
+                limits: Vec::new(),
+                environment_names: Vec::new(),
+                removed_environment_names: Vec::new(),
+            },
+            observer: crate::observer::CoverageSummary::unobserved().to_observer_record(),
+            coverage,
+            process: None,
+            lifetime: crate::records::Lifetime::pending(),
+            outcome: Outcome::pending(),
+            state_cleanup: StateCleanup::NotNeeded,
+            cleanup_error: None,
+            created_at: now,
+            updated_at: now,
+            errors: Vec::new(),
+            credentials: Vec::new(),
+        }
+    }
+
+    /// A receipt records a trace loss as the stream's note does: on each
+    /// covered evidence class, from the note's start, as a wrapper loss.
+    #[test]
+    fn a_receipt_records_the_trace_loss_with_the_notes_start_and_source() {
+        use crate::records::{CoverageEntry, SourceStatus};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = trace::shared(FileSink::with_bounds(file.reopen().unwrap(), 100, 40));
+        trace
+            .lock()
+            .unwrap()
+            .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
+        let mut journal = Journal::new("att_test", trace.clone());
+        // An event past the 60-byte payload budget: the sink's first loss.
+        let event = crate::records::Event::lifecycle_note(
+            "att_test",
+            0,
+            SystemTime::now(),
+            0,
+            &"x".repeat(200),
+        );
+        assert!(
+            trace
+                .lock()
+                .unwrap()
+                .write_event(&event, Priority::Normal)
+                .is_err()
+        );
+        assert!(journal.take_new_loss().is_some());
+        let start = trace.lock().unwrap().loss_start_ns().expect("a loss start");
+        let active = || CoverageEntry {
+            status: SourceStatus::Active,
+            sources: vec!["audit".to_owned()],
+            observed_count: Some(0),
+            gaps: Vec::new(),
+        };
+        let mut coverage = crate::observer::CoverageSummary::unobserved().to_coverage();
+        coverage.exec = active();
+        coverage.fs_write = active();
+        coverage.fs_deny = active();
+        coverage.net = active();
+        let mut record = test_record(coverage);
+        degrade_trace_coverage(&mut record, &journal);
+        for entry in [
+            &record.coverage.exec,
+            &record.coverage.fs_write,
+            &record.coverage.fs_deny,
+            &record.coverage.net,
+        ] {
+            assert_eq!(entry.status, SourceStatus::Degraded);
+            let gap = &entry.gaps[0];
+            assert_eq!(gap.source, "wrapper", "{gap:?}");
+            assert_eq!(gap.start_ns, start.to_string(), "{gap:?}");
+        }
+        assert!(record.coverage.proxy_net.gaps.is_empty());
+    }
+    // J5-C end
 
     #[test]
     fn the_gate_and_preparation_budgets_are_the_ones_the_specification_names() {

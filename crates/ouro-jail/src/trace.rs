@@ -102,9 +102,32 @@ pub struct TraceWriter {
     last_healthy_ns: u128,
     /// Whether the note recording the first loss has been attempted.
     gap_noted: bool,
+    // J5-C begin: review item 15
+    /// The evidence classes this attempt's stream carries: what a loss note
+    /// names. Every class a stream could carry until the supervisor narrows
+    /// it to the attempt's own (observation on, proxy applied).
+    stream_classes: Vec<String>,
+    /// Where the first loss note's interval starts, once it was attempted:
+    /// the receipts record the same loss from the same point (§13.3).
+    loss_start_ns: Option<u128>,
+    // J5-C end
 }
 
 impl TraceWriter {
+    // J5-C begin: review item 15
+    /// Narrows the classes this stream's loss note names to the evidence
+    /// classes the attempt actually covers.
+    pub fn set_stream_classes(&mut self, classes: &[&str]) {
+        self.stream_classes = classes.iter().map(|class| (*class).to_owned()).collect();
+    }
+
+    /// The start of the first loss note's interval, once a loss was noted.
+    #[must_use]
+    pub fn loss_start_ns(&self) -> Option<u128> {
+        self.loss_start_ns
+    }
+    // J5-C end
+
     /// Serialize under the stream lock. All wrapper notes share this sequence.
     ///
     /// # Errors
@@ -168,11 +191,9 @@ impl TraceWriter {
             return;
         };
         self.gap_noted = true;
+        self.loss_start_ns = Some(self.last_healthy_ns);
         let gap = crate::records::Gap {
-            classes: STREAM_CLASSES
-                .iter()
-                .map(|class| (*class).to_owned())
-                .collect(),
+            classes: self.stream_classes.clone(),
             source: "wrapper".to_owned(),
             start_ns: self.last_healthy_ns.to_string(),
             end_ns: None,
@@ -224,6 +245,11 @@ pub fn shared(sink: impl TraceSink + Send + 'static) -> SharedTrace {
         attempt_id: None,
         last_healthy_ns: 0,
         gap_noted: false,
+        stream_classes: STREAM_CLASSES
+            .iter()
+            .map(|class| (*class).to_owned())
+            .collect(),
+        loss_start_ns: None,
     }))
 }
 
@@ -988,6 +1014,66 @@ mod tests {
         assert_eq!(sink.written(), 302);
         assert_eq!(sink.loss().unwrap().lost_frames, Some(3));
     }
+
+    // J5-C begin: review item 15, the loss note names what the attempt covers
+    /// The first loss note names the evidence classes this attempt's stream
+    /// was set to carry, not every class a stream could carry, and the writer
+    /// keeps the note's start so the receipts can record the same loss.
+    #[test]
+    fn the_loss_note_names_the_covered_classes_and_keeps_its_start() {
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        let trace = shared(FileSink::with_bounds(
+            file.reopen().expect("a handle"),
+            4096,
+            2048,
+        ));
+        trace
+            .lock()
+            .unwrap()
+            .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
+        assert_eq!(trace.lock().unwrap().loss_start_ns(), None);
+        let filler = "f".repeat(400);
+        for index in 0..100 {
+            let event = crate::records::Event::lifecycle_note(
+                "att_test",
+                0,
+                std::time::SystemTime::now(),
+                0,
+                &format!("filler_{index}_{filler}"),
+            );
+            if trace
+                .lock()
+                .unwrap()
+                .write_event(&event, Priority::Normal)
+                .is_err()
+            {
+                break;
+            }
+        }
+        let start = trace
+            .lock()
+            .unwrap()
+            .loss_start_ns()
+            .expect("the loss note's start is kept");
+        let bytes = std::fs::read(file.path()).expect("the trace");
+        let readback = read_frames(&bytes);
+        let note = readback
+            .frames
+            .iter()
+            .find(|frame| frame["fields"]["reason"] == TRANSPORT_LOSS_REASON)
+            .expect("a loss note");
+        assert_eq!(
+            note["fields"]["classes"],
+            serde_json::json!(["exec", "fs.write", "fs.deny", "net"]),
+            "no proxy.net: this attempt has no proxy"
+        );
+        assert_eq!(
+            note["fields"]["start_ns"],
+            serde_json::json!(start.to_string())
+        );
+        assert_eq!(note["fields"]["source"], "wrapper");
+    }
+    // J5-C end
 
     #[test]
     fn an_oversized_event_is_refused_rather_than_truncated() {
