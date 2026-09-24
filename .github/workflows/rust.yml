@@ -32,6 +32,26 @@ jobs:
         run: rustup toolchain install && rustup show
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # J5 platform compilation (jail-v1 §3.2): compile-only evidence for a
+      # triple no runner executes, one per leg. Intel macOS is "additional
+      # evidence, not an execution support claim"; Linux aarch64 is a later
+      # lane, and a build for it reports the filter and observer capabilities
+      # `unsupported` (reason `unsupported_architecture`), so it refuses
+      # before exec. `cargo check`, not clippy: some lints (a cast to
+      # `c_char`, which is `u8` there) differ by target without being defects.
+      # Nothing here runs, so nothing here is claimed as tested.
+      - name: Cross-target check (compile only)
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          case "$RUNNER_OS" in
+            macOS) target=x86_64-apple-darwin ;;
+            Linux) target=aarch64-unknown-linux-gnu ;;
+            *) echo "no cross target for $RUNNER_OS"; exit 1 ;;
+          esac
+          rustup target add "$target"
+          cargo check --workspace --all-targets --target "$target"
+          echo "Compiled (not run): \`$target\`" >> "$GITHUB_STEP_SUMMARY"
       # jail-v1 §15 row I02: no vendor name in the execution core. Nothing ran
       # this before, so a vendor name landed green.
       - name: I02 vendor-name scan
