@@ -76,7 +76,11 @@ fn s02_a_contained_grant_of_proc_sys_or_cgroupfs_refuses_before_exec() {
     if !common::live() {
         return;
     }
-    let grants: &[&str] = &["/proc", "/sys", "/sys/fs/cgroup"];
+    // `/proc/1` is strictly inside the proc mount, not a mount point itself,
+    // so only the source's filesystem type (statfs) catches it; the three
+    // mount points are also caught by mount topology. Together they exercise
+    // both branches of the guard.
+    let grants: &[&str] = &["/proc", "/sys", "/sys/fs/cgroup", "/proc/1"];
     for profile in ["tool", "agent"] {
         for grant in grants {
             if !Path::new(grant).exists() {
