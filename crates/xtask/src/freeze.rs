@@ -42,9 +42,12 @@ pub const TESTED_MARKER: &str =
 
 /// The frozen inputs that are not build inputs, as git pathspecs: a change
 /// to any of them after the tested revision means the run did not test what
-/// the file freezes. (Build inputs are compared by digest.)
-const FROZEN_PATHSPECS: [&str; 5] = [
-    "docs/specs/jail-v1/evidence",
+/// the file freezes. (Build inputs are compared by digest.) Of the evidence
+/// directory only the tables the build is pinned against are frozen: the
+/// run's own evidence is recorded after the run and must not invalidate it.
+const FROZEN_PATHSPECS: [&str; 6] = [
+    "docs/specs/jail-v1/evidence/closed-set-x86_64.txt",
+    "docs/specs/jail-v1/evidence/seccomp-table-*-x86_64.txt",
     "docs/specs/jail-v1/frozen-schemas.toml",
     "docs/specs/jail-v1/*.schema.json",
     "crates/ouro-jail/profiles/launch",
@@ -1306,9 +1309,27 @@ mod tests {
                 "frozen_inputs_unchanged_since_revision",
             ])
         );
-        // A frozen input that is not a build input moves after the run.
+        // The run's own evidence lands after the run: it is not a frozen
+        // input, so recording it never invalidates the tested run.
         std::fs::create_dir_all(root.join("docs/specs/jail-v1/evidence")).unwrap();
-        std::fs::write(root.join("docs/specs/jail-v1/evidence/table.txt"), "x").unwrap();
+        std::fs::write(
+            root.join("docs/specs/jail-v1/evidence/j5-test-log-2026-09-25-ouro-ci.txt"),
+            "test result: ok.\n",
+        )
+        .unwrap();
+        git_in(root, &["add", "-A"]);
+        git_in(root, &["commit", "-q", "-m", "run evidence"]);
+        assert_eq!(
+            validate_tested(root, &tested).map(|v| v.len()),
+            Ok(4),
+            "a new run-evidence file is not a frozen input"
+        );
+        // A frozen evidence table moves after the run.
+        std::fs::write(
+            root.join("docs/specs/jail-v1/evidence/closed-set-x86_64.txt"),
+            "x",
+        )
+        .unwrap();
         git_in(root, &["add", "-A"]);
         git_in(root, &["commit", "-q", "-m", "evidence"]);
         let problems = validate_tested(root, &tested).unwrap_err();
