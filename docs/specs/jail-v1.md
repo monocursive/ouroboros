@@ -9,11 +9,13 @@ portable requirement `execution_boundary`, `doctor --json` as the host
 manifest (`ouro.jail.doctor/1`), build provenance and the architecture refusal,
 which bubblewrap runs, the frozen wire schemas and milestone-1 inputs, the
 error codes `exec_interpreter_missing` and `exec_unconfirmed`, the
-preparation and gate budgets on the boot clock, the test seams J5 added, the
+preparation and gate budgets on the boot clock and the preparation budget's
+expiry, the refusal of operator grants that expose host `/proc`, `/sys` or
+cgroupfs, the supervisor's non-dumpable state, the test seams J5 added, the
 L02 row reworded to the lifetime links and §10's network helpers, what the
 observer and `none` do beside a process the supervisor was started beside,
-and the limits the milestone names (§§3.2, 4, 5, 6.1–6.4, 8.2, 8.3, 9.3, 11,
-13, 14.1, 15–18); the milestone's evidence, acceptance verdict and named
+and the limits the milestone names (§§3.2, 4, 5, 6.1–6.4, 8.2, 8.3, 9.1, 9.3,
+11, 13, 14.1, 15–18); the milestone's evidence, acceptance verdict and named
 limits are in [J5 authority](jail-v1/j5-authority.md). Revision 18 has `run` and
 `doctor` enter a delegated user scope themselves where the user manager
 lingers, so an attempt gets its execution leaf from a plain login session
@@ -575,31 +577,32 @@ it supersedes the decision of 2026-09-24, which applied both budgets to the
 jail's own overhead):
 
 - The startup budget stays: under 250 ms p95 added warm startup. It is met in
-  every judged cell, `tool` 92 to 124 ms.
+  every judged cell, `tool` 101 to 139 ms.
 - The 20% budget on the fixed workload is missed, and is replaced by a
   measured ceiling on the jail's own overhead: `--observe off` against direct
   execution, at most 50% median post-start overhead on this syscall-dense
-  worst-case workload, judged on `tool`. `tool` measures 43.4% from a plain
-  session and 38.7% in a scope, which meets the ceiling and misses 20% by about
-  23 and 19 points (the informational profiles: `agent` 39.0% and 38.9%,
-  `none` 6.7% and 6.5%). Its work phase (+30.8%, +28.4%) and end-to-end wall
-  (+103.7%, +92.6%, startup included) are reported, not budgeted. The
-  dominant cost is
+  worst-case workload, judged on `tool`. `tool` measures 39.5% from a plain
+  session and 40.3% in a scope, which meets the ceiling and misses 20% by about
+  20 points (the informational profiles: `agent` 42.0% and 42.5%, `none` 3.1%
+  and 5.8%). Its work phase (+29.6%, +28.9%) and end-to-end wall (+99.9%,
+  +90.7%, startup included) are reported, not budgeted. The dominant cost is
   bubblewrap's containment as the stock distribution confines it: on this
-  workload bubblewrap alone, with the `tool` profile's namespaces under
-  Ubuntu's `unpriv_bwrap` AppArmor confinement, adds 19.0% to the work phase,
-  and the jail with observation off 22.2%, so the jail's filter and supervisor
-  add about 3 points
+  workload, measured at revision `4380241f` (the later commits change neither
+  bubblewrap nor the distribution's confinement), bubblewrap alone, with the
+  `tool` profile's namespaces under Ubuntu's `unpriv_bwrap` AppArmor
+  confinement, adds 19.0% to the work phase, and the jail with observation off
+  22.2%, so the jail's filter and supervisor add about 3 points
   ([attribution](jail-v1/evidence/perf-2026-09-25-attribution-ouro-ci.txt));
   settlement, tree verification, the receipts and the trace flush add a
-  median 17.5 ms (plain) and 19.2 ms (scope) of teardown.
+  median 19.4 ms (plain) and 18.6 ms (scope) of teardown.
 - The cost of observation (`--observe on` against off, and against direct) is
   reported per workload with its median, p95 and valid and excluded counts,
   and has no budget. Every closed-set call costs the observer two ptrace
   stops, measured in J0 at about 22 µs each on the reference host, and nothing
   in user space removes them, so the cost scales with the rate of closed-set
   calls: on the fixed workload, about 100,000 such calls per second, `tool`
-  with observation on is about +400% on the work phase against direct; it is
+  with observation on is +423% to +433% on the work phase against direct; it
+  is
   small on work that mostly computes, reads or writes, which the set does not
   cover.
 - A representative workload, a build or a test run, joins the §5 set as later
@@ -898,8 +901,12 @@ them against same-UID interference. No unspecified memory/CPU ceiling is implied
 Linux measures execution wall, preparation/gate/stop budgets and event elapsed
 time using `CLOCK_BOOTTIME`: suspend counts, wall-clock adjustments do not.
 An expired deadline is acted on when execution resumes; the supervisor cannot
-run during suspend. Later macOS uses a native continuous clock with the same
-suspend semantics. Pids, memory and CPU use their separate cgroup mechanisms.
+run during suspend. The preparation budget covers credential staging, which
+waits on the same deadline. Waits that bound I/O or a race rather than the
+attempt (the watcher's grace, `gc`'s own verification, trace and persistence
+progress, the scope step's wait, proxy deadlines, the observer's internal
+waits) may use the monotonic clock; a suspend lengthens them. Later macOS uses
+a native continuous clock with the same suspend semantics. Pids, memory and CPU use their separate cgroup mechanisms.
 
 Exit codes: child's code on a completed execution; `128 + signal` for a
 signal-terminated child; 1 for a tool failure; 2 for invalid CLI/config syntax;
@@ -1093,7 +1100,11 @@ Initial preparation budget: 30 seconds; external gate wait: 60 seconds after
 prepared. Both run on the continuous clock of §6.4 (`CLOCK_BOOTTIME` on
 Linux), so suspend counts against them, and are distinct from the execution
 wall budget. A wait for the gate re-checks its deadline at least every 250 ms,
-so an expiry is acted on soon after execution resumes. Expiry refuses and tears down prepared resources. A future owner must
+so an expiry is acted on soon after execution resumes. Expiry refuses and
+tears down prepared resources. A step of preparation whose own wait the budget
+ended refuses with `prepare_timeout` and remediation `retry`, never as the
+failure of that step, and an attempt whose budget is spent before its prepared
+receipt is persisted refuses without publishing `prepared`. A future owner must
 handle a timed-out prepared attempt through reconciliation, not reuse the gate.
 
 For managed Linux mode, verify and record the direct owner's birth identity,
@@ -1170,7 +1181,15 @@ isolation belongs to managed MT04–MT05, not to a successful workspace mount.
 
 Mount a private `/proc` for the child PID namespace and a minimal `/dev`.
 Do not expose host `/proc`, `/sys`, cgroupfs, host namespace handles, Docker or
-SSH-agent sockets. Denied subtrees within visible parents are absent or masked
+SSH-agent sockets. An operator grant (`--ro`, `--rw`, an operator profile or a
+launch profile) whose resolved source is on a `proc`, `sysfs` or cgroup (v1 or
+v2) filesystem, or that is an ancestor of such a mount, refuses before exec
+with `policy_widening`, remediation `configuration`, naming the grant's key
+path. The decision is by the pinned source's filesystem type (`statfs`) and the
+mount topology, never by path spelling, so a symlink onto `/proc` refuses too;
+`--ro /` is refused earlier by the state-isolation rule (§§6.2, 7). The
+built-in runtime roots are on the root filesystem, and the child's private
+`/proc` and `/dev` are made by the backend, not bound from a grant. Denied subtrees within visible parents are absent or masked
 by the backend. Scratch provides the child's temporary directory; generated
 `TMPDIR` is a reserved environment variable, not an inherited host path.
 
@@ -1375,6 +1394,13 @@ It mounts no jail, installs no containment filter and inherits the host view.
 It still closes private control fds, strips reserved environment variables and
 uses the same deadline logic. Same-UID interference remains possible, including
 interference with the supervisor's resources; `unprotected` is never upgraded.
+In every profile the supervisor makes itself non-dumpable (`PR_SET_DUMPABLE`
+0) once the target is about to run, after the capability probes and the
+observer's attach: a same-UID process can then no longer read its `/proc`
+entries (`fd`, `environ`, `mem`, `exe`) or trace it, so it cannot reopen the
+operator's live trace or control stream, read the operator's environment or
+seize the supervisor. Signals, the shared records in the data directory (R05)
+and the cgroup remain open to a same-UID peer.
 A narrowing that asks `none` for a restriction it cannot apply (read denials,
 read-only grants, protected coverage, network `none`) makes the requirement
 unsatisfiable and the run refuses with remediation `configuration`. The

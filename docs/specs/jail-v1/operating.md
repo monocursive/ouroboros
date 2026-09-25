@@ -214,6 +214,14 @@ add credentials or select `none`; each refuses before anything is prepared,
 naming the key (`policy_widening`, or `invalid_config` for a key a project
 file cannot have). Only `--profile none` selects `none`.
 
+Grants (`--rw`, `--ro`, `--deny-read` and their operator-file forms) are
+checked against the objects they resolve to. A grant of the host's `/proc`,
+`/sys` or cgroup filesystem, or of a directory above one of them, refuses
+before exec with `policy_widening`, naming the grant, whatever path or symlink
+spells it: the contained view has its own private `/proc` and `/dev`, and none
+of the host's pseudo filesystems. `--ro /` refuses too, because it would make
+the runtime state visible to the child.
+
 Configuration: `~/.config/ouro/config.toml` (`[jail]`, `[jail.limits]`;
 `jail.profile` may name a built-in or an operator profile file), launch
 profiles in `~/.config/ouro/launch/<name>.toml`, runtime state in
@@ -352,7 +360,9 @@ ouro-jail run --attempt-id att_<uuid> --gate-fd 3 --control-fd 4 \
 6. On any mismatch, close the gate without writing: the attempt refuses with
    `gate_closed`, and the command never runs. A gate held open without a frame
    expires 60 seconds after `prepared` (`prepare_timeout`); preparation itself
-   has a 30-second budget.
+   has a 30-second budget. Both run on `CLOCK_BOOTTIME`. A preparation budget
+   that runs out refuses with `prepare_timeout` (remediation `retry`) before
+   `prepared` is announced.
 7. Follow the stream to its terminal message: `exec_confirmed`, then `settled`
    or `unsettled` (tree death not verified); `refused` only while the command
    has not executed, including a failed exec. A control message acknowledges
@@ -429,15 +439,15 @@ of files) and small on work that mostly computes, reads or writes. Measured at
 milestone 1 on the reference host
 ([backend-evaluation.md §4](backend-evaluation.md#4-performance-52-budgets)):
 
-- Startup: a jailed launch adds about 85 to 108 ms (median) under `tool`,
-  with a p95 under 125 ms; the budget is 250 ms.
+- Startup: a jailed launch adds about 91 to 120 ms (median) under `tool`,
+  with a p95 under 140 ms; the budget is 250 ms.
 - The jail's own cost with observation off, on 5,000 create/rename/unlink
   rounds: `tool` adds about 40% after the command starts (its work plus the
   jail's teardown), most of it bubblewrap's containment as Ubuntu's AppArmor
-  confines it; `none` adds about 7%. The ceiling is 50%.
+  confines it; `none` adds about 3 to 6%. The ceiling is 50%.
 - Observation on the same workload multiplies the command's own run time by
-  about five (+367% to +404%); on 200 fork+exec descendants it adds about 41%
-  to 71%. Observation has no budget; it is reported per workload.
+  about five (+389% to +446%); on 200 fork+exec descendants it adds about 47%
+  to 77%. Observation has no budget; it is reported per workload.
 
 `--observe off` removes the audit source and its cost; the receipt then
 marks every audit class unsupported. It is an explicit choice, never an
@@ -453,7 +463,11 @@ with its evidence.
 - **`none` protects nothing.** Same-UID processes can tamper with its
   evidence and its cgroup, and its cleanup is not guaranteed after its
   supervisor dies. It detects a migration out of its cgroup; it does not
-  promise to find every one.
+  promise to find every one. In every profile the supervisor makes itself
+  non-dumpable once the command is about to run, so a same-UID process cannot
+  read its `/proc` entries or trace it: it cannot reopen your live trace or
+  control stream or read your environment. Signals, the records in the data
+  directory and the cgroup stay open to it.
 - **Without lingering there is no execution leaf** (see
   [Lingering](#lingering-and-the-scope-step)).
 - **End-of-file.** Under the contained profiles bubblewrap's outer process and
@@ -499,14 +513,16 @@ with its evidence.
 
 ## What this guide was checked against
 
-Checked against the binary built from revision `8012bae5` on macOS
-(aarch64-apple-darwin, debug build): every command's options (`--help`), the
-`version` text and JSON (build provenance, `frozen`, a null closed set on
-macOS), `explain` text and JSON (policy digest, requirement names, the
-`build` profile's refusal without `mem`, exit 2), `doctor` refusing with 125
-and `unsupported_platform` rows, `run` refusing with 125 before exec, the
-error line format, `run --label-only --gate-fd` as a usage error, and the
-`gc --json` entry shape.
+Checked against a debug build, on macOS (aarch64-apple-darwin), of the tree
+of the final milestone revision `027de7d2`; its build-inputs digest
+(`sha256:43bb1ee0…`) is the one the tested Linux binary records. Checked:
+every command's options (`--help`), the `version` text and JSON (build
+provenance, `frozen`, a null closed set on macOS), `explain` text and JSON
+(policy digest, requirement names, the `build` profile's refusal without
+`mem`, exit 2), `doctor` refusing with 125 and `unsupported_platform` rows,
+`run` refusing with 125 before exec, the error line format,
+`run --label-only --gate-fd` as a usage error, and the `gc --json` entry
+shape.
 
 Taken from the specification (revision 19) and the conformance tests, not run
 for this guide: everything Linux executes (probes, the scope step, profiles'
