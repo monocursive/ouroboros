@@ -56,6 +56,10 @@ const PASSES_FILE: &str = "passes.ndjson";
 /// (`platform/linux/platform.rs`, `terminal_event`).
 pub const EXEC_UNCONFIRMED: &str = "the backend ended without independent evidence of target exec";
 
+/// The receipt error code the supervisor records for that same limit since
+/// J5-B1 made it a coded tool error (stage `running`, exit 1).
+pub const EXEC_UNCONFIRMED_CODE: &str = "exec_unconfirmed";
+
 /// The closed-set classes an attached observer must report active.
 const CLOSED_SET: [&str; 4] = ["exec", "fs.write", "fs.deny", "net"];
 
@@ -76,6 +80,14 @@ pub enum Action {
         /// The run directory holding `launches.ndjson`.
         #[arg(long, value_name = "DIR")]
         dir: PathBuf,
+        /// Write the summary here instead of into DIR.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Apply this revision's validity rules to records taken under older
+        /// ones, and name every record they change; without it such drift is
+        /// a raw-data problem that withholds every verdict.
+        #[arg(long)]
+        revalidate: bool,
     },
 }
 
@@ -803,7 +815,11 @@ fn validate_jailed(
     } else {
         reasons.push(Reason::Outcome);
     }
-    if !r.errors.is_empty() {
+    // The coded form of the same limit (J5-B1): with the unconfirmed outcome
+    // above, an error list that is exactly `exec_unconfirmed` is the limit
+    // itself, not a further failure. Any other or additional error excludes.
+    let only_the_limit = unconfirmed && r.errors == [EXEC_UNCONFIRMED_CODE];
+    if !r.errors.is_empty() && !only_the_limit {
         reasons.push(Reason::Errors);
     }
     if r.integrity.as_deref() != Some("verified") || r.tree_empty != Some(true) {
@@ -1176,6 +1192,10 @@ pub struct Summary {
     pub gate: Gate,
     /// Problems with the raw data; any one blocks every verdict.
     pub integrity: Vec<String>,
+    /// Records whose stored validity the current rules changed, applied on
+    /// request (`perf summarize --revalidate`) and named here.
+    #[serde(default)]
+    pub revalidated: Vec<String>,
     /// Who summarised which raw bytes (filled by `perf summarize`/`run`).
     pub provenance: Value,
     pub cells: Vec<CellSummary>,
@@ -1536,17 +1556,103 @@ pub fn integrity_problems(records: &[LaunchRecord], parameters: &Value) -> Vec<S
             }
         }
     }
-    let drift = records
-        .iter()
-        .filter(|r| r.validity != Validity::default() && r.validity != validate(r))
-        .count();
-    if drift > 0 {
+    let drift = validity_drift(records);
+    if !drift.is_empty() {
         problems.push(format!(
-            "{drift} record(s) whose stored validity differs from the one recomputed now \
-             (the validity rules changed since the run; re-run instead)"
+            "{} record(s) whose stored validity differs from the one recomputed now (the \
+             validity rules changed since the run; re-run, or re-summarise with \
+             --revalidate to apply the current rules by name): {}",
+            drift.values().sum::<usize>(),
+            drift_text(&drift)
         ));
     }
     problems
+}
+
+fn validity_text(v: &Validity) -> String {
+    let mut text = if v.valid {
+        "valid".to_owned()
+    } else {
+        format!(
+            "excluded ({})",
+            v.reasons
+                .iter()
+                .map(enum_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    if !v.flags.is_empty() {
+        let _ = write!(
+            text,
+            ", flagged {}",
+            v.flags.iter().map(enum_name).collect::<Vec<_>>().join(", ")
+        );
+    }
+    text
+}
+
+/// Records whose stored validity the current rules change, counted by
+/// session, workload, arm and the change. A record with no stored validity
+/// (never set) is not drift.
+fn validity_drift(records: &[LaunchRecord]) -> BTreeMap<String, usize> {
+    let mut drift: BTreeMap<String, usize> = BTreeMap::new();
+    for r in records.iter().filter(|r| r.schema == RECORD_SCHEMA) {
+        let now = validate(r);
+        if r.validity != Validity::default() && r.validity != now {
+            *drift
+                .entry(format!(
+                    "{} {} {}{}: stored {}, now {}",
+                    r.session.name(),
+                    r.workload.name(),
+                    r.arm.name(),
+                    if r.warmup { " warm-up" } else { "" },
+                    validity_text(&r.validity),
+                    validity_text(&now)
+                ))
+                .or_default() += 1;
+        }
+    }
+    drift
+}
+
+fn drift_text(drift: &BTreeMap<String, usize>) -> String {
+    drift
+        .iter()
+        .map(|(k, n)| format!("{k} ({n} record(s))"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The summary, optionally applying the current validity rules to records
+/// taken under older ones (named in `revalidated`, never silently).
+#[must_use]
+pub fn summarize_with(
+    records: &[LaunchRecord],
+    parameters: Value,
+    host: Value,
+    revalidate: bool,
+) -> Summary {
+    if !revalidate {
+        return summarize(records, parameters, host);
+    }
+    let drift = validity_drift(records);
+    let current: Vec<LaunchRecord> = records
+        .iter()
+        .cloned()
+        .map(|mut r| {
+            if r.validity != Validity::default() {
+                r.validity = validate(&r);
+            }
+            r
+        })
+        .collect();
+    let mut summary = summarize(&current, parameters, host);
+    summary.revalidated = drift
+        .iter()
+        .map(|(k, n)| format!("{k} ({n} record(s))"))
+        .collect();
+    summary
 }
 
 /// The whole summary of a set of launch records.
@@ -1604,6 +1710,7 @@ pub fn summarize(records: &[LaunchRecord], parameters: Value, host: Value) -> Su
         ),
         gate,
         integrity,
+        revalidated: Vec::new(),
         provenance: Value::Null,
         cells: cells.iter().map(|(k, v)| summarize_cell(*k, v)).collect(),
         comparisons,
@@ -1860,6 +1967,19 @@ pub fn render_markdown(summary: &Summary) -> String {
             .as_u64()
             .map_or("?".to_owned(), |n| n.to_string()),
     );
+    if !summary.revalidated.is_empty() {
+        let _ = writeln!(
+            md,
+            "## Revalidated under the current rules\n\n\
+             These records were taken under older validity rules; `perf summarize \
+             --revalidate` applied the rules of the summarising revision to them (the raw \
+             file is unchanged):\n"
+        );
+        for notice in &summary.revalidated {
+            let _ = writeln!(md, "- {notice}");
+        }
+        let _ = writeln!(md);
+    }
     if !summary.integrity.is_empty() {
         let _ = writeln!(md, "## Raw-data problems: every verdict is withheld\n");
         for problem in &summary.integrity {
@@ -2273,10 +2393,16 @@ fn comparison_table(
 pub fn main(cli: Cli) -> ExitCode {
     let result = match cli.action {
         Action::Run(args) => run(*args),
-        Action::Summarize { dir } => write_summary(&dir).and_then(|(md, problems)| {
-            println!("{md}");
-            integrity_result(&problems)
-        }),
+        Action::Summarize {
+            dir,
+            out,
+            revalidate,
+        } => write_summary(&dir, out.as_deref().unwrap_or(&dir), revalidate).and_then(
+            |(md, problems)| {
+                println!("{md}");
+                integrity_result(&problems)
+            },
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -2510,7 +2636,7 @@ fn run(args: RunArgs) -> Result<(), String> {
             return Err(format!("the scope pass failed: {status}"));
         }
     }
-    let (md, problems) = write_summary(&plan.out)?;
+    let (md, problems) = write_summary(&plan.out, &plan.out, false)?;
     println!("{md}");
     eprintln!(
         "xtask perf: summary in {}",
@@ -2542,9 +2668,13 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Read `launches.ndjson`, summarise, and write `summary.json` and
-/// `summary.md`. Returns the Markdown and the raw data's problems.
-fn write_summary(dir: &Path) -> Result<(String, Vec<String>), String> {
+/// Read `dir/launches.ndjson`, summarise, and write `summary.json` and
+/// `summary.md` into `out`. Returns the Markdown and the raw data's problems.
+fn write_summary(
+    dir: &Path,
+    out: &Path,
+    revalidate: bool,
+) -> Result<(String, Vec<String>), String> {
     let raw = std::fs::read(dir.join(RAW_FILE))
         .map_err(|e| format!("{}: {e}", dir.join(RAW_FILE).display()))?;
     let mut records = Vec::new();
@@ -2558,10 +2688,11 @@ fn write_summary(dir: &Path) -> Result<(String, Vec<String>), String> {
                 .map_err(|e| format!("{RAW_FILE} line {}: {e}", i + 1))?,
         );
     }
-    let mut summary = summarize(
+    let mut summary = summarize_with(
         &records,
         read_json(&dir.join(PARAMETERS_FILE)),
         read_json(&dir.join(HOST_FILE)),
+        revalidate,
     );
     summary.provenance = json!({
         "raw_file": RAW_FILE,
@@ -2569,6 +2700,7 @@ fn write_summary(dir: &Path) -> Result<(String, Vec<String>), String> {
         "raw_records": records.len(),
         "raw_sha256": sha256(&dir.join(RAW_FILE)),
         "summarized_at": crate::stamp::rfc3339_from_unix(crate::stamp::unix_now()),
+        "revalidated": revalidate,
         "summarizer": {
             "xtask_version": env!("CARGO_PKG_VERSION"),
             "record_schema": RECORD_SCHEMA,
@@ -2577,11 +2709,12 @@ fn write_summary(dir: &Path) -> Result<(String, Vec<String>), String> {
                 .filter(|t| t.len() == 40),
         },
     });
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let v = serde_json::to_value(&summary).map_err(|e| e.to_string())?;
-    write_json(&dir.join("summary.json"), &v)?;
+    write_json(&out.join("summary.json"), &v)?;
     let md = render_markdown(&summary);
-    std::fs::write(dir.join("summary.md"), &md)
-        .map_err(|e| format!("{}: {e}", dir.join("summary.md").display()))?;
+    std::fs::write(out.join("summary.md"), &md)
+        .map_err(|e| format!("{}: {e}", out.join("summary.md").display()))?;
     Ok((md, summary.integrity))
 }
 
@@ -4350,6 +4483,142 @@ not json
             let back: LaunchRecord = serde_json::from_slice(&line).unwrap();
             let s = summarize(&[back], Value::Null, Value::Null);
             assert!(s.cells.iter().all(|c| c.valid == 0), "{:?}", s.cells);
+        }
+    }
+
+    // ------------------------------------------ J5-E w3: the coded exec limit
+    // J5-B1 made the observe-off fast-target case a coded tool error: the
+    // receipt carries `errors[0].code == "exec_unconfirmed"` with outcome
+    // `unknown`, and the jail exits 1. It is the same recorded limit as the
+    // silent `unknown` before it, so it is valid and flagged; nothing else is.
+    mod w3 {
+        use super::*;
+
+        fn coded_unconfirmed(observe: Observe) -> LaunchRecord {
+            let mut r = jailed(observe, 100, 300);
+            let rc = r.receipt.as_mut().unwrap();
+            rc.outcome_kind = "unknown".to_owned();
+            rc.outcome_code = None;
+            rc.outcome_cause = Some(EXEC_UNCONFIRMED.to_owned());
+            rc.errors = vec![EXEC_UNCONFIRMED_CODE.to_owned()];
+            r.launcher.as_mut().unwrap().status.code = Some(1);
+            r
+        }
+
+        #[test]
+        fn the_coded_exec_limit_is_valid_and_flagged_with_observation_off() {
+            let v = validate(&coded_unconfirmed(Observe::Off));
+            assert!(v.valid, "{v:?}");
+            assert_eq!(v.flags, vec![Flag::ExecUnconfirmed]);
+        }
+
+        #[test]
+        fn any_other_error_or_shape_still_excludes() {
+            let with = |f: &dyn Fn(&mut LaunchRecord)| {
+                let mut r = coded_unconfirmed(Observe::Off);
+                f(&mut r);
+                validate(&r).reasons
+            };
+            // A second error beside the limit.
+            assert_eq!(
+                with(&|r| r
+                    .receipt
+                    .as_mut()
+                    .unwrap()
+                    .errors
+                    .push("evidence_lost".to_owned())),
+                vec![Reason::Errors]
+            );
+            // Another error in its place.
+            assert_eq!(
+                with(&|r| r.receipt.as_mut().unwrap().errors = vec!["evidence_lost".to_owned()]),
+                vec![Reason::Errors]
+            );
+            // The code without the unknown outcome it explains.
+            assert_eq!(
+                with(&|r| {
+                    let rc = r.receipt.as_mut().unwrap();
+                    rc.outcome_kind = "exited".to_owned();
+                    rc.outcome_code = Some(0);
+                    rc.outcome_cause = None;
+                    r.launcher.as_mut().unwrap().status.code = Some(0);
+                }),
+                vec![Reason::Errors]
+            );
+            // Another unknown cause.
+            assert_eq!(
+                with(&|r| r.receipt.as_mut().unwrap().outcome_cause = Some("x".to_owned())),
+                vec![Reason::Outcome, Reason::Errors]
+            );
+            // Not the tool-failure exit.
+            assert_eq!(
+                with(&|r| r.launcher.as_mut().unwrap().status.code = Some(2)),
+                vec![Reason::JailExit]
+            );
+            // The target's own lines are what prove it ran.
+            assert!(with(&|r| r.target.start_ns = None).contains(&Reason::NoStartLine));
+            assert!(
+                with(&|r| {
+                    r.target.end_ns = None;
+                    r.target.ok = None;
+                })
+                .contains(&Reason::NoEndLine)
+            );
+            // With observation on the limit does not apply.
+            let on = validate(&coded_unconfirmed(Observe::On)).reasons;
+            assert!(
+                on.contains(&Reason::Outcome) && on.contains(&Reason::Errors),
+                "{on:?}"
+            );
+        }
+
+        /// Records taken under the old rule carry its verdict; re-summarising
+        /// them under the new one happens only on request, and says so.
+        #[test]
+        fn a_rule_change_is_applied_only_on_request_and_named() {
+            let base = many(|_| direct(Session::Plain, 2, 200), 30);
+            let off = many(
+                |_| {
+                    let mut r = coded_unconfirmed(Observe::Off);
+                    r.validity = Validity {
+                        valid: false,
+                        reasons: vec![Reason::Errors],
+                        flags: vec![Flag::ExecUnconfirmed],
+                    };
+                    r
+                },
+                30,
+            );
+            let records = [base, off].concat();
+            let params = json!({"launches": 30, "max_load": 1.0});
+            let off_direct = |s: &Summary| {
+                s.comparisons
+                    .iter()
+                    .find(|c| c.kind == CompareKind::OffVsDirect)
+                    .unwrap()
+                    .startup_verdict
+            };
+            let plain = summarize(&records, params.clone(), Value::Null);
+            assert!(
+                plain.integrity.iter().any(|p| p.contains("validity")),
+                "{:?}",
+                plain.integrity
+            );
+            assert_eq!(off_direct(&plain), Some(Verdict::Insufficient));
+
+            let re = summarize_with(&records, params, Value::Null, true);
+            assert!(re.integrity.is_empty(), "{:?}", re.integrity);
+            assert_eq!(off_direct(&re), Some(Verdict::Pass));
+            assert!(
+                re.revalidated
+                    .iter()
+                    .any(|n| n.contains("tool/off") && n.contains("30")),
+                "{:?}",
+                re.revalidated
+            );
+            let md = render_markdown(&re);
+            assert!(md.contains("Revalidated"), "{md}");
+            assert!(md.contains("exec_unconfirmed"), "{md}");
         }
     }
 }
