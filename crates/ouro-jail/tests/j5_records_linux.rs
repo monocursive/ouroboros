@@ -542,24 +542,47 @@ fn j5_a_trace_loss_note_and_its_receipt_agree() {
 }
 
 /// J5-C wave 3, R03.5 "Trace partial writes ... cannot block deadline
-/// enforcement": every trace frame reaches the consumer in several partial
+/// enforcement", one run with a consumer that reads 4 KiB and then pauses
+/// `pause_ms`: every trace frame reaches the consumer in several partial
 /// writes (the test seam `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=64` caps each
 /// `write(2)` of the `--trace-fd` sink at 64 bytes, and every frame is longer),
 /// the target produces results for longer than its 2 s wall and then sleeps
-/// 30 s, and the consumer is slow but live (a 4 KiB read every 20 ms, so the
-/// sink never meets its no-progress deadline). The wall still fires on time:
+/// 30 s, and the consumer is slow but live (its pause stays inside the sink's
+/// one-second no-progress deadline). The wall still fires on time:
 /// the run ends within seconds, the receipt's cause is `wall_expiry` with the
 /// wall's `hit` recorded, and, when the stream is complete, the target's own
 /// `proc.exit` lies within 3.5 s of its exec on the product's clock. The trace
 /// is every frame reassembled from its pieces (the whole contract holds), or,
 /// when the terminal drain could not deliver the backlog within its budget,
 /// visibly incomplete with the loss in the receipt; never corrupt.
+/// Seconds since the epoch of an RFC 3339 UTC time as the product writes it
+/// (`YYYY-MM-DDThh:mm:ssZ`, `records::rfc3339_utc`).
+fn rfc3339_seconds(text: &str) -> i64 {
+    let number = |range: std::ops::Range<usize>| -> i64 {
+        text.get(range)
+            .and_then(|part| part.parse().ok())
+            .unwrap_or_else(|| panic!("not an RFC 3339 UTC time: {text}"))
+    };
+    let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+    // Howard Hinnant's days_from_civil.
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let year_of_era = shifted - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    days * 86_400 + number(11..13) * 3600 + number(14..16) * 60 + number(17..19)
+}
+
 #[test]
-fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
+fn rfc3339_seconds_matches_known_times() {
+    assert_eq!(rfc3339_seconds("1970-01-01T00:00:00Z"), 0);
+    assert_eq!(rfc3339_seconds("2000-02-29T23:59:59Z"), 951_868_799);
+    assert_eq!(rfc3339_seconds("2026-09-25T00:15:36Z"), 1_790_295_336);
+}
+
+fn wall_under_partial_writes(pause_ms: u64) -> ouro_fixture::harness::TraceState {
     const WRITE_MAX: usize = 64;
-    if !Profile::Tool.available() {
-        return;
-    }
     let mut c = case_with(Profile::Tool, "best-effort", &["--limit", "wall=2s"]);
     let base = c.base();
     let mut steps: Vec<Value> = Vec::new();
@@ -580,16 +603,9 @@ fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
         .env(ouro_jail::trace::TRACE_FD_WRITE_SEAM, WRITE_MAX.to_string())
         .trace_consumer(TraceConsumer::Slow {
             chunk: 4096,
-            pause: std::time::Duration::from_millis(20),
+            pause: std::time::Duration::from_millis(pause_ms),
         });
-    let started = std::time::Instant::now();
     let run = c.run(&Value::from(steps), &Release::Valid);
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_secs(8),
-        "the 2 s wall stopped the 30 s target on time, not the trace: {elapsed:?}: {}",
-        explain(&run)
-    );
     let receipts = run.receipts();
     for receipt in &receipts {
         common::check_receipt(receipt).unwrap_or_else(|error| panic!("{error}\n{receipt:#}"));
@@ -607,6 +623,29 @@ fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
     assert_eq!(
         wall["hit"], true,
         "the receipt records the wall's hit: {wall}"
+    );
+    // On the product's own clock (the harness's elapsed time also counts its
+    // slow consumer reading what the pipe still holds after the jail exits):
+    // the tree was verified dead soon after the 2 s wall, and the final
+    // receipt, written after the terminal drain's one-second budget, soon
+    // after that. Whole seconds, so the bounds carry a second of rounding.
+    let seconds = |pointer: &str| {
+        rfc3339_seconds(
+            last.pointer(pointer)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{pointer}: {last:#}")),
+        )
+    };
+    let created = seconds("/created_at");
+    assert!(
+        seconds("/lifetime/verified_at") - created <= 4,
+        "the tree died {} s after the attempt began: the wall was late",
+        seconds("/lifetime/verified_at") - created
+    );
+    assert!(
+        seconds("/updated_at") - created <= 6,
+        "the final receipt came {} s after the attempt began",
+        seconds("/updated_at") - created
     );
     assert_eq!(
         last["lifetime"]["native"]["details"]["test_seams"][ouro_jail::trace::TRACE_FD_WRITE_SEAM],
@@ -676,4 +715,36 @@ fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
         }
         other => panic!("the trace is {other:?}"),
     }
+    readback.state
+}
+
+/// The consumer keeps up (a 4 KiB read every 20 ms): the backlog is small,
+/// the terminal drain delivers it, and the trace is every frame reassembled
+/// from its pieces, with the target's own end 2 s after its exec.
+#[test]
+fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
+    if !Profile::Tool.available() {
+        return;
+    }
+    assert_eq!(
+        wall_under_partial_writes(20),
+        ouro_fixture::harness::TraceState::Complete,
+        "a consumer that keeps up gets every frame"
+    );
+}
+
+/// The consumer stalls but stays live (a 4 KiB read every 700 ms, inside the
+/// one-second no-progress deadline): the pipe stays full, so the writer waits
+/// with a frame partly written while the wall comes due. The wall fires on
+/// time all the same; the backlog cannot be delivered within the terminal
+/// drain's budget, so the trace ends visibly incomplete with the loss in the
+/// receipt. A writer that blocked on its consumer would hold the supervisor
+/// for as long as the consumer stalls (the mutation replay's M4).
+#[test]
+fn j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame() {
+    if !Profile::Tool.available() {
+        return;
+    }
+    let state = wall_under_partial_writes(700);
+    assert_ne!(state, ouro_fixture::harness::TraceState::Corrupt);
 }
