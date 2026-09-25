@@ -30,8 +30,9 @@ pub struct Cli {
 pub enum Command {
     /// Prepare a boundary and run PROGRAM under it.
     Run(Box<RunArgs>),
-    /// Render the requested policy without probing or executing. Boxed:
-    /// `ExplainArgs` carries the full override set and dwarfs the rest.
+    // Boxed: `ExplainArgs` carries the full override set and dwarfs the
+    // rest. A `//` comment, not `///`: clap renders doc comments as help.
+    /// Render the requested policy without probing or executing.
     Explain(Box<ExplainArgs>),
     /// Probe the capabilities the requested plan needs.
     Doctor(DoctorArgs),
@@ -175,6 +176,23 @@ mod tests {
     #[test]
     fn the_definition_is_internally_consistent() {
         Cli::command().debug_assert();
+    }
+
+    /// Help text is operator-facing: every subcommand's summary is its own
+    /// sentence, with no implementation note carried over from a doc comment.
+    #[test]
+    fn subcommand_help_carries_no_implementation_notes() {
+        let command = Cli::command();
+        for sub in command.get_subcommands() {
+            let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
+            for leak in ["Boxed", "`", "dwarfs"] {
+                assert!(
+                    !about.contains(leak),
+                    "`{}` help leaks an implementation note: {about}",
+                    sub.get_name()
+                );
+            }
+        }
     }
 
     #[test]
