@@ -1362,6 +1362,245 @@ fn o03_an_unmatched_exit_is_a_gap_not_a_result() {
     assert_one_evidence_loss(&receipt);
 }
 
+// ===========================================================================
+// X06.4: no tracing privilege — ptrace and pidfd_getfd against every process
+// the child can address fail (§15 X06; J5-B1 review MEDIUM: the old test never
+// called pidfd_getfd and targeted a pid absent from the child's namespace).
+// ===========================================================================
+
+/// The Python probe: for every process the child can address (its own /proc,
+/// minus itself) and every ancestor up the PPid chain, open a pidfd, try to
+/// steal each of its first descriptors with `pidfd_getfd`, and try to seize it
+/// with `ptrace(PTRACE_SEIZE)`. Reports one JSON object per target.
+const X06_PROBE: &str = r#"
+import os, ctypes, json
+libc = ctypes.CDLL(None, use_errno=True)
+def call(nr, *a):
+    ctypes.set_errno(0)
+    rc = libc.syscall(nr, *[ctypes.c_long(x) for x in a])
+    return [rc, ctypes.get_errno()]
+def comm(pid):
+    try: return open('/proc/%d/comm' % pid).read().strip()
+    except OSError: return '?'
+def probe(pid):
+    pfd = call(434, pid, 0)              # pidfd_open
+    getfd = []
+    if pfd[0] >= 0:
+        for n in range(0, 6):
+            r = call(438, pfd[0], n, 0)  # pidfd_getfd
+            getfd.append(0 if r[0] >= 0 else r[1])
+            if r[0] >= 0: os.close(r[0])
+        os.close(pfd[0])
+    pt = call(101, 0x4206, pid, 0, 0)    # ptrace(PTRACE_SEIZE)
+    return {'pid': pid, 'comm': comm(pid), 'pidfd_ok': pfd[0] >= 0,
+            'getfd_errnos': getfd, 'ptrace_ok': pt[0] >= 0, 'ptrace_errno': pt[1]}
+def caps():
+    out = {}
+    for line in open('/proc/self/status'):
+        if line[:3] == 'Cap':
+            k, v = line.split(':'); out[k.strip()] = v.strip()
+    return out
+me = os.getpid()
+addressable = [probe(int(d)) for d in os.listdir('/proc') if d.isdigit() and int(d) != me]
+ancestors = []; p = os.getppid(); seen = set()
+while p > 1 and p not in seen:
+    seen.add(p); ancestors.append(probe(p))
+    try: p = int(open('/proc/%d/stat' % p).read().split(') ')[1].split()[1])
+    except (OSError, IndexError): break
+print(json.dumps({'me': me, 'caps': caps(), 'addressable': addressable, 'ancestors': ancestors}))
+"#;
+
+/// No target may steal a descriptor or seize a tracer over any process it can
+/// address. Verdict, from inside every profile: `pidfd_getfd` and
+/// `ptrace(PTRACE_SEIZE)` fail against every addressable process and every
+/// ancestor — for the contained profiles the child's `/proc` holds only its
+/// own pid namespace (bubblewrap's init, and under `agent` the launcher and
+/// bridge), so the supervisor and observer are not even addressable; for
+/// `none` the ancestor chain reaches the supervisor/observer and the calls
+/// still fail (EPERM). The mutation-provable anchor is the jail's capability
+/// drop: for the contained profiles the child's CapEff/CapPrm/CapInh/CapAmb
+/// are empty (adding a capability, e.g. `bwrap --cap-add CAP_SYS_PTRACE` with
+/// the CapEff check disabled, reddens this — verified on the host). The
+/// `pidfd_getfd`/`ptrace` denials themselves are kernel-enforced defence in
+/// depth (Yama ptrace scope, the user-namespace credential mapping, and, for
+/// `ptrace` under a contained profile, the baseline seccomp deny) on top of
+/// that empty capability set.
+#[test]
+fn x06_no_tracing_privilege_reaches_the_child() {
+    if !common::live() {
+        return;
+    }
+    for profile in ["tool", "build", "agent"] {
+        let c = case(profile);
+        let jail = if profile == "build" {
+            c.jail.args(["--limit", "mem=64MiB"])
+        } else {
+            c.jail
+        };
+        let run = jail.target(py(X06_PROBE)).run().unwrap();
+        assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
+        let out = py_out(&run);
+        // The jail's mechanism: an empty capability set for the child.
+        for key in ["CapEff", "CapPrm", "CapInh", "CapAmb"] {
+            let value = out["caps"][key].as_str().unwrap_or("?");
+            assert!(
+                value.trim_matches('0').is_empty(),
+                "{profile}: {key} is not empty: {value}"
+            );
+        }
+        assert_no_tracing(profile, &out);
+        // Contained: the child's /proc is its own pid namespace only — a small
+        // set of low pids; the supervisor/observer (host processes) are absent.
+        let pids: Vec<i64> = out["addressable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["pid"].as_i64().unwrap())
+            .collect();
+        assert!(
+            pids.iter().all(|pid| *pid < 100),
+            "{profile}: the child addresses a host pid (supervisor/observer reachable): {pids:?}"
+        );
+        settled(&run);
+    }
+    // none: the child shares the host pid namespace, so its ancestor chain
+    // reaches the supervisor/observer; the calls still fail.
+    if let Some((jail, _)) = none_case("on") {
+        let run = jail.target(py(X06_PROBE)).run().unwrap();
+        assert_eq!(run.code(), Some(0), "none: {}", run.stderr_text());
+        let out = py_out(&run);
+        assert_no_tracing("none", &out);
+        // The supervisor (`ouro-jail`) is an ancestor and was actually probed.
+        let ancestors = out["ancestors"].as_array().unwrap();
+        assert!(
+            ancestors
+                .iter()
+                .any(|entry| entry["comm"].as_str() == Some("ouro-jail")),
+            "none: the supervisor was not reached up the ancestor chain: {ancestors:#?}"
+        );
+    }
+}
+
+/// Every probed target (addressable process and ancestor) refused both
+/// `pidfd_getfd` (EPERM for every descriptor tried) and `ptrace` (never
+/// succeeded). A target may hand out no descriptor and be seized by no tracer.
+fn assert_no_tracing(profile: &str, out: &Value) {
+    let mut targets: Vec<&Value> = out["addressable"].as_array().unwrap().iter().collect();
+    targets.extend(out["ancestors"].as_array().unwrap().iter());
+    assert!(
+        !targets.is_empty(),
+        "{profile}: no target was probed: {out:#}"
+    );
+    for target in targets {
+        assert_eq!(
+            target["ptrace_ok"], false,
+            "{profile}: ptrace SEIZE succeeded against {}: {target}",
+            target["comm"]
+        );
+        for errno in target["getfd_errnos"].as_array().unwrap() {
+            assert_eq!(
+                errno.as_i64(),
+                Some(i64::from(libc::EPERM)),
+                "{profile}: pidfd_getfd did not fail EPERM against {}: {target}",
+                target["comm"]
+            );
+        }
+    }
+}
+
+// ===========================================================================
+// R05.3: forging the receipt, trace and jail state mid-run is outside local
+// evidence assurance while the run still ends as it would (§15 R05; §9.3).
+// ===========================================================================
+
+/// Attempted, live, `none` (observation on): the target — the same uid as the
+/// supervisor — overwrites the attempt's receipt (`jail.json`), trace sink
+/// (`trace.ndjson`) and jail state (`jail-state.json`) WHILE the run is live,
+/// then exits 0. Verdict: the run's own outcome is exactly what it would be
+/// without the forgery — it settles, exits 0, the tree verifies — and its
+/// records still make no protection claim (`unprotected`); no error and no
+/// note reports the tampering, because `none` offers no local evidence
+/// assurance against a same-uid peer (§9.3: "same-UID interference remains
+/// possible ... `unprotected` is never upgraded"). This strengthens
+/// `conformance_j3_none.rs::r05_same_uid_tampering...`, which forges only the
+/// static `policy.json`. The mutation-provable anchor is the `none`
+/// `unprotected` labeling (records.rs `Containment::None => Unprotected`):
+/// a build that upgraded `none` to protected reddens the `unprotected`
+/// assertion. R05 is about the ABSENCE of assurance, so the test asserts the
+/// product does not falsely claim to have detected the forgery.
+#[test]
+fn r05_forging_records_mid_run_is_outside_local_evidence_assurance() {
+    let (jail, _) = match none_case("on") {
+        Some(pair) => pair,
+        None => return,
+    };
+    let data = jail.data_dir();
+    // The same-uid child recovers the attempt directory (a host path it can
+    // see under `none`) and overwrites all three live record files, then lives
+    // just long enough for the supervisor to keep running past the forgery.
+    let code = format!(
+        "import glob, os, time\n\
+         d = glob.glob({data:?} + '/attempts/*/')[0]\n\
+         forged = []\n\
+         for name, body in [('jail.json', '{{\"forged\":\"receipt\"}}'), \
+             ('trace.ndjson', '{{\"forged\":\"trace\"}}\\n'), \
+             ('jail-state.json', '{{\"forged\":\"state\"}}')]:\n\
+         \x20   p = os.path.join(d, name)\n\
+         \x20   existed = os.path.exists(p)\n\
+         \x20   open(p, 'w').write(body)\n\
+         \x20   forged.append('%s:%s' % (name, existed))\n\
+         print('FORGED ' + ' '.join(forged))\n\
+         time.sleep(0.3)\n",
+        data = data.to_str().unwrap(),
+    );
+    let run = jail
+        .receipt()
+        .target([PYTHON, "-c", &code])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    // The forgery really happened: all three record files existed and were
+    // overwritten by the same-uid child mid-run.
+    let forged = run
+        .stdout_text()
+        .lines()
+        .find(|line| line.starts_with("FORGED "))
+        .unwrap_or_else(|| panic!("the child did not forge: {}", run.stdout_text()))
+        .to_owned();
+    // Whether each file pre-existed at that instant is a timing detail; the
+    // write always lands in the attempt dir. The child reports one entry per
+    // record it wrote.
+    for name in ["jail.json:", "trace.ndjson:", "jail-state.json:"] {
+        assert!(
+            forged.contains(name),
+            "the child did not write a forged record: {forged}"
+        );
+    }
+    // The run's own outcome is exactly what it would be without the forgery.
+    let receipt = run
+        .receipt_phase("settled")
+        .unwrap_or_else(|| panic!("no settled receipt: {}", run.stderr_text()));
+    let _ = common::checked_receipt(receipt.clone());
+    assert_eq!(receipt["outcome"]["kind"], "exited", "{receipt:#}");
+    assert_eq!(receipt["outcome"]["code"], 0, "{receipt:#}");
+    assert_eq!(receipt["lifetime"]["integrity"], "verified", "{receipt:#}");
+    // ...and the records still make no protection claim.
+    assert_eq!(receipt["containment"], "none", "{receipt:#}");
+    assert_eq!(receipt["child_protection"], "unprotected", "{receipt:#}");
+    // Nothing in the product claims to have detected the tampering: R05 is
+    // about the absence of assurance, not detection.
+    assert!(
+        run.receipt_errors().is_empty(),
+        "the product raised an error over same-uid tampering it cannot detect: {:?}",
+        run.receipt_errors()
+    );
+    let errors = receipt["errors"].as_array().cloned().unwrap_or_default();
+    assert!(
+        errors.is_empty(),
+        "the settled receipt claims to have detected the forgery: {errors:#?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `none`-specific support (delegated-scope precondition, sibling cgroups)
 // ---------------------------------------------------------------------------
