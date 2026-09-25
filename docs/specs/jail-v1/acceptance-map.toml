@@ -2909,10 +2909,12 @@ id = "M03.5"
 gate = "M03"
 clause = "A macOS doctor record is never ready, carries only unsupported requirement rows (no Linux probe row, no old requirement name) and a macOS build target"
 tag = "portable"
+lane = "macos"
 tests = [
   "ouro-jail/tests/portable_doctor.rs::the_doctor_schema_rejects_what_it_must",
   "ouro-jail/tests/portable_vocabulary.rs::macos_inspection_output_carries_no_linux_vocabulary",
 ]
+note = "Lane macos: macos_inspection_output_carries_no_linux_vocabulary compiles on macOS only (the Linux build has no such test; found by the wave-3 listing check)."
 
 # ------------------------------------------------------------------ I01
 
