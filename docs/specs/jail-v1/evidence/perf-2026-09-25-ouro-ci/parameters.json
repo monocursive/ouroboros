@@ -1,0 +1,33 @@
+{
+  "allow_loaded": false,
+  "arm_order": "a seeded Fisher-Yates permutation per round (SplitMix64 of seed, session, workload, round)",
+  "deadline_ms": 300000,
+  "fileops_rounds": 5000,
+  "fixture": "/home/ouro-ci/j5/perf/target/release/ouro-fixture",
+  "jail": "/home/ouro-ci/j5/perf/target/release/ouro-jail",
+  "launches": 30,
+  "max_load": 3.0,
+  "overhead_budget_pct": 20.0,
+  "profiles": [
+    "tool",
+    "agent",
+    "none"
+  ],
+  "sample_ms": 5,
+  "seed": 1790302840055834092,
+  "sessions": [
+    "plain",
+    "scope"
+  ],
+  "spawn_child": "/usr/bin/true",
+  "spawn_count": 200,
+  "spec_min_launches": 30,
+  "startup_budget_ms": 250.0,
+  "trace_sink": "the default local trace.ndjson (no --trace-fd consumer)",
+  "warmup": 1,
+  "workloads": [
+    "noop",
+    "spawn-tree",
+    "fileops"
+  ]
+}
