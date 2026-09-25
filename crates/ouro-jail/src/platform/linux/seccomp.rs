@@ -14,6 +14,28 @@ use super::bpf::{Asm, BpfError, Program};
 
 /// `AUDIT_ARCH_X86_64` from `linux/audit.h`.
 pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+
+// J5-D begin: the architecture the tables cover (jail-v1 §3.2)
+/// The one architecture, as `std::env::consts::ARCH` spells it, whose
+/// syscall numbers this implementation's filter tables, mediation filter and
+/// closed set carry. Linux aarch64 is a later lane (§3.2): a build for any
+/// other architecture compiles, and the capabilities that rest on these
+/// tables report `unsupported` with [`REASON_UNSUPPORTED_ARCHITECTURE`], so
+/// `doctor` is not ready and `run` refuses before preparation instead of
+/// loading a filter that denies every call.
+pub const TABLE_ARCH: &str = "x86_64";
+
+/// The reason code of a capability whose syscall tables do not cover the
+/// architecture this binary was built for.
+pub const REASON_UNSUPPORTED_ARCHITECTURE: &str = "unsupported_architecture";
+
+/// Whether the syscall tables cover `arch` (a `std::env::consts::ARCH`
+/// value).
+#[must_use]
+pub fn tables_cover(arch: &str) -> bool {
+    arch == TABLE_ARCH
+}
+// J5-D end
 /// Bit set in the syscall number for the x32 ABI (`__X32_SYSCALL_BIT`).
 pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
@@ -774,6 +796,17 @@ pub use linux_only::{install, program_pipe, set_no_new_privs};
 
 #[cfg(test)]
 mod tests {
+    // J5-D begin: the architecture the tables cover
+    #[test]
+    fn the_tables_cover_x86_64_and_nothing_else() {
+        assert!(tables_cover("x86_64"));
+        for other in ["aarch64", "x86", "riscv64", "arm", "powerpc64", "s390x", ""] {
+            assert!(!tables_cover(other), "{other}");
+        }
+        assert_eq!(REASON_UNSUPPORTED_ARCHITECTURE, "unsupported_architecture");
+    }
+    // J5-D end
+
     use super::*;
 
     #[test]

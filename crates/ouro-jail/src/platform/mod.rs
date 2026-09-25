@@ -225,6 +225,9 @@ pub enum RunEvent {
     ExecError {
         /// The errno name the launcher reported.
         errno: String,
+        /// What the errno alone does not say (X04: a missing interpreter
+        /// answers ENOENT like a missing program), when the platform knows.
+        detail: Option<ExecFailureDetail>,
     },
     /// The wall deadline expired.
     WallExpired,
@@ -240,12 +243,54 @@ pub enum RunEvent {
         after_target_end: bool,
         // J4 W2-S end
     },
+    // J5-B1 begin: §6.4
+    /// Without an observer, the target's exec could not be confirmed (it
+    /// ended before its new image was seen); the outcome is unknown and the
+    /// run is a coded tool error, never a silent exit 1.
+    ExecUnconfirmed {
+        /// A safe reason.
+        reason: String,
+    },
+    // J5-B1 end
     /// The facts needed are missing; never a fabricated outcome.
     Unknown {
         /// A safe reason.
         reason: String,
     },
 }
+
+// J5-B1 begin: X04
+/// What a target exec failure's errno does not say, when the platform
+/// established it (X04).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExecFailureDetail {
+    /// The named file exists, but the kernel answered ENOENT: its `#!`
+    /// interpreter or its ELF loader is missing.
+    InterpreterMissing,
+}
+
+impl ExecFailureDetail {
+    /// The refusal's error code for this failure.
+    #[must_use]
+    pub fn error_code(self) -> crate::records::ErrorCode {
+        match self {
+            ExecFailureDetail::InterpreterMissing => {
+                crate::records::ErrorCode::ExecInterpreterMissing
+            }
+        }
+    }
+
+    /// The explanation appended to the refusal's message.
+    #[must_use]
+    pub fn explanation(self) -> &'static str {
+        match self {
+            ExecFailureDetail::InterpreterMissing => {
+                "the program exists, but the interpreter or loader it names was not found"
+            }
+        }
+    }
+}
+// J5-B1 end
 
 /// A monotonic deadline (§6.4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

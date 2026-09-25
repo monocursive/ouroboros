@@ -171,7 +171,7 @@ fn an_execution_cgroup_is_required_by_a_tree_limit_not_by_observation() {
         !observed
             .requirements
             .iter()
-            .any(|name| name == ouro_jail::capability::REQ_EXECUTION_CGROUP),
+            .any(|name| name == "execution_boundary"),
         "ptrace observation alone requires no cgroup: {:?}",
         observed.requirements
     );
@@ -188,7 +188,7 @@ fn an_execution_cgroup_is_required_by_a_tree_limit_not_by_observation() {
         limited
             .requirements
             .iter()
-            .any(|name| name == ouro_jail::capability::REQ_EXECUTION_CGROUP),
+            .any(|name| name == "execution_boundary"),
         "an explicit pids ceiling needs a cgroup: {:?}",
         limited.requirements
     );
@@ -202,7 +202,7 @@ fn an_execution_cgroup_is_required_by_a_tree_limit_not_by_observation() {
         uncontained
             .requirements
             .iter()
-            .any(|name| name == ouro_jail::capability::REQ_EXECUTION_CGROUP)
+            .any(|name| name == "execution_boundary")
     );
 }
 

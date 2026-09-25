@@ -29,7 +29,6 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use jsonschema::{Registry, Resource, Validator};
 use ouro_fixture::harness::{self, Jail, Run};
 use serde_json::Value;
 
@@ -44,46 +43,6 @@ fn specs_dir() -> PathBuf {
         .join("../../docs/specs/jail-v1")
         .canonicalize()
         .expect("the checked-in specification directory exists")
-}
-
-/// One validator per checked-in schema, by stem.
-fn validators() -> &'static BTreeMap<String, Validator> {
-    static ONCE: std::sync::OnceLock<BTreeMap<String, Validator>> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let mut schemas: BTreeMap<String, Value> = BTreeMap::new();
-        for entry in std::fs::read_dir(specs_dir()).unwrap() {
-            let path = entry.unwrap().path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if let Some(stem) = name.strip_suffix(".schema.json") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                schemas.insert(stem.to_owned(), serde_json::from_str(&text).unwrap());
-            }
-        }
-        let pairs: Vec<(String, Resource)> = schemas
-            .values()
-            .map(|schema| {
-                (
-                    schema["$id"].as_str().unwrap().to_owned(),
-                    Resource::from_contents(schema.clone()),
-                )
-            })
-            .collect();
-        let registry: Registry = Registry::new().extend(pairs).unwrap().prepare().unwrap();
-        let registry: &'static Registry = Box::leak(Box::new(registry));
-        schemas
-            .into_iter()
-            .map(|(name, schema)| {
-                let validator = jsonschema::options()
-                    .with_registry(registry)
-                    .should_validate_formats(true)
-                    .build(&schema)
-                    .unwrap();
-                (name, validator)
-            })
-            .collect()
-    })
 }
 
 /// The profiles this file runs. `none` needs a delegated leaf (§9.3).
@@ -239,17 +198,9 @@ fn settled(run: &Run) -> Value {
         "{:?}",
         run.receipt_errors()
     );
-    for receipt in run.receipts() {
-        validators()["jail-receipt"]
-            .validate(&receipt)
-            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
-        common::assert_semantic_receipt(&receipt);
-    }
-    for event in run.trace_events() {
-        validators()["jail-event"]
-            .validate(event)
-            .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
-    }
+    // J5-C: every receipt, the trace as a stream and the control transcript,
+    // held to the frozen contract.
+    common::assert_run_records(run);
     run.receipt_phase("settled").unwrap_or_else(|| {
         panic!(
             "no settled receipt: exit {:?}, stderr {}",

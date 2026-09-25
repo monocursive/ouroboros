@@ -1570,6 +1570,45 @@ fn build_snapshot(
     })
 }
 
+// J5-B1-w3 begin: §9.1 — an operator grant may not expose a pseudo filesystem
+/// Whether a filesystem `f_type` magic is `proc`, `sysfs` or cgroup (v1 or v2).
+/// The Linux platform reads it with `fstatfs` on the resolved, pinned source;
+/// keeping the set here lets the resolution rule and its test stay portable.
+#[must_use]
+pub fn is_pseudo_fs_magic(f_type: i64) -> bool {
+    // proc, sysfs, cgroup v1, cgroup v2 (statfs magic numbers, uapi/magic.h).
+    const PROC: i64 = 0x0000_9fa0;
+    const SYSFS: i64 = 0x6265_6572;
+    const CGROUP: i64 = 0x0027_e0eb;
+    const CGROUP2: i64 = 0x6367_7270;
+    matches!(f_type, PROC | SYSFS | CGROUP | CGROUP2)
+}
+
+/// Whether an operator grant of `resolved` would expose host `/proc`, `/sys`
+/// or cgroupfs (jail-v1 §9.1: "Do not expose host `/proc`, `/sys`, cgroupfs").
+///
+/// `source_on_pseudo_fs` is the platform's `fstatfs` verdict on the resolved
+/// source itself: true catches a grant whose source is on such a filesystem
+/// (a direct `--ro /proc`, a `--ro /proc/1`, a symlink resolving onto one).
+/// `pseudo_mounts` are the mount points of every proc/sysfs/cgroup mount;
+/// a grant that is an ancestor of, or equal to, any of them exposes it too
+/// (`--ro /` reaches `/proc` and `/sys`). The decision is on filesystem
+/// identity and mount topology, never on how the grant was spelled.
+#[must_use]
+pub fn grant_exposes_pseudo_fs(
+    resolved: &std::path::Path,
+    source_on_pseudo_fs: bool,
+    pseudo_mounts: &[std::path::PathBuf],
+) -> bool {
+    if source_on_pseudo_fs {
+        return true;
+    }
+    pseudo_mounts
+        .iter()
+        .any(|mount| mount == resolved || mount.starts_with(resolved))
+}
+// J5-B1-w3 end
+
 #[cfg(test)]
 mod tests {
     use super::*;

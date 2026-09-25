@@ -519,6 +519,51 @@ pub enum Mode {
     Raise { signal: String },
     /// Run a JSON array of argv arrays in this one process.
     Script { file: OsString },
+    // J5-E begin: the performance workloads and launcher (jail-v1 §5)
+    /// The fixed file-operation workload (J0's): ROUNDS rounds of create
+    /// (`openat` with `O_WRONLY|O_CREAT|O_TRUNC`, then `close`), `rename` and
+    /// `unlink` of one name in DIR, which must exist (`renameat`/`unlinkat`
+    /// where the architecture has no legacy numbers). Prints a `perf-start`
+    /// line with this process's `CLOCK_MONOTONIC` reading first, then one
+    /// `fileops` line with the counts, the end reading and the peak RSS.
+    Fileops {
+        #[arg(value_name = "ROUNDS")]
+        rounds: u32,
+        dir: OsString,
+    },
+    /// The descendant-heavy workload: COUNT children, one at a time, each
+    /// forked, replaced by ARGV (default `/usr/bin/true`) and waited for: a
+    /// tree of depth one, as J0 measured it. `spawn-tree 0` is the no-op
+    /// workload. Lines as for `fileops`.
+    SpawnTree {
+        #[arg(value_name = "COUNT")]
+        count: u32,
+        #[arg(last = true, num_args = 0.., value_name = "ARGV")]
+        argv: Vec<OsString>,
+    },
+    /// The per-launch launcher of `cargo xtask perf`. Runs OUTSIDE the jail:
+    /// reads `CLOCK_MONOTONIC` just before forking ARGV, samples the launched
+    /// process's peak RSS (and, with `--data-dir`, the execution leaf's
+    /// `memory.peak` named by the attempt's receipt) every MS milliseconds
+    /// while it runs, reaps it with `wait4`, reads the clock again, then
+    /// harvests the attempt directories under DIR. Writes one JSON object to
+    /// FILE and exits 0 whatever ARGV did; nothing goes to the report fd.
+    PerfLaunch {
+        #[arg(long, value_name = "FILE")]
+        out: OsString,
+        /// The launched jail's `OURO_DATA_DIR`.
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<OsString>,
+        /// Sampling interval; 0 takes no sample at all.
+        #[arg(long, value_name = "MS", default_value_t = 5)]
+        sample_ms: u64,
+        /// SIGTERM the launched process after this long, SIGKILL 10 s later.
+        #[arg(long, value_name = "MS", default_value_t = 600_000)]
+        deadline_ms: u64,
+        #[arg(last = true, required = true, num_args = 1.., value_name = "ARGV")]
+        argv: Vec<OsString>,
+    },
+    // J5-E end
 }
 
 /// Parse an octal mode string.

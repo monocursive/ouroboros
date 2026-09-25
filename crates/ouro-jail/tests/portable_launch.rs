@@ -516,6 +516,7 @@ impl RunningExecution for SimRunning {
         match (self.sim.target, self.step) {
             (TargetEnd::ExecError, _) => RunEvent::ExecError {
                 errno: "ENOENT".into(),
+                detail: None,
             },
             (TargetEnd::Exit0, 1) => RunEvent::ExecConfirmed,
             (TargetEnd::Exit0, _) => RunEvent::TargetExited { code: 0 },

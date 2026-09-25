@@ -18,6 +18,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+// J5-C begin: the record rules JSON Schema cannot state (R01, §17)
+pub mod semantic;
+// J5-C end
+
 // ---------------------------------------------------------------------------
 // Schema identifiers (§13, §6.3, §8.2). `version --json` announces these and a
 // test compares them with the checked-in schema files.
@@ -41,6 +45,16 @@ pub const SCHEMA_CONTROL: &str = "ouro.jail.control/1";
 pub const SCHEMA_NETWORK: &str = "ouro.jail.network/1";
 /// `linux-closed-v1`: the observed operation set (§11.2).
 pub const CLOSED_SET_LINUX_V1: &str = "linux-closed-v1";
+
+// J5-C begin: the milestone-1 freeze of the wire schemas (§13, §17)
+/// Whether the wire identifiers above name frozen schemas: `true` since
+/// milestone 1. `version --json` announces it as `"frozen": true`; the frozen
+/// files and their sha256s are `docs/specs/jail-v1/frozen-schemas.toml`, and
+/// `tests/portable_version.rs` fails when a frozen file changes under its
+/// identifier (§13: "After freeze, a breaking semantic change needs a new
+/// schema identifier").
+pub const SCHEMAS_FROZEN: bool = true;
+// J5-C end
 
 /// Maximum gate frame, including the single trailing LF (§8.2).
 pub const GATE_FRAME_MAX: usize = 1024;
@@ -313,6 +327,17 @@ pub enum ErrorCode {
     AttemptExists,
     /// The target `exec` failed; no target instruction ran (§8.1).
     ExecFailed,
+    // J5-B1 begin: X04
+    /// The target `exec` failed with ENOENT although the named file exists:
+    /// its `#!` interpreter or ELF loader is what is missing (X04). The
+    /// errno stays in `outcome.cause`; this code tells it from a missing
+    /// program, which is `exec_failed`.
+    ExecInterpreterMissing,
+    /// With observation off, the target's exec could not be confirmed: it
+    /// ended before the supervisor saw its new image, so whether it ran is
+    /// unknown (§6.4: exit 1 is a tool error with a stable code).
+    ExecUnconfirmed,
+    // J5-B1 end
     /// Observation evidence was lost (§11.4).
     EvidenceLost,
     /// Tree death could not be verified within its budget (§9.3).
@@ -343,6 +368,10 @@ impl ErrorCode {
             ErrorCode::PrepareTimeout => "prepare_timeout",
             ErrorCode::AttemptExists => "attempt_exists",
             ErrorCode::ExecFailed => "exec_failed",
+            // J5-B1 begin: X04
+            ErrorCode::ExecInterpreterMissing => "exec_interpreter_missing",
+            ErrorCode::ExecUnconfirmed => "exec_unconfirmed",
+            // J5-B1 end
             ErrorCode::EvidenceLost => "evidence_lost",
             ErrorCode::TreeUnknown => "tree_unknown",
             ErrorCode::StateWriteFailed => "state_write_failed",
@@ -596,9 +625,13 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
         | ErrorCode::GateClosed
         | ErrorCode::PrepareTimeout
         | ErrorCode::AttemptExists
-        | ErrorCode::ExecFailed => 125,
+        | ErrorCode::ExecFailed
+        // J5-B1: X04
+        | ErrorCode::ExecInterpreterMissing => 125,
         ErrorCode::EvidenceLost
         | ErrorCode::TreeUnknown
+        // J5-B1: §6.4
+        | ErrorCode::ExecUnconfirmed
         | ErrorCode::StateWriteFailed
         | ErrorCode::InternalError => 1,
     }

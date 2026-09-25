@@ -114,6 +114,8 @@ fn validators() -> BTreeMap<String, Validator> {
 fn validate(run: &Run) {
     validate_receipts(run);
     validate_events(run.trace_events());
+    // J5-C: the trace as a stream and the control transcript too.
+    common::assert_run_records(run);
 }
 
 fn validate_receipts(run: &Run) {
@@ -402,14 +404,17 @@ fn r05_same_uid_tampering_is_outside_local_evidence_assurance() {
         return;
     }
     let (jail, _) = none_case("on");
-    // The child's own environment carries no reserved name, and it recovers
-    // the state root anyway, from its parent, because nothing separates two
-    // processes of one user: hygiene is not protection (§12).
+    // The child's own environment carries no reserved name, and it writes
+    // the attempt's records anyway, because nothing separates two processes
+    // of one user: hygiene is not protection (§12). It is handed the state
+    // root's path: since J5 the supervisor is not dumpable, so its
+    // environment is no longer a way to learn it (§9.3), and in a real
+    // deployment the default state root is at a predictable per-user path.
+    let data_dir = jail.data_dir().to_path_buf();
     let code = r#"
-import json, os
+import json, os, sys
 own = sorted(name for name in os.environ if name.startswith('OURO_'))
-environ = open('/proc/%d/environ' % os.getppid(), 'rb').read().split(b'\0')
-data = [entry.split(b'=', 1)[1] for entry in environ if entry.startswith(b'OURO_DATA_DIR=')][0]
+data = os.fsencode(sys.argv[1])
 attempts = os.path.join(data, b'attempts')
 (attempt,) = [name for name in os.listdir(attempts) if name.startswith(b'att_')]
 policy = os.path.join(attempts, attempt, b'policy.json')
@@ -419,7 +424,12 @@ print(json.dumps({'own_reserved': own, 'found_state_root': True,
                   'session_leader': os.getsid(0) == os.getpid()}))
 "#;
     let run = jail
-        .target([PYTHON, "-c", code])
+        .target([
+            PYTHON.as_ref(),
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new(code),
+            data_dir.as_os_str(),
+        ])
         .run()
         .expect("the jail runs");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
@@ -928,7 +938,7 @@ fn l03_none_without_a_usable_cgroup_refuses() {
         );
         assert_eq!(receipt["lifetime"]["boundary"], "pending");
         assert!(
-            strings(&receipt["policy"]["requirements"]).contains(&"execution_cgroup".to_owned())
+            strings(&receipt["policy"]["requirements"]).contains(&"execution_boundary".to_owned())
         );
     }
 }

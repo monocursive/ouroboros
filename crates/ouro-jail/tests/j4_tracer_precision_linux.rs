@@ -1379,14 +1379,9 @@ impl Case {
 /// trace event against its schema; returns the receipt of `phase`.
 fn receipt(run: &Run, phase: &str) -> Value {
     run.assert_channels_complete();
-    for receipt in run.receipts() {
-        common::check_receipt(&receipt).unwrap_or_else(|error| panic!("{error}\n{receipt:#}"));
-    }
-    for event in run.trace_events() {
-        common::validators()["jail-event"]
-            .validate(event)
-            .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
-    }
+    // J5-C: every receipt, the trace as a stream and the control transcript,
+    // held to the frozen contract.
+    common::assert_run_records(run);
     run.receipt_phase(phase).unwrap_or_else(|| {
         panic!(
             "no {phase} receipt: exit {:?}, stderr {}",

@@ -531,11 +531,21 @@ impl Jail {
             }
         }
         // SAFETY: the closure runs between `fork` and `exec` in the child. It
-        // calls only `dup2` and `fcntl`, both async-signal-safe, over a plan
-        // built before the fork whose targets collide with no source, and,
-        // when asked, `limit_file_size` (see its own safety note).
+        // calls only `dup2`, `fcntl` and `signal`, all async-signal-safe, over
+        // a plan built before the fork whose targets collide with no source,
+        // and, when asked, `limit_file_size` (see its own safety note).
         unsafe {
             cmd.pre_exec(move || {
+                // An inherited ignore survives `exec`, and the jail honours it
+                // (a run started under `nohup` keeps ignoring HUP). The
+                // harness is not that operator: every program it starts sees
+                // INT, QUIT and HUP at their defaults, whatever launched the
+                // suite (a detached driver step runs from an `&` list).
+                for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP] {
+                    if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
                 pipes::place_in_child(&plan)?;
                 match file_size_limit {
                     Some(bytes) => limit_file_size(bytes),
@@ -1369,6 +1379,42 @@ fn push_json(text: &str, from: &Path, out: &mut Vec<Value>, errors: &mut Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A suite started from a non-interactive `&` (and `nohup`) runs with
+    /// SIGINT, SIGQUIT and SIGHUP ignored, and `exec` keeps an ignored
+    /// disposition. The jail deliberately honours an inherited ignore, so an
+    /// operator-signal test would then measure the launcher, not the jail:
+    /// the harness starts every program with the three at their defaults.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_spawned_program_starts_with_default_int_quit_and_hup() {
+        const RESET: [libc::c_int; 3] = [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP];
+        // SAFETY: `signal` with SIG_IGN/SIG_DFL on standard signals; the
+        // previous dispositions are restored below before any assertion.
+        let previous: Vec<libc::sighandler_t> = RESET
+            .iter()
+            .map(|&s| unsafe { libc::signal(s, libc::SIG_IGN) })
+            .collect();
+        let run = Jail::with_program("/bin/sh")
+            .expect("a private harness")
+            .args(["-c", "grep '^SigIgn:' /proc/self/status"])
+            .run();
+        for (&s, &old) in RESET.iter().zip(previous.iter()) {
+            // SAFETY: as above.
+            unsafe { libc::signal(s, old) };
+        }
+        let run = run.expect("the program runs");
+        let line = run.stdout_text();
+        let mask = u64::from_str_radix(line.trim().trim_start_matches("SigIgn:").trim(), 16)
+            .unwrap_or_else(|e| panic!("no SigIgn mask in {line:?}: {e}"));
+        for s in RESET {
+            assert_eq!(
+                mask & (1u64 << (s - 1)),
+                0,
+                "signal {s} is still ignored in the spawned program: {line}"
+            );
+        }
+    }
 
     #[test]
     fn conformance_mode_is_exactly_the_value_one() {

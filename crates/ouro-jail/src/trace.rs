@@ -102,9 +102,32 @@ pub struct TraceWriter {
     last_healthy_ns: u128,
     /// Whether the note recording the first loss has been attempted.
     gap_noted: bool,
+    // J5-C begin: review item 15
+    /// The evidence classes this attempt's stream carries: what a loss note
+    /// names. Every class a stream could carry until the supervisor narrows
+    /// it to the attempt's own (observation on, proxy applied).
+    stream_classes: Vec<String>,
+    /// Where the first loss note's interval starts, once it was attempted:
+    /// the receipts record the same loss from the same point (§13.3).
+    loss_start_ns: Option<u128>,
+    // J5-C end
 }
 
 impl TraceWriter {
+    // J5-C begin: review item 15
+    /// Narrows the classes this stream's loss note names to the evidence
+    /// classes the attempt actually covers.
+    pub fn set_stream_classes(&mut self, classes: &[&str]) {
+        self.stream_classes = classes.iter().map(|class| (*class).to_owned()).collect();
+    }
+
+    /// The start of the first loss note's interval, once a loss was noted.
+    #[must_use]
+    pub fn loss_start_ns(&self) -> Option<u128> {
+        self.loss_start_ns
+    }
+    // J5-C end
+
     /// Serialize under the stream lock. All wrapper notes share this sequence.
     ///
     /// # Errors
@@ -168,11 +191,9 @@ impl TraceWriter {
             return;
         };
         self.gap_noted = true;
+        self.loss_start_ns = Some(self.last_healthy_ns);
         let gap = crate::records::Gap {
-            classes: STREAM_CLASSES
-                .iter()
-                .map(|class| (*class).to_owned())
-                .collect(),
+            classes: self.stream_classes.clone(),
             source: "wrapper".to_owned(),
             start_ns: self.last_healthy_ns.to_string(),
             end_ns: None,
@@ -224,6 +245,11 @@ pub fn shared(sink: impl TraceSink + Send + 'static) -> SharedTrace {
         attempt_id: None,
         last_healthy_ns: 0,
         gap_noted: false,
+        stream_classes: STREAM_CLASSES
+            .iter()
+            .map(|class| (*class).to_owned())
+            .collect(),
+        loss_start_ns: None,
     }))
 }
 
@@ -253,6 +279,34 @@ pub fn local_bounds(seam: Option<&str>) -> (u64, u64) {
         (cap, LOCAL_RESERVE.min(cap / 2))
     })
 }
+
+// J5-C begin: wave 3, the trace-fd write-size seam (R03.5)
+/// A test seam (S9, J5 wave 3): `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=<bytes>`
+/// makes the external `--trace-fd` sink put at most that many bytes into each
+/// `write(2)`, so every frame longer than it reaches the consumer in several
+/// partial writes, each resumed at its offset (§13.3: the writer "preserves
+/// unwritten offsets"). Without it a partial write happens only when a pipe
+/// fills mid-frame, which a live test cannot arrange: a nonblocking pipe write
+/// of at most `PIPE_BUF` bytes is all or nothing, and frames are smaller.
+///
+/// Accepted only as plain decimal bytes in `1..=EVENT_MAX`; anything else is
+/// ignored. It changes how bytes are written, never which: it cannot widen a
+/// bound, drop a frame or skip a check, and every loss reason of a sink under
+/// it names the seam and its value. Like every `OURO_JAIL_TEST_*` variable it
+/// is recorded in jail state and in every receipt's native details
+/// (`test_seams`).
+pub const TRACE_FD_WRITE_SEAM: &str = "OURO_JAIL_TEST_TRACE_FD_WRITE_MAX";
+
+/// The per-write cap [`TRACE_FD_WRITE_SEAM`] asks for, if its value is one.
+#[must_use]
+pub fn fd_write_max(seam: Option<&str>) -> Option<usize> {
+    seam.filter(|text| {
+        !text.starts_with('0') && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+    })
+    .and_then(|text| text.parse::<usize>().ok())
+    .filter(|max| (1..=EVENT_MAX).contains(max))
+}
+// J5-C end
 
 /// One bounded NDJSON trace sink.
 pub trait TraceSink {
@@ -524,6 +578,11 @@ pub struct FdSink {
     /// Whole frames, each ending in its LF; the front one may be partly
     /// written.
     frames: VecDeque<Vec<u8>>,
+    // J5-C begin: fix wave
+    /// Each queued frame's priority, in step with `frames`: a drain that
+    /// drops a reserve note must not let a later one through.
+    priorities: VecDeque<Priority>,
+    // J5-C end
     /// Bytes of the front frame already written.
     front_written: usize,
     /// Bytes still to write, over all queued frames.
@@ -535,6 +594,10 @@ pub struct FdSink {
     state: FdState,
     loss: Option<Loss>,
     lost_frames: u64,
+    // J5-C begin: wave 3
+    /// [`TRACE_FD_WRITE_SEAM`]'s cap on each write, when the seam is set.
+    write_max: Option<usize>,
+    // J5-C end
 }
 
 impl FdSink {
@@ -555,6 +618,7 @@ impl FdSink {
         Ok(FdSink {
             file,
             frames: VecDeque::new(),
+            priorities: VecDeque::new(),
             front_written: 0,
             queued: 0,
             queue_max: EXTERNAL_QUEUE_MAX,
@@ -564,8 +628,26 @@ impl FdSink {
             state: FdState::Open,
             loss: None,
             lost_frames: 0,
+            write_max: None,
         })
     }
+
+    // J5-C begin: wave 3
+    /// Takes ownership of `fd` for an attempt, applying
+    /// [`TRACE_FD_WRITE_SEAM`]'s value `seam` if it is one.
+    ///
+    /// # Safety
+    /// As for [`FdSink::from_raw_fd`].
+    ///
+    /// # Errors
+    /// As for [`FdSink::from_raw_fd`].
+    pub unsafe fn for_attempt(fd: RawFd, seam: Option<&str>) -> Result<Self, JailError> {
+        // SAFETY: the caller's guarantee is the one `from_raw_fd` needs.
+        let mut sink = unsafe { Self::from_raw_fd(fd) }?;
+        sink.write_max = fd_write_max(seam);
+        Ok(sink)
+    }
+    // J5-C end
 
     /// Overrides the bounds, for tests that must reach them quickly. The
     /// reserve shrinks with the queue: at most a quarter of it.
@@ -593,7 +675,11 @@ impl FdSink {
     pub fn flush_now(&mut self) -> Result<(), JailError> {
         while let Some(front) = self.frames.front() {
             let front_len = front.len();
-            match (&self.file).write(&front[self.front_written..]) {
+            // J5-C, wave 3: under the seam, at most `write_max` bytes a write.
+            let end = self
+                .write_max
+                .map_or(front_len, |max| (self.front_written + max).min(front_len));
+            match (&self.file).write(&front[self.front_written..end]) {
                 Ok(0) => break,
                 Ok(written) => {
                     self.front_written += written;
@@ -601,6 +687,7 @@ impl FdSink {
                     self.last_progress = Instant::now();
                     if self.front_written == front_len {
                         self.frames.pop_front();
+                        self.priorities.pop_front();
                         self.front_written = 0;
                     }
                 }
@@ -656,8 +743,14 @@ impl FdSink {
             // frame the stream still ends on a frame boundary, so the reserve
             // notes may follow.
             let torn = self.front_written > 0;
+            // J5-C, fix wave: a reserve note dropped here (the loss note
+            // queued behind a stalled consumer's frames) would leave a silent
+            // hole if a later note were delivered after it. Like the local
+            // sink when a reserve note fails, write nothing more: the stream
+            // stays visibly incomplete (§13.3).
+            let reserve_dropped = self.priorities.contains(&Priority::Reserve);
             self.clear_queue();
-            if torn {
+            if torn || reserve_dropped {
                 self.state = FdState::Broken;
             } else if self.state == FdState::Open {
                 self.state = FdState::Lost;
@@ -671,6 +764,7 @@ impl FdSink {
 
     fn clear_queue(&mut self) {
         self.frames.clear();
+        self.priorities.clear();
         self.front_written = 0;
         self.queued = 0;
     }
@@ -687,16 +781,23 @@ impl FdSink {
     /// Records `frames` more lost frames. The first reason is kept: later
     /// losses follow from it, and a later message would hide its cause.
     fn lose(&mut self, reason: &str, frames: u64) -> JailError {
+        // J5-C, wave 3: a loss under the write-size seam says so.
+        let reason = match self.write_max {
+            Some(max) => format!(
+                "{reason} (trace fd writes capped to {max} bytes by the test seam {TRACE_FD_WRITE_SEAM})"
+            ),
+            None => reason.to_owned(),
+        };
         self.lost_frames += frames;
         let first = self
             .loss
             .as_ref()
-            .map_or_else(|| reason.to_owned(), |loss| loss.reason.clone());
+            .map_or_else(|| reason.clone(), |loss| loss.reason.clone());
         self.loss = Some(Loss {
             reason: first,
             lost_frames: Some(self.lost_frames),
         });
-        evidence_lost(reason)
+        evidence_lost(&reason)
     }
 }
 
@@ -741,6 +842,7 @@ impl TraceSink for FdSink {
         owned.push(b'\n');
         self.queued += owned.len();
         self.frames.push_back(owned);
+        self.priorities.push_back(priority);
         self.flush_now()
     }
 
@@ -988,6 +1090,181 @@ mod tests {
         assert_eq!(sink.written(), 302);
         assert_eq!(sink.loss().unwrap().lost_frames, Some(3));
     }
+
+    // J5-C begin: review item 15, the loss note names what the attempt covers
+    /// The first loss note names the evidence classes this attempt's stream
+    /// was set to carry, not every class a stream could carry, and the writer
+    /// keeps the note's start so the receipts can record the same loss.
+    #[test]
+    fn the_loss_note_names_the_covered_classes_and_keeps_its_start() {
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        let trace = shared(FileSink::with_bounds(
+            file.reopen().expect("a handle"),
+            4096,
+            2048,
+        ));
+        trace
+            .lock()
+            .unwrap()
+            .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
+        assert_eq!(trace.lock().unwrap().loss_start_ns(), None);
+        let filler = "f".repeat(400);
+        for index in 0..100 {
+            let event = crate::records::Event::lifecycle_note(
+                "att_test",
+                0,
+                std::time::SystemTime::now(),
+                0,
+                &format!("filler_{index}_{filler}"),
+            );
+            if trace
+                .lock()
+                .unwrap()
+                .write_event(&event, Priority::Normal)
+                .is_err()
+            {
+                break;
+            }
+        }
+        let start = trace
+            .lock()
+            .unwrap()
+            .loss_start_ns()
+            .expect("the loss note's start is kept");
+        let bytes = std::fs::read(file.path()).expect("the trace");
+        let readback = read_frames(&bytes);
+        let note = readback
+            .frames
+            .iter()
+            .find(|frame| frame["fields"]["reason"] == TRANSPORT_LOSS_REASON)
+            .expect("a loss note");
+        assert_eq!(
+            note["fields"]["classes"],
+            serde_json::json!(["exec", "fs.write", "fs.deny", "net"]),
+            "no proxy.net: this attempt has no proxy"
+        );
+        assert_eq!(
+            note["fields"]["start_ns"],
+            serde_json::json!(start.to_string())
+        );
+        assert_eq!(note["fields"]["source"], "wrapper");
+    }
+
+    /// Found by `trace_loss_recorded` on the reference host (J5-C fix wave):
+    /// a consumer that stalls past the no-progress deadline makes the sink
+    /// lost with frames still queued, the loss note queued behind them. The
+    /// terminal drain then dropped the whole queue, the note with it, and
+    /// still delivered the final receipt note written after: a complete-
+    /// looking trace with a silent hole where its loss note belongs. A sink
+    /// that drops a reserve note now writes nothing more, as the local sink
+    /// closes when a reserve note fails (§13.3: after a loss the stream is a
+    /// prefix plus the reserve notes, never a later note after a lost one).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_drain_that_drops_a_reserve_note_writes_nothing_after_it() {
+        use std::os::fd::{IntoRawFd as _, OwnedFd};
+        // On Linux a nonblocking pipe write of at most PIPE_BUF bytes is whole
+        // or refused, so no frame is left partly written (which would end the
+        // stream for a different reason); hence the Linux gate.
+        let (reader, writer) = std::io::pipe().expect("a pipe");
+        let fd = OwnedFd::from(writer).into_raw_fd();
+        // SAFETY: the write end was just created here and handed over whole.
+        let sink = unsafe { FdSink::from_raw_fd(fd) }.expect("nonblocking");
+        let mut sink = sink.with_bounds(EXTERNAL_QUEUE_MAX, Duration::from_millis(50));
+        let frame = vec![b'x'; 1000];
+        while sink.queued() == 0 {
+            sink.write_frame(&frame, Priority::Normal).expect("queued");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            sink.poll().is_err(),
+            "no progress within the deadline is loss"
+        );
+        sink.write_frame(b"{\"loss\":\"note\"}", Priority::Reserve)
+            .expect("the loss note is queued behind the stalled frames");
+        sink.finish();
+        assert_eq!(
+            sink.queued(),
+            0,
+            "the stalled queue was dropped and counted"
+        );
+        assert!(
+            sink.write_frame(b"{\"final\":\"note\"}", Priority::Reserve)
+                .is_err(),
+            "after a dropped reserve note nothing more is written"
+        );
+        drop(reader);
+    }
+    // J5-C end
+
+    // J5-C begin: wave 3, the trace-fd write-size seam (R03.5)
+    /// The seam's values: plain decimal bytes in `1..=EVENT_MAX`, else no cap.
+    #[test]
+    fn the_write_size_seam_accepts_only_a_byte_count() {
+        assert_eq!(fd_write_max(Some("64")), Some(64));
+        assert_eq!(fd_write_max(Some("1")), Some(1));
+        assert_eq!(fd_write_max(Some(&EVENT_MAX.to_string())), Some(EVENT_MAX));
+        for ignored in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("064"),
+            Some("-5"),
+            Some("x"),
+            Some("65537"),
+        ] {
+            assert_eq!(fd_write_max(ignored), None, "{ignored:?}");
+        }
+    }
+
+    /// Under the seam every `write(2)` the external sink makes carries at most
+    /// the cap, so a frame longer than it is written in several partial
+    /// writes, each resumed at its offset: a datagram pair shows each write as
+    /// one datagram, and the datagrams reassemble every frame exactly once.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn under_the_write_size_seam_every_frame_is_written_in_pieces() {
+        use std::os::fd::IntoRawFd as _;
+        let (reader, writer) = std::os::unix::net::UnixDatagram::pair().expect("a socket pair");
+        // SAFETY: the writing end was just created here and handed over whole.
+        let mut sink =
+            unsafe { FdSink::for_attempt(writer.into_raw_fd(), Some("64")) }.expect("nonblocking");
+        let frames: Vec<Vec<u8>> = (0..20u8)
+            .map(|index| format!("{{\"n\":{index},\"pad\":\"{}\"}}", "x".repeat(600)).into_bytes())
+            .collect();
+        for frame in &frames {
+            sink.write_frame(frame, Priority::Normal).expect("queued");
+        }
+        sink.finish();
+        assert!(sink.loss().is_none(), "{:?}", sink.loss());
+        drop(sink);
+        let mut received = Vec::new();
+        let mut writes = 0usize;
+        let mut buffer = [0u8; 4096];
+        while let Ok(size) = reader.recv(&mut buffer) {
+            if size == 0 {
+                break;
+            }
+            assert!(size <= 64, "a write of {size} bytes under a 64-byte cap");
+            received.extend_from_slice(&buffer[..size]);
+            writes += 1;
+            reader.set_nonblocking(true).expect("nonblocking reader");
+        }
+        let mut expected = Vec::new();
+        for frame in &frames {
+            expected.extend_from_slice(frame);
+            expected.push(b'\n');
+        }
+        assert_eq!(
+            received, expected,
+            "every frame once, in order, reassembled"
+        );
+        assert!(
+            writes >= frames.len() * 9,
+            "each ~620-byte frame took at least ten writes: {writes}"
+        );
+    }
+    // J5-C end
 
     #[test]
     fn an_oversized_event_is_refused_rather_than_truncated() {

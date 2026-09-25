@@ -1,0 +1,50 @@
+[
+  {
+    "schema": "ouro.jail.control/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "seq": 1,
+    "kind": "prepared",
+    "receipt_phase": "prepared",
+    "receipt_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "outcome": {
+      "kind": "pending",
+      "code": null,
+      "signal": null,
+      "cause": null,
+      "error": null
+    },
+    "error": null
+  },
+  {
+    "schema": "ouro.jail.control/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "seq": 2,
+    "kind": "exec_confirmed",
+    "receipt_phase": "enforced",
+    "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "outcome": {
+      "kind": "pending",
+      "code": null,
+      "signal": null,
+      "cause": null,
+      "error": null
+    },
+    "error": null
+  },
+  {
+    "schema": "ouro.jail.control/1",
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "seq": 3,
+    "kind": "settled",
+    "receipt_phase": "settled",
+    "receipt_digest": "sha256:6377cf0a83e710ae364f2d24a64599a0557fc694faf5e8f19220218a33ded0d3",
+    "outcome": {
+      "kind": "exited",
+      "code": 0,
+      "signal": null,
+      "cause": null,
+      "error": null
+    },
+    "error": null
+  }
+]

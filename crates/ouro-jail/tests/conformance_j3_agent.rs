@@ -173,17 +173,9 @@ fn settled(run: &Run) -> Value {
         "{:?}",
         run.receipt_errors()
     );
-    for receipt in run.receipts() {
-        validators()["jail-receipt"]
-            .validate(&receipt)
-            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
-        common::assert_semantic_receipt(&receipt);
-    }
-    for event in run.trace_events() {
-        validators()["jail-event"]
-            .validate(event)
-            .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
-    }
+    // J5-C: every receipt, the trace as a stream and the control transcript,
+    // held to the frozen contract.
+    common::assert_run_records(run);
     run.receipt_phase("settled").unwrap_or_else(|| {
         panic!(
             "no settled receipt: exit {:?}, stderr {}",

@@ -1,0 +1,2 @@
+{"cgroup":"/user.slice/user-1001.slice/session-9484.scope","ended":"2026-09-25T07:23:41Z","loadavg_end":"1.61 1.41 1.49 1/202 1105845","loadavg_start":"1.92 1.20 1.48 2/198 1047518","session":"plain","started":"2026-09-25T07:19:41Z"}
+{"cgroup":"/user.slice/user-1001.slice/user@1001.service/app.slice/run-p1105846-i5301702.scope","ended":"2026-09-25T07:27:24Z","loadavg_end":"1.77 1.56 1.54 2/196 1163528","loadavg_start":"1.61 1.41 1.49 1/203 1105846","session":"scope","started":"2026-09-25T07:23:41Z"}

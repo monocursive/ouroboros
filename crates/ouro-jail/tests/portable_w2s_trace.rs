@@ -215,6 +215,7 @@ impl RunningExecution for Running {
             Some(Step::Exec) => RunEvent::ExecConfirmed,
             Some(Step::ExecError) => RunEvent::ExecError {
                 errno: "ENOENT".into(),
+                detail: None,
             },
             Some(Step::Signaled) => RunEvent::TargetSignaled { signal: 9 },
             Some(Step::Exited) | None => RunEvent::TargetExited { code: 0 },

@@ -1,0 +1,211 @@
+# The frozen wire contract of jail v1, milestone 1 (jail-v1 §13, §17).
+#
+# jail-v1 §13: "After freeze, a breaking semantic change needs a new schema
+# identifier." Each entry pins one file by its bytes. A test
+# (crates/ouro-jail/tests/portable_version.rs) and validate_contract.py fail
+# when a frozen file's sha256 differs from the one recorded here.
+#
+# The rule: a frozen file whose bytes change is a new identifier. Revert the
+# change, or give what the file defines a new identifier (a schema: a new
+# `$id` `...:2` and wire identifier `.../2`) and record the new file as a new
+# entry. An entry is never re-blessed in place. Nothing in a file can prevent
+# someone editing both a frozen file and its sha256 here; that edit is visible
+# in review, and by this rule it is a violation, not a re-bless.
+#
+# `[[frozen]]`: every `*.schema.json` beside this file is either frozen here
+# or listed as `[[unfrozen]]` with the reason it is not a milestone-1 wire
+# record, and no two schema files declare one `$id`. `identifier` is the wire
+# `schema` value the records carry and `version --json` announces; the
+# producer restriction carries the envelope's.
+#
+# `[[frozen_artifact]]`: the files that define the announced identifiers no
+# schema states: the policy digest domain and policy file (canonicalization.md
+# and its golden fixtures), the network rule set, the gate frame rules, and
+# the record rules no schema can state (the semantic corpus and the instances
+# it changes). Every identifier `version --json` announces is backed by a
+# frozen schema or a frozen artifact. The checkers that run the corpora
+# (ouro_jail::records::semantic, validate_contract.py) are code, not frozen by
+# bytes: the corpus is their contract, and both must give every case its
+# recorded verdict.
+#
+# The same schema sha256s are recorded in the milestone freeze file
+# (milestone-1-freeze.toml) and the milestone report.
+
+schema = "ouro.jail.frozen-schemas/1"
+milestone = "milestone-1"
+
+# §13.1: the shared source-event envelope
+[[frozen]]
+file = "event.schema.json"
+id = "urn:ouro:schema:event:1"
+identifier = "ouro.event/1"
+sha256 = "f11a51654753f9db14bede36a33abee5a7fbfbb66901a9175fd7cd3e45296384"
+
+# §13.1: the jail producer's restriction of ouro.event/1 (no identifier of its own)
+[[frozen]]
+file = "jail-event.schema.json"
+id = "urn:ouro:schema:jail-event:1"
+identifier = "ouro.event/1"
+sha256 = "08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137"
+
+# §13.2: the receipt
+[[frozen]]
+file = "jail-receipt.schema.json"
+id = "urn:ouro:schema:jail-receipt:1"
+identifier = "ouro.jail.receipt/1"
+sha256 = "7f20ea6830bb81e27d46dd7ac90c69a6d3a4f84b7613bcaa1a375192d59e2c5a"
+
+# §6.3, canonicalization.md: the canonical policy snapshot
+[[frozen]]
+file = "policy-snapshot.schema.json"
+id = "urn:ouro:schema:jail-policy-snapshot:1"
+identifier = "ouro.jail.policy-snapshot/1"
+sha256 = "94bc81e85522cfa3b81bc7f2dd9504a8a3fd5f412ccac3938c98bdd018c61da4"
+
+# §8.2: the managed gate release frame
+[[frozen]]
+file = "jail-gate.schema.json"
+id = "urn:ouro:schema:jail-gate:1"
+identifier = "ouro.jail.gate/1"
+sha256 = "cc7156f417929e3e93e842b02ee7630a025025e0856cf6cc3d1eda26666ff201"
+
+# §8.2: the control message
+[[frozen]]
+file = "jail-control.schema.json"
+id = "urn:ouro:schema:jail-control:1"
+identifier = "ouro.jail.control/1"
+sha256 = "1a7ca84c1839448806becf5e320987e56f373c8bce858841a39943b25e6d4740"
+
+# §3.2, §14.1: doctor --json, which supersedes the manual host manifest and
+# is recorded with every conformance run and the milestone report
+[[frozen]]
+file = "jail-doctor.schema.json"
+id = "urn:ouro:schema:jail-doctor:1"
+identifier = "ouro.jail.doctor/1"
+sha256 = "bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9"
+
+# the canonical bytes, the policy and argv digest preimages and the private policy.json envelope
+[[frozen_artifact]]
+file = "canonicalization.md"
+identifiers = ["ouro.jail.policy/1", "ouro.jail.policy-file/1", "ouro.jail.policy-snapshot/1"]
+sha256 = "c4f809f34adb8090e245a9b89d3dada7aa95a4b0b419907b6280047674e2c56e"
+
+# the golden snapshot
+[[frozen_artifact]]
+file = "fixtures/policy-snapshot.json"
+identifiers = ["ouro.jail.policy/1"]
+sha256 = "bcb787d7294e2971466c1233882616a5ef3f88c8a687eea0a0d37e6a4c557187"
+
+# its golden RFC 8785 bytes
+[[frozen_artifact]]
+file = "fixtures/policy.jcs"
+identifiers = ["ouro.jail.policy/1"]
+sha256 = "5ac06fe87661d497f95be1af7d7dbc8a584f5312b145f7d37467a9d0b1a8debe"
+
+# the golden policy and argv digests
+[[frozen_artifact]]
+file = "fixtures/digests.json"
+identifiers = ["ouro.jail.policy/1"]
+sha256 = "ff361096e68e18b34f8866b2c86ac47a29db4b966a03d1214de7f89d76b3b14b"
+
+# the host-rule set
+[[frozen_artifact]]
+file = "network-rules.md"
+identifiers = ["ouro.jail.network/1"]
+sha256 = "4622c64887ae26b23a5527d540955ee5bd77a27262c6b6d73b5598f23f14a00c"
+
+# the address table
+[[frozen_artifact]]
+file = "network-addresses.json"
+identifiers = ["ouro.jail.network/1"]
+sha256 = "60d9e0c44ae54d711d8ad8cbf0ae9f7cad66c3b3ce118bb3dfc8e05b7c897d49"
+
+# the frozen address fixtures (N03)
+[[frozen_artifact]]
+file = "fixtures/network-cases.json"
+identifiers = ["ouro.jail.network/1"]
+sha256 = "0ec74d81e3cdc9125f879d564d4fe2e1bd17bee053879da8fd9b3ba5e3cd7134"
+
+# the frame rules no schema states
+[[frozen_artifact]]
+file = "fixtures/gate-frames.json"
+identifiers = ["ouro.jail.gate/1"]
+sha256 = "105ba35ff476bebfe7ee1df74c98ceb15514f7a2fcca7203a0a3f839e6ec2f75"
+
+# the record rules no schema states, and their citations
+[[frozen_artifact]]
+file = "fixtures/semantic-cases.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "75087582edaeb746b4a62edb82aae92bc6751b5ff60584a96668bcaa1d5618b9"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-agent-proxy-only.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "50bc375795b32a2c0af9a29c5d2e32e6b34bfa66be6eed377387deedba273f39"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-exec-refused.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "23b1cff4cddd0a10b9b524cdf596d57530fdac7a662d879a185751783f1bb567"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-macos-refused.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "6c7ccd81445f73be174bed300ec818cf513264ce993f7067cc05e4a641a4be99"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-native-path.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "4f0129c535273d4bbd4c73087c177dba32eac7b1a6c0288b15ec7de94daeb4f0"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-none.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "fd0900054d8741f44d0473b7ae55a9f21e984e9747d698f8f0ddaa4ba9e80b62"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-prepared.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "81a79512f19e4a1534f9760daf1f11156d3fecb5e2857bec3eee1f2a9eda45ab"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-settled-unknown.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "9bdb84ba3f7c8844c6c07133043cf41a9b3d1655b15c5e788ef9d9d0e61ef705"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "examples/receipt-tool.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "20fb2a33bbede8be0c836d183c159f52d1f13c132081263d54690e7bf42c7dd7"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "fixtures/control-tool.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "e81bbdfb5fe0fc5b9ba67a680d5cdc90383d3bf2ef52adb2cc7e1cd77d28ae76"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "fixtures/receipt-trace-loss.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "7fb8b38686ff9feb9b0f31875e4126b7e45cc7883ab1cb878d8818c39c417f65"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "fixtures/trace-loss.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "83a7442ff668aff3d885c2560dd6217f86387cbc26271eb62c84741648244310"
+
+# an instance the semantic corpus changes
+[[frozen_artifact]]
+file = "fixtures/trace-tool.json"
+identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
+sha256 = "9eee4083254560f1eacc59a3df0d803133002c98cb5197f6d2836d35315087a5"

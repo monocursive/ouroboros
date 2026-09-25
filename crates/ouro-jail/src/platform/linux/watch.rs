@@ -18,8 +18,9 @@
 //! that started it, which can die before the rest of a dying supervisor, so
 //! bubblewrap can end while the supervisor still looks alive (measured with an
 //! instrumented watcher, J4). A supervisor still alive when the grace ends
-//! owns what is left, and the watcher leaves, so the observer's wait for its
-//! last child is never held up for long.
+//! owns what is left, and the watcher leaves. The observer does not wait for
+//! the watcher (J5-T): the supervisor reaps it itself once the observer is
+//! done.
 //!
 //! Killing only the backend is not enough (J4, measured 2026-09-23):
 //! bubblewrap's namespace init arms its own parent-death signal late in its
@@ -96,7 +97,17 @@ impl Watcher {
         let result = (|| {
             let fd = identity::pidfd_open(child.id() as i32)?;
             if !read_release(ready_r.as_raw_fd(), deadline) {
-                return Err(io::Error::other("lifetime watcher did not become ready"));
+                // A wait the deadline ended is a timeout, which the caller
+                // reports as the preparation budget's, not as a host failure.
+                let kind = if deadline.expired() {
+                    io::ErrorKind::TimedOut
+                } else {
+                    io::ErrorKind::Other
+                };
+                return Err(io::Error::new(
+                    kind,
+                    "lifetime watcher did not become ready",
+                ));
             }
             Ok(fd)
         })();
@@ -196,7 +207,7 @@ pub fn bootstrap_main(args: &[OsString]) -> ! {
     unsafe {
         libc::write(super::platform::STATUS_FD, note.as_ptr().cast(), note.len());
     }
-    eprintln!("ouro-jail: backend exec failed: {error}");
+    crate::diag!("ouro-jail: backend exec failed: {error}");
     std::process::exit(125);
 }
 

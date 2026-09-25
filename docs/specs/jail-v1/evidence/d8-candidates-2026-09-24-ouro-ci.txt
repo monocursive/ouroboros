@@ -1,0 +1,124 @@
+# D8 candidate fixture runs on the stock reference host (jail-v1 §5.1, north star D8)
+# 2026-09-24, as ouro-ci (no sudo, CapEff 0), Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap 0.11.1,
+# kernel.apparmor_restrict_unprivileged_userns=1. Nothing was installed on the host: every
+# tool below lives in ~/j5/d8 and was removed afterwards.
+#
+# Provenance (each download verified against its publisher's checksum):
+#   node v24.21.0 (nodejs.org, SHASUMS256.txt): fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+#   @anthropic-ai/sandbox-runtime 0.0.77 (npm, integrity sha512-uOe6kkAbo91r5shXXBxZ1DKbOpWmnXkNDDujXrFJRaHSG7D7s8b7Yfsu0pGDkYFgKZ2ECtVCNisl6pCYcaMF7A==)
+#   greywall 0.3.7 (GitHub release checksums.txt): tarball 1a340a9027a8ac71a33907f84cb8c39bbaa4a313ef7669ef2bc6f3aaafc5c7ff, binary 9968afd25b7b4b9f16ce5b868115e108e4ea856f5d62bc3ee6be78eb20e8f950
+#   ripgrep_15.1.0-1ubuntu1_amd64.deb (Ubuntu archive via apt-get download, unpacked with dpkg -x): 80a254cd0471985cc712bac42a8b5809d4a58932ef9a50e64a1f7cdb224b7a90
+#   socat_1.8.1.1-1ubuntu0.1_amd64.deb (Ubuntu archive via apt-get download, unpacked with dpkg -x): 7e216496b3dfd7c0d7d655f5230e3062c0db028e0a95afff79b00ee17f557188
+#
+# The fixture: a trivial command, then what an agent sandbox does inside the jail (a nested user
+# namespace and a nested bubblewrap), then each candidate's own monitoring of a denied write.
+
+## sandbox-runtime (srt) 0.0.77
+# srt 0.0.77 on 7.0.0-31-generic, 2026-09-24T19:57:28Z, as ouro-ci
+$ srt -s srt-settings.json -c <fixture>
+Error: Sandbox dependencies not available: ripgrep (rg) not found, socat not installed
+srt_exit=1
+
+# with Ubuntu socat 1.8.1.1-1ubuntu0.1 and ripgrep 15.1.0-1ubuntu1 extracted to ~/j5/d8/local (apt-get download + dpkg -x, nothing installed)
+$ srt -s srt-settings.json -c <fixture>
+apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied
+srt_exit=1
+
+$ srt -s srt-settings.json -c true   (trivial command, nothing nested)
+apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied
+srt_exit=1
+$ srt -d -s srt-settings.json -c true   (debug: which layer fails)
+[SandboxDebug] [SeccompFilter] Looking for apply-seccomp binary for architecture: x64
+[SandboxDebug] [SeccompFilter] Found apply-seccomp binary: /home/ouro-ci/j5/d8/srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/x64/apply-seccomp (x64)
+[SandboxDebug] [Sandbox Linux] Applying seccomp filter for Unix socket blocking
+[SandboxDebug] [Sandbox Linux] Wrapped command with bwrap (network, filesystem, seccomp(unix-block) restrictions)
+apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied
+
+## Greywall 0.3.7
+# greywall 0.3.7 on 7.0.0-31-generic, 2026-09-24T19:57:28Z, as ouro-ci
+$ greywall check
+greywall - lightweight, container-free sandbox for running untrusted commands
+Version: 0.3.7
+Built:   2026-06-01T15:01:40Z
+Commit:  5581056d0523bfa244d8061008744ed9f72a0361
+Platform: linux (kernel 7.0)
+
+Checking system capabilities:
+  ✓ bubblewrap
+  ✗ socat — required
+  ✓ seccomp
+  ✓ landlock (v8)
+  ✓ D-Bus isolated (notify-send will not work)
+  ✗ xdg-dbus-proxy — optional, enables notify-send inside sandbox
+  ✗ secret-tool — optional, injects keyring credentials (gh, glab) into sandbox
+  ✓ network isolation
+  ✗ greyproxy
+  ✗ greyproxy running
+
+Next steps:
+  1. sudo apt install socat
+  2. sudo apt install xdg-dbus-proxy
+  3. sudo apt install libsecret-tools
+  4. greywall setup
+  5. Run 'greywall check' again to verify
+check_exit=0
+$ greywall -c <fixture>
+Error: failed to initialize sandbox: failed to initialize proxy bridge: socat is required on Linux but not found: exec: "socat": executable file not found in $PATH
+greywall_exit=1
+
+# with Ubuntu socat 1.8.1.1-1ubuntu0.1 extracted to ~/j5/d8/local (nothing installed)
+$ greywall -c <fixture>
+Error: failed to wrap command: command blocked by default sandbox command policy: "unshare -Ur true" matches "unshare"
+greywall_exit=1
+
+$ greywall -c "echo inside uid=$(id -u)"   (trivial command)
+RTNETLINK answers: Operation not permitted
+ioctl(TUNSETIFF): Operation not permitted
+Cannot find device "tun0"
+Cannot find device "tun0"
+Cannot find device "tun0"
+inside uid=1001
+greywall_exit=0
+$ greywall -- ./work/nested.sh   (nested bubblewrap, as an agent sandbox would start)
+RTNETLINK answers: Operation not permitted
+ioctl(TUNSETIFF): Operation not permitted
+Cannot find device "tun0"
+Cannot find device "tun0"
+Cannot find device "tun0"
+inside uid=1001
+NoNewPrivs:	1
+Seccomp:	2
+bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.
+nested_bwrap_rc=1
+greywall_exit=0
+
+$ greywall -c "curl -sS -m 5 -o /dev/null -w %{http_code} https://example.com"   (egress with no proxy running)
+curl: (6) Could not resolve host: example.com
+000
+curl_rc=0
+greywall_exit=0
+
+$ greywall -m -c "touch work/created; cat /etc/shadow; echo done"   (monitor mode: are a create and a denied read reported?)
+cat: /etc/shadow: Permission denied
+done
+greywall_exit=0
+$ greywall --learning -c "touch work/learned"   (learning mode: strace-based tracing)
+[greywall] Learning mode: tracing filesystem access for "touch"
+[greywall] WARNING: The sandbox filesystem is relaxed during learning. Do not use for untrusted code.
+[greywall] Analyzing filesystem access patterns...
+
+[greywall] No additional write paths discovered.
+
+[greywall] Generated profile:
+[greywall]   // Learned profile for "touch"
+[greywall]   // Generated by: greywall --learning -- touch
+[greywall]   // Review and adjust paths as needed
+[greywall]   {
+[greywall]     "schemaVersion": 1,
+greywall_exit=0
+
+$ greywall -m -c "touch $HOME/greywall-denied-write; echo touch_rc=$?"   (a write outside allowWrite [.], which greywall itself must deny; is the violation reported?)
+touch: cannot touch '/home/ouro-ci/greywall-denied-write': Permission denied
+touch_rc=1
+greywall_exit=0
+after: ls: cannot access '/home/ouro-ci/greywall-denied-write': No such file or directory

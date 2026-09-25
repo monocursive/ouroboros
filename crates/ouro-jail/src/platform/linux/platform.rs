@@ -15,7 +15,7 @@
 //! init and the target tree, while the supervisor/observer/watcher stay outside.
 
 use std::ffi::{OsStr, OsString};
-use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -56,7 +56,7 @@ use super::seccomp;
 use super::tracer::{Tracer, TracerEvent, TracerSummary};
 
 /// Descriptor the seccomp program is handed to bubblewrap on.
-const SECCOMP_FD: RawFd = 10;
+pub(crate) const SECCOMP_FD: RawFd = 10;
 /// Descriptor bubblewrap writes its JSON status to.
 pub(crate) const STATUS_FD: RawFd = 11;
 /// Descriptor the launcher blocks reading.
@@ -64,14 +64,14 @@ const RELEASE_FD: RawFd = 12;
 /// Descriptor the launcher writes a failed exec's errno to.
 const ERROR_FD: RawFd = 13;
 /// Descriptor a long argument list is handed over.
-const ARGS_FD: RawFd = 14;
+pub(crate) const ARGS_FD: RawFd = 14;
 /// First fixed descriptor number used for pinned protected binds
 /// (`--ro-bind-fd`); the fixed channel descriptors live below it.
 const PINNED_FD_BASE: RawFd = 20;
 // J3-launch begin: the vendor-state directory's descriptor in bubblewrap
 /// Descriptor the vendor-state directory is handed to bubblewrap on
 /// (`--bind-fd`). The `bind_ro` credential views follow the pinned binds.
-const VENDOR_STATE_FD: RawFd = 16;
+pub(crate) const VENDOR_STATE_FD: RawFd = 16;
 // J3-launch end
 
 /// Preparation budget (§8.2).
@@ -93,7 +93,8 @@ const LIMIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 /// The Linux platform.
 #[derive(Clone, Debug)]
 pub struct LinuxPlatform {
-    bwrap: PathBuf,
+    // J5-D: the resolved backend, or why none was (review F1/F2)
+    bwrap: Result<PathBuf, String>,
 }
 
 impl Default for LinuxPlatform {
@@ -103,38 +104,93 @@ impl Default for LinuxPlatform {
 }
 
 impl LinuxPlatform {
-    /// The platform with bubblewrap looked up on `PATH`.
+    /// The platform with the bubblewrap this process resolved once from the
+    /// operator's `PATH` ([`resolved_bwrap`]).
     #[must_use]
     pub fn new() -> Self {
         LinuxPlatform {
-            bwrap: find_bwrap(),
+            bwrap: resolved_bwrap()
+                .map(Path::to_path_buf)
+                .map_err(str::to_owned),
         }
     }
 
-    /// The bubblewrap binary this platform will use.
+    /// The bubblewrap binary this platform executes: an absolute, canonical
+    /// path, or `None` when the operator's `PATH` provides none.
     #[must_use]
-    pub fn bwrap(&self) -> &Path {
-        &self.bwrap
+    pub fn bwrap(&self) -> Option<&Path> {
+        self.bwrap.as_deref().ok()
+    }
+
+    /// The backend as the probes take it: the path, or why there is none.
+    fn backend(&self) -> Result<&Path, &str> {
+        self.bwrap.as_deref().map_err(String::as_str)
     }
 }
 
-/// The backend, looked up on the operator's `PATH`.
+// J5-D begin: bubblewrap, resolved once (review F1, F2)
+/// The backend, resolved from a `PATH` value.
 ///
-/// There is no fallback to a well-known location. An operator whose `PATH`
-/// does not contain bubblewrap has not provisioned this host for the backend,
-/// and `doctor` should say the backend is unavailable rather than reach past
-/// what they configured and report a capability they did not offer.
-fn find_bwrap() -> PathBuf {
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join("bwrap");
-            if candidate.is_file() {
-                return candidate;
-            }
+/// The first *absolute* entry that holds an executable regular file named
+/// `bwrap`, canonicalized, so the path recorded is the file that runs. An
+/// empty entry (which a shell-style lookup reads as the current directory)
+/// and a relative entry are skipped: either would let the working directory
+/// pick the backend. There is no fallback to a well-known location, and an
+/// unset `PATH` is not replaced by the C library's default search path: an
+/// operator whose `PATH` does not name bubblewrap has not provisioned it,
+/// and `doctor` says the backend is unavailable rather than reach past what
+/// they configured (§3.2).
+///
+/// # Errors
+/// Why no backend was found, for the `bwrap_present` evidence.
+pub fn resolve_bwrap(path: Option<&std::ffi::OsStr>) -> Result<PathBuf, String> {
+    let Some(path) = path else {
+        return Err("PATH is unset, so no bubblewrap is provisioned for this process".to_owned());
+    };
+    let mut skipped = Vec::new();
+    for dir in std::env::split_paths(path) {
+        if dir.as_os_str().is_empty() || !dir.is_absolute() {
+            skipped.push(format!("{:?}", dir.display().to_string()));
+            continue;
+        }
+        let Ok(canonical) = std::fs::canonicalize(dir.join("bwrap")) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&canonical) else {
+            continue;
+        };
+        let Ok(c_path) = std::ffi::CString::new(canonical.as_os_str().as_bytes()) else {
+            continue;
+        };
+        // SAFETY: `c_path` is a live NUL-terminated string; access reads it.
+        let executable = unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0;
+        if meta.is_file() && executable {
+            return Ok(canonical);
         }
     }
-    PathBuf::from("bwrap")
+    let mut reason = "no executable `bwrap` in any absolute PATH entry".to_owned();
+    if !skipped.is_empty() {
+        reason.push_str(&format!(
+            " (empty or relative entries are never searched: {})",
+            skipped.join(", ")
+        ));
+    }
+    Err(reason)
 }
+
+/// [`resolve_bwrap`] of this process's `PATH`, computed once: every probe,
+/// every run and `doctor`'s record use this one path.
+///
+/// # Errors
+/// Why no backend was found.
+pub fn resolved_bwrap() -> Result<&'static Path, &'static str> {
+    static RESOLVED: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| resolve_bwrap(std::env::var_os("PATH").as_deref()))
+        .as_deref()
+        .map_err(String::as_str)
+}
+// J5-D end
 
 fn error(
     code: ErrorCode,
@@ -333,37 +389,43 @@ impl LinuxPlatform {
         let results: Vec<ProbeResult> = probe::PROBE_NAMES
             .iter()
             .filter(|name| wanted(name))
-            .map(|name| probe::run_one(name, &exe, &self.bwrap))
+            .map(|name| probe::run_one_backend(name, &exe, self.backend()))
             .collect();
-        let measured_at = rfc3339_utc(SystemTime::now());
-
-        // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
-        // Shadows the fn for this call only; the closure falls back to it.
-        let capability_for = |requirement: &str, results: &[ProbeResult], measured_at: &str| {
-            super::uncontained::capability_for(plan.profile, requirement, results, measured_at)
-                .unwrap_or_else(|| capability_for(requirement, results, measured_at))
-        };
-        // J3-none end
-        let mut out: Vec<Capability> = plan
-            .requirements
-            .iter()
-            .map(|requirement| capability_for(requirement, &results, &measured_at))
-            .collect();
-        // The probe rows themselves, so `doctor --json` reports what was
-        // measured and not only what the plan happened to ask for (§14.1).
-        for result in &results {
-            out.push(Capability {
-                name: result.name.to_owned(),
-                status: status_of(result),
-                scope: CapabilityScope::Host,
-                mechanism: Some(result.mechanism.to_owned()),
-                reason_code: Some(result.reason_code.to_owned()),
-                measured_at: Some(measured_at.clone()),
-                evidence_ref: Some(result.evidence.clone()),
-            });
-        }
-        out
+        derive(plan, &results, &rfc3339_utc(SystemTime::now()))
     }
+}
+
+// J5-D: the derivation apart from the probing, so the requirement→probe
+// mapping is testable with stated results (review F12).
+/// The plan's capabilities from the probe results: one row per requirement
+/// (through [`inputs_for`] and `none`'s own mapping), then the probe rows.
+fn derive(plan: &PlanRequest, results: &[ProbeResult], measured_at: &str) -> Vec<Capability> {
+    // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
+    // Shadows the fn for this call only; the closure falls back to it.
+    let capability_for = |requirement: &str, results: &[ProbeResult], measured_at: &str| {
+        super::uncontained::capability_for(plan.profile, requirement, results, measured_at)
+            .unwrap_or_else(|| capability_for(requirement, results, measured_at))
+    };
+    // J3-none end
+    let mut out: Vec<Capability> = plan
+        .requirements
+        .iter()
+        .map(|requirement| capability_for(requirement, results, measured_at))
+        .collect();
+    // The probe rows themselves, so `doctor --json` reports what was
+    // measured and not only what the plan happened to ask for (§14.1).
+    for result in results {
+        out.push(Capability {
+            name: result.name.to_owned(),
+            status: status_of(result),
+            scope: CapabilityScope::Host,
+            mechanism: Some(result.mechanism.to_owned()),
+            reason_code: Some(result.reason_code.to_owned()),
+            measured_at: Some(measured_at.to_owned()),
+            evidence_ref: Some(result.evidence.clone()),
+        });
+    }
+    out
 }
 
 impl Platform for LinuxPlatform {
@@ -417,7 +479,16 @@ impl Platform for LinuxPlatform {
             return super::uncontained::prepare(plan, sinks, deadline);
         }
         // J3-none end
-        let prepared = Boundary::create(&self.bwrap, plan, sinks, deadline)?;
+        // J5-D: never a bare name, so nothing but the resolved file runs.
+        let bwrap = self.backend().map_err(|reason| {
+            error(
+                ErrorCode::BackendUnavailable,
+                ErrorStage::Preparing,
+                Remediation::HostSetup,
+                format!("bubblewrap is not available: {reason}"),
+            )
+        })?;
+        let prepared = Boundary::create(bwrap, plan, sinks, deadline)?;
         Ok(Box::new(LinuxPrepared { boundary: prepared }))
     }
 }
@@ -789,6 +860,15 @@ impl Boundary {
             bplan.masked.push(PathBuf::from(destination));
         }
 
+        // J5-B1-w3: §9.1 — an operator grant may not expose host /proc, /sys
+        // or cgroupfs. Checked here, before any mount, on the resolved source
+        // by filesystem type and mount topology (never by spelling), so it
+        // refuses before exec. The baseline runtime roots are on the root
+        // filesystem and pass; the child's private /proc and /dev are made by
+        // bubblewrap, not bound from these sources.
+        refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
+        refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")?;
+
         let (scan, pins, pinned_fds, placeholders) = prepare_mounts(
             &mut bplan,
             &plan.attempt_dir,
@@ -878,7 +958,16 @@ impl Boundary {
             PINNED_FD_BASE + pinned_fds.len() as RawFd + staged.credentials.len() as RawFd,
         );
         // J3-launch end
+        // §8.2: a wait that the preparation budget ended (the watcher's
+        // readiness, the arguments' write) refuses as the budget's timeout,
+        // with remediation `retry`, not as a host failure of the step that
+        // happened to be waiting.
         let io = |err: std::io::Error| {
+            if err.kind() == std::io::ErrorKind::TimedOut {
+                return prepare_timeout(&format!(
+                    "preparation did not complete within its budget: {err}"
+                ));
+            }
             preparing(
                 ErrorCode::BackendUnavailable,
                 format!("the boundary's channels could not be created: {err}"),
@@ -936,6 +1025,10 @@ impl Boundary {
 
         let mut command = Command::new(&exe);
         command.arg("__backend").args(&rendered.argv);
+        // J5-B2 seam: give a test a deterministic window between pinning and
+        // the mount-handoff verification below to replace a pinned source, so
+        // the source-identity-swap refusal (F04) can be proved through the CLI.
+        mount_swap_rendezvous();
         // §9.1 mount-handoff verification: the workspace and every pinned
         // protected segment must still resolve to the objects that were
         // scanned, or the run refuses rather than bind a replacement.
@@ -2101,18 +2194,35 @@ fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
 }
 
 /// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`.
+// J5-B1 begin: P01.8 — mountinfo is bytes, not text. It was read with
+// `read_to_string`, so one mount point that is not UTF-8 (a `--deny-read` of
+// such a name, say) made the whole read fail and the receipt claimed an empty
+// mount table.
 fn read_mount_table(pid: libc::pid_t) -> Vec<AppliedMount> {
-    let Ok(raw) = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")) else {
+    let Ok(raw) = std::fs::read(format!("/proc/{pid}/mountinfo")) else {
         return Vec::new();
     };
+    parse_mount_table(&raw)
+}
+
+/// The `(mount point, mode)` rows of a `mountinfo` file's bytes. Fields are
+/// separated by single spaces; a space, tab, newline or backslash inside a
+/// path is an octal escape, so splitting on the byte is exact.
+fn parse_mount_table(raw: &[u8]) -> Vec<AppliedMount> {
     let mut out = Vec::new();
-    for line in raw.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
+    for line in raw.split(|byte| *byte == b'\n') {
+        let fields: Vec<&[u8]> = line
+            .split(|byte| *byte == b' ')
+            .filter(|field| !field.is_empty())
+            .collect();
         let Some(point) = fields.get(4) else { continue };
         let Some(options) = fields.get(5) else {
             continue;
         };
-        let mode = if options.split(',').any(|item| item == "ro") {
+        let mode = if options
+            .split(|byte| *byte == b',')
+            .any(|item| item == b"ro")
+        {
             "ro"
         } else {
             "rw"
@@ -2133,24 +2243,26 @@ fn read_mount_table(pid: libc::pid_t) -> Vec<AppliedMount> {
 }
 
 /// `mountinfo` escapes space, tab, newline and backslash as octal.
-fn decode_mountinfo_path(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
+fn decode_mountinfo_path(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'\\' && index + 3 < bytes.len() {
-            let digits = &text[index + 1..index + 4];
-            if let Ok(value) = u8::from_str_radix(digits, 8) {
-                out.push(value);
-                index += 4;
-                continue;
-            }
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && let Some(value) = std::str::from_utf8(&bytes[index + 1..index + 4])
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 8).ok())
+        {
+            out.push(value);
+            index += 4;
+            continue;
         }
         out.push(bytes[index]);
         index += 1;
     }
     out
 }
+// J5-B1 end
 
 /// The environment names the launcher actually has, read from `/proc`.
 ///
@@ -2352,6 +2464,123 @@ type MountPreparation = (
     Vec<(OwnedFd, RawFd)>,
     Vec<Placeholder>,
 );
+
+/// `OURO_JAIL_TEST_MOUNT_SWAP=<dir>`: a test seam (J5-B2) that opens a
+/// deterministic window at the §9.1 mount handoff. When the variable names a
+/// directory, the supervisor writes `<dir>/pinned` once every mount source has
+/// been pinned and then waits (bounded, 10 s) for `<dir>/go` before running the
+/// handoff verification. A test replaces a pinned object in that window to
+/// prove the verification refuses the replacement (F04 source-identity swap).
+///
+/// Test-only. It can only delay the verification that is already there — never
+/// widen anything — and, like every `OURO_JAIL_TEST_*` variable, it is recorded
+/// in jail state and in every receipt with native details
+/// (`state::persist::test_seams`, S9). A value that is not a usable directory
+/// makes the write and the poll no-ops, so a stray setting cannot hang a run.
+pub const MOUNT_SWAP_SEAM: &str = "OURO_JAIL_TEST_MOUNT_SWAP";
+
+fn mount_swap_rendezvous() {
+    let Some(dir) = std::env::var_os(MOUNT_SWAP_SEAM) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    if std::fs::write(dir.join("pinned"), b"1").is_err() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !dir.join("go").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+// J5-B1-w3 begin: §9.1 pseudo-filesystem guard
+/// Refuses any operator grant in `binds` whose resolved source exposes host
+/// `/proc`, `/sys` or cgroupfs (jail-v1 §9.1), keyed by `key`
+/// (`filesystem.read_only` or `filesystem.read_write`). A policy refusal
+/// (`policy_widening`, remediation `configuration`) before any mount.
+fn refuse_pseudo_fs_grants(binds: &[(PathBuf, PathBuf)], key: &str) -> Result<(), JailError> {
+    if binds.is_empty() {
+        return Ok(());
+    }
+    let mounts = pseudo_fs_mount_points();
+    for (source, _destination) in binds {
+        // The check follows symlinks to the real object (`--ro <link>` where
+        // the link resolves onto a pseudo filesystem must refuse); the later
+        // pin opens with RESOLVE_NO_SYMLINKS for race safety.
+        let resolved = std::fs::canonicalize(source).unwrap_or_else(|_| source.clone());
+        let on_pseudo = source_on_pseudo_fs(&resolved);
+        if crate::policy::grant_exposes_pseudo_fs(&resolved, on_pseudo, &mounts) {
+            return Err(error(
+                ErrorCode::PolicyWidening,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                format!(
+                    "the grant {} exposes host /proc, /sys or cgroupfs, which a contained \
+                     profile never binds (jail-v1 §9.1)",
+                    source.display()
+                ),
+            )
+            .with_key_path(key));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the object at `resolved` is on a proc, sysfs or cgroup filesystem,
+/// by `fstatfs` on an `O_PATH` handle. A path that cannot be opened is not
+/// treated as pseudo here; the ancestor check and the later pin catch the
+/// rest.
+fn source_on_pseudo_fs(resolved: &Path) -> bool {
+    let Ok(c) = super::sys::cstring_from_path(resolved) else {
+        return false;
+    };
+    // SAFETY: `c` is a NUL-terminated path that outlives the call; O_PATH
+    // acquires no I/O authority.
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: `fd` was just opened and is owned here.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut buf = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `fd` is live; `buf` is a writable statfs the call fills.
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), buf.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    // SAFETY: fstatfs returned 0, so the struct is initialised.
+    // SAFETY: fstatfs returned 0, so the struct is initialised.
+    let f_type = unsafe { buf.assume_init() }.f_type;
+    crate::policy::is_pseudo_fs_magic(f_type)
+}
+
+/// The mount points of every proc, sysfs or cgroup (v1 or v2) mount, from
+/// `/proc/self/mountinfo` read as bytes. The fstype is the field after the
+/// ` - ` separator.
+fn pseudo_fs_mount_points() -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(raw) = std::fs::read("/proc/self/mountinfo") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in raw.split(|byte| *byte == b'\n') {
+        let Some(separator) = line.windows(3).position(|w| w == b" - ") else {
+            continue;
+        };
+        let fields: Vec<&[u8]> = line.split(|byte| *byte == b' ').collect();
+        let Some(point) = fields.get(4) else { continue };
+        let fstype = line[separator + 3..]
+            .split(|byte| *byte == b' ')
+            .next()
+            .unwrap_or_default();
+        if matches!(fstype, b"proc" | b"sysfs" | b"cgroup" | b"cgroup2") {
+            out.push(PathBuf::from(std::ffi::OsStr::from_bytes(
+                &decode_mountinfo_path(point),
+            )));
+        }
+    }
+    out
+}
+// J5-B1-w3 end
 
 /// Pin every source once, scan the pinned writable roots, then give each bind
 /// its own descriptor. Bubblewrap validates the mounted inode against that fd.
@@ -2820,14 +3049,12 @@ impl LinuxRunning {
         // backend's report is all there is.
         let status = self.bwrap_status?;
         if !self.boundary.error_bytes.is_empty() {
-            let errno = super::launch::decode_error_report(&self.boundary.error_bytes).map_or_else(
-                || "unknown".to_owned(),
-                |code| super::sys::errno_name(code).to_owned(),
-            );
-            return Some(RunEvent::ExecError { errno });
+            let (errno, detail) = super::launch::exec_failure_parts(&self.boundary.error_bytes);
+            return Some(RunEvent::ExecError { errno, detail });
         }
         if !self.exec_confirmed {
-            return Some(RunEvent::Unknown {
+            // J5-B1: §6.4 — a coded error, not a bare unknown.
+            return Some(RunEvent::ExecUnconfirmed {
                 reason: "the backend ended without independent evidence of target exec".to_owned(),
             });
         }
@@ -2923,13 +3150,9 @@ impl RunningExecution for LinuxRunning {
                 self.boundary.error_bytes.clear();
             }
             if !self.boundary.error_bytes.is_empty() {
-                let errno = super::launch::decode_error_report(&self.boundary.error_bytes)
-                    .map_or_else(
-                        || "unknown".to_owned(),
-                        |code| super::sys::errno_name(code).to_owned(),
-                    );
+                let (errno, detail) = super::launch::exec_failure_parts(&self.boundary.error_bytes);
                 self.boundary.error_bytes.clear();
-                return RunEvent::ExecError { errno };
+                return RunEvent::ExecError { errno, detail };
             }
             let done = self.bwrap_status.is_some()
                 && (self.boundary.tracer.is_none()
@@ -2983,8 +3206,8 @@ impl RunningExecution for LinuxRunning {
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
             self.pump_status();
-            // The observer finishes only once every child of this process is
-            // gone, the watcher included.
+            // The observer finishes once every tracee and the backend are
+            // reaped (J5-T); the watcher, released here, is reaped below.
             self.boundary.release_watcher_after_backend();
             let tracer_done = self.boundary.tracer.is_none() || self.finished;
             if tracer_done
@@ -3354,6 +3577,214 @@ impl Drop for Boundary {
 
 #[cfg(test)]
 mod tests {
+    // J5-D begin: bubblewrap resolution (review F1, F2)
+    fn executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn bubblewrap_resolves_only_from_absolute_entries_to_a_canonical_file() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        let link = root.join("link");
+        for d in [&first, &second, &link] {
+            std::fs::create_dir(d).unwrap();
+        }
+        executable(&second.join("bwrap"));
+        let second_s = second.to_str().unwrap().to_owned();
+
+        // An empty, a `.` and a relative entry are never searched, even
+        // listed first; the first absolute entry holding one wins.
+        for path in [
+            format!(":{second_s}"),
+            format!(".:{second_s}"),
+            format!("rel:{second_s}"),
+            format!("{}:{second_s}", first.display()),
+        ] {
+            assert_eq!(
+                super::resolve_bwrap(Some(OsStr::new(&path))).unwrap(),
+                second.join("bwrap"),
+                "{path}"
+            );
+        }
+        // A symlink is recorded as the file it names.
+        std::os::unix::fs::symlink(second.join("bwrap"), link.join("bwrap")).unwrap();
+        assert_eq!(
+            super::resolve_bwrap(Some(OsStr::new(link.to_str().unwrap()))).unwrap(),
+            second.join("bwrap")
+        );
+        // Not executable, or not a regular file: skipped.
+        std::fs::write(first.join("bwrap"), b"").unwrap();
+        std::fs::set_permissions(first.join("bwrap"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        std::fs::create_dir(root.join("dir-named")).unwrap();
+        std::fs::create_dir(root.join("dir-named").join("bwrap")).unwrap();
+        let path = format!(
+            "{}:{}:{second_s}",
+            first.display(),
+            root.join("dir-named").display()
+        );
+        assert_eq!(
+            super::resolve_bwrap(Some(OsStr::new(&path))).unwrap(),
+            second.join("bwrap")
+        );
+        // Nothing absolute holds one: refused, with the reason.
+        for path in ["", ":", ".", "rel:.:"] {
+            let reason = super::resolve_bwrap(Some(OsStr::new(path))).unwrap_err();
+            assert!(reason.contains("no executable `bwrap`"), "{path}: {reason}");
+            assert!(reason.contains("never searched"), "{path}: {reason}");
+        }
+        let reason = super::resolve_bwrap(Some(OsStr::new(first.to_str().unwrap()))).unwrap_err();
+        assert!(!reason.contains("never searched"), "{reason}");
+        // No PATH at all: refused, never the C library's default path.
+        assert!(
+            super::resolve_bwrap(None)
+                .unwrap_err()
+                .contains("PATH is unset")
+        );
+    }
+
+    #[test]
+    fn a_probe_never_executes_a_relative_or_missing_backend() {
+        use super::super::probe::{self, ProbeStatus};
+        let exe = std::path::Path::new("/nonexistent/ouro-jail");
+        for (name, _) in probe::BACKEND_PROBES {
+            for result in [
+                probe::run_one(name, exe, std::path::Path::new("bwrap")),
+                probe::run_one_backend(name, exe, Err("PATH is unset")),
+            ] {
+                // A table-bound probe is refused first off x86_64.
+                if result.status == ProbeStatus::Unsupported {
+                    continue;
+                }
+                assert_eq!(result.status, ProbeStatus::Unavailable, "{name}");
+                assert_eq!(result.reason_code, "backend_unavailable", "{name}");
+            }
+        }
+    }
+
+    fn plan_for(profile: crate::policy::ProfileName, observe_off: bool) -> super::PlanRequest {
+        let baseline = crate::profiles::baseline(profile, crate::records::Os::Linux, &|_| None);
+        let inputs = crate::policy::ResolveInputs {
+            platform: crate::records::Os::Linux,
+            base_profile: profile,
+            policy_name: profile.as_str().to_owned(),
+            baseline,
+            workspace: b"/work".to_vec(),
+            scratch: crate::policy::ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: Vec::new(),
+        };
+        let mut snapshot = crate::policy::resolve(&inputs)
+            .expect("the built-in baseline resolves")
+            .snapshot;
+        if observe_off {
+            snapshot.observation.mode = crate::records::ObserveMode::Off;
+        }
+        let requirements = crate::capability::requirements(&snapshot);
+        super::PlanRequest {
+            snapshot,
+            profile,
+            requirements,
+        }
+    }
+
+    /// Review F12: through the real requirement→probe mapping, a build for
+    /// an architecture the tables do not cover leaves the filter, observer
+    /// and proxy requirements unsupported (so `run` refuses before
+    /// preparation), and nothing else: `none` with observation off still
+    /// derives every requirement it needs.
+    #[test]
+    fn off_x86_64_the_real_mapping_refuses_exactly_the_table_bound_requirements() {
+        use super::super::probe::{self, ProbeResult, ProbeStatus};
+        use crate::capability::{
+            CapabilityStatus, REQ_CLOSED_SET_OBSERVATION, REQ_NETWORK_PROXY, REQ_SYSCALL_FILTER,
+        };
+        use crate::policy::ProfileName;
+        let results: Vec<ProbeResult> = probe::PROBE_NAMES
+            .iter()
+            .map(|name| {
+                probe::architecture_refusal(name, "aarch64").unwrap_or_else(|| ProbeResult {
+                    name,
+                    status: ProbeStatus::Available,
+                    mechanism: "test",
+                    reason_code: "ok",
+                    evidence: String::new(),
+                })
+            })
+            .collect();
+        let refused = [
+            REQ_SYSCALL_FILTER,
+            REQ_CLOSED_SET_OBSERVATION,
+            REQ_NETWORK_PROXY,
+        ];
+        for (profile, observe_off, expected) in [
+            (
+                ProfileName::Tool,
+                false,
+                &[REQ_SYSCALL_FILTER, REQ_CLOSED_SET_OBSERVATION][..],
+            ),
+            (ProfileName::Tool, true, &[REQ_SYSCALL_FILTER][..]),
+            (
+                ProfileName::Build,
+                false,
+                &[REQ_SYSCALL_FILTER, REQ_CLOSED_SET_OBSERVATION][..],
+            ),
+            (
+                ProfileName::Agent,
+                false,
+                &[
+                    REQ_SYSCALL_FILTER,
+                    REQ_CLOSED_SET_OBSERVATION,
+                    REQ_NETWORK_PROXY,
+                ][..],
+            ),
+            (ProfileName::None, false, &[REQ_CLOSED_SET_OBSERVATION][..]),
+            (ProfileName::None, true, &[][..]),
+        ] {
+            let plan = plan_for(profile, observe_off);
+            let capabilities = super::derive(&plan, &results, "2026-09-24T00:00:00Z");
+            let mut unsatisfied = Vec::new();
+            for requirement in &plan.requirements {
+                let row = capabilities
+                    .iter()
+                    .find(|row| &row.name == requirement)
+                    .unwrap_or_else(|| panic!("{profile:?}: no row for {requirement}"));
+                if row.satisfies() {
+                    continue;
+                }
+                assert_eq!(
+                    row.status,
+                    CapabilityStatus::Unsupported,
+                    "{profile:?} {requirement}"
+                );
+                assert_eq!(
+                    row.reason_code.as_deref(),
+                    Some("unsupported_architecture"),
+                    "{profile:?} {requirement}"
+                );
+                assert!(refused.contains(&requirement.as_str()), "{requirement}");
+                unsatisfied.push(requirement.clone());
+            }
+            let mut expected: Vec<&str> = expected.to_vec();
+            expected.sort_unstable();
+            unsatisfied.sort();
+            assert_eq!(
+                unsatisfied, expected,
+                "{profile:?} observe_off={observe_off}"
+            );
+        }
+    }
+    // J5-D end
+
     #[test]
     fn stalled_backend_argument_delivery_has_a_deadline() {
         use std::os::fd::AsRawFd;
@@ -3492,11 +3923,33 @@ mod tests {
     #[test]
     fn mountinfo_paths_decode_their_octal_escapes() {
         assert_eq!(
-            decode_mountinfo_path("/work/a\\040b"),
+            decode_mountinfo_path(b"/work/a\\040b"),
             b"/work/a b".to_vec()
         );
-        assert_eq!(decode_mountinfo_path("/plain"), b"/plain".to_vec());
+        assert_eq!(decode_mountinfo_path(b"/plain"), b"/plain".to_vec());
     }
+
+    // J5-B1 begin: P01.8
+    #[test]
+    fn a_mount_point_that_is_not_utf8_keeps_the_whole_table() {
+        let raw: &[u8] = b"22 1 0:1 / / ro,nosuid - tmpfs tmpfs ro\n\
+            23 22 0:2 / /work/sec\xffret rw,nosuid - tmpfs tmpfs rw\n\
+            24 22 0:3 / /work/a\\040b ro - tmpfs tmpfs ro\n";
+        let table = parse_mount_table(raw);
+        let rows: Vec<(Vec<u8>, &str)> = table
+            .iter()
+            .map(|mount| (mount.path.as_bytes().to_vec(), mount.mode.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (b"/".to_vec(), "ro"),
+                (b"/work/sec\xffret".to_vec(), "rw"),
+                (b"/work/a b".to_vec(), "ro"),
+            ]
+        );
+    }
+    // J5-B1 end
 
     #[test]
     fn a_requirement_with_no_probe_is_never_available() {

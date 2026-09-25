@@ -1,0 +1,26 @@
+     Running unittests src/lib.rs (target/release/deps/ouro_jail-1d54b8c75e2e48d1)
+
+running 1 test
+test records::tests::a ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/conformance_j1.rs (target/release/deps/conformance_j1-004409195d769e4e)
+
+running 1 test
+test x01_literal_argv ... 
+ok
+FAILED
+
+failures:
+
+---- x01_literal_argv stdout ----
+thread 'x01_literal_argv' panicked at crates/ouro-jail/tests/conformance_j1.rs:10:5:
+the marker was not written
+
+failures:
+    x01_literal_argv
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p ouro-jail --test conformance_j1`

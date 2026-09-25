@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:jail-gate:1",
+  "title": "Ouro jail gate release frame v1",
+  "description": "Frozen at jail milestone 1 (jail-v1 \u00a78.2, jail-v1.md:895-910). The one valid release object. The frame rules around it (one UTF-8 line ending in exactly one LF, no CR, at most 1,024 bytes including the LF, duplicate keys refuse, nothing after the LF) are checked on the bytes by the supervisor's parser and pinned by fixtures/gate-frames.json.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.jail.gate/1"
+    },
+    "action": {
+      "const": "release"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^att_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "schema",
+    "action",
+    "attempt_id",
+    "policy_digest"
+  ],
+  "additionalProperties": false
+}

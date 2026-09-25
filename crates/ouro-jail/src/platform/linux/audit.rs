@@ -74,6 +74,11 @@ pub struct AuditWriter {
     limit_hits: u64,
     /// True once a frame could not be written; recorded, never ignored.
     lost_frames: u64,
+    // J5-C begin: review item 12
+    /// When this writer was made, before the observer attached: the last
+    /// point nothing can have been lost, where a loss of unknown start begins.
+    created_ns: u64,
+    // J5-C end
 }
 
 impl AuditWriter {
@@ -96,6 +101,8 @@ impl AuditWriter {
             gaps: Vec::new(),
             limit_hits: 0,
             lost_frames: 0,
+            // J5-C: review item 12
+            created_ns: now_ns(),
         }
     }
 
@@ -116,15 +123,26 @@ impl AuditWriter {
             reason,
         );
         if let Some(trace) = self.trace.as_ref() {
+            // J5-C, review item 12: a poisoned trace lock took nothing, so
+            // the note is lost like any refused frame.
             let written = match trace.lock() {
-                Ok(mut sink) => sink.write_event(&event, Priority::Normal),
-                Err(_) => Ok(()),
+                Ok(mut sink) => sink.write_event(&event, Priority::Normal).is_ok(),
+                Err(_) => false,
             };
-            if written.is_err() {
+            if !written {
                 self.lost_frames += 1;
             }
         }
     }
+
+    // J5-C begin: review item 12
+    /// Frames that never reached the trace: results, gap notes and limit
+    /// notes the sink refused or a poisoned trace lock could not take.
+    #[must_use]
+    pub fn lost_frames(&self) -> u64 {
+        self.lost_frames
+    }
+    // J5-C end
 
     /// Events emitted for one coverage class so far.
     #[must_use]
@@ -142,20 +160,35 @@ impl AuditWriter {
             // anyone claimed to collect.
             return true;
         };
+        // `None`: the lock was poisoned by a panicking thread.
         let written = match trace.lock() {
-            Ok(mut sink) => sink.write_event(event, Priority::Normal),
-            Err(_) => {
+            Ok(mut sink) => Some(sink.write_event(event, Priority::Normal).is_ok()),
+            Err(_) => None,
+        };
+        match written {
+            Some(true) => true,
+            Some(false) => {
                 self.lost_frames += 1;
                 self.degraded.insert(class);
-                return false;
+                false
             }
-        };
-        if written.is_err() {
-            self.lost_frames += 1;
-            self.degraded.insert(class);
-            false
-        } else {
-            true
+            None => {
+                // J5-C, review item 12: a trace whose lock a panicking thread
+                // held can take no frame, and nothing else (the sink's own
+                // loss note, the supervisor's receipt gaps) will say so: this
+                // result is a gap of its class, with a count of one.
+                self.lost_frames += 1;
+                let now = now_ns();
+                self.push_gap(Gap {
+                    classes: vec![class.as_str().to_owned()],
+                    source: "audit".to_owned(),
+                    start_ns: now.to_string(),
+                    end_ns: Some(now.to_string()),
+                    reason: TRACE_WRITER_POISONED.to_owned(),
+                    lost_count: Some(1),
+                });
+                false
+            }
         }
     }
 
@@ -504,10 +537,7 @@ impl AuditWriter {
         count: Option<u64>,
     ) {
         let classes = classes_for(ops);
-        for class in &classes {
-            self.degraded.insert(*class);
-        }
-        let gap = Gap {
+        self.push_gap(Gap {
             classes: classes
                 .iter()
                 .map(|class| class.as_str().to_owned())
@@ -520,7 +550,26 @@ impl AuditWriter {
             end_ns: (!reason.is_open_ended()).then(|| to_ns.to_string()),
             reason: reason.as_str().to_owned(),
             lost_count: count,
-        };
+        });
+    }
+
+    /// Records one gap: degrades the classes it names, coalesces it with a
+    /// gap of the same reason and classes, bounds the summaries, and writes
+    /// its note. A note no trace took is a lost frame (J5-C review item 12:
+    /// a poisoned trace lock used to count as a successful write).
+    fn push_gap(&mut self, gap: Gap) {
+        for class in CoverageClass::ALL {
+            if gap.classes.iter().any(|name| name == class.as_str()) {
+                self.degraded.insert(class);
+            }
+        }
+        let (from_ns, to_ns) = (
+            gap.start_ns.parse::<u64>().unwrap_or(0),
+            gap.end_ns
+                .as_deref()
+                .and_then(|end| end.parse::<u64>().ok())
+                .unwrap_or(0),
+        );
         // Keep bounded interval summaries; repeated losses extend an interval.
         if let Some(existing) = self
             .gaps
@@ -554,10 +603,10 @@ impl AuditWriter {
         // A gap note may use the reserve: it is the record of what was lost.
         if let Some(trace) = self.trace.as_ref() {
             let written = match trace.lock() {
-                Ok(mut sink) => sink.write_event(&event, Priority::Reserve),
-                Err(_) => Ok(()),
+                Ok(mut sink) => sink.write_event(&event, Priority::Reserve).is_ok(),
+                Err(_) => false,
             };
-            if written.is_err() {
+            if !written {
                 self.lost_frames += 1;
             }
         }
@@ -579,6 +628,29 @@ impl AuditWriter {
     /// The coverage summary for an attempt this writer observed.
     #[must_use]
     pub fn summary(&self, tracer: &TracerSummary, attached: bool) -> CoverageSummary {
+        // J5-C, review item 12: a panicked tracer thread leaves every audit
+        // class without an account. The loss is stated as a gap in each, from
+        // before attachment (this writer's creation) to now, with no count,
+        // so a degraded class always names its missing interval (§11.4).
+        let mut gaps = self.gaps.clone();
+        if tracer.thread_panicked {
+            gaps.push(Gap {
+                classes: [
+                    CoverageClass::Exec,
+                    CoverageClass::FsWrite,
+                    CoverageClass::FsDeny,
+                    CoverageClass::Net,
+                ]
+                .iter()
+                .map(|class| class.as_str().to_owned())
+                .collect(),
+                source: "audit".to_owned(),
+                start_ns: self.created_ns.to_string(),
+                end_ns: Some(now_ns().max(self.created_ns).to_string()),
+                reason: OBSERVER_PANICKED.to_owned(),
+                lost_count: None,
+            });
+        }
         let audit_status = if self.degraded.is_empty() && !tracer.thread_panicked {
             SourceStatus::Active
         } else {
@@ -606,8 +678,7 @@ impl AuditWriter {
                     } else {
                         Some(self.count(class))
                     },
-                    gaps: self
-                        .gaps
+                    gaps: gaps
                         .iter()
                         .filter(|gap| gap.classes.iter().any(|name| name == class.as_str()))
                         .cloned()
@@ -626,7 +697,7 @@ impl AuditWriter {
                 audit: audit_status,
                 proxy: SourceStatus::Unsupported,
             },
-            gaps: self.gaps.clone(),
+            gaps,
             classes,
         }
     }
@@ -721,6 +792,18 @@ impl AuditWriter {
         )
     }
 }
+
+// J5-C begin: review item 12
+/// The gap reason of a result a poisoned trace lock could not take.
+const TRACE_WRITER_POISONED: &str = "trace_writer_poisoned";
+/// The gap reason of an observer whose tracer thread panicked.
+const OBSERVER_PANICKED: &str = "observer_panicked";
+
+/// Now, in the gap intervals' unit: nanoseconds since supervisor start.
+fn now_ns() -> u64 {
+    u64::try_from(crate::platform::elapsed_since_start_ns()).unwrap_or(u64::MAX)
+}
+// J5-C end
 
 /// `fields.pid_start_ticks`: the birth of the process `fields.pid` names —
 /// the start time of its thread-group leader, field 22 of `/proc/<pid>/stat`
@@ -1007,6 +1090,146 @@ mod tests {
         // A wrapper note consumes no audit sequence and counts in no class.
         assert_eq!(writer.count(CoverageClass::Exec), 0);
     }
+
+    // J5-C begin: review item 12, a degraded class always names its gap
+    /// A trace whose lock a panicking thread held: every later `lock()` is
+    /// `Err(PoisonError)`.
+    fn poisoned_trace() -> crate::trace::SharedTrace {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
+        let held = std::sync::Arc::clone(&trace);
+        let _ = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("poison the trace lock (test)");
+        })
+        .join();
+        assert!(trace.lock().is_err(), "the trace lock is poisoned");
+        trace
+    }
+
+    /// Every degraded class of `summary` names at least one gap, and every
+    /// gap it lists names it (§11.4; the receipt schema's frozen rule).
+    fn assert_degraded_classes_name_their_gaps(summary: &CoverageSummary) {
+        for (class, entry) in &summary.classes {
+            if entry.status == SourceStatus::Degraded {
+                assert!(!entry.gaps.is_empty(), "{class:?} is degraded with no gap");
+            }
+            for gap in &entry.gaps {
+                assert!(
+                    gap.classes.iter().any(|name| name == class.as_str()),
+                    "{class:?} lists a gap that does not name it: {gap:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_panicked_observer_is_a_gap_in_every_audit_class() {
+        let writer = writer();
+        let summary = writer.summary(
+            &TracerSummary {
+                thread_panicked: true,
+                ..TracerSummary::default()
+            },
+            true,
+        );
+        assert_degraded_classes_name_their_gaps(&summary);
+        for class in [
+            CoverageClass::Exec,
+            CoverageClass::FsWrite,
+            CoverageClass::FsDeny,
+            CoverageClass::Net,
+        ] {
+            let entry = &summary.classes[&class];
+            assert_eq!(entry.status, SourceStatus::Degraded, "{class:?}");
+            assert_eq!(entry.observed_count, None, "{class:?}");
+            let gap = &entry.gaps[0];
+            assert_eq!(gap.reason, "observer_panicked");
+            assert_eq!(gap.source, "audit");
+            assert_eq!(gap.lost_count, None, "nothing says how much was lost");
+            let (start, end) = (
+                gap.start_ns.parse::<u64>().unwrap(),
+                gap.end_ns.as_deref().unwrap().parse::<u64>().unwrap(),
+            );
+            assert!(start <= end, "{gap:?}");
+        }
+        assert_eq!(summary.sources.audit, SourceStatus::Degraded);
+        assert!(
+            summary
+                .gaps
+                .iter()
+                .any(|gap| gap.reason == "observer_panicked"),
+            "the observer's own gap summary says so too"
+        );
+    }
+
+    #[test]
+    fn a_result_a_poisoned_trace_cannot_take_is_a_gap_of_its_class() {
+        let mut writer =
+            AuditWriter::new("att_test", Some(poisoned_trace()), b"/work/space", b"/tmp");
+        writer.record_syscall(
+            10,
+            Some(1),
+            10,
+            ClosedOp::Open,
+            "openat",
+            &Args {
+                path: Some(snap("/work/space/f")),
+                flags: Some(1),
+                ..Args::default()
+            },
+            3,
+        );
+        let summary = writer.summary(&TracerSummary::default(), true);
+        assert_degraded_classes_name_their_gaps(&summary);
+        let entry = &summary.classes[&CoverageClass::FsWrite];
+        assert_eq!(entry.status, SourceStatus::Degraded);
+        assert_eq!(entry.gaps.len(), 1, "{entry:?}");
+        assert_eq!(entry.gaps[0].reason, "trace_writer_poisoned");
+        assert_eq!(entry.gaps[0].lost_count, Some(1));
+        assert_eq!(
+            writer.count(CoverageClass::FsWrite),
+            0,
+            "not delivered, not counted"
+        );
+        // The result and the note that would have recorded its loss.
+        assert_eq!(writer.lost_frames(), 2);
+        // A second lost result in the same class extends the same gap.
+        writer.record_syscall(
+            10,
+            Some(1),
+            10,
+            ClosedOp::Open,
+            "openat",
+            &Args {
+                path: Some(snap("/work/space/g")),
+                flags: Some(1),
+                ..Args::default()
+            },
+            4,
+        );
+        let summary = writer.summary(&TracerSummary::default(), true);
+        let entry = &summary.classes[&CoverageClass::FsWrite];
+        assert_eq!(entry.gaps.len(), 1, "coalesced: {entry:?}");
+        assert_eq!(entry.gaps[0].lost_count, Some(2));
+    }
+
+    #[test]
+    fn a_gap_note_a_poisoned_trace_refuses_is_a_lost_frame() {
+        let mut writer =
+            AuditWriter::new("att_test", Some(poisoned_trace()), b"/work/space", b"/tmp");
+        writer.record_gap(
+            GapReason::QueueFull,
+            OpSet::of(ClosedOp::Open),
+            1,
+            2,
+            Some(1),
+        );
+        assert_eq!(writer.lost_frames(), 1, "the note never reached the trace");
+        writer.record_limit_unapplied("pids", "no delegated cgroup");
+        assert_eq!(writer.lost_frames(), 2, "nor did the limit note");
+    }
+    // J5-C end
 
     #[test]
     fn a_relative_path_is_never_joined_to_a_guessed_cwd() {

@@ -88,6 +88,11 @@ limits of the mechanism are in [§10](../jail-v1.md#10-network-mediation).
   `agent` on a stock Ubuntu host; running such a vendor with its own sandbox
   off gives its tool commands the agent's jail authority
   ([north star §4.6](../../../north-star.md#46-nesting)).
-- A doctor killed with SIGKILL leaves its probes' temporary directories; `gc`
-  keeps attempts with no final receipt until J4's reconciliation.
-- No real agent run (A01) has been recorded; every profile stays experimental.
+- A doctor killed with SIGKILL leaves its probes' temporary directories.
+  They are in the system temporary directory, which `gc` never searches, so
+  they stay until the operator removes them. `gc` kept attempts with no final
+  receipt until J4, whose reconciliation now handles them (jail-v1 §14.2).
+- No real agent run (A01) had been recorded at J3. The first runs are recorded
+  in [agent compatibility](agent-compatibility.md) (2026-09-23, revision 12);
+  the binary reports every launch profile experimental, and the record carries
+  the support claim (revision 19).

@@ -648,7 +648,8 @@ mod imp {
         Attempt::finish(r)
     }
 
-    /// `CLONE_UNTRACED` from `linux/sched.h`.
+    /// `CLONE_UNTRACED` from `linux/sched.h`. Read only by the x86_64 path.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) const CLONE_UNTRACED: u64 = 0x0080_0000;
 
     /// `clone(CLONE_UNTRACED | SIGCHLD)` with no new stack, which makes the

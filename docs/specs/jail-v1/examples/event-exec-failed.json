@@ -1,0 +1,30 @@
+{
+  "schema": "ouro.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "audit",
+  "source_seq": 7,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "260000000",
+  "operation": "proc.exec",
+  "stage": "result",
+  "decision": null,
+  "outcome": {
+    "ok": false,
+    "return_value": -2,
+    "errno": "ENOENT",
+    "completion": "syscall_return"
+  },
+  "fields": {
+    "syscall": "execve",
+    "pid": 1240,
+    "pid_start_ticks": 123460,
+    "tid": 1240,
+    "path_basis": "argument_snapshot",
+    "path_complete": true,
+    "path": {
+      "kind": "digest",
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "reason": "outside_known_roots"
+    }
+  }
+}

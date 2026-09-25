@@ -165,7 +165,7 @@
     "cause": null,
     "error": {
       "code": "exec_failed",
-      "stage": "exec",
+      "stage": "released",
       "message": "Synthetic fixture: target executable unavailable.",
       "remediation_category": "configuration"
     }
@@ -177,7 +177,7 @@
   "errors": [
     {
       "code": "exec_failed",
-      "stage": "exec",
+      "stage": "released",
       "message": "Synthetic fixture: target executable unavailable.",
       "remediation_category": "configuration"
     }

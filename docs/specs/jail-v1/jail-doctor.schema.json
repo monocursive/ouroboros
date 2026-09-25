@@ -1,0 +1,1238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:jail-doctor:1",
+  "title": "Ouro jail doctor report v1",
+  "description": "The record `ouro-jail doctor --json` prints (jail-v1 §3.2, §14.1): the measured capabilities, the host manifest that supersedes host-manifest.sh, the binaries and the build that produced it. On Linux it carries `host`, `supervisor_scope` and the resolved bubblewrap; on macOS, where execution is unsupported in this milestone, it carries none of them and every capability is an unsupported requirement row.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.jail.doctor/1"
+    },
+    "component": {
+      "const": "ouro-jail"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "build": {
+      "$ref": "#/$defs/build"
+    },
+    "platform": {
+      "type": "object",
+      "properties": {
+        "os": {
+          "enum": [
+            "linux",
+            "macos"
+          ]
+        },
+        "arch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kernel": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "kernel"
+      ],
+      "additionalProperties": false
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(tree_termination|closed_set_observation|filesystem_containment|syscall_filter|network_none|network_proxy|execution_boundary|credential_staging|limit:(wall|pids|mem|cpu)|protected_coverage:(existing_and_root|all_descendants))$"
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/capability"
+      }
+    },
+    "ready": {
+      "type": "boolean"
+    },
+    "launch": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/launch"
+        }
+      ]
+    },
+    "supervisor_scope": {
+      "$ref": "#/$defs/supervisor_scope"
+    },
+    "binaries": {
+      "type": "object",
+      "properties": {
+        "ouro-jail": {
+          "$ref": "#/$defs/binary"
+        },
+        "bwrap": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/backend_binary"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ouro-jail"
+      ],
+      "additionalProperties": false
+    },
+    "host": {
+      "$ref": "#/$defs/host"
+    }
+  },
+  "required": [
+    "schema",
+    "component",
+    "version",
+    "build",
+    "platform",
+    "requirements",
+    "capabilities",
+    "ready",
+    "launch",
+    "binaries"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "os": {
+                "const": "linux"
+              }
+            },
+            "required": [
+              "os"
+            ]
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "then": {
+        "required": [
+          "host",
+          "supervisor_scope"
+        ],
+        "properties": {
+          "binaries": {
+            "required": [
+              "ouro-jail",
+              "bwrap"
+            ]
+          },
+          "build": {
+            "properties": {
+              "target": {
+                "pattern": "-linux-"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "os": {
+                "const": "macos"
+              }
+            },
+            "required": [
+              "os"
+            ]
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "host"
+              ]
+            },
+            {
+              "required": [
+                "supervisor_scope"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "ready": {
+            "const": false
+          },
+          "binaries": {
+            "propertyNames": {
+              "const": "ouro-jail"
+            }
+          },
+          "build": {
+            "properties": {
+              "target": {
+                "pattern": "-apple-darwin$"
+              }
+            }
+          },
+          "capabilities": {
+            "items": {
+              "properties": {
+                "name": {
+                  "pattern": "^(tree_termination|closed_set_observation|filesystem_containment|syscall_filter|network_none|network_proxy|execution_boundary|credential_staging|limit:(wall|pids|mem|cpu)|protected_coverage:(existing_and_root|all_descendants))$"
+                },
+                "status": {
+                  "const": "unsupported"
+                },
+                "scope": {
+                  "enum": [
+                    "process",
+                    "tree"
+                  ]
+                },
+                "mechanism": {
+                  "type": "null"
+                },
+                "reason_code": {
+                  "const": "unsupported_platform"
+                },
+                "measured_at": {
+                  "type": "null"
+                },
+                "evidence_ref": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "arch": {
+                "const": "x86_64"
+              }
+            },
+            "required": [
+              "arch"
+            ]
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "build": {
+            "properties": {
+              "target": {
+                "pattern": "^x86_64-"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "properties": {
+              "arch": {
+                "const": "aarch64"
+              }
+            },
+            "required": [
+              "arch"
+            ]
+          }
+        },
+        "required": [
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "build": {
+            "properties": {
+              "target": {
+                "pattern": "^aarch64-"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ready": {
+            "const": true
+          }
+        },
+        "required": [
+          "ready"
+        ]
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "if": {
+                "properties": {
+                  "scope": {
+                    "enum": [
+                      "process",
+                      "tree"
+                    ]
+                  }
+                },
+                "required": [
+                  "scope"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "status": {
+                    "const": "available"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ready": {
+            "const": true
+          },
+          "requirements": {
+            "contains": {
+              "const": "filesystem_containment"
+            }
+          }
+        },
+        "required": [
+          "ready",
+          "requirements"
+        ]
+      },
+      "then": {
+        "properties": {
+          "binaries": {
+            "properties": {
+              "bwrap": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "bwrap"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "native_string": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "encoding": {
+              "const": "base64"
+            },
+            "data": {
+              "type": "string",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            }
+          },
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "build": {
+      "description": "What built this binary (jail-v1 §16 build provenance). `inputs`, `opt_level` and `debug_assertions` are measured at compile time; `revision` and `dirty` are the build environment's validated claims, null when it made none, and `dirty` is never set without `revision`.",
+      "type": "object",
+      "properties": {
+        "revision": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "not": {
+                "const": "0000000000000000000000000000000000000000"
+              }
+            }
+          ]
+        },
+        "dirty": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rustc": {
+          "type": "string",
+          "pattern": "^rustc [0-9]"
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+(-[a-z0-9_]+)?$"
+        },
+        "opt_level": {
+          "enum": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "s",
+            "z"
+          ]
+        },
+        "debug_assertions": {
+          "type": "boolean"
+        },
+        "inputs": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "revision",
+        "dirty",
+        "rustc",
+        "target",
+        "opt_level",
+        "debug_assertions",
+        "inputs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "dirty": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "dirty"
+            ]
+          },
+          "then": {
+            "properties": {
+              "revision": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "capability": {
+      "description": "jail-v1 §3.1 Capability. Requirement rows have scope process or tree; probe rows have scope host.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "available",
+            "unavailable",
+            "unsupported",
+            "error",
+            "skipped"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "process",
+            "tree",
+            "host"
+          ]
+        },
+        "mechanism": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_:.-]*$"
+            }
+          ]
+        },
+        "measured_at": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "format": "date-time"
+            }
+          ]
+        },
+        "evidence_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "scope",
+        "mechanism",
+        "reason_code",
+        "measured_at",
+        "evidence_ref"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "available"
+              },
+              "scope": {
+                "enum": [
+                  "process",
+                  "tree"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "scope"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason_code": {
+                "const": "ok"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ]
+          },
+          "then": {
+            "properties": {
+              "name": {
+                "not": {
+                  "pattern": "^(tree_termination|closed_set_observation|filesystem_containment|syscall_filter|network_none|network_proxy|execution_boundary|credential_staging|limit:(wall|pids|mem|cpu)|protected_coverage:(existing_and_root|all_descendants))$"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "launch": {
+      "description": "`doctor --launch NAME` (§14.1): the launch profile's support status apart from the host probes, and each credential by the profile's own names; never a source path or a value.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "support": {
+          "enum": [
+            "experimental",
+            "supported"
+          ]
+        },
+        "support_reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_:.-]*$"
+        },
+        "credentials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mode": {
+                "enum": [
+                  "copy_rw",
+                  "bind_ro"
+                ]
+              },
+              "dest": {
+                "$ref": "#/$defs/native_string"
+              },
+              "status": {
+                "enum": [
+                  "available",
+                  "unavailable"
+                ]
+              },
+              "reason_code": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_:.-]*$"
+              }
+            },
+            "required": [
+              "id",
+              "mode",
+              "dest",
+              "status",
+              "reason_code"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "name",
+        "support",
+        "support_reason",
+        "credentials"
+      ],
+      "additionalProperties": false
+    },
+    "supervisor_scope": {
+      "description": "What §9.3's supervisor scope step did for this doctor (Linux).",
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "already_delegated",
+            "entered",
+            "unavailable"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_:.-]*$"
+            }
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cgroup": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "test_seam": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "unit",
+        "reason_code",
+        "reason",
+        "cgroup"
+      ],
+      "additionalProperties": false
+    },
+    "binary": {
+      "description": "A binary this doctor vouches for: the path it runs from and the SHA-256 of its bytes (on Linux, of the running image), null when they could not be read.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "backend_binary": {
+      "description": "The bubblewrap the product resolved once from the absolute entries of the operator's PATH, canonicalized: the file every probe and run executes. The whole record is null when there is none.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "host": {
+      "description": "The host manifest of jail-v1 §3.2, read-only; an unreadable fact is null. The architecture is `platform.arch`.",
+      "type": "object",
+      "properties": {
+        "kernel_release": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "distribution": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "virtualization": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cpus_online": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        },
+        "memory": {
+          "type": "object",
+          "properties": {
+            "mem_total_kib": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              ]
+            },
+            "swap_total_kib": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              ]
+            }
+          },
+          "required": [
+            "mem_total_kib",
+            "swap_total_kib"
+          ],
+          "additionalProperties": false
+        },
+        "systemd_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sysctls": {
+          "type": "object",
+          "properties": {
+            "kernel.apparmor_restrict_unprivileged_userns": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.unprivileged_bpf_disabled": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.perf_event_paranoid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.yama.ptrace_scope": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user.max_user_namespaces": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kernel.io_uring_disabled": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kernel.apparmor_restrict_unprivileged_userns",
+            "kernel.unprivileged_bpf_disabled",
+            "kernel.perf_event_paranoid",
+            "kernel.yama.ptrace_scope",
+            "user.max_user_namespaces",
+            "kernel.io_uring_disabled"
+          ],
+          "additionalProperties": false
+        },
+        "apparmor_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "apparmor_userns_restriction": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": [
+                "on",
+                "off",
+                "absent",
+                "unknown"
+              ]
+            },
+            "profile_files": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            },
+            "local_files": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            },
+            "unpackaged_files": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^/"
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "profile_files",
+            "local_files",
+            "unpackaged_files"
+          ],
+          "additionalProperties": false
+        },
+        "cgroup": {
+          "type": "object",
+          "properties": {
+            "root_controllers": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            },
+            "delegated_root": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^/"
+                }
+              ]
+            },
+            "controllers": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            },
+            "subtree_control": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "root_controllers",
+            "delegated_root",
+            "controllers",
+            "subtree_control"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "delegated_root": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "delegated_root"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "controllers": {
+                    "type": "null"
+                  },
+                  "subtree_control": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "linger": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "operator_identity": {
+          "enum": [
+            "unknown",
+            "user_namespace",
+            "root",
+            "set_id",
+            "capable",
+            "privileged_group",
+            "unprivileged"
+          ]
+        },
+        "privileged_groups": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "root",
+                  "sudo",
+                  "admin",
+                  "wheel",
+                  "docker",
+                  "lxd",
+                  "incus-admin",
+                  "libvirt",
+                  "disk"
+                ]
+              },
+              "uniqueItems": true
+            }
+          ]
+        }
+      },
+      "required": [
+        "kernel_release",
+        "kernel_version",
+        "distribution",
+        "virtualization",
+        "cpus_online",
+        "memory",
+        "systemd_version",
+        "sysctls",
+        "apparmor_enabled",
+        "apparmor_userns_restriction",
+        "cgroup",
+        "linger",
+        "operator_identity",
+        "privileged_groups"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "sysctls": {
+                "properties": {
+                  "kernel.apparmor_restrict_unprivileged_userns": {
+                    "const": "0"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "apparmor_userns_restriction": {
+                "properties": {
+                  "state": {
+                    "const": "off"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "sysctls": {
+                "properties": {
+                  "kernel.apparmor_restrict_unprivileged_userns": {
+                    "type": "string",
+                    "not": {
+                      "const": "0"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "apparmor_userns_restriction": {
+                "properties": {
+                  "state": {
+                    "const": "on"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "sysctls": {
+                "properties": {
+                  "kernel.apparmor_restrict_unprivileged_userns": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "apparmor_userns_restriction": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "absent",
+                      "unknown"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operator_identity": {
+                "const": "privileged_group"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "privileged_groups": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "operator_identity": {
+                "const": "unprivileged"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "privileged_groups": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,6 +1,7 @@
 //! The tracer thread: one `waitpid(-1, __WALL)` loop that owns every child
 //! and every tracee of the process, and the §11 bookkeeping that turns its
-//! stops into the events of [`super::TracerEvent`].
+//! stops into the events of [`super::TracerEvent`]. It ends on its own
+//! account of what it answers for ([`Owed`]), not when no child is left.
 //!
 //! Everything the spec calls a semantic lives here as code:
 //!
@@ -131,6 +132,10 @@ pub(super) trait ProcView: Send {
     /// Field 22 of `/proc/<tid>/stat`: the task's start time in clock ticks
     /// since boot.
     fn start_ticks(&self, tid: pid_t) -> Option<u64>;
+    /// The direct children of every thread of `pid` (J5-T).
+    fn children(&self, pid: pid_t) -> Vec<pid_t> {
+        proc::children(pid)
+    }
 }
 
 /// `/proc`, read now.
@@ -143,6 +148,52 @@ impl ProcView for LiveProc {
 
     fn start_ticks(&self, tid: pid_t) -> Option<u64> {
         proc::start_ticks(tid)
+    }
+}
+
+/// J5-T: the children of this process, besides its tracees, whose end the
+/// tracer answers for.
+///
+/// It ends on this account, never on `waitpid(-1)` returning `ECHILD`. A
+/// process can start with children it never made — a shell's process
+/// substitution forked before it `exec`ed the supervisor, a background job,
+/// a library's helper — and those are no part of the attempt: waiting for
+/// them held the tracer open until its deadline and then reported them as
+/// unreaped. While the tracer runs it still reaps any of them that exits
+/// (`waitpid(-1)` cannot leave them out) and delivers the status as
+/// [`TracerEvent::UntracedChildExit`], so nothing is lost; one alive when it
+/// finishes is left to its owner. A child it gains after attaching is the
+/// opposite case — an orphan of the traced tree adopted by a subreaper
+/// supervisor — and is owed like the backend (`Session::adopted`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    /// Nothing: the launcher is itself a child of this process.
+    Nothing,
+    /// The child the launcher descends through — bubblewrap — with its
+    /// birth, until its exit has been reaped and delivered.
+    Backend {
+        pid: pid_t,
+        birth: Option<u64>,
+        reaped: bool,
+    },
+    /// The launcher's ancestry could not be read, so which child is the
+    /// backend is unknown: every child is waited for, as before J5-T.
+    Every,
+}
+
+impl Owed {
+    /// Read from the kernel's parent links while the launcher is seized and
+    /// blocked, so the chain above it cannot change under the walk.
+    fn toward(launcher: pid_t, procfs: &dyn ProcView) -> Owed {
+        match proc::child_toward(sys::getpid(), launcher) {
+            Some(child) if child == launcher => Owed::Nothing,
+            Some(child) => Owed::Backend {
+                pid: child,
+                birth: procfs.start_ticks(child),
+                reaped: false,
+            },
+            None => Owed::Every,
+        }
     }
 }
 
@@ -376,6 +427,13 @@ pub(super) fn run(
         monotonic_ns: clock::boottime_ns(),
     });
     session.register(launcher);
+    session.owed = Owed::toward(launcher, &*session.procfs);
+    session.beside = session
+        .procfs
+        .children(sys::getpid())
+        .into_iter()
+        .filter_map(|pid| session.procfs.start_ticks(pid).map(|birth| (pid, birth)))
+        .collect();
     session.run_loop(&handles);
     session.finish(&handles)
 }
@@ -388,7 +446,9 @@ fn ensure_wake_handler() -> bool {
 }
 
 fn seize_and_confirm(launcher: pid_t) -> Result<(), TracerError> {
-    if !cfg!(target_arch = "x86_64") {
+    // J5-D: the one statement of which architecture the tables cover, so
+    // the tracer refuses exactly where `doctor` reports it unsupported.
+    if !super::super::seccomp::tables_cover(std::env::consts::ARCH) {
         return Err(TracerError::UnsupportedArch);
     }
     ensure_wake_handler();
@@ -436,6 +496,48 @@ struct CoalescedGap {
     count: Option<u64>,
 }
 
+// J5-B2 O03 seams (tracer gaps) begin.
+/// `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH=<substring>`: every covered non-exec
+/// call whose path contains `<substring>` reports "the kernel accepted the
+/// call but the tracer could not read the path" — the truncation case O03
+/// names — so that call, when it succeeds, becomes a `path_unreadable` gap
+/// rather than a result.
+///
+/// The substring gates the seam to the test's own target path so the observer
+/// capability probe (whose paths never match) is untouched. A test seam (S9):
+/// read once when the session starts, empty/unset leaves the tracer unchanged
+/// (the release binary is unaffected), and, like every `OURO_JAIL_TEST_*`
+/// variable, it is recorded in jail state and in every receipt with native
+/// details (`state::persist::test_seams`). It can only MANUFACTURE a gap the
+/// tracer already records for real truncation — never hide a result or widen
+/// authority — so a run under it ends exactly as a run with that real loss would.
+pub const TRUNCATE_PATH_SEAM: &str = "OURO_JAIL_TEST_TRACER_TRUNCATE_PATH";
+
+/// `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT=<substring>`: every covered non-exec
+/// entry whose path contains `<substring>` is followed to its exit stop
+/// without being recorded, so its exit has no entry to pair with and is an
+/// `unmatched_exit` gap. A path-gated test seam (S9), read once when the
+/// session starts, recorded like every `OURO_JAIL_TEST_*` variable; it
+/// manufactures only a gap the tracer already records.
+pub const UNMATCHED_EXIT_SEAM: &str = "OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT";
+
+fn seam_marker(name: &str) -> Option<Vec<u8>> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(String::into_bytes)
+}
+
+fn path_has_marker(snapshot: Option<&PathSnapshot>, marker: &[u8]) -> bool {
+    snapshot.is_some_and(|snapshot| {
+        snapshot
+            .bytes
+            .windows(marker.len())
+            .any(|window| window == marker)
+    })
+}
+// J5-B2 O03 seams end.
+
 struct Session {
     config: TracerConfig,
     tx: SyncSender<TracerEvent>,
@@ -482,6 +584,17 @@ struct Session {
     scratch: Vec<u8>,
     /// Where task identity comes from: `/proc`, or a test's script.
     procfs: Box<dyn ProcView>,
+    // J5-B2 O03 seams: the path substrings that mark a covered call whose path
+    // read is forced unreadable, or whose entry is dropped so its exit is
+    // unmatched. `None` in the release binary unless the seam is set.
+    force_truncate_marker: Option<Vec<u8>>,
+    force_unmatched_marker: Option<Vec<u8>>,
+    /// J5-T: which children, besides the tracees, the tracer answers for.
+    owed: Owed,
+    /// J5-T: the children this process had when the tracer attached, by
+    /// birth. Any other child that is not a tracee came after — an orphan
+    /// a subreaper supervisor adopted from the traced tree — and is owed.
+    beside: Vec<(pid_t, u64)>,
 }
 
 impl Session {
@@ -519,6 +632,12 @@ impl Session {
             inflight: 0,
             scratch,
             procfs,
+            force_truncate_marker: seam_marker(TRUNCATE_PATH_SEAM),
+            force_unmatched_marker: seam_marker(UNMATCHED_EXIT_SEAM),
+            // `run` reads the real one once the launcher is seized; a
+            // session built without it keeps the rule before J5-T.
+            owed: Owed::Every,
+            beside: Vec::new(),
         }
     }
 
@@ -794,6 +913,11 @@ impl Session {
                     break;
                 }
             }
+            // J5-T: done on its own account. Past this point a blocking
+            // wait could only be for a child the tracer does not answer for.
+            if self.accounted_for() {
+                break;
+            }
             // About to block: hand the consumer whatever is still buffered,
             // so a backlog never waits on the tree making its next call.
             self.flush();
@@ -807,6 +931,45 @@ impl Session {
                 Wait::NoChildren => break,
                 Wait::Status { pid, status } => self.handle(pid, status),
             }
+        }
+    }
+
+    /// J5-T: every tracee has been reaped and the backend's exit delivered
+    /// ([`Owed`]). Any other child of this process may live on.
+    fn accounted_for(&self) -> bool {
+        self.tasks.is_empty()
+            && match self.owed {
+                Owed::Nothing => true,
+                Owed::Backend { pid, birth, reaped } => reaped || !self.still_there(pid, birth),
+                Owed::Every => false,
+            }
+            && self.adopted().is_empty()
+    }
+
+    /// J5-T: this process's children that are not tracees and that it did
+    /// not have, under the same birth, when the tracer attached — orphans of
+    /// the traced tree a subreaper supervisor adopted, zombie or alive. They
+    /// are the attempt's, so the tracer reaps them before it finishes (L01.7).
+    fn adopted(&self) -> Vec<pid_t> {
+        self.procfs
+            .children(sys::getpid())
+            .into_iter()
+            .filter(|pid| !self.tasks.contains_key(pid))
+            .filter(|pid| {
+                !self.beside.iter().any(|(known, birth)| {
+                    known == pid && self.procfs.start_ticks(*pid) == Some(*birth)
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `pid` still names the process born at `birth`, zombie
+    /// included. Without a birth, whether anything has the number.
+    fn still_there(&self, pid: pid_t, birth: Option<u64>) -> bool {
+        match (self.procfs.start_ticks(pid), birth) {
+            (Some(now), Some(born)) => now == born,
+            (now, None) => now.is_some(),
+            (None, Some(_)) => false,
         }
     }
 
@@ -1529,6 +1692,19 @@ impl Session {
             return;
         }
         let op = pending.entry.op;
+        // J5-B2 O03 seam: when this covered call's path matches the seam
+        // marker, treat its exit as unmatched — the entry might never have been
+        // seen — so it becomes an `unmatched_exit` gap, never a result. The
+        // in-flight slot is already released above, so this matches a genuinely
+        // unmatched exit. Gated to a non-exec op.
+        if op != ClosedOp::Exec
+            && let Some(marker) = &self.force_unmatched_marker
+            && path_has_marker(pending.args.path.as_ref(), marker)
+        {
+            self.summary.loss.unmatched_exits += 1;
+            self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
+            return;
+        }
         // An argument the observer could not read is only a hole in coverage
         // when the kernel could read it. When the kernel rejected the same
         // pointer or structure, there was no covered operation to miss, and
@@ -1831,6 +2007,17 @@ impl Session {
                 self.tracee_deaths.insert(pid, Instant::now() + KILL_GRACE);
                 return;
             }
+            // J5-T: the backend's exit is the one the tracer owes; any other
+            // child's is delivered all the same, and is not the tree's.
+            if let Owed::Backend {
+                pid: backend,
+                reaped,
+                ..
+            } = &mut self.owed
+                && *backend == pid
+            {
+                *reaped = true;
+            }
             self.summary.untraced_child_exits += 1;
             self.emit(TracerEvent::UntracedChildExit { pid, status });
             return;
@@ -1944,6 +2131,22 @@ impl Session {
             let (snapshot, unreadable) = self.read_path(tid, raw[index as usize]);
             args.path = snapshot;
             path_unreadable = unreadable;
+        }
+        // J5-B2 O03 seam: force this covered call's path to be
+        // kernel-accepted-but-unreadable — the truncation case O03 names —
+        // when its path matches the seam marker. Gated to a non-exec op (an
+        // exec never returns to the normal exit path where a `path_unreadable`
+        // gap is emitted). When the call then succeeds it becomes a
+        // `path_unreadable` gap.
+        if entry.op != ClosedOp::Exec
+            && let Some(marker) = &self.force_truncate_marker
+            && path_has_marker(args.path.as_ref(), marker)
+        {
+            args.path = Some(PathSnapshot {
+                bytes: Vec::new(),
+                complete: false,
+            });
+            path_unreadable = true;
         }
         if let Some(index) = entry.path2 {
             let (snapshot, unreadable) = self.read_path(tid, raw[index as usize]);
@@ -2099,11 +2302,23 @@ impl Session {
     fn finish(mut self, handles: &Handles) -> TracerSummary {
         // Direct children that were never reaped have no route left for
         // their exit status: the supervisor was told not to wait for its own
-        // children while a tracer is attached.
-        let unreaped: Vec<pid_t> = proc::children(sys::getpid())
-            .into_iter()
-            .filter(|pid| !self.tasks.contains_key(pid))
-            .collect();
+        // children while a tracer is attached. J5-T: only those it answers
+        // for — the backend and any child gained after it attached; a child
+        // it was attached beside is its owner's to wait for once this ends.
+        let unreaped: Vec<pid_t> = match self.owed {
+            Owed::Every => proc::children(sys::getpid())
+                .into_iter()
+                .filter(|pid| !self.tasks.contains_key(pid))
+                .collect(),
+            Owed::Backend {
+                pid,
+                birth,
+                reaped: false,
+            } if self.still_there(pid, birth) => {
+                std::iter::once(pid).chain(self.adopted()).collect()
+            }
+            Owed::Backend { .. } | Owed::Nothing => self.adopted(),
+        };
         if !unreaped.is_empty() {
             self.summary.loss.unreaped_children += unreaped.len() as u64;
             self.gap(
@@ -2300,6 +2515,11 @@ mod tests {
         }
         fn start_ticks(&self, tid: pid_t) -> Option<u64> {
             self.0.lock().unwrap().get(&tid).map(|(_, ticks)| *ticks)
+        }
+        /// A script has no children: the test binary's real ones are other
+        /// tests' business.
+        fn children(&self, _pid: pid_t) -> Vec<pid_t> {
+            Vec::new()
         }
     }
 
@@ -2930,7 +3150,13 @@ mod tests {
                             libc::O_WRONLY | libc::O_CLOEXEC,
                         );
                     } else {
+                        // J5-D: `mkdir` has no syscall of its own off x86_64;
+                        // the test only runs where the tracer does, but it
+                        // must compile for every Linux target.
+                        #[cfg(target_arch = "x86_64")]
                         libc::syscall(libc::SYS_mkdir, path.as_ptr(), 0o700);
+                        #[cfg(not(target_arch = "x86_64"))]
+                        libc::syscall(libc::SYS_mkdirat, libc::AT_FDCWD, path.as_ptr(), 0o700);
                     }
                     libc::_exit(0);
                 }
@@ -3301,5 +3527,173 @@ mod tests {
         assert_eq!(sockaddr_len(libc::AF_NETLINK as u16, 128), None);
         assert_eq!(sockaddr_len(libc::AF_PACKET as u16, 128), None);
         assert_eq!(sockaddr_len(0xffff, 128), None);
+    }
+
+    /// J5-T (review of the fix, M5): the backend is owed only while its
+    /// number still names the process born at the recorded time. A reused
+    /// number — same pid, another birth — is not the backend: the tracer
+    /// neither waits for it nor lists it as unreaped. The same pid and
+    /// birth is, zombie included, until its exit is reaped. The kernel
+    /// will not reuse a live pid on demand, so the birth is scripted.
+    #[test]
+    fn j5t_the_backend_is_owed_only_under_its_own_birth() {
+        const BACKEND: pid_t = RECYCLED;
+        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let mut session = Session::new(
+            TracerConfig::default(),
+            tx,
+            Arc::default(),
+            0,
+            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+        );
+        session.owed = Owed::Backend {
+            pid: BACKEND,
+            birth: Some(1000),
+            reaped: false,
+        };
+        let now_named = |birth: Option<u64>| {
+            let mut table = table.lock().unwrap();
+            match birth {
+                Some(ticks) => table.insert(BACKEND, (BACKEND, ticks)),
+                None => table.remove(&BACKEND),
+            };
+        };
+
+        now_named(Some(1000));
+        assert!(session.tasks.is_empty());
+        assert!(
+            !session.accounted_for(),
+            "the backend, born at 1000, is alive or a zombie: wait for its exit"
+        );
+        now_named(Some(2000));
+        assert!(
+            session.accounted_for(),
+            "the number now names a process born at 2000: the backend is gone"
+        );
+        now_named(None);
+        assert!(session.accounted_for(), "nothing has the number");
+
+        // Without a recorded birth any holder of the number is kept.
+        session.owed = Owed::Backend {
+            pid: BACKEND,
+            birth: None,
+            reaped: false,
+        };
+        now_named(Some(2000));
+        assert!(!session.accounted_for());
+        // A reaped backend is done whatever holds its number now.
+        session.owed = Owed::Backend {
+            pid: BACKEND,
+            birth: Some(1000),
+            reaped: true,
+        };
+        now_named(Some(1000));
+        assert!(session.accounted_for());
+
+        // The same rule decides what `finish` reports as unreaped.
+        let handles = |session: &Session| Handles {
+            stop: Arc::new(AtomicBool::new(true)),
+            shutdown_ns: Arc::default(),
+            tid: Arc::default(),
+            handed: Arc::clone(&session.handed),
+        };
+        let unreaped = |birth_now: u64| {
+            let (tx, _rx) = std::sync::mpsc::sync_channel(64);
+            let mut session = Session::new(
+                TracerConfig::default(),
+                tx,
+                Arc::default(),
+                0,
+                Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+            );
+            session.owed = Owed::Backend {
+                pid: BACKEND,
+                birth: Some(1000),
+                reaped: false,
+            };
+            now_named(Some(birth_now));
+            let handles = handles(&session);
+            session.finish(&handles).unreaped_children
+        };
+        assert_eq!(unreaped(1000), vec![BACKEND], "its own birth: unreaped");
+        assert_eq!(
+            unreaped(2000),
+            Vec::<pid_t>::new(),
+            "another birth: not the backend, not loss"
+        );
+        drop(rx);
+    }
+    /// J5-T w3: the children a session was attached beside are recognised
+    /// by pid and birth; anything else that is not a tracee was gained since
+    /// and is owed — awaited, and listed unreaped if the tracer stops first.
+    /// A pid the kernel reused after a bystander ended is gained, not beside.
+    /// Scripted: the kernel will not reuse a pid, or hand an unprivileged
+    /// test a live orphan, on demand.
+    #[test]
+    fn j5t_a_child_gained_after_the_attach_is_owed_and_a_bystander_is_not() {
+        struct Family(std::sync::Arc<std::sync::Mutex<Vec<(pid_t, u64)>>>);
+        impl ProcView for Family {
+            fn tgid(&self, tid: pid_t) -> Option<pid_t> {
+                Some(tid)
+            }
+            fn start_ticks(&self, tid: pid_t) -> Option<u64> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(pid, _)| *pid == tid)
+                    .map(|(_, birth)| *birth)
+            }
+            fn children(&self, _pid: pid_t) -> Vec<pid_t> {
+                self.0.lock().unwrap().iter().map(|(pid, _)| *pid).collect()
+            }
+        }
+        const BYSTANDER: pid_t = RECYCLED;
+        const ORPHAN: pid_t = WORKER;
+        let family = std::sync::Arc::new(std::sync::Mutex::new(vec![(BYSTANDER, 1000)]));
+        let session = || {
+            let (tx, _) = std::sync::mpsc::sync_channel(64);
+            let mut session = Session::new(
+                TracerConfig::default(),
+                tx,
+                Arc::default(),
+                0,
+                Box::new(Family(std::sync::Arc::clone(&family))),
+            );
+            session.owed = Owed::Nothing;
+            session.beside = vec![(BYSTANDER, 1000)];
+            session
+        };
+        let set = |children: &[(pid_t, u64)]| *family.lock().unwrap() = children.to_vec();
+
+        let s = session();
+        assert!(s.adopted().is_empty());
+        assert!(s.accounted_for(), "only the bystander: done");
+        set(&[(BYSTANDER, 1000), (ORPHAN, 1500)]);
+        assert_eq!(s.adopted(), vec![ORPHAN]);
+        assert!(!s.accounted_for(), "an orphan gained since: wait for it");
+        set(&[(BYSTANDER, 2000)]);
+        assert_eq!(
+            s.adopted(),
+            vec![BYSTANDER],
+            "the bystander's number under another birth is a new child"
+        );
+        assert!(!s.accounted_for());
+
+        let handles = |session: &Session| Handles {
+            stop: Arc::new(AtomicBool::new(true)),
+            shutdown_ns: Arc::default(),
+            tid: Arc::default(),
+            handed: Arc::clone(&session.handed),
+        };
+        set(&[(BYSTANDER, 1000), (ORPHAN, 1500)]);
+        let s = session();
+        let h = handles(&s);
+        assert_eq!(
+            s.finish(&h).unreaped_children,
+            vec![ORPHAN],
+            "stopped first: the orphan is unreaped, the bystander is not"
+        );
     }
 }

@@ -18,6 +18,17 @@
 //! [`TracerEvent::UntracedChildExit`]. The supervisor then releases the
 //! launcher, which execs the target.
 //!
+//! The thread ends on its own account (J5-T): when every tracee has been
+//! reaped, the child the launcher descends through — bubblewrap, when the
+//! launcher is not itself a child — has had its exit delivered, and every
+//! child this process gained after the attach (an orphan of the traced tree
+//! that a subreaper supervisor adopted, often already a zombie) has been
+//! reaped. It never waits for a child this process already had when it
+//! attached, such as a shell's process substitution the supervisor
+//! inherited when that shell `exec`ed it: one that exits while the thread
+//! runs is reaped and delivered like any untraced child, and one still alive
+//! at the end is left to its owner.
+//!
 //! ```no_run
 //! # use ouro_jail::platform::linux::tracer::{Tracer, TracerConfig, TracerEvent};
 //! # fn example(launcher_pid: i32) -> Result<(), Box<dyn std::error::Error>> {
@@ -320,8 +331,10 @@ pub enum GapReason {
     UnexpectedTraceStop,
     /// The tracer stopped while tracees were still alive; they were killed.
     TraceesAbandoned,
-    /// The tracer stopped while direct children of this process had not been
-    /// reaped, so their exit statuses have no delivery route left.
+    /// The tracer stopped while a direct child of this process it answers
+    /// for — the backend the launcher descends through, or one gained after
+    /// the attach — had not been reaped, so its exit status had no delivery
+    /// route left (J5-T).
     UnreapedChildren,
     /// A stopped tracee could not be restarted, so it was killed rather than
     /// left stopped forever.
@@ -499,7 +512,8 @@ pub enum TracerEvent {
         monotonic_ns: u64,
     },
     /// A child of this process that was never a tracee has exited —
-    /// bubblewrap, which lives outside the namespaces it creates.
+    /// bubblewrap, which lives outside the namespaces it creates, or any
+    /// other child that ended while the tracer owned every `waitpid` (J5-T).
     UntracedChildExit { pid: pid_t, status: i32 },
     /// Coverage has a hole. `count` is `None` when the size of the hole
     /// cannot be established; `ops` names the closed-set operations it
@@ -600,8 +614,9 @@ pub struct LossCounters {
     /// Tracees still alive when the tracer was told to stop. They were
     /// killed and reaped; anything they were about to do is unobserved.
     pub abandoned_tracees: u64,
-    /// Direct children of this process that were never reaped, so their exit
-    /// statuses have no route left to the supervisor.
+    /// Children the tracer answers for (the backend, and any gained after the
+    /// attach), never reaped, so their exit statuses have no route left to
+    /// the supervisor (J5-T).
     pub unreaped_children: u64,
     /// Stopped tracees that could not be restarted and were killed.
     pub restart_failed: u64,
@@ -686,8 +701,9 @@ pub struct TracerSummary {
     pub tasks_destroyed_by_exec: u64,
     /// The most bytes the observer ever held on the consumer's behalf.
     pub queue_bytes_peak: usize,
-    /// Direct children of this process that were still unreaped when the
-    /// tracer stopped.
+    /// Direct children of this process the tracer answers for (the backend,
+    /// and any gained after the attach) that were still unreaped when it
+    /// stopped. Children it was attached beside are not the tracer's (J5-T).
     pub unreaped_children: Vec<pid_t>,
     /// Syscall exits with a kernel restart code that the kernel then
     /// re-entered: seen re-entered at the same instruction, or decided at a
@@ -858,7 +874,10 @@ impl Tracer {
     /// From here until the tracer stops, the tracer thread owns every
     /// `waitpid` in this process. The caller must not wait on its own
     /// children; their exits arrive as
-    /// [`TracerEvent::UntracedChildExit`].
+    /// [`TracerEvent::UntracedChildExit`]. The thread finishes once every
+    /// tracee is reaped, the child `launcher` descends through has exited
+    /// and every child gained since the attach is reaped, whatever other
+    /// children this process already had (J5-T).
     ///
     /// # Errors
     /// [`TracerError`], which distinguishes a refused seize from one that
@@ -958,11 +977,11 @@ impl Tracer {
     /// This always returns. If tracees are still alive it interrupts the
     /// thread's `waitpid`, lets the tree end for up to `budget`, and on
     /// expiry kills every remaining tracee, reaps it, and records the loss as
-    /// [`GapReason::TraceesAbandoned`] with a count. Direct children of this
-    /// process that were never reaped are listed in
-    /// [`TracerSummary::unreaped_children`] and reported as
-    /// [`GapReason::UnreapedChildren`]: their exit statuses had exactly one
-    /// route to the supervisor and it is now closed.
+    /// [`GapReason::TraceesAbandoned`] with a count. A child it answers for
+    /// (the backend, or one gained since the attach) that was never reaped
+    /// is listed in [`TracerSummary::unreaped_children`] and reported as
+    /// [`GapReason::UnreapedChildren`]: its exit status had exactly one route
+    /// to the supervisor and it is now closed.
     #[must_use]
     pub fn finish_within(self, budget: Duration) -> TracerSummary {
         self.finish_within_draining(budget, |_| {})

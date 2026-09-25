@@ -534,6 +534,12 @@
           "fields"
         ],
         "value": {
+          "syscall": "connect",
+          "pid": 1234,
+          "pid_start_ticks": 123456,
+          "tid": 1234,
+          "observation": "seccomp_user_notification",
+          "mediator_reason": "no_attempt_listener",
           "attempted_operation": "net.connect"
         }
       },
@@ -836,6 +842,19 @@
           "audit"
         ],
         "value": "degraded"
+      },
+      {
+        "path": [
+          "errors"
+        ],
+        "value": [
+          {
+            "code": "evidence_lost",
+            "stage": "reconciling",
+            "message": "Synthetic fixture: coverage was lost before settlement.",
+            "remediation_category": "inspect_state"
+          }
+        ]
       }
     ]
   },
@@ -887,6 +906,2887 @@
           "exec_observed"
         ],
         "value": true
+      }
+    ]
+  },
+  {
+    "name": "audit result cannot carry proxy counters",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "bytes_out"
+        ],
+        "value": 12
+      }
+    ]
+  },
+  {
+    "name": "audit result cannot close like a proxy",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "completion"
+        ],
+        "value": "proxy_close"
+      }
+    ]
+  },
+  {
+    "name": "audit result states its errno",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": 3,
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "only proc.exec has an exec transition",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": null,
+          "errno": null,
+          "completion": "exec_transition"
+        }
+      }
+    ]
+  },
+  {
+    "name": "an exec transition is a success",
+    "schema": "event",
+    "base": "examples/event-exec.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "ok"
+        ],
+        "value": false
+      }
+    ]
+  },
+  {
+    "name": "an exec transition has no errno",
+    "schema": "event",
+    "base": "examples/event-exec.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "value": "ENOENT"
+      }
+    ]
+  },
+  {
+    "name": "exec success is never a syscall return",
+    "schema": "event",
+    "base": "examples/event-exec-failed.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": 0,
+          "errno": null,
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "only proc.exit is a process exit",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": 0,
+          "errno": null,
+          "completion": "process_exit"
+        }
+      }
+    ]
+  },
+  {
+    "name": "proc.exit is a process exit, not a return",
+    "schema": "event",
+    "base": "examples/event-exit.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "completion"
+        ],
+        "value": "syscall_return"
+      }
+    ]
+  },
+  {
+    "name": "a successful return is not negative",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "return_value"
+        ],
+        "value": -1
+      }
+    ]
+  },
+  {
+    "name": "a successful return has no errno",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "value": "EIO"
+      }
+    ]
+  },
+  {
+    "name": "a failed return names its errno",
+    "schema": "event",
+    "base": "examples/event-exec-failed.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "a failed return is negative",
+    "schema": "jail-event",
+    "base": "examples/event-exec-failed.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "return_value"
+        ],
+        "value": 0
+      }
+    ]
+  },
+  {
+    "name": "EACCES is classified fs.deny",
+    "schema": "jail-event",
+    "base": "examples/event-exec-failed.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "return_value"
+        ],
+        "value": -13
+      },
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "value": "EACCES"
+      }
+    ]
+  },
+  {
+    "name": "EPERM on a connect is classified fs.deny",
+    "schema": "jail-event",
+    "base": "examples/event-connect.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "return_value"
+        ],
+        "value": -1
+      },
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "value": "EPERM"
+      }
+    ]
+  },
+  {
+    "name": "attempted_operation only on fs.deny",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "attempted_operation"
+        ],
+        "value": "fs.write"
+      }
+    ]
+  },
+  {
+    "name": "proxy result states its counters",
+    "schema": "event",
+    "base": "examples/event-proxy-allow.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": null,
+          "errno": null,
+          "completion": "proxy_close"
+        }
+      }
+    ]
+  },
+  {
+    "name": "proxy result closes like a proxy",
+    "schema": "event",
+    "base": "examples/event-proxy-allow.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "completion"
+        ],
+        "value": "syscall_return"
+      }
+    ]
+  },
+  {
+    "name": "owner intent envelope stays open",
+    "schema": "event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "operation"
+        ],
+        "value": "intent.admitted"
+      },
+      {
+        "path": [
+          "fields"
+        ],
+        "value": {
+          "kind": "admission"
+        }
+      }
+    ]
+  },
+  {
+    "name": "jail wrapper completion is wrapper",
+    "schema": "jail-event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "completion"
+        ],
+        "value": "syscall_return"
+      }
+    ]
+  },
+  {
+    "name": "jail wrapper carries no counters",
+    "schema": "jail-event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "duration_ms"
+        ],
+        "value": 3
+      }
+    ]
+  },
+  {
+    "name": "coverage gap note names its classes",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "classes"
+        ],
+        "value": [
+          "fs.writes"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "coverage gap note states its interval",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "start_ns"
+        ],
+        "value": "01"
+      }
+    ]
+  },
+  {
+    "name": "coverage gap note count is known or null",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "lost_count"
+        ],
+        "value": -1
+      }
+    ]
+  },
+  {
+    "name": "coverage gap note open interval is valid",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "end_ns"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "fields",
+          "lost_count"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "receipt note names a digest",
+    "schema": "jail-event",
+    "base": "examples/event-receipt.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "receipt_digest"
+        ],
+        "value": "sha256:abc"
+      }
+    ]
+  },
+  {
+    "name": "receipt note names a phase",
+    "schema": "jail-event",
+    "base": "examples/event-receipt.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "phase"
+        ],
+        "value": "running"
+      }
+    ]
+  },
+  {
+    "name": "receipt note is a wrapper fact",
+    "schema": "jail-event",
+    "base": "examples/event-receipt.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "source"
+        ],
+        "value": "audit"
+      }
+    ]
+  },
+  {
+    "name": "lifecycle note names its transition",
+    "schema": "jail-event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields"
+        ],
+        "value": {
+          "kind": "lifecycle"
+        }
+      }
+    ]
+  },
+  {
+    "name": "lifecycle transition is a safe name",
+    "schema": "jail-event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "transition"
+        ],
+        "value": "exec confirmed at /home/user"
+      }
+    ]
+  },
+  {
+    "name": "an exec transition names its call, when it names one",
+    "schema": "jail-event",
+    "base": "examples/event-exec.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "syscall"
+        ],
+        "value": ""
+      }
+    ]
+  },
+  {
+    "name": "fs.write carries its action",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "action"
+        ],
+        "value": ""
+      }
+    ]
+  },
+  {
+    "name": "audit result carries its pid",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "pid"
+        ],
+        "value": 0
+      }
+    ]
+  },
+  {
+    "name": "audit pid may be unknown",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "pid"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "fields",
+          "pid_start_ticks"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "a path is relative, a digest or unavailable",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path"
+        ],
+        "value": {
+          "kind": "absolute",
+          "value": "/home/user/secret"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a digest path names its reason",
+    "schema": "jail-event",
+    "base": "examples/event-deny.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path"
+        ],
+        "value": {
+          "kind": "digest",
+          "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a relative path has no raw extra",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path",
+          "absolute"
+        ],
+        "value": "/work/fixture.txt"
+      }
+    ]
+  },
+  {
+    "name": "a path records its basis",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path_basis"
+        ],
+        "value": ""
+      }
+    ]
+  },
+  {
+    "name": "a byte path uses the native codec",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path",
+          "value"
+        ],
+        "value": {
+          "encoding": "hex",
+          "data": "ff"
+        }
+      }
+    ]
+  },
+  {
+    "name": "degraded coverage names its gap",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "errors"
+        ],
+        "value": [
+          {
+            "code": "evidence_lost",
+            "stage": "reconciling",
+            "message": "Synthetic fixture: coverage was lost before settlement.",
+            "remediation_category": "inspect_state"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "settled degraded coverage is evidence_lost",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "fs.write"
+            ],
+            "source": "audit",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      }
+    ]
+  },
+  {
+    "name": "a class lists only gaps that name it",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.write",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "net"
+            ],
+            "source": "audit",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "errors"
+        ],
+        "value": [
+          {
+            "code": "evidence_lost",
+            "stage": "reconciling",
+            "message": "Synthetic fixture: coverage was lost before settlement.",
+            "remediation_category": "inspect_state"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "active audit coverage needs an attached observer",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "observer",
+          "attached"
+        ],
+        "value": false
+      }
+    ]
+  },
+  {
+    "name": "active audit coverage needs an applied audit source",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "supported"
+      }
+    ]
+  },
+  {
+    "name": "active proxy coverage needs an applied proxy",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "observer",
+          "sources",
+          "proxy"
+        ],
+        "value": "supported"
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary applies no limit",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "limits"
+        ],
+        "value": [
+          {
+            "key": "wall",
+            "requested": "30m",
+            "required": true,
+            "applied": true,
+            "mechanism": "monotonic-deadline",
+            "scope": "tree",
+            "hit": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary may list requested limits unapplied",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "limits"
+        ],
+        "value": [
+          {
+            "key": "wall",
+            "requested": "30m",
+            "required": true,
+            "applied": false,
+            "mechanism": null,
+            "scope": null,
+            "hit": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary names no environment",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-none-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "environment_names"
+        ],
+        "value": [
+          "PATH"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary has no network mechanism",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-none-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "network",
+          "mechanism"
+        ],
+        "value": "host"
+      }
+    ]
+  },
+  {
+    "name": "pending containment has a pending network",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "network",
+          "mode"
+        ],
+        "value": "host"
+      }
+    ]
+  },
+  {
+    "name": "an error stage is a lifecycle state",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-exec-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "errors",
+          0,
+          "stage"
+        ],
+        "value": "exec"
+      }
+    ]
+  },
+  {
+    "name": "gate release is valid",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "gate wrong schema",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "schema"
+        ],
+        "value": "ouro.jail.gate/2"
+      }
+    ]
+  },
+  {
+    "name": "gate wrong action",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "action"
+        ],
+        "value": "withhold"
+      }
+    ]
+  },
+  {
+    "name": "gate malformed attempt",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "attempt_id"
+        ],
+        "value": "att_00000000-0000-1000-8000-000000000001"
+      }
+    ]
+  },
+  {
+    "name": "gate malformed digest",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy_digest"
+        ],
+        "value": "sha256:AAAA"
+      }
+    ]
+  },
+  {
+    "name": "gate extra key",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "argv"
+        ],
+        "value": [
+          "rm",
+          "-rf"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "control prepared names the prepared receipt",
+    "schema": "jail-control",
+    "base": "examples/control-prepared.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "receipt_phase"
+        ],
+        "value": "enforced"
+      }
+    ]
+  },
+  {
+    "name": "control prepared has no target outcome",
+    "schema": "jail-control",
+    "base": "examples/control-prepared.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "kind": "exited",
+          "code": 0,
+          "signal": null,
+          "cause": null,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "control exec_confirmed names the enforced receipt",
+    "schema": "jail-control",
+    "base": "examples/control-exec-confirmed.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "receipt_phase"
+        ],
+        "value": "prepared"
+      }
+    ]
+  },
+  {
+    "name": "control refused names the refused receipt",
+    "schema": "jail-control",
+    "base": "examples/control-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "receipt_phase"
+        ],
+        "value": "prepared"
+      }
+    ]
+  },
+  {
+    "name": "control refused is a pre-exec outcome",
+    "schema": "jail-control",
+    "base": "examples/control-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "kind": "exited",
+          "code": 0,
+          "signal": null,
+          "cause": null,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "control settled names the settled receipt",
+    "schema": "jail-control",
+    "base": "examples/control-settled.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "receipt_phase"
+        ],
+        "value": "enforced"
+      }
+    ]
+  },
+  {
+    "name": "control unsettled keeps a nonsettled phase",
+    "schema": "jail-control",
+    "base": "examples/control-unsettled.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "receipt_phase"
+        ],
+        "value": "settled"
+      }
+    ]
+  },
+  {
+    "name": "control unsettled may keep prepared",
+    "schema": "jail-control",
+    "base": "examples/control-unsettled.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "receipt_phase"
+        ],
+        "value": "prepared"
+      }
+    ]
+  },
+  {
+    "name": "control never carries raw argv",
+    "schema": "jail-control",
+    "base": "examples/control-settled.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "argv"
+        ],
+        "value": [
+          "secret"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "control message number starts at 1",
+    "schema": "jail-control",
+    "base": "examples/control-prepared.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "seq"
+        ],
+        "value": 0
+      }
+    ]
+  },
+  {
+    "name": "control names the receipt by digest",
+    "schema": "jail-control",
+    "base": "examples/control-settled.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "receipt_digest"
+        ],
+        "value": "sha256:xyz"
+      }
+    ]
+  },
+  {
+    "name": "control kind is closed",
+    "schema": "jail-control",
+    "base": "examples/control-settled.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "kind"
+        ],
+        "value": "approved"
+      }
+    ]
+  },
+  {
+    "name": "pending containment has no boundary",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-exec-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "containment"
+        ],
+        "value": "pending"
+      },
+      {
+        "path": [
+          "child_protection"
+        ],
+        "value": "pending"
+      },
+      {
+        "path": [
+          "applied",
+          "network",
+          "mode"
+        ],
+        "value": "pending"
+      },
+      {
+        "path": [
+          "applied",
+          "network",
+          "mechanism"
+        ],
+        "value": null
+      }
+    ]
+  },
+  {
+    "name": "audit result is not a wrapper fact",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "completion"
+        ],
+        "value": "wrapper"
+      }
+    ]
+  },
+  {
+    "name": "only the proxy closes like a proxy",
+    "schema": "event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": null,
+          "errno": null,
+          "completion": "proxy_close"
+        }
+      }
+    ]
+  },
+  {
+    "name": "jail wrapper fact is not a syscall return",
+    "schema": "jail-event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": 0,
+          "errno": null,
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary applies no filesystem",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "filesystem"
+        ],
+        "value": {
+          "mechanism": "fixture-mounts",
+          "protected_coverage": "existing_and_root",
+          "mounts": []
+        }
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary installs no syscall filter",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "syscalls"
+        ],
+        "value": {
+          "mechanism": "fixture-seccomp",
+          "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary allows no host",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "network",
+          "allowed_hosts"
+        ],
+        "value": [
+          "example.test"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary removed no environment",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-none-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "removed_environment_names"
+        ],
+        "value": [
+          "LD_PRELOAD"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "the exec class lists only gaps that name it",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "exec",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "exec",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "exec",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "net"
+            ],
+            "source": "audit",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "errors"
+        ],
+        "value": [
+          {
+            "code": "evidence_lost",
+            "stage": "reconciling",
+            "message": "Synthetic fixture: coverage was lost before settlement.",
+            "remediation_category": "inspect_state"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "the fs.deny class lists only gaps that name it",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "fs.deny",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.deny",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "fs.deny",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "exec"
+            ],
+            "source": "audit",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "errors"
+        ],
+        "value": [
+          {
+            "code": "evidence_lost",
+            "stage": "reconciling",
+            "message": "Synthetic fixture: coverage was lost before settlement.",
+            "remediation_category": "inspect_state"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "the net class lists only gaps that name it",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "net",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "net",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "net",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "fs.write"
+            ],
+            "source": "audit",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "audit"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "errors"
+        ],
+        "value": [
+          {
+            "code": "evidence_lost",
+            "stage": "reconciling",
+            "message": "Synthetic fixture: coverage was lost before settlement.",
+            "remediation_category": "inspect_state"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "the limits class lists only gaps that name it",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "limits",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "limits",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "limits",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "exec"
+            ],
+            "source": "wrapper",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "the proxy.net class lists only gaps that name it",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "proxy.net",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "proxy.net",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "proxy.net",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "net"
+            ],
+            "source": "proxy",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      },
+      {
+        "path": [
+          "observer",
+          "sources",
+          "proxy"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "errors"
+        ],
+        "value": [
+          {
+            "code": "evidence_lost",
+            "stage": "reconciling",
+            "message": "Synthetic fixture: coverage was lost before settlement.",
+            "remediation_category": "inspect_state"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a degraded limits class naming its gap is valid",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "coverage",
+          "limits",
+          "status"
+        ],
+        "value": "degraded"
+      },
+      {
+        "path": [
+          "coverage",
+          "limits",
+          "observed_count"
+        ],
+        "value": null
+      },
+      {
+        "path": [
+          "coverage",
+          "limits",
+          "gaps"
+        ],
+        "value": [
+          {
+            "classes": [
+              "limits"
+            ],
+            "source": "wrapper",
+            "start_ns": "0",
+            "end_ns": "10",
+            "reason": "fixture_loss",
+            "lost_count": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "the shared envelope leaves the sign of a raw return to the producer",
+    "schema": "event",
+    "base": "examples/event-exec-failed.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "return_value"
+        ],
+        "value": 1
+      }
+    ]
+  },
+  {
+    "name": "the shared envelope leaves errno names to the producer",
+    "schema": "event",
+    "base": "examples/event-deny.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "value": "E_NOT_PERMITTED"
+      }
+    ]
+  },
+  {
+    "name": "the shared envelope does not classify errno values",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": false,
+          "return_value": -13,
+          "errno": "EACCES",
+          "completion": "syscall_return"
+        }
+      },
+      {
+        "path": [
+          "fields",
+          "action"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a jail fs.deny is EACCES or EPERM",
+    "schema": "jail-event",
+    "base": "examples/event-deny.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "value": "EIO"
+      }
+    ]
+  },
+  {
+    "name": "an audit exec transition states its return value",
+    "schema": "event",
+    "base": "examples/event-exec.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "return_value"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "an audit process exit states its errno",
+    "schema": "event",
+    "base": "examples/event-exit.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "errno"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a syscall return states its return value",
+    "schema": "event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "errno": null,
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a syscall return states its errno",
+    "schema": "event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": 0,
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a syscall return is a success or a failure",
+    "schema": "event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": null,
+          "return_value": 0,
+          "errno": null,
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a syscall return has a numeric return",
+    "schema": "event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": true,
+          "return_value": null,
+          "errno": null,
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a failed syscall return names a non-empty errno",
+    "schema": "event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "ok": false,
+          "return_value": -1,
+          "errno": "",
+          "completion": "syscall_return"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a proxy result states bytes_in",
+    "schema": "event",
+    "base": "examples/event-proxy-allow.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "bytes_in"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a proxy result states bytes_out",
+    "schema": "event",
+    "base": "examples/event-proxy-allow.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "bytes_out"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a proxy result states duration_ms",
+    "schema": "event",
+    "base": "examples/event-proxy-allow.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "duration_ms"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a proxy result is closed by the proxy",
+    "schema": "event",
+    "base": "examples/event-proxy-allow.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome",
+          "completion"
+        ],
+        "value": "wrapper"
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note states classes",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "classes"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note states start_ns",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "start_ns"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note states end_ns",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "end_ns"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note states reason",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "reason"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note states lost_count",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "lost_count"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "coverage gap note classes are a list",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "classes"
+        ],
+        "value": "exec"
+      }
+    ]
+  },
+  {
+    "name": "coverage gap note classes are distinct",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "classes"
+        ],
+        "value": [
+          "exec",
+          "exec"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note source is a source",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "source"
+        ],
+        "value": "kernel"
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note end is a decimal or open",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "end_ns"
+        ],
+        "value": "x"
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note reason is a string",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "reason"
+        ],
+        "value": 5
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note reason is not empty",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "reason"
+        ],
+        "value": ""
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note count is a number",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "lost_count"
+        ],
+        "value": "2"
+      }
+    ]
+  },
+  {
+    "name": "a coverage gap note count is bounded",
+    "schema": "jail-event",
+    "base": "examples/event-note-coverage-gap.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "lost_count"
+        ],
+        "value": 9007199254740992
+      }
+    ]
+  },
+  {
+    "name": "a receipt note states its phase",
+    "schema": "jail-event",
+    "base": "examples/event-receipt.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "phase"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a receipt note states its digest",
+    "schema": "jail-event",
+    "base": "examples/event-receipt.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "receipt_digest"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "an exec transition's call is a name",
+    "schema": "jail-event",
+    "base": "examples/event-exec.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "syscall"
+        ],
+        "value": 5
+      }
+    ]
+  },
+  {
+    "name": "a witnessed exec names its call",
+    "schema": "jail-event",
+    "base": "examples/event-exec.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "syscall"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "an exec whose entry was not followed names no call",
+    "schema": "jail-event",
+    "base": "examples/event-exec.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "syscall"
+        ],
+        "delete": true
+      },
+      {
+        "path": [
+          "fields",
+          "path"
+        ],
+        "value": {
+          "kind": "unavailable",
+          "reason": "argument_not_read"
+        }
+      },
+      {
+        "path": [
+          "fields",
+          "path_complete"
+        ],
+        "value": false
+      }
+    ]
+  },
+  {
+    "name": "an fs.write states its action",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "action"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "an fs.write action is a string",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "action"
+        ],
+        "value": 1
+      }
+    ]
+  },
+  {
+    "name": "an audit result states its pid",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "pid"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "an audit result states its pid birth",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "pid_start_ticks"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "an audit pid is a number",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "pid"
+        ],
+        "value": "1234"
+      }
+    ]
+  },
+  {
+    "name": "an audit pid birth is a number",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "pid_start_ticks"
+        ],
+        "value": "123456"
+      }
+    ]
+  },
+  {
+    "name": "an audit pid birth is not negative",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "pid_start_ticks"
+        ],
+        "value": -1
+      }
+    ]
+  },
+  {
+    "name": "a second path has a path shape",
+    "schema": "jail-event",
+    "base": "examples/event-rename.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path2"
+        ],
+        "value": {
+          "kind": "absolute",
+          "value": "/x"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a path basis is a string",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path_basis"
+        ],
+        "value": 5
+      }
+    ]
+  },
+  {
+    "name": "a path completeness is a boolean",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path_complete"
+        ],
+        "value": "yes"
+      }
+    ]
+  },
+  {
+    "name": "a second path completeness is a boolean",
+    "schema": "jail-event",
+    "base": "examples/event-rename.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path2_complete"
+        ],
+        "value": "yes"
+      }
+    ]
+  },
+  {
+    "name": "a path dirfd is a number",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path_dirfd"
+        ],
+        "value": "5"
+      }
+    ]
+  },
+  {
+    "name": "a second path dirfd is a number",
+    "schema": "jail-event",
+    "base": "examples/event-rename.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path2_dirfd"
+        ],
+        "value": "5"
+      }
+    ]
+  },
+  {
+    "name": "a path states its basis",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path_basis"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a path states its completeness",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path_complete"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a second path alone states the basis",
+    "schema": "jail-event",
+    "base": "examples/event-rename.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path"
+        ],
+        "delete": true
+      },
+      {
+        "path": [
+          "fields",
+          "path_complete"
+        ],
+        "delete": true
+      },
+      {
+        "path": [
+          "fields",
+          "path_basis"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "a second path states its completeness",
+    "schema": "jail-event",
+    "base": "examples/event-rename.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path2_complete"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "control settled carries a settled outcome",
+    "schema": "jail-control",
+    "base": "examples/control-settled.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "outcome"
+        ],
+        "value": {
+          "kind": "pending",
+          "code": null,
+          "signal": null,
+          "cause": null,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "gate attempt is a string",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "attempt_id"
+        ],
+        "value": 5
+      }
+    ]
+  },
+  {
+    "name": "gate digest is a string",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy_digest"
+        ],
+        "value": 5
+      }
+    ]
+  },
+  {
+    "name": "gate frame states its schema",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "schema"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "gate frame states its action",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "action"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "gate frame states its attempt_id",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "attempt_id"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "gate frame states its policy_digest",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy_digest"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "an event path value holds no NUL",
+    "schema": "jail-event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "path",
+          "value"
+        ],
+        "value": "fix\u0000ture.txt"
+      }
+    ]
+  },
+  {
+    "name": "a receipt grant value holds no NUL",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-native-path.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy",
+          "grants",
+          0,
+          "value"
+        ],
+        "value": "/wo\u0000rk"
+      }
+    ]
+  },
+  {
+    "name": "a receipt mount path holds no NUL",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "filesystem",
+          "mounts",
+          0,
+          "path"
+        ],
+        "value": "/wo\u0000rk"
+      }
+    ]
+  },
+  {
+    "name": "an attempt id has no trailing LF",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "attempt_id"
+        ],
+        "value": "att_00000000-0000-4000-8000-000000000001\n"
+      }
+    ]
+  },
+  {
+    "name": "a monotonic time has no trailing LF",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "monotonic_ns"
+        ],
+        "value": "200000000\n"
+      }
+    ]
+  },
+  {
+    "name": "a transition has no trailing LF",
+    "schema": "jail-event",
+    "base": "examples/event-note-lifecycle.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "transition"
+        ],
+        "value": "prepared\n"
+      }
+    ]
+  },
+  {
+    "name": "a receipt attempt id has no trailing LF",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "attempt_id"
+        ],
+        "value": "att_00000000-0000-4000-8000-000000000001\n"
+      }
+    ]
+  },
+  {
+    "name": "a control digest has no trailing LF",
+    "schema": "jail-control",
+    "base": "examples/control-settled.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "receipt_digest"
+        ],
+        "value": "sha256:3333333333333333333333333333333333333333333333333333333333333333\n"
+      }
+    ]
+  },
+  {
+    "name": "a gate digest has no trailing LF",
+    "schema": "jail-gate",
+    "base": "examples/gate-release.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy_digest"
+        ],
+        "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+      }
+    ]
+  },
+  {
+    "name": "an event time is a date-time",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "observed_at"
+        ],
+        "value": "not a timestamp"
+      }
+    ]
+  },
+  {
+    "name": "an event time states its offset",
+    "schema": "event",
+    "base": "examples/event-open.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "observed_at"
+        ],
+        "value": "2026-09-21T12:00:00"
+      }
+    ]
+  },
+  {
+    "name": "a receipt creation time is a date-time",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "created_at"
+        ],
+        "value": "yesterday"
+      }
+    ]
+  },
+  {
+    "name": "a receipt verification time is a real date",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-tool.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "lifetime",
+          "verified_at"
+        ],
+        "value": "2026-13-01T00:00:00Z"
+      }
+    ]
+  },
+  {
+    "name": "an exec transition names its call or an unread path",
+    "schema": "jail-event",
+    "base": "examples/event-exec.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "syscall"
+        ],
+        "delete": true
+      },
+      {
+        "path": [
+          "fields",
+          "path"
+        ],
+        "delete": true
+      },
+      {
+        "path": [
+          "fields",
+          "path_complete"
+        ],
+        "delete": true
       }
     ]
   }

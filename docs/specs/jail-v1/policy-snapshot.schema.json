@@ -699,5 +699,5 @@
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ouro:schema:jail-policy-snapshot:1",
-  "title": "Canonical jail policy snapshot v1 (draft)"
+  "title": "Canonical jail policy snapshot v1"
 }

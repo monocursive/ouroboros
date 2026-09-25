@@ -1,0 +1,31 @@
+{
+  "schema": "ouro.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "audit",
+  "source_seq": 10,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "290000000",
+  "operation": "net.connect",
+  "stage": "result",
+  "decision": null,
+  "outcome": {
+    "ok": false,
+    "return_value": -111,
+    "errno": "ECONNREFUSED",
+    "completion": "syscall_return"
+  },
+  "fields": {
+    "syscall": "connect",
+    "pid": 1234,
+    "pid_start_ticks": 123456,
+    "tid": 1234,
+    "path_basis": "argument_snapshot",
+    "path_complete": false,
+    "path": {
+      "kind": "unavailable",
+      "reason": "argument_not_read"
+    },
+    "address_family": 2,
+    "address_complete": true
+  }
+}

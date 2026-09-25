@@ -345,7 +345,7 @@ fn j4_c03_a_populated_orphan_leaf_of_this_boot_is_killed_verified_and_removed() 
     let (code, report, stderr) = gc(&orphan.run, &["--dry-run"]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
     assert_eq!(
-        text(&report, "cgroup"),
+        text(&report, "execution_boundary"),
         "would_terminate_orphan",
         "{report:#}"
     );
@@ -359,7 +359,7 @@ fn j4_c03_a_populated_orphan_leaf_of_this_boot_is_killed_verified_and_removed() 
     let (code, report, stderr) = gc(&orphan.run, &[]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
     assert_eq!(
-        text(&report, "cgroup"),
+        text(&report, "execution_boundary"),
         "terminated_orphan_and_removed",
         "{report:#}"
     );
@@ -430,7 +430,7 @@ fn j4_c03_a_replaced_leaf_is_never_touched() {
     for extra in [&["--dry-run"][..], &[][..]] {
         let (code, report, stderr) = gc(&orphan.run, extra);
         assert_eq!(code, Some(0), "{extra:?}: {stderr}\n{report:#}");
-        let cgroup = text(&report, "cgroup");
+        let cgroup = text(&report, "execution_boundary");
         assert!(
             cgroup.starts_with("retained") && cgroup.contains("replaced"),
             "{extra:?}: {report:#}"
@@ -477,7 +477,7 @@ fn j4_c03_a_simulated_reboot_never_targets_a_reused_cgroup() {
         let (code, report, stderr) = gc(&orphan.run, extra);
         assert_eq!(code, Some(0), "{extra:?}: {stderr}\n{report:#}");
         assert!(
-            text(&report, "cgroup").contains("another boot"),
+            text(&report, "execution_boundary").contains("another boot"),
             "{extra:?}: {report:#}"
         );
         assert!(
@@ -597,7 +597,7 @@ fn j4_c03_a_stale_owner_pid_never_signals_an_unrelated_process() {
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
     assert!(text(&report, "owner").contains("reused"), "{report:#}");
     assert_eq!(
-        text(&report, "cgroup"),
+        text(&report, "execution_boundary"),
         "terminated_orphan_and_removed",
         "{report:#}"
     );
@@ -637,7 +637,7 @@ fn j4_c03_a_receipt_naming_another_cgroup_is_never_acted_on() {
     // The receipt alone: it disagrees with jail state.
     let (code, report, stderr) = gc(&orphan.run, &["--dry-run"]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
-    let cgroup = text(&report, "cgroup");
+    let cgroup = text(&report, "execution_boundary");
     assert!(
         cgroup.starts_with("retained") && cgroup.contains("different"),
         "{report:#}"
@@ -652,7 +652,7 @@ fn j4_c03_a_receipt_naming_another_cgroup_is_never_acted_on() {
     for extra in [&["--dry-run"][..], &[][..]] {
         let (code, report, stderr) = gc(&orphan.run, extra);
         assert_eq!(code, Some(0), "{extra:?}: {stderr}\n{report:#}");
-        let cgroup = text(&report, "cgroup");
+        let cgroup = text(&report, "execution_boundary");
         assert!(
             cgroup.starts_with("retained") && cgroup.contains("leaf's name"),
             "{extra:?}: {report:#}"
@@ -683,7 +683,7 @@ fn j4_c03_child_cgroups_inside_an_orphan_leaf_are_ended_and_removed() {
     let (code, report, stderr) = gc(&orphan.run, &[]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
     assert_eq!(
-        text(&report, "cgroup"),
+        text(&report, "execution_boundary"),
         "terminated_orphan_and_removed",
         "{report:#}"
     );
@@ -751,14 +751,18 @@ fn j4_c03_contained_crash_leaves_an_empty_leaf_that_gc_removes() {
 
     let (code, report, stderr) = gc(&run, &["--dry-run"]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
-    assert_eq!(text(&report, "cgroup"), "would_remove", "{report:#}");
+    assert_eq!(
+        text(&report, "execution_boundary"),
+        "would_remove",
+        "{report:#}"
+    );
     assert_eq!(text(&report, "scratch"), "would_remove", "{report:#}");
     assert_eq!(inode(&leaf), Some(leaf_inode));
     assert!(scratch.join("left-behind").is_file());
 
     let (code, report, stderr) = gc(&run, &[]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
-    assert_eq!(text(&report, "cgroup"), "removed", "{report:#}");
+    assert_eq!(text(&report, "execution_boundary"), "removed", "{report:#}");
     assert_eq!(text(&report, "scratch"), "removed", "{report:#}");
     assert_eq!(inode(&leaf), None);
     assert!(!scratch.exists());
@@ -920,7 +924,7 @@ fn j4_n7_a_crash_between_mkdir_and_the_receipt_leaves_a_leaf_gc_removes() {
         }
         eprintln!(
             "{point}: cgroup {:?}, recorded {actions:?}",
-            text(&report, "cgroup")
+            text(&report, "execution_boundary")
         );
     }
     assert!(
@@ -1198,7 +1202,7 @@ fn j4_w3_g2_a_forged_registration_of_a_live_attempts_leaf_is_never_acted_on() {
         if code != Some(0) {
             problems.push(format!("{extra:?}: gc exited {code:?}: {stderr}"));
         }
-        let cgroup = entry["cgroup"].as_str().unwrap_or_default();
+        let cgroup = entry["execution_boundary"].as_str().unwrap_or_default();
         if !(cgroup.starts_with("retained") && cgroup.contains("not this attempt's")) {
             problems.push(format!("{extra:?}: A's entry: {entry:#}"));
         }

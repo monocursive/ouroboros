@@ -256,7 +256,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
         Err(err) => {
-            eprintln!("ouro-jail {SUBCOMMAND}: {err}");
+            crate::diag!("ouro-jail {SUBCOMMAND}: {err}");
             std::process::exit(EXIT_USAGE);
         }
     };
@@ -267,7 +267,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
     ] {
         // SAFETY: F_GETFD takes a descriptor number and dereferences nothing.
         if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-            eprintln!(
+            crate::diag!(
                 "ouro-jail {SUBCOMMAND}: {}",
                 LaunchUsage::ClosedFd(option, fd)
             );
@@ -413,12 +413,23 @@ pub fn launch_main(args: &[OsString]) -> ! {
     // implicit shell, and X04 wants `ENOEXEC` to be its own distinct outcome,
     // so the error reaches the error pipe as itself.
     let mut last_errno = libc::ENOENT;
+    // J5-B1 begin: X04 — ENOENT for a file that exists
+    let mut interpreter_missing = false;
+    // J5-B1 end
     for candidate in &candidates {
         // SAFETY: `candidate` and `argv_ptrs` are NUL-terminated C strings and
         // a NULL-terminated pointer array, all live for the call, and
         // `environ` is this process's own. execve only returns on failure.
         unsafe { libc::execve(candidate.as_ptr(), argv_ptrs.as_ptr(), environ()) };
         last_errno = errno();
+        // J5-B1 begin: X04 — the kernel answers ENOENT both for a program
+        // that is not there and for one whose `#!` interpreter or ELF loader
+        // is not there. A candidate that exists tells the two apart; the
+        // errno stays the kernel's own.
+        if last_errno == libc::ENOENT && exists(candidate) {
+            interpreter_missing = true;
+        }
+        // J5-B1 end
         // The search continues only where a PATH search is defined to: a
         // component that is not there, or not a directory. Anything else — a
         // file that exists and cannot be executed, a file that is not an
@@ -427,8 +438,97 @@ pub fn launch_main(args: &[OsString]) -> ! {
             break;
         }
     }
-    report_and_exit(parsed.error_fd, last_errno, EXIT_EXEC_FAILED);
+    // J5-B1 begin: X04
+    let detail = if last_errno == libc::ENOENT && interpreter_missing {
+        DETAIL_INTERPRETER_MISSING
+    } else {
+        0
+    };
+    report_exec_failure_and_exit(parsed.error_fd, last_errno, detail, EXIT_EXEC_FAILED);
+    // J5-B1 end
 }
+
+// J5-B1 begin: X04 — what an exec failure's errno does not say
+/// The launcher's detail code for an `ENOENT` from a file that exists: what
+/// is missing is the interpreter its `#!` line names, or its ELF loader.
+pub const DETAIL_INTERPRETER_MISSING: u32 = 1;
+
+/// Whether `path` names an existing object. Async-signal-safe: one
+/// `faccessat` on a string built before the fork-free no-allocation point.
+fn exists(path: &CString) -> bool {
+    // SAFETY: `path` is a live NUL-terminated string; F_OK checks existence
+    // only and dereferences nothing else.
+    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::F_OK, 0) == 0 }
+}
+
+/// A failed target exec as the launcher reported it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecFailure {
+    /// The kernel's errno for the last exec attempted.
+    pub errno: i32,
+    /// The file named exists, and `errno` is `ENOENT`: its interpreter or
+    /// loader is what was not found.
+    pub interpreter_missing: bool,
+}
+
+impl ExecFailure {
+    /// The errno name, which is what a receipt's `outcome.cause` holds.
+    #[must_use]
+    pub fn errno_name(&self) -> &'static str {
+        super::sys::errno_name(self.errno)
+    }
+
+    /// What the errno alone does not say; `None` when it says everything
+    /// the launcher knows.
+    #[must_use]
+    pub fn detail(&self) -> Option<crate::platform::ExecFailureDetail> {
+        self.interpreter_missing
+            .then_some(crate::platform::ExecFailureDetail::InterpreterMissing)
+    }
+}
+
+/// Decode an exec failure report: the errno, then an optional detail code.
+/// A report of any other length after the errno carries no detail.
+#[must_use]
+pub fn decode_exec_failure(bytes: &[u8]) -> Option<ExecFailure> {
+    let errno = decode_error_report(bytes)?;
+    let detail = bytes
+        .get(4..8)
+        .and_then(|four| <[u8; 4]>::try_from(four).ok())
+        .map(u32::from_le_bytes);
+    Some(ExecFailure {
+        errno,
+        interpreter_missing: errno == libc::ENOENT
+            && bytes.len() == 8
+            && detail == Some(DETAIL_INTERPRETER_MISSING),
+    })
+}
+
+/// The errno name and the detail of a failed exec's report, as a platform
+/// hands them to the supervisor: `("unknown", None)` for a report that does
+/// not decode.
+#[must_use]
+pub fn exec_failure_parts(bytes: &[u8]) -> (String, Option<crate::platform::ExecFailureDetail>) {
+    decode_exec_failure(bytes).map_or_else(
+        || ("unknown".to_owned(), None),
+        |failure| (failure.errno_name().to_owned(), failure.detail()),
+    )
+}
+
+/// Write `errno`, and `detail` when it is not zero, as little-endian words in
+/// one `write`, and exit with `code`. Async-signal-safe: `write` and `_exit`.
+fn report_exec_failure_and_exit(fd: RawFd, errno: i32, detail: u32, code: i32) -> ! {
+    if detail == 0 {
+        report_and_exit(fd, errno, code);
+    }
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&errno.to_le_bytes());
+    bytes[4..].copy_from_slice(&detail.to_le_bytes());
+    write_fully(fd, &bytes);
+    // SAFETY: _exit takes a scalar and never returns.
+    unsafe { libc::_exit(code) }
+}
+// J5-B1 end
 
 // J3-agent begin: the signal mask the jail hands the target
 /// The calling thread's blocked signals as a bitmask (bit `n - 1` for signal
@@ -662,7 +762,14 @@ pub fn exec_candidates(program: &CString, path: Option<&OsStr>) -> Vec<CString> 
 ///
 /// Async-signal-safe: `write` and `_exit` only.
 fn report_and_exit(fd: RawFd, errno: i32, code: i32) -> ! {
-    let bytes = errno.to_le_bytes();
+    write_fully(fd, &errno.to_le_bytes());
+    // SAFETY: _exit takes a scalar and never returns.
+    unsafe { libc::_exit(code) }
+}
+
+/// Write `bytes` to `fd`, retrying a short or interrupted write, and give up
+/// silently on any other failure. Async-signal-safe: `write` only.
+fn write_fully(fd: RawFd, bytes: &[u8]) {
     let mut written = 0usize;
     while written < bytes.len() {
         // SAFETY: the pointer and length address the remaining bytes of a live
@@ -682,8 +789,6 @@ fn report_and_exit(fd: RawFd, errno: i32, code: i32) -> ! {
         }
         written += n as usize;
     }
-    // SAFETY: _exit takes a scalar and never returns.
-    unsafe { libc::_exit(code) }
 }
 
 fn errno() -> i32 {
@@ -899,4 +1004,61 @@ mod tests {
         assert_eq!(decode_error_report(&[1, 2]), None);
         assert_eq!(decode_error_report(&[]), None);
     }
+
+    // J5-B1 begin: X04
+    #[test]
+    fn an_exec_failure_report_carries_the_interpreter_detail_only_for_enoent() {
+        let report = |errno: i32, detail: Option<u32>| {
+            let mut bytes = errno.to_le_bytes().to_vec();
+            if let Some(detail) = detail {
+                bytes.extend_from_slice(&detail.to_le_bytes());
+            }
+            decode_exec_failure(&bytes)
+        };
+        let plain = report(libc::ENOENT, None).unwrap();
+        assert_eq!(plain.errno_name(), "ENOENT");
+        assert!(!plain.interpreter_missing);
+        assert_eq!(plain.detail(), None);
+
+        let interpreter = report(libc::ENOENT, Some(DETAIL_INTERPRETER_MISSING)).unwrap();
+        assert_eq!(
+            interpreter.errno_name(),
+            "ENOENT",
+            "the errno stays the kernel's"
+        );
+        assert!(interpreter.interpreter_missing);
+        assert_eq!(
+            interpreter.detail(),
+            Some(crate::platform::ExecFailureDetail::InterpreterMissing)
+        );
+
+        // The detail means nothing beside another errno, an unknown code or
+        // a report of the wrong length.
+        assert!(
+            !report(libc::EACCES, Some(DETAIL_INTERPRETER_MISSING))
+                .unwrap()
+                .interpreter_missing
+        );
+        assert!(!report(libc::ENOENT, Some(7)).unwrap().interpreter_missing);
+        let mut long = libc::ENOENT.to_le_bytes().to_vec();
+        long.extend_from_slice(&DETAIL_INTERPRETER_MISSING.to_le_bytes());
+        long.push(0);
+        assert!(!decode_exec_failure(&long).unwrap().interpreter_missing);
+        assert_eq!(decode_exec_failure(&[1, 2]), None);
+    }
+
+    #[test]
+    fn an_existing_path_is_told_apart_from_a_missing_one() {
+        let dir = std::env::temp_dir();
+        let present = CString::new(dir.as_os_str().as_bytes()).unwrap();
+        assert!(exists(&present));
+        let absent = CString::new(
+            dir.join(format!("ouro-launch-absent-{}", std::process::id()))
+                .as_os_str()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(!exists(&absent));
+    }
+    // J5-B1 end
 }

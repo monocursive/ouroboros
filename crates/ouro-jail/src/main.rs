@@ -19,6 +19,11 @@ use ouro_jail::records::{
 };
 use ouro_jail::supervisor::{self, Context, DoctorReport, ExplainReport};
 
+// J5-D: the build provenance rules build.rs applies (one rule, three users:
+// build.rs and xtask use the tree walk, this binary the validation)
+#[allow(dead_code)]
+mod build_provenance;
+
 fn main() -> ExitCode {
     if let Some(code) = internal_subcommand() {
         return code;
@@ -71,7 +76,7 @@ fn build_context() -> Result<Context, JailError> {
 }
 
 fn fail(error: &JailError) -> ExitCode {
-    eprintln!("{error}");
+    ouro_jail::diag!("{error}");
     exit(error.exit_code())
 }
 
@@ -102,8 +107,69 @@ fn schema_identifiers() -> serde_json::Value {
         "gate": SCHEMA_GATE,
         "control": SCHEMA_CONTROL,
         "network": SCHEMA_NETWORK,
+        // J5-D
+        "doctor": SCHEMA_DOCTOR,
     })
 }
+
+// J5-D begin: build provenance (§16) and the doctor record's identifier
+/// The identifier of the `doctor --json` record, whose schema is
+/// `docs/specs/jail-v1/jail-doctor.schema.json` (§3.2: it is the host
+/// manifest every conformance run records).
+const SCHEMA_DOCTOR: &str = "ouro.jail.doctor/1";
+
+/// The revision and dirty flag as build.rs validated them (it fails the
+/// build on a malformed or contradictory pair, so an error here cannot
+/// happen in a built binary; it would read as unknown).
+fn build_claims() -> build_provenance::Claims {
+    build_provenance::validate(
+        option_env!("OURO_BUILD_REVISION"),
+        option_env!("OURO_BUILD_DIRTY"),
+    )
+    .unwrap_or(build_provenance::Claims {
+        revision: None,
+        dirty: None,
+    })
+}
+
+/// What built this binary (§16's "build provenance"), measured where it can
+/// be (review F8): the compiler's `rustc -V`, the target, the opt-level and
+/// debug assertions the code was actually compiled with, and the digest of
+/// the build inputs (`build_provenance`). The revision and dirty flag are
+/// the build environment's validated claims, null when it made none; the
+/// inputs digest is what checks them.
+fn build_json() -> serde_json::Value {
+    let claims = build_claims();
+    serde_json::json!({
+        "revision": claims.revision,
+        "dirty": claims.dirty,
+        "rustc": env!("OURO_BUILD_RUSTC"),
+        "target": env!("OURO_BUILD_TARGET"),
+        "opt_level": env!("OURO_BUILD_OPT_LEVEL"),
+        "debug_assertions": cfg!(debug_assertions),
+        "inputs": env!("OURO_BUILD_INPUTS"),
+    })
+}
+
+/// The `build` object as text lines, for `version` without `--json`.
+fn print_build_text() {
+    let claims = build_claims();
+    let unknown = || "unknown".to_owned();
+    println!("build {}", env!("OURO_BUILD_RUSTC"));
+    println!(
+        "build target {} opt-level {} debug-assertions {}",
+        env!("OURO_BUILD_TARGET"),
+        env!("OURO_BUILD_OPT_LEVEL"),
+        cfg!(debug_assertions)
+    );
+    println!(
+        "build revision {} dirty {}",
+        claims.revision.unwrap_or_else(unknown),
+        claims.dirty.map_or_else(unknown, |dirty| dirty.to_string())
+    );
+    println!("build inputs {}", env!("OURO_BUILD_INPUTS"));
+}
+// J5-D end
 
 fn platform_json(platform: &PlatformRecord) -> serde_json::Value {
     serde_json::json!({
@@ -112,6 +178,22 @@ fn platform_json(platform: &PlatformRecord) -> serde_json::Value {
         "kernel": platform.kernel,
     })
 }
+
+// J5-D begin: the running platform's closed set (§3.2)
+/// The closed set this build observes: `linux-closed-v1` on Linux built for
+/// an architecture the syscall tables cover, and none anywhere else (macOS,
+/// and a Linux build for another architecture, whose observer reports
+/// `unsupported_architecture`; §3.2).
+fn closed_set() -> Option<&'static str> {
+    closed_set_for(cfg!(target_os = "linux"), std::env::consts::ARCH)
+}
+
+/// [`closed_set`] for a stated OS and architecture.
+fn closed_set_for(linux: bool, arch: &str) -> Option<&'static str> {
+    (linux && ouro_jail::platform::linux::seccomp::tables_cover(arch))
+        .then(CoverageSummary::linux_closed_set)
+}
+// J5-D end
 
 fn version(context: &Context, args: &VersionArgs) -> ExitCode {
     let identity = context.platform.identity();
@@ -126,7 +208,11 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             "version": env!("CARGO_PKG_VERSION"),
             "platform": platform_json(&platform),
             "schemas": schema_identifiers(),
-            "observation": { "closed_set": CoverageSummary::linux_closed_set() },
+            // J5-C: the announced wire identifiers are frozen (jail-v1 §13)
+            "frozen": ouro_jail::records::SCHEMAS_FROZEN,
+            "observation": { "closed_set": closed_set() },
+            // J5-D
+            "build": build_json(),
         }));
     } else {
         println!("ouro-jail {}", env!("CARGO_PKG_VERSION"));
@@ -136,7 +222,7 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             platform.arch,
             platform.kernel
         );
-        println!("closed set {}", CoverageSummary::linux_closed_set());
+        println!("closed set {}", closed_set().unwrap_or("none"));
         for (name, value) in [
             ("receipt", SCHEMA_RECEIPT),
             ("event", SCHEMA_EVENT),
@@ -146,9 +232,16 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             ("gate", SCHEMA_GATE),
             ("control", SCHEMA_CONTROL),
             ("network", SCHEMA_NETWORK),
+            // J5-D
+            ("doctor", SCHEMA_DOCTOR),
         ] {
             println!("schema {name} {value}");
         }
+        if ouro_jail::records::SCHEMAS_FROZEN {
+            println!("schemas frozen (milestone 1)");
+        }
+        // J5-D
+        print_build_text();
     }
     ExitCode::SUCCESS
 }
@@ -364,6 +457,9 @@ fn doctor(context: &Context, args: &DoctorArgs) -> ExitCode {
 fn doctor_json(report: &DoctorReport) -> serde_json::Value {
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut value = serde_json::json!({
+        // J5-D: a versioned record (§3.2), with what built this binary
+        "schema": SCHEMA_DOCTOR,
+        "build": build_json(),
         "component": "ouro-jail",
         "version": env!("CARGO_PKG_VERSION"),
         "platform": platform_json(&report.platform),
@@ -402,8 +498,40 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             ouro_jail::platform::linux::scope::details(),
         );
     }
+    // J5-D begin: the host manifest (§3.2) and the binaries (§14.1)
+    if let Some(object) = value.as_object_mut() {
+        object.insert("binaries".to_owned(), binaries_json());
+        #[cfg(target_os = "linux")]
+        object.insert(
+            "host".to_owned(),
+            ouro_jail::platform::linux::host::manifest(),
+        );
+    }
+    // J5-D end
     value
 }
+
+// J5-D begin
+/// The binaries this `doctor` vouches for: itself, and on Linux the
+/// bubblewrap the platform resolved. The resolution is made once per
+/// process (`resolved_bwrap`), so the record names exactly the file every
+/// probe and run executes, not a second lookup.
+fn binaries_json() -> serde_json::Value {
+    let mut binaries = serde_json::Map::new();
+    binaries.insert(
+        "ouro-jail".to_owned(),
+        ouro_jail::platform::linux::host::own_binary(),
+    );
+    #[cfg(target_os = "linux")]
+    binaries.insert(
+        "bwrap".to_owned(),
+        ouro_jail::platform::linux::host::bwrap_binary(
+            ouro_jail::platform::linux::platform::resolved_bwrap().ok(),
+        ),
+    );
+    serde_json::Value::Object(binaries)
+}
+// J5-D end
 
 fn print_doctor_text(report: &DoctorReport) {
     println!(
@@ -459,64 +587,19 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
         // §6.4: `gc` uses 1 for failed cleanup or state access, whatever the
         // underlying code's usual mapping would be.
         Err(error) => {
-            eprintln!("{error}");
+            ouro_jail::diag!("{error}");
             return ExitCode::from(1);
         }
     };
     if args.json {
         print_json(&gc_json(&report));
     } else {
-        for entry in &report.entries {
-            println!("{} {} {}", entry.attempt_id, entry.action, entry.reason);
-            // J3-agent begin
-            if let Some(proxy_dir) = &entry.proxy_dir {
-                println!("{} proxy_dir {proxy_dir}", entry.attempt_id);
-            }
-            // J3-agent end
-            // J4-G begin
-            for (key, value) in [
-                ("owner", &entry.owner),
-                ("cgroup", &entry.cgroup),
-                ("scratch", &entry.scratch),
-            ] {
-                if let Some(value) = value {
-                    println!("{} {key} {value}", entry.attempt_id);
-                }
-            }
-            for action in &entry.recorded {
-                println!("{} recorded {action}", entry.attempt_id);
-            }
-            // J4-G end
-            // J4 W2-S begin
-            for name in &entry.leftover_temp_files {
-                println!("{} leftover_temp_file {name}", entry.attempt_id);
-            }
-            if let Some(temp_files) = &entry.temp_files {
-                println!("{} temp_files {temp_files}", entry.attempt_id);
-            }
-            // J4 W2-S end
-        }
-        println!("scanned {}", report.entries.len());
-        // J4-G begin: S7, S9
-        println!(
-            "entries {} of {}{}",
-            report.budget.charged,
-            report.budget.max_entries,
-            if report.budget.listing_complete {
-                ""
-            } else {
-                " (listing incomplete)"
-            }
-        );
-        for (name, value) in &report.test_seams {
-            println!("test_seam {name}={value}");
-        }
-        // J4-G end
+        print!("{}", gc_text(&report));
     }
     // J3-launch begin: §6.4 — a cleanup that stopped again exits 1, after the
     // report is printed (J3 review L1).
     if !report.incomplete.is_empty() {
-        eprintln!(
+        ouro_jail::diag!(
             "ouro-jail: cleanup did not complete for: {}",
             report.incomplete.join(", ")
         );
@@ -524,6 +607,67 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     }
     // J3-launch end
     ExitCode::SUCCESS
+}
+
+// J5-D: the text rendering as a function, so its keys are unit-tested
+/// Renders `gc`'s text report, one line per fact.
+fn gc_text(report: &ouro_jail::gc::Report) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for entry in &report.entries {
+        let _ = writeln!(
+            out,
+            "{} {} {}",
+            entry.attempt_id, entry.action, entry.reason
+        );
+        // J3-agent begin
+        if let Some(proxy_dir) = &entry.proxy_dir {
+            let _ = writeln!(out, "{} proxy_dir {proxy_dir}", entry.attempt_id);
+        }
+        // J3-agent end
+        // J4-G begin
+        for (key, value) in [
+            ("owner", &entry.owner),
+            // J5-D: the portable name of what became of the execution
+            // boundary (on Linux, the recorded cgroup leaf).
+            ("execution_boundary", &entry.cgroup),
+            ("scratch", &entry.scratch),
+        ] {
+            if let Some(value) = value {
+                let _ = writeln!(out, "{} {key} {value}", entry.attempt_id);
+            }
+        }
+        for action in &entry.recorded {
+            let _ = writeln!(out, "{} recorded {action}", entry.attempt_id);
+        }
+        // J4-G end
+        // J4 W2-S begin
+        for name in &entry.leftover_temp_files {
+            let _ = writeln!(out, "{} leftover_temp_file {name}", entry.attempt_id);
+        }
+        if let Some(temp_files) = &entry.temp_files {
+            let _ = writeln!(out, "{} temp_files {temp_files}", entry.attempt_id);
+        }
+        // J4 W2-S end
+    }
+    let _ = writeln!(out, "scanned {}", report.entries.len());
+    // J4-G begin: S7, S9
+    let _ = writeln!(
+        out,
+        "entries {} of {}{}",
+        report.budget.charged,
+        report.budget.max_entries,
+        if report.budget.listing_complete {
+            ""
+        } else {
+            " (listing incomplete)"
+        }
+    );
+    for (name, value) in &report.test_seams {
+        let _ = writeln!(out, "test_seam {name}={value}");
+    }
+    // J4-G end
+    out
 }
 
 fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
@@ -542,7 +686,8 @@ fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
                 // J3-agent end
                 // J4-G begin
                 "owner": entry.owner,
-                "cgroup": entry.cgroup,
+                // J5-D: portable key; the value is the platform's report
+                "execution_boundary": entry.cgroup,
                 "scratch": entry.scratch,
                 "recorded": entry.recorded,
                 // J4-G end
@@ -568,6 +713,8 @@ fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 fn run(context: &Context, args: &RunArgs) -> ExitCode {
+    // J5-B1: X05.3 — this binary's stdout is the target's (§8.3).
+    supervisor::release_stdout_after_prepare();
     let report = supervisor::run(context, args);
     // §6.1: `--label-only` prints the proposed execution label and describes
     // each capability; it executes nothing and copies no credential.
@@ -584,21 +731,21 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
         );
     }
     if let Some(error) = &report.error {
-        eprintln!("{error}");
+        ouro_jail::diag!("{error}");
     }
     // J4 W3, P5: every error no durable receipt carries reaches stderr.
     for error in &report.unrecorded {
-        eprintln!("{error}");
+        ouro_jail::diag!("{error}");
     }
     // I05: evidence health is a separate fact from the attempt's outcome, so a
     // trace failure gets its own diagnostic line rather than replacing one.
     if let Some(error) = &report.trace_error {
-        eprintln!("{error}");
+        ouro_jail::diag!("{error}");
     }
     // J4-G: control messages the consumer never took are reported, never
     // waited on (§13.3); the count comes from `RunReport.control_dropped`.
     if report.control_dropped > 0 {
-        eprintln!(
+        ouro_jail::diag!(
             "ouro-jail: {} control message(s) were dropped: the --control-fd consumer did not \
              read them",
             report.control_dropped
@@ -612,7 +759,7 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
         // supervisor's own diagnostic into it would make the stream differ
         // from direct execution (X05), so the line goes out only when a
         // terminal is watching, where no byte comparison is being made.
-        eprintln!("ouro-jail: receipt {}", path.display());
+        ouro_jail::diag!("ouro-jail: receipt {}", path.display());
     }
     exit(report.exit_code)
 }
@@ -680,3 +827,158 @@ fn internal_subcommand() -> Option<ExitCode> {
         _ => None,
     }
 }
+
+// J5-D begin: unit tests of the renderings this binary owns
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gc_report(boundary: Option<&str>) -> ouro_jail::gc::Report {
+        ouro_jail::gc::Report {
+            entries: vec![ouro_jail::gc::Entry {
+                attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+                action: "retained".to_owned(),
+                reason: "a reason".to_owned(),
+                cgroup: boundary.map(str::to_owned),
+                ..ouro_jail::gc::Entry::default()
+            }],
+            dry_run: true,
+            incomplete: Vec::new(),
+            budget: ouro_jail::gc::Budget {
+                max_entries: 10,
+                charged: 1,
+                exhausted: false,
+                listing_complete: true,
+            },
+            test_seams: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Decision 2026-09-24: gc names what became of the execution boundary
+    /// in portable terms, in both renderings; a Linux cgroup is the value's
+    /// business, not the key's.
+    #[test]
+    fn gc_names_the_execution_boundary_in_both_renderings() {
+        let report = gc_report(Some("removed"));
+        let json = gc_json(&report);
+        let entry = json["entries"][0].as_object().expect("an entry");
+        assert_eq!(entry["execution_boundary"], "removed", "{json:#}");
+        assert!(!entry.contains_key("cgroup"), "{json:#}");
+
+        let text = gc_text(&report);
+        assert!(
+            text.lines().any(|line| line
+                == "att_00000000-0000-4000-8000-000000000001 execution_boundary removed"),
+            "{text}"
+        );
+        assert!(!text.contains(" cgroup "), "{text}");
+
+        // Absent is rendered as null in JSON and as no line in text.
+        let report = gc_report(None);
+        assert_eq!(
+            gc_json(&report)["entries"][0]["execution_boundary"],
+            serde_json::Value::Null
+        );
+        assert!(!gc_text(&report).contains("execution_boundary"));
+    }
+
+    /// Review F7: `version` announces the closed set only where this build
+    /// can observe it: Linux on an architecture the syscall tables cover.
+    #[test]
+    fn the_closed_set_is_announced_only_where_the_build_can_observe_it() {
+        assert_eq!(closed_set_for(true, "x86_64"), Some("linux-closed-v1"));
+        for arch in ["aarch64", "riscv64", "x86", ""] {
+            assert_eq!(closed_set_for(true, arch), None, "{arch}");
+        }
+        for arch in ["x86_64", "aarch64"] {
+            assert_eq!(closed_set_for(false, arch), None, "macOS {arch}");
+        }
+        // And the running binary uses exactly that rule.
+        assert_eq!(
+            closed_set(),
+            closed_set_for(cfg!(target_os = "linux"), std::env::consts::ARCH)
+        );
+    }
+
+    /// §16 build provenance: the build environment's claims are validated
+    /// (build.rs fails the build with these same errors; review F8).
+    #[test]
+    fn build_claims_are_a_full_commit_and_a_consistent_flag() {
+        use build_provenance::{Claims, validate};
+        let full = "48a229ceaefd4985c50990b14116b6d856af0985";
+        assert_eq!(
+            validate(Some(full), Some("false")),
+            Ok(Claims {
+                revision: Some(full.to_owned()),
+                dirty: Some(false)
+            })
+        );
+        assert_eq!(
+            validate(Some(&full.to_ascii_uppercase()), Some("1"))
+                .unwrap()
+                .revision
+                .as_deref(),
+            Some(full),
+            "hex is recorded lowercased"
+        );
+        assert_eq!(
+            validate(Some(&format!(" {full}\n")), None),
+            Ok(Claims {
+                revision: Some(full.to_owned()),
+                dirty: None
+            })
+        );
+        // Unset and empty are unknown, never an error.
+        for (revision, dirty) in [(None, None), (Some(""), Some("")), (Some(""), None)] {
+            assert_eq!(
+                validate(revision, dirty),
+                Ok(Claims {
+                    revision: None,
+                    dirty: None
+                })
+            );
+        }
+        // Malformed or contradictory claims are refused.
+        for revision in [
+            "48a229cea",
+            "48a229ceaefd4985c50990b14116b6d856af09850",
+            "g8a229ceaefd4985c50990b14116b6d856af0985",
+            "HEAD",
+            "0000000000000000000000000000000000000000",
+        ] {
+            assert!(validate(Some(revision), None).is_err(), "{revision}");
+        }
+        for dirty in ["yes", "dirty", "no"] {
+            assert!(validate(Some(full), Some(dirty)).is_err(), "{dirty}");
+        }
+        assert!(
+            validate(None, Some("false")).is_err(),
+            "a clean claim about no revision"
+        );
+        assert!(validate(Some(""), Some("true")).is_err());
+    }
+
+    /// The inputs digest is the documented construction.
+    #[test]
+    fn the_inputs_digest_is_the_documented_construction() {
+        use sha2::Digest as _;
+        let files: [(&str, &[u8]); 2] = [("a", b"xy"), ("b/c", b"")];
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"a\0");
+        expected.extend_from_slice(&2u64.to_le_bytes());
+        expected.extend_from_slice(b"xy");
+        expected.extend_from_slice(b"b/c\0");
+        expected.extend_from_slice(&0u64.to_le_bytes());
+        let hex: String = sha2::Sha256::digest(&expected)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(build_provenance::digest(files), format!("sha256:{hex}"));
+        // A different path or content is a different digest.
+        assert_ne!(
+            build_provenance::digest([("a", &b"xy"[..])]),
+            build_provenance::digest([("A", &b"xy"[..])])
+        );
+    }
+}
+// J5-D end

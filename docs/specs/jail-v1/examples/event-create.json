@@ -1,0 +1,29 @@
+{
+  "schema": "ouro.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "audit",
+  "source_seq": 2,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "210000000",
+  "operation": "fs.create",
+  "stage": "result",
+  "decision": null,
+  "outcome": {
+    "ok": true,
+    "return_value": 4,
+    "errno": null,
+    "completion": "syscall_return"
+  },
+  "fields": {
+    "syscall": "openat",
+    "pid": 1234,
+    "pid_start_ticks": 123456,
+    "tid": 1234,
+    "path_basis": "argument_snapshot",
+    "path_complete": true,
+    "path": {
+      "kind": "workspace_relative",
+      "value": "created.txt"
+    }
+  }
+}

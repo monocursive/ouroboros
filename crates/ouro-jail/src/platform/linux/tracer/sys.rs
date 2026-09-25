@@ -15,6 +15,9 @@ use libc::{c_int, c_uint, c_void, pid_t};
 
 pub const PTRACE_CONT: c_uint = 7;
 pub const PTRACE_SINGLESTEP: c_uint = 9;
+/// Read only by the x86_64 register reader; other architectures' ABIs
+/// have no `PTRACE_GETREGS` (aarch64 uses `PTRACE_GETREGSET`).
+#[cfg(target_arch = "x86_64")]
 pub const PTRACE_GETREGS: c_uint = 12;
 pub const PTRACE_DETACH: c_uint = 17;
 pub const PTRACE_SYSCALL: c_uint = 24;
@@ -514,6 +517,7 @@ mod tests {
     fn ptrace_constants_match_libc() {
         assert_eq!(u64::from(PTRACE_CONT), libc::PTRACE_CONT as u64);
         assert_eq!(u64::from(PTRACE_SINGLESTEP), libc::PTRACE_SINGLESTEP as u64);
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(u64::from(PTRACE_GETREGS), libc::PTRACE_GETREGS as u64);
         assert_eq!(u64::from(PTRACE_GETSIGINFO), libc::PTRACE_GETSIGINFO as u64);
         assert_eq!(u64::from(PTRACE_DETACH), libc::PTRACE_DETACH as u64);

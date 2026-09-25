@@ -15,13 +15,16 @@
     "completion": "syscall_return"
   },
   "fields": {
-    "action": "opened_for_mutation",
     "syscall": "openat",
+    "pid": 1234,
+    "pid_start_ticks": 123456,
+    "tid": 1234,
+    "path_basis": "argument_snapshot",
+    "path_complete": true,
     "path": {
       "kind": "workspace_relative",
       "value": "fixture.txt"
     },
-    "path_basis": "argument_snapshot",
-    "path_complete": true
+    "action": "opened_for_mutation"
   }
 }

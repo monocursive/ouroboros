@@ -155,6 +155,29 @@ pub fn children(pid: pid_t) -> Vec<pid_t> {
     out
 }
 
+/// The child of `ancestor` through which `pid` descends: `pid` itself when
+/// it is a direct child, else the child found by following each parent up
+/// from `pid` (J5-T). For the launcher under bubblewrap it is bubblewrap.
+///
+/// `None` when a parent cannot be read, the walk reaches init first, or it
+/// is deeper than [`MAX_DEPTH`]: then `pid` is not provably below
+/// `ancestor` and the caller must not guess which child it came through.
+#[must_use]
+pub fn child_toward(ancestor: pid_t, pid: pid_t) -> Option<pid_t> {
+    let mut current = pid;
+    for _ in 0..MAX_DEPTH {
+        let parent = ppid(current)?;
+        if parent == ancestor {
+            return Some(current);
+        }
+        if parent <= 1 {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
 /// Every descendant of `pid`, breadth first, nearest first.
 ///
 /// The order is what the caller wants: the first entry is a direct child,
@@ -295,6 +318,49 @@ mod tests {
         let me = std::process::id() as pid_t;
         let mine = cmdline(me).expect("this process has an argv");
         assert!(!mine.is_empty(), "and it is not empty");
+    }
+
+    /// J5-T: the walk names the direct child a descendant came through, and
+    /// refuses rather than guesses when the task is not below the ancestor.
+    #[test]
+    fn j5t_the_child_toward_a_descendant_is_the_one_it_came_through() {
+        let me = std::process::id() as pid_t;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & echo $!; read x"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("/bin/sh must exist on the reference host");
+        let sh = child.id() as pid_t;
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.as_mut().expect("stdout")),
+            &mut line,
+        )
+        .expect("the grandchild's pid");
+        let grandchild: pid_t = line.trim().parse().expect("a pid");
+        assert_eq!(
+            child_toward(me, sh),
+            Some(sh),
+            "a direct child is its own way down"
+        );
+        assert_eq!(
+            child_toward(me, grandchild),
+            Some(sh),
+            "a grandchild came through its parent"
+        );
+        assert_eq!(child_toward(me, 1), None, "init is not below this process");
+        assert_eq!(child_toward(me, 0), None, "no such task");
+        assert_eq!(
+            child_toward(sh, me),
+            None,
+            "an ancestor is not below its child"
+        );
+        // SAFETY: the grandchild is alive (the shell is still waiting on
+        // stdin, so it is not reaped and its number is not reused).
+        unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        drop(child.stdin.take());
+        let _ = child.wait();
     }
 
     #[test]

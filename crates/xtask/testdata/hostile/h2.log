@@ -1,0 +1,17 @@
+     Running unittests src/lib.rs (target/release/deps/ouro_jail-1d54b8c75e2e48d1)
+
+running 1 test
+test records::tests::a ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/conformance_j1.rs (target/release/deps/conformance_j1-004409195d769e4e)
+
+running 3 tests
+test x01_literal_argv ... ok
+test x01_unmapped_other ... error: test failed, to rerun pass `-p ouro-jail --test conformance_j1`
+
+Caused by:
+  process didn't exit successfully: `/home/x/target/release/deps/conformance_j1-004409195d769e4e --test-threads=1` (signal: 11, SIGSEGV: invalid memory reference)
+error: 1 target failed:
+    `-p ouro-jail --test conformance_j1`

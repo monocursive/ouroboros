@@ -32,6 +32,26 @@ jobs:
         run: rustup toolchain install && rustup show
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # J5 platform compilation (jail-v1 §3.2): compile-only evidence for a
+      # triple no runner executes, one per leg. Intel macOS is "additional
+      # evidence, not an execution support claim"; Linux aarch64 is a later
+      # lane, and a build for it reports the filter and observer capabilities
+      # `unsupported` (reason `unsupported_architecture`), so it refuses
+      # before exec. `cargo check`, not clippy: some lints (a cast to
+      # `c_char`, which is `u8` there) differ by target without being defects.
+      # Nothing here runs, so nothing here is claimed as tested.
+      - name: Cross-target check (compile only)
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          case "$RUNNER_OS" in
+            macOS) target=x86_64-apple-darwin ;;
+            Linux) target=aarch64-unknown-linux-gnu ;;
+            *) echo "no cross target for $RUNNER_OS"; exit 1 ;;
+          esac
+          rustup target add "$target"
+          cargo check --workspace --all-targets --target "$target"
+          echo "Compiled (not run): \`$target\`" >> "$GITHUB_STEP_SUMMARY"
       # jail-v1 §15 row I02: no vendor name in the execution core. Nothing ran
       # this before, so a vendor name landed green.
       - name: I02 vendor-name scan
@@ -46,7 +66,26 @@ jobs:
         # One test thread: a ptrace tracer owns every waitpid in its process, so two
         # observer tests in parallel reap each other (the conformance driver pins
         # this too); the binaries also serialize themselves, this is the second wall.
-        run: cargo test --workspace -- --test-threads=1 --nocapture 2>&1 | tee test-output.txt
+        # The macOS leg runs in conformance mode (every live test there is
+        # Linux-only, so nothing skips) and prints the markers that bind its log
+        # to this revision, so its acceptance-map lane can be judged; the Ubuntu
+        # leg must not: its live tests skip, which conformance mode fails.
+        env:
+          OURO_CONFORMANCE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+        run: |
+          {
+            echo "ouro-suite-path=$PATH"
+            echo "ouro-suite-revision=$(git rev-parse HEAD)"
+            echo "ouro-suite-conformance=${OURO_CONFORMANCE}"
+            cargo test --workspace -- --test-threads=1 --nocapture
+          } 2>&1 | tee test-output.txt
+      # jail-v1 §15: the macOS-lane clauses of the acceptance map (M01, M03,
+      # X02's usage errors), judged from this leg's own test output at this
+      # revision. Linux clauses read `elsewhere`; the conformance workflow
+      # judges them on the reference host.
+      - name: Acceptance verdict (macOS lane)
+        if: matrix.os == 'macos-latest'
+        run: cargo run -p xtask -- gates --log macos=test-output.txt
       # `tee` would otherwise mask the test step's own status.
       - name: Report what was not exercised
         if: always()

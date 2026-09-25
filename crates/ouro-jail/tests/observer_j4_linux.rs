@@ -29,6 +29,9 @@ use ouro_jail::platform::linux::tracer::{
 };
 use serde_json::Value;
 
+// J5-C: the shared contract checks for the two `none` receipts below.
+mod common;
+
 const HELPER_C: &str = r##"
 #define _GNU_SOURCE
 #include <errno.h>
@@ -972,6 +975,21 @@ fn none_run(work: &Work, evidence: &str, argv: &[&str]) -> Run {
         .expect("the jail runs")
 }
 
+/// The run's settled receipt, after every record of the run was held to its
+/// contract.
+///
+/// J5-C: the two `none` checks below used to read the settled receipt with no
+/// validation at all (gap analysis §1.3.2). Every receipt now passes its
+/// schema and `ouro_jail::records::semantic::receipt`, the trace passes
+/// `jail-event` per event and `semantic::trace` plus `trace_ends_with`, and
+/// the control transcript passes `jail-control` and `semantic::control`.
+fn settled_receipt(run: &Run) -> Value {
+    run.assert_channels_complete();
+    common::assert_run_records(run);
+    run.receipt_phase("settled")
+        .unwrap_or_else(|| panic!("no settled receipt: {}", run.stderr_text()))
+}
+
 fn gap_reasons(receipt: &Value) -> Vec<String> {
     receipt["observer"]["gaps"]
         .as_array()
@@ -998,9 +1016,7 @@ fn j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops() {
     let hidden = work.path("hidden");
     let seen = work.path("seen");
     let run = none_run(&work, "strict", &[&helper, "listener", &hidden, &seen]);
-    let receipt = run
-        .receipt_phase("settled")
-        .unwrap_or_else(|| panic!("no settled receipt: {}", run.stderr_text()));
+    let receipt = settled_receipt(&run);
     let reasons = gap_reasons(&receipt);
     assert!(
         reasons.iter().any(|r| r == "child_notification_listener"),
@@ -1039,9 +1055,7 @@ fn j4_d2_none_a_foreign_abi_call_degrades_the_receipt() {
         "best-effort",
         &[&helper, "foreign", &i386, &x32, &native],
     );
-    let receipt = run
-        .receipt_phase("settled")
-        .unwrap_or_else(|| panic!("no settled receipt: {}", run.stderr_text()));
+    let receipt = settled_receipt(&run);
     assert!(Path::new(&i386).exists(), "the i386 call ran");
     // Best-effort: the loss is an error of the run, not a stop of the child.
     assert_eq!(

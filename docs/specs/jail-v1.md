@@ -1,7 +1,22 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 18, 2026-09-24. No implementation
-or backend conformance is claimed by this document. Revision 18 has `run` and
+Status: implementation specification, revision 19, 2026-09-25. No implementation
+or backend conformance is claimed by this document. Revision 19 records J5, the
+milestone proof: the D8 decision (the native bubblewrap adapter and the ptrace
+observer; `srt` and Greywall disqualified by named failures; eBPF withdrawn
+from v1), the performance budgets' definitions and their adjustment, the
+portable requirement `execution_boundary`, `doctor --json` as the host
+manifest (`ouro.jail.doctor/1`), build provenance and the architecture refusal,
+which bubblewrap runs, the frozen wire schemas and milestone-1 inputs, the
+error codes `exec_interpreter_missing` and `exec_unconfirmed`, the
+preparation and gate budgets on the boot clock and the preparation budget's
+expiry, the refusal of operator grants that expose host `/proc`, `/sys` or
+cgroupfs, the supervisor's non-dumpable state, the test seams J5 added, the
+L02 row reworded to the lifetime links and §10's network helpers, what the
+observer and `none` do beside a process the supervisor was started beside,
+and the limits the milestone names (§§3.2, 4, 5, 6.1–6.4, 8.2, 8.3, 9.1, 9.3,
+11, 13, 14.1, 15–18); the milestone's evidence, acceptance verdict and named
+limits are in [J5 authority](jail-v1/j5-authority.md). Revision 18 has `run` and
 `doctor` enter a delegated user scope themselves where the user manager
 lingers, so an attempt gets its execution leaf from a plain login session
 (§§6.2, 9.3, 14.1). Revision 17 records J4's
@@ -48,8 +63,10 @@ policy, authenticated developer identity or a compliant company deployment.
 
 Normative words: **must** is a release gate, **initial** is a tunable default
 that must be recorded, and **candidate** is unproved until the named evaluation
-passes. The backend choice and observer privilege model remain implementation
-gates, not facts established by this specification.
+passes. The backend and observer were chosen from measurement and are recorded
+in [backend-evaluation.md](jail-v1/backend-evaluation.md) (D8, revision 19);
+this specification states the choice, and conformance, not this text,
+establishes that it holds.
 
 ## 1. Outcome and scope
 
@@ -183,17 +200,29 @@ run its own kernel under hardware virtualization. A container-based server
 that cannot create user namespaces, delegate a cgroup v2 subtree with the
 pids, memory and cpu controllers, or permit the observer's attachment is
 ineligible, whatever the provider calls it. `doctor --json` on that host
-produces the host manifest, which the J0 report and every conformance run
-record: kernel release and build, architecture, distribution, bubblewrap and
-selected-backend versions and hashes, cgroup v2 delegation as seen from the
-operator's session, the values of `kernel.apparmor_restrict_unprivileged_userns`,
-`kernel.unprivileged_bpf_disabled`, `kernel.perf_event_paranoid` and
-`kernel.yama.ptrace_scope`, any operator-installed AppArmor profile, and the
-mechanism by which tracing capabilities were provisioned (§5.2). Until
-`doctor` exists, [host-manifest.sh](jail-v1/host-manifest.sh) collects the
-same facts read-only; its first run is
-[evidence/reference-host-2026-09-22.txt](jail-v1/evidence/reference-host-2026-09-22.txt),
-and `doctor --json` output supersedes it. Ubuntu 24.04 and later restrict
+produces the host manifest, which every conformance run records: the record
+`ouro.jail.doctor/1` ([schema](jail-v1/jail-doctor.schema.json)). On Linux its
+`host` object carries the kernel release and build, the distribution, the
+virtualization, online CPUs, memory and swap, the systemd version, the sysctls
+`kernel.apparmor_restrict_unprivileged_userns`,
+`kernel.unprivileged_bpf_disabled`, `kernel.perf_event_paranoid`,
+`kernel.yama.ptrace_scope`, `user.max_user_namespaces` and
+`kernel.io_uring_disabled` (an unreadable restriction sysctl is `unknown`,
+distinct from an absent one), whether AppArmor is enabled and the state of its
+user-namespace restriction with the installed profile files that name user
+namespaces, bubblewrap or this product, the non-empty `local/` overrides and the
+top-level profile files no package owns, cgroup v2 delegation as seen from the
+operator's session (the root controllers, the delegated root, its controllers
+and `subtree_control`), lingering, the operator identity category (§14.1) and
+the privileged groups the operator belongs to. `binaries` records this binary's
+path and the SHA-256 of the running image, and the bubblewrap a run would
+execute (path, SHA-256, version) or null; `build` is `version`'s (§6.1). The
+architecture is `platform.arch`. An unreadable fact is null. On macOS the record
+has no `host`, no `supervisor_scope` and no backend binary.
+[host-manifest.sh](jail-v1/host-manifest.sh) collected the same facts read-only
+before `doctor` did (its first run is
+[evidence/reference-host-2026-09-22.txt](jail-v1/evidence/reference-host-2026-09-22.txt))
+and remains a fallback for a host where the binary cannot run. Ubuntu 24.04 and later restrict
 unprivileged user namespaces through AppArmor by default. The
 distribution's own `bwrap-userns-restrict` profile is measured sufficient for
 the one containment layer every contained profile uses, and insufficient for a
@@ -206,18 +235,37 @@ on a stock install of a supported distribution, and the reference host stays
 stock so that conformance proves it. Nested user namespaces are therefore a
 measured, optional host capability (§9.2), never a requirement. `doctor` names
 the host-specific change that would enable them, as an optional remediation. All of
-these are host policy: the tools report the state and change none of them. Conformance runs on the host as a dedicated operator account,
-`ouro-ci`: no sudo, lingering enabled so its `user@` service delegates the
-cgroup controllers, the provisioned tracing capabilities, and nothing else
-(§16). A VM is acceptable; a container that cannot delegate the required
+these are host policy: the tools report the state and change none of them.
+
+The backend is the bubblewrap the operator's `PATH` provides, resolved once per
+process: the first absolute entry holding an executable regular file named
+`bwrap`, canonicalized. Empty and relative entries are never searched, and an
+unset `PATH` provides no backend (there is no built-in search path). Every
+probe and every run executes exactly that file, and `doctor` records exactly
+it; with none, the probes that would execute it are `unavailable`
+(`backend_unavailable`) without running, `doctor` is not ready and a contained
+`run` refuses with 125 before exec.
+
+Conformance runs on the host as a dedicated operator account,
+`ouro-ci`: no sudo, no capability, lingering enabled (a per-user logind
+setting, §9.3) so its `user@` service delegates the cgroup controllers, and
+nothing else (§16). A VM is acceptable; a container that cannot delegate the required
 kernel features is not a substitute for the release runner. Linux aarch64
 gets its own native conformance run before it is advertised; it is a later
-lane, not the reference host. No promise is made about all kernels newer than
+lane, not the reference host. Every syscall table in v1 (the contained
+filters, the mediation filter and the observer's closed set) is x86_64's, so
+a build for another architecture compiles, and the probes that rest on those
+tables report `unsupported` with reason `unsupported_architecture`:
+`syscall_filter`, `closed_set_observation` and `network_proxy` are
+unsupported, `doctor` is not ready and `run` refuses with 125 before
+preparation. No promise is made about all kernels newer than
 a version.
 
 The native macOS CI lane initially targets Apple Silicon; Intel compilation is
-additional evidence, not an execution support claim. Both architectures remain
-possible through the platform contract.
+additional evidence, not an execution support claim. CI compiles
+`aarch64-unknown-linux-gnu` and `x86_64-apple-darwin` (all targets, warnings
+denied); neither is executed, and neither is a support claim. Both
+architectures remain possible through the platform contract.
 
 ### 3.3 macOS work that must remain possible
 
@@ -264,11 +312,11 @@ crates/
     src/{lib,main,cli,config,policy,profiles,capability,supervisor,observer,
          network,records,trace,state,cleanup}.rs
     src/platform/{mod.rs,linux/,macos/}
+    build.rs          records the compiler, target, optimisation and build inputs for version/doctor
     profiles/launch/  codex.toml, claude.toml, opencode.toml: data only
     tests/            integration and conformance tests; tests/fixtures/
   ouro-fixture/       J1   the conformance child binary (§15) and harness helpers
-  ouro-jail-ebpf/     J1   the observer's BPF object, only if J0 selects eBPF
-  xtask/              J1   repository tasks: I02 scan, BPF build, conformance driver
+  xtask/              J1   repository tasks: I02 scan, conformance driver and acceptance verdict, freeze, perf
   ouro-records/       M2   wire types, canonical bytes, schema identifiers
   ouro-ledger/        M2   library + the `ouro-ledger` binary
   ouro/               D6   the front door; `ouro managed` verbs join it at M4
@@ -288,10 +336,8 @@ packaging/            D6   reserved; empty until after milestone 3
 - `ouro-fixture` is the compiled child §15 requires. Tests locate it through
   Cargo's built-binary environment variable. It is never packaged, and it is
   exempt from I02 together with `profiles/launch/`, documentation and fixtures.
-- `ouro-jail-ebpf` is not a default workspace member: it needs a BPF target
-  and linker that portable builds and macOS never have. `xtask` builds it on
-  Linux; the Linux platform module embeds the object and records its digest
-  (§16). Whether it exists at all is decided by J0.
+- There is no BPF object crate: D8 selected the ptrace observer, which is
+  compiled into `ouro-jail`, and v1 withdraws eBPF (§5.2).
 - Schemas are single-sourced under `docs/specs/`. Rust tests read them by a
   path relative to the crate manifest, and the schema identifiers that
   `ouro version --json` announces are constants tested against those files.
@@ -301,8 +347,10 @@ packaging/            D6   reserved; empty until after milestone 3
 - Every crate sets `publish = false`. Binaries are named exactly `ouro`,
   `ouro-jail` and `ouro-ledger` (D6).
 - `xtask` owns checks that are not unit tests: the I02 vendor-name scan over
-  `crates/ouro-jail/src` and `crates/ouro-ledger/src`, the BPF build, and the
-  conformance driver. Until it exists, the link check is
+  `crates/ouro-jail/src` and `crates/ouro-ledger/src`, the conformance driver
+  and its per-gate verdict over [acceptance-map.toml](jail-v1/acceptance-map.toml)
+  (`gates`, `gates-merge`), the milestone freeze file (`freeze`, §16) and the
+  performance harness (`perf`, §5.2). The link check is
   `docs/specs/validate_links.py` beside the schema validators.
 
 Use stable Rust, pin the toolchain and dependencies in the implementation PR,
@@ -344,10 +392,10 @@ new product features.
 Order inside J0: provision the reference host and record its manifest (§3.2),
 measure the observer privilege model (§5.2) first, then evaluate the
 enforcement candidates (§5.1). A blocked observer changes which backend is
-worth integrating. The report's skeleton,
-[backend-evaluation.md](jail-v1/backend-evaluation.md), is checked in with
-every measurement marked `not_started`; a value there is a claim only once the
-host manifest and the raw fixture output it cites exist beside it.
+worth integrating. The report,
+[backend-evaluation.md](jail-v1/backend-evaluation.md), records the D8
+decision (revision 19); a value there is a claim only where the host manifest
+and the raw fixture output it cites exist beside it.
 
 ### 5.1 Enforcement candidates
 
@@ -385,116 +433,180 @@ source of fixtures and code to inspect, not a conformance oracle. It previously
 allowed broader reads and had different network fallback behavior.
 
 The implementation records its decision in
-[backend-evaluation.md](jail-v1/backend-evaluation.md). The checked-in skeleton
-fixes the report's shape; it contains no measurement, and its presence is not
-completion of D8. The completed report must include the host manifest, raw
-fixture locations and a gap-to-gate table. Only the chosen integration becomes
-a shipping dependency.
+[backend-evaluation.md](jail-v1/backend-evaluation.md), with the host manifest,
+raw fixture locations and a gap-to-gate table. Only the chosen integration
+becomes a shipping dependency.
+
+Decision (D8, recorded 2026-09-25): the thin native Rust adapter over
+bubblewrap 0.11.1, seccomp and cgroup v2 delegation, which is what J1 to J4
+implement. Each candidate was run on the stock reference host with nothing
+installed ([fixture runs](jail-v1/evidence/d8-candidates-2026-09-24-ouro-ci.txt)),
+and each fails a gate by name. `srt` 0.0.77 cannot run `true`: its seccomp
+helper needs a nested user namespace, which the distribution's
+`unpriv_bwrap` profile denies. Greywall 0.3.7 needs `socat` and a downloaded
+proxy service (GreyProxy), cannot create its TUN device, and its monitor
+reports nothing for a write it denied, so it offers no jail-owned observation
+(north star D10). The legacy sandbox is an Elixir module of the legacy runtime
+(§18), so it cannot run without BEAM, which I01 excludes; it was not run and
+stays a source of fixtures. The criteria those failures leave unevaluated are
+recorded as not evaluated, not as passed.
 
 ### 5.2 Observer candidate and privilege boundary
 
-The first candidate is a Linux eBPF observer owned by the supervisor, filtered
-to the attempt before collecting arguments. Evaluate it separately from D8's
-enforcement candidates. No audit daemon, vendor protocol or seccomp-notification
-service is introduced.
+The observer is a ptrace tracer in the supervisor (D8, revision 19). It was
+measured first, on 2026-09-22, because it needs no provisioning under the
+default Yama scope that Ubuntu, Debian, Fedora and Arch ship, and it observes
+the whole closed set (§11.2), which O01–O06 test. No audit daemon, vendor protocol or seccomp-notification
+service is introduced; `agent`'s `connect` results come from the unix-peer
+mediator the supervisor owns (§11.4).
 
-Measurement order, revised 2026-09-22 for portability across distributions:
-the ptrace tracer described below is measured first, because it needs no
-provisioning under the default Yama scope that Ubuntu, Debian, Fedora and
-Arch ship. The eBPF candidate is measured when ptrace misses the closed set
-or the performance budget. Whichever is selected must install on a wide range
-of distributions without a service manager or a privileged helper.
+eBPF is withdrawn from the v1 contract. Attaching it needs `CAP_BPF`,
+`CAP_PERFMON` and tracefs access provisioned on the host, which the
+no-host-configuration requirement (§3.2) rules out: unprovisioned, as
+`ouro-ci`, attachment was refused
+([ptrace probe §1](jail-v1/evidence/ptrace-probe-2026-09-22-ouro-ci.txt)). The
+revision-15 working assumption of two observer backends (ptrace everywhere,
+eBPF where provisioned) is withdrawn with it, and so are the file-capability
+provisioning path and the capability-clearing contract it needed. An eBPF fast
+path is future work: it needs its own proposal, which states its provisioning
+as an explicit, optional operator step, passes O01–O06 by itself, and keeps
+the receipt's `observer.backend` naming what ran.
 
-Working assumption, recorded 2026-09-22 after the first measurements and to
-be confirmed by the purpose-built tracer: two observer backends behind the
-observer interface of §4. ptrace is the baseline that runs on any host with
-nothing installed and is what `doctor` selects when it cannot prove eBPF
-usable; eBPF is the fast path when the installer's file capabilities and
-tracefs access are present. Both emit the same closed set, events and
-receipts, and the receipt's observer backend field names which one ran. The
-tracer's overhead on the fixed file workload decides whether J1 needs eBPF or
-can defer it. Measured 2026-09-22: the purpose-built tracer costs what strace
-costs, so the price is the kernel's two stops per traced call, and ptrace
-alone cannot meet the fixed-workload budget; eBPF is needed where that budget
-matters and ptrace remains the baseline everywhere. The assumption is
-confirmed on cost; selection waits for the eBPF candidate to attach and pass
-the same fixture.
+The selected tracer, with its limits, each specified where it applies:
 
-The proof must identify attach points, kernel/configuration dependencies,
-required capabilities, attachment lifetime, descendant tracking, event loss,
-startup latency and runtime overhead. The reference deployment aims for a
-non-root operator process with narrowly provisioned tracing capabilities and a
-delegated cgroup. `CAP_BPF`/`CAP_PERFMON` are candidates to measure; their names
-alone do not establish that a particular host permits attachment. Kernel
-[perf security documentation](https://docs.kernel.org/admin-guide/perf-security.html)
-describes capability and host-policy checks that affect tracing.
+- It attaches to the blocked launcher before exec with `PTRACE_O_TRACEEXEC`,
+  `PTRACE_O_TRACEFORK`, `PTRACE_O_TRACEVFORK`, `PTRACE_O_TRACECLONE` and
+  `PTRACE_O_TRACEEXIT`, reads results at syscall-exit-stop, and takes the exec
+  event as the confirmed transition (§11.2). Under the default
+  `kernel.yama.ptrace_scope=1` an ancestor needs no capability; a host whose
+  Yama scope forbids it cannot attach, and `--observe on` then refuses.
+- A seccomp filter returning `SECCOMP_RET_TRACE` narrows its stops to the
+  closed set; the filter's digest is published and recorded (§11.2). A
+  narrowed call still costs two stops, a seccomp stop and an exit stop, which
+  is the observation cost below. A call that reaches the narrowing filter with
+  no tracer attached fails with `ENOSYS` (§9.2).
+- Attachment is per thread and bound to the attaching thread; a traced tree
+  cannot be traced by anything inside it; attribution across PID namespaces
+  and PID reuse is specified in §11.3.
 
-The first release does not install a setuid helper, run the user's command as
-root, change sysctls, grant file capabilities or edit AppArmor. The operator
-provisions the documented reference environment. Effective UID 0 execution and
-mismatched real/effective UIDs refuse in v1. A provisioned supervisor must clear
-ambient/inheritable/effective/permitted tracing capabilities on every backend,
-bridge and user-child launch path. Clear the supervisor's no-longer-needed
-capabilities after attachment, and set `no_new_privs` before child exec.
-Prove the child cannot reacquire privileges; user-namespace capabilities are
-separately confined and do not grant host capabilities.
+`fanotify` was not evaluated: the tracer covers the whole closed set, and
+`fanotify` cannot supply a confirmed exec transition, `proc.exit` or
+`net.connect`. The kernel audit subsystem, an LSM or BPF-LSM program and a
+privileged host daemon are not candidates: each is host-global or needs a
+separate proposal. The north star's rule that the sensor lives in the
+supervisor, outside the child and outside the enforcement backend, applies
+unchanged.
 
-Capability provisioning is the operator's act on the reference host, and J0
-records which mechanism was used: ambient capabilities granted by a systemd
-system service unit that starts the supervisor (`AmbientCapabilities=`; a user
-unit cannot grant capabilities the account lacks), or file capabilities the
-operator sets on the supervisor binary. Neither is installed by the tools. An
-installed system uses the second: the package or installer sets the file
-capabilities on the `ouro-jail` binary once, which works on any distribution
-with extended attributes and does not assume systemd (revised 2026-09-22; the
-service-unit choice is withdrawn). The conformance loop measures the ptrace
-tracer first, which needs neither. Measure the smallest set that attaches: `CAP_BPF` and
-`CAP_PERFMON` are the candidates on the pinned kernel; needing `CAP_SYS_ADMIN`
-is a failed measurement, not a fallback. Record whether the AppArmor
-user-namespace restriction, `perf_event_paranoid` or a hardened
-`unprivileged_bpf_disabled` interfered, and how the operator resolved each.
-
-J0 measures the ptrace tracer below first, against the §11 semantics, because
-it needs no provisioning; the eBPF candidate follows if ptrace misses the
-closed set or the §5.2 budgets. `fanotify` is measured only as a supplement.
-None is selected here:
-
-- A ptrace tracer in the supervisor, attached to the launcher before exec with
-  `PTRACE_O_TRACEEXEC`, `PTRACE_O_TRACEFORK`, `PTRACE_O_TRACEVFORK`,
-  `PTRACE_O_TRACECLONE` and `PTRACE_O_TRACEEXIT`, reading results at
-  syscall-exit-stop; the exec event is a confirmed transition. Under the
-  default `kernel.yama.ptrace_scope=1` an ancestor needs no capability. Known
-  limits to measure: two stops per traced call unless a seccomp filter with
-  `SECCOMP_RET_TRACE` narrows stops to the closed set, and a call that reaches
-  such a filter with no tracer attached fails with `ENOSYS`, which must be a
-  tested failure mode; attachment is per thread and bound to the attaching
-  thread; a traced tree cannot be traced by anything inside it; attribution
-  across PID namespaces and PID reuse needs its own fixture.
-- `fanotify` for the filesystem classes only. It cannot supply a confirmed
-  exec transition, `proc.exit` or `net.connect`, so it can at most combine with
-  another source and cannot alone make the closed set active.
-
-The kernel audit subsystem, an LSM or BPF-LSM program and a privileged host
-daemon are not candidates: each is host-global or needs a separate proposal.
-A fallback that passes O01–O06 with its own measured overhead may become the
-selected observer for the pinned host. The north star's rule that the sensor
-lives in the supervisor, outside the child and outside the enforcement
-backend, applies to it unchanged.
+v1 provisions no capability. The first release does not install a setuid
+helper, run the user's command as root, change sysctls, grant file
+capabilities or edit AppArmor, and the supervisor needs no capability for any
+profile. Effective UID 0 execution and mismatched real/effective UIDs refuse in
+v1. Set `no_new_privs` before child exec and prove the child cannot reacquire
+privileges (X06): every contained target starts with empty inheritable,
+permitted, effective, bounding and ambient capability sets, and it must not be
+able to trace, or take descriptors from, the supervisor or the observer.
+User-namespace capabilities are separately confined and do not grant host
+capabilities. `doctor` reports
+the operator identity category (§14.1).
 
 No observer attachment means refusal with `--observe on`. An explicit
 `--observe off` remains usable wherever the containment/lifetime requirements
-can be met. It is not an automatic compatibility fallback. If the candidate
-cannot satisfy the closed set, record that blocked gate and revise the observer
-choice before marking the first executable slice complete. A general privileged
-host service would require a separate proposal.
+can be met. It is not an automatic compatibility fallback. A general
+privileged host service would require a separate proposal.
 
-Measure at least 30 launches each for a no-op command, a descendant-heavy fixture
-and a fixed file-operation workload, with observation on/off. Report median/p95
-startup, wall time, peak RSS, event counts and losses on the named host. Initial
-budgets: under 250 ms p95 added warm startup and under 20% median overhead on the
-fixed workload. These are engineering decision thresholds, not customer claims;
-exceeding one requires a recorded adjustment before backend freeze. Missing or
-incorrect evidence cannot be waived as a performance tradeoff.
+Performance is measured with `cargo xtask perf run` on the reference host, as
+the operator, from a plain lingering login session and again inside a
+pre-entered delegated user scope: at least 30 valid launches per arm after one
+discarded warm-up launch per arm, the arms' order a seeded permutation per
+round. Workloads: a no-op (the fixture starts, reports and exits), a
+descendant-heavy fixture (200 children, one at a time, each forked and
+replaced by `/usr/bin/true`) and a fixed file-operation workload (5,000 rounds
+of create, rename and unlink of one name in the workspace: 15,000 closed-set
+calls). Arms: direct execution, and `tool` (the budget profile), `agent` and
+`none` (informational), each with observation on and off. Report median and
+p95 startup, wall time, peak RSS, event counts and losses.
+
+- **Startup** runs from the launcher's `CLOCK_MONOTONIC` reading immediately
+  before `fork` to the target's first reading at entry to its workload; the
+  launcher and the target must be shown to share a time namespace. **Added
+  warm startup** is a jailed launch's startup minus the median startup of
+  direct execution of the same workload in the same session.
+- **Work** is the target's own end reading minus its entry reading.
+  **Teardown** runs from the target's end reading to the launcher's reading
+  after `wait4` returns the jail (settlement, tree verification, receipts and
+  trace flush). **Post-start** is work plus teardown; **wall** is startup plus
+  post-start.
+- **Median overhead** is the subject's median over the baseline's median,
+  minus one. On the fixed workload it is computed on work, on post-start and
+  on end-to-end wall. Post-start carries the budget: startup has its own, and
+  post-start leaves no jail time after the target's entry uncounted. Work
+  isolates the per-call cost while the target runs; work and wall are
+  reported. p95 is the nearest-rank 95th percentile.
+- **Peak RSS** reports the supervisor's sampled `VmHWM`, `wait4`'s
+  `ru_maxrss`, the execution leaf's sampled `memory.peak` and the target's own
+  `ru_maxrss`, each named as what it is; a sampled value is a lower bound.
+- **Event counts** are the receipt's per-class `observed_count` and the trace
+  frames by source; **losses** are observer and coverage gaps, receipt errors
+  and incomplete traces, over every launch.
+- A launch counts only if the target completed its workload and, jailed, the
+  attempt settled with the arm's profile, observation mode and scope state,
+  outcome `exited` 0, no error, verified tree death and no gap or degraded
+  class; with observation on, an attached observer, every closed-set class
+  active, every event count exactly the workload's (the trace's equal to the
+  receipt's) and a complete trace (§13.3). With observation off, a target that
+  ends before the supervisor confirms its exec settles `unknown` with
+  `exec_unconfirmed` (§6.4); such a launch counts, flagged, because the
+  target's own report proves it ran. Every other launch is excluded and counted
+  by reason, never averaged.
+- A verdict needs at least 30 valid launches on both sides, no excluded
+  launch on either side, clean raw data (one run, no duplicate launch, counts
+  as planned) and a quiet host (every counted launch taken at or below the
+  run's stated load threshold); otherwise the numbers are reported without a
+  verdict. A budget holds for a profile only if every session and workload
+  cell passes.
+
+Initial budgets, as first written: under 250 ms p95 added warm startup, and
+under 20% median overhead on the fixed workload. These are engineering
+decision thresholds, not customer claims; exceeding one requires a recorded
+adjustment before backend freeze. Missing or incorrect evidence cannot be
+waived as a performance tradeoff.
+
+Recorded adjustment (operator decision, 2026-09-25, on the milestone
+measurement, [backend-evaluation.md §4](jail-v1/backend-evaluation.md#4-performance-52-budgets);
+it supersedes the decision of 2026-09-24, which applied both budgets to the
+jail's own overhead):
+
+- The startup budget stays: under 250 ms p95 added warm startup. It is met in
+  every judged cell, `tool` 101 to 139 ms.
+- The 20% budget on the fixed workload is missed, and is replaced by a
+  measured ceiling on the jail's own overhead: `--observe off` against direct
+  execution, at most 50% median post-start overhead on this syscall-dense
+  worst-case workload, judged on `tool`. `tool` measures 39.5% from a plain
+  session and 40.3% in a scope, which meets the ceiling and misses 20% by about
+  20 points (the informational profiles: `agent` 42.0% and 42.5%, `none` 3.1%
+  and 5.8%). Its work phase (+29.6%, +28.9%) and end-to-end wall (+99.9%,
+  +90.7%, startup included) are reported, not budgeted. The dominant cost is
+  bubblewrap's containment as the stock distribution confines it: on this
+  workload, measured at revision `4380241f` (the later commits change neither
+  bubblewrap nor the distribution's confinement), bubblewrap alone, with the
+  `tool` profile's namespaces under Ubuntu's `unpriv_bwrap` AppArmor
+  confinement, adds 19.0% to the work phase, and the jail with observation off
+  22.2%, so the jail's filter and supervisor add about 3 points
+  ([attribution](jail-v1/evidence/perf-2026-09-25-attribution-ouro-ci.txt));
+  settlement, tree verification, the receipts and the trace flush add a
+  median 19.4 ms (plain) and 18.6 ms (scope) of teardown.
+- The cost of observation (`--observe on` against off, and against direct) is
+  reported per workload with its median, p95 and valid and excluded counts,
+  and has no budget. Every closed-set call costs the observer two ptrace
+  stops, measured in J0 at about 22 µs each on the reference host, and nothing
+  in user space removes them, so the cost scales with the rate of closed-set
+  calls: on the fixed workload, about 100,000 such calls per second, `tool`
+  with observation on is +423% to +433% on the work phase against direct; it
+  is
+  small on work that mostly computes, reads or writes, which the set does not
+  cover.
+- A representative workload, a build or a test run, joins the §5 set as later
+  work.
 
 ## 6. CLI and configuration
 
@@ -542,12 +654,34 @@ Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
 stdout/stderr byte streams and has no `--json` stdout mode. An error that
 reaches no durable receipt (a terminal receipt that failed to persist, and
 what only it would have recorded) is printed on stderr, one line per error.
+A diagnostic that cannot be written to stderr is dropped: diagnostics never
+change an exit code.
 
 `--control-fd` carries structured control messages instead of textual launch
 diagnostics. `--trace-fd` carries events. Each supplied fd must be open, have the
 correct direction, be distinct from all other supplied channels and stdio, and
 be owned exclusively for the invocation. The child inherits only validated
 stdio, not those channels. Fd validation fails before preparation.
+
+`version --json` announces the schema identifiers this build writes,
+`"frozen": true` since the milestone-1 freeze (§13), the running platform's
+closed set (`observation.closed_set`: `linux-closed-v1` on a Linux build whose
+architecture the syscall tables cover, §3.2, otherwise null, as on macOS in
+this milestone) and a `build` object. `build` carries `revision` and `dirty`,
+the build environment's claims (`OURO_BUILD_REVISION`, `OURO_BUILD_DIRTY`),
+validated: a revision is a full, non-zero 40-hex commit, `dirty` requires a
+revision, a malformed or contradictory pair fails the build, where the
+repository is present a claim that disagrees with it fails the build, and a
+build environment that sets neither records null, never a guess. It also
+carries what was measured at compile time: `rustc` (`rustc -V`), `target`,
+`opt_level`, `debug_assertions`, and `inputs`, the SHA-256 of the build inputs
+(every file under the jail crate's `src`, its build script and manifest, the
+workspace manifest, `Cargo.lock` and `rust-toolchain.toml`). The same digest
+computed from a commit shows whether a binary's claimed revision is the tree it
+was built from. `doctor --json` carries the same `build` (§3.2). `gc --json`
+reports what became of an attempt's execution boundary under the key
+`execution_boundary`. `gc --json` and `explain --json` are unversioned
+diagnostics: their shape can change without a new identifier.
 
 ### 6.2 Paths and precedence
 
@@ -570,9 +704,12 @@ Apply configuration in this order:
    `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
    `OURO_JAIL_EVIDENCE`. No environment-derived path or host grants.
    Every `OURO_JAIL_TEST_*` variable is a test-only knob: it can only shrink
-   a bound, end an attempt early or make the product take a path it takes on
-   other hosts; it never widens authority and leaves the policy digest
-   unchanged. At attempt start every such variable set is
+   a bound, end an attempt early, make the product take a path it takes on
+   other hosts or under a real loss, or hold one named point for a bounded
+   time; it never widens authority and leaves the policy digest
+   unchanged. The release binary honours them, so the tested binary is the
+   shipped binary; [J5 authority](jail-v1/j5-authority.md) lists the gates
+   each one proves. At attempt start every such variable set is
    recorded, name to value (a name set more than once with its first value,
    the one `getenv` returns and every consumer applies), in `jail-state.json` `test_seams` and in
    `lifetime.native.details.test_seams` of every receipt that has native
@@ -581,9 +718,10 @@ Apply configuration in this order:
    unix-peer mediation record queue, 1 to 4096), `OURO_JAIL_TEST_TRACE_CAP`
    (the local trace cap, 4096 bytes to 64 MiB, half of it at most 256 KiB
    reserve, and named in every loss it causes), `OURO_JAIL_TEST_ABORT_AT`
-   (`<site>:<point>` aborts at one named point, `temp_written`,
-   `temp_synced`, `renamed` or `dir_synced`, of the first write at one
-   persistence site), `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
+   (`<site>:<point>[:<n>]` aborts at one named point, `temp_written`,
+   `temp_synced`, `renamed` or `dir_synced`, of the `n`th write, 1 to 10,000
+   and the first when omitted, at one persistence site),
+   `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
    entry bound, reported in gc's `test_seams`), and
    `OURO_JAIL_TEST_TRACER_INFLIGHT` (1 to 16,384) and
    `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304; the bound in force,
@@ -598,7 +736,24 @@ Apply configuration in this order:
    (`assume-outside-no-bus`) or with lingering treated as off
    (`assume-outside-no-linger`); any other value is ignored; it is named in
    `supervisor_scope.test_seam`, with the value applied or null when
-   ignored.
+   ignored. `OURO_JAIL_TEST_ARCH` makes the probes that rest on the x86_64
+   syscall tables refuse as a build for the named architecture would (§3.2);
+   it can only add a refusal, and the refusal's evidence names it.
+   `OURO_JAIL_TEST_MOUNT_SWAP=<dir>` writes `<dir>/pinned` once every mount
+   source is pinned and then waits, at most 10 seconds, for `<dir>/go` before
+   §9.1's handoff verification, so a test can replace a pinned source; a value
+   that is not a usable directory does nothing.
+   `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH=<substring>` makes a covered non-exec
+   call whose path contains the substring report a path the observer could not
+   read, so a successful one is a `path_unreadable` gap, and
+   `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT=<substring>` follows such a call's
+   entry without recording it, so its exit is an `unmatched_exit` gap; each
+   manufactures only a gap the observer records for the real loss.
+   `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=<bytes>` makes the external
+   `--trace-fd` sink put at most that many bytes into each write, so a frame
+   longer than it reaches the consumer in several partial writes, each
+   resumed at its offset (§13.3); a value that is not decimal digits without
+   a leading zero, from 1 to the event bound, is ignored.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 
@@ -673,7 +828,12 @@ command fragments and arbitrary environment entries are not policy keys.
 | Change proxy network to none, or shrink its allowed host set | Allow |
 | Enable observation or change best-effort to strict | Allow |
 | Add a host/path grant, increase/remove a limit, weaken coverage/evidence | Refuse with the exact key path |
-| Add credentials, launch profile, executable, `none` or backend settings | Refuse |
+| Add credentials, a launch profile or `none` | Refuse |
+
+No v1 layer has an executable or backend key (the file keys above, §12), so no
+file can widen through one: such a key is unknown and refuses
+(`invalid_config`). A credential in a project file refuses as the widening it
+is, `policy_widening` at `jail.credentials`.
 
 Compare authority after expansion and path resolution, not TOML ordering or
 string prefixes. `/work/a` is not an ancestor of `/work/ab`. Denial wins over
@@ -710,27 +870,43 @@ CPU-seconds timeout. Wall always exists.
 
 This table is authoritative for initial defaults and requirements:
 
-| Profile | wall (required) | pids (preferred) | mem | cpu | Execution cgroup |
+| Profile | wall (required) | pids (preferred) | mem | cpu | Execution boundary |
 |---|---|---|---|---|---|
-| agent | 2h | 512 | Absent unless explicit | Absent unless explicit | Required by a cgroup-filtering observer (eBPF) or an explicit tree limit; the ptrace observer needs none |
-| tool | 30m | 256 | Absent unless explicit | Absent unless explicit | Required by a cgroup-filtering observer (eBPF) or an explicit tree limit; the ptrace observer needs none |
+| agent | 2h | 512 | Absent unless explicit | Absent unless explicit | Required by an explicit tree limit; the ptrace observer needs none |
+| tool | 30m | 256 | Absent unless explicit | Absent unless explicit | Required by an explicit tree limit; the ptrace observer needs none |
 | build | 1h | 512 | Explicit ceiling required | Absent unless explicit | Required for memory |
 | none | 2h | Absent unless explicit | Absent unless explicit | Absent unless explicit | Required for lifetime, including observe off |
+
+The requirement `execution_boundary` names a tree the supervisor can place the
+target in, bound resources on, kill as a whole and verify empty. `none` needs
+it for lifetime (observation on or off), and every explicit pids, memory or
+CPU ceiling needs it. It names the semantic, not a mechanism (§3.1): the Linux
+plan satisfies it with a delegated cgroup v2 leaf, and a platform without one
+reports it `unsupported`. Linux-private state and native details keep their
+own names (`execution_cgroup` in `jail-state.json` and in
+`lifetime.native.details`). The receipt's `lifetime.boundary` values are a
+per-OS vocabulary, not portable requirements: `pid_namespace` and
+`supervisor_cgroup` are Linux's, `native_tree` is another platform's, and the
+receipt schema refuses the Linux values in a macOS receipt (M02).
 
 Every explicit limit from CLI, operator or project config is required, even
 when it equals a preferred default. Attempt preferred pids enforcement when
 delegation and its controller are usable; otherwise record the requested value
 with `required=false`, `applied=false`, null mechanism/hit/scope and
 an explanatory wrapper note. Missing a preferred controller alone never refuses.
-Observer/lifetime requirements can require a cgroup without requiring its pids
-controller. `none` may enforce explicit cgroup limits but still cannot protect
+Lifetime requirements can require an execution boundary without requiring its
+pids controller. `none` may enforce explicit cgroup limits but still cannot protect
 them against same-UID interference. No unspecified memory/CPU ceiling is implied.
 
 Linux measures execution wall, preparation/gate/stop budgets and event elapsed
 time using `CLOCK_BOOTTIME`: suspend counts, wall-clock adjustments do not.
 An expired deadline is acted on when execution resumes; the supervisor cannot
-run during suspend. Later macOS uses a native continuous clock with the same
-suspend semantics. Pids, memory and CPU use their separate cgroup mechanisms.
+run during suspend. The preparation budget covers credential staging, which
+waits on the same deadline. Waits that bound I/O or a race rather than the
+attempt (the watcher's grace, `gc`'s own verification, trace and persistence
+progress, the scope step's wait, proxy deadlines, the observer's internal
+waits) may use the monotonic clock; a suspend lengthens them. Later macOS uses
+a native continuous clock with the same suspend semantics. Pids, memory and CPU use their separate cgroup mechanisms.
 
 Exit codes: child's code on a completed execution; `128 + signal` for a
 signal-terminated child; 1 for a tool failure; 2 for invalid CLI/config syntax;
@@ -744,7 +920,14 @@ recorded (`errors[]`, exit 1) but is not a stop the supervisor acted on: it
 requests no stop and never becomes `outcome.cause`.
 A child exiting 125 is `outcome.kind=exited`, not `refused`. A persistence
 failure (`state_write_failed`) before exec is a refusal (125); after exec it
-is a tool error (1).
+is a tool error (1). With observation off, a target that ends before the
+supervisor sees its new image cannot have its exec confirmed (§8.1 step 7:
+end-of-file on the error channel alone is insufficient). The outcome is
+`unknown`, and the run is a tool error: exit 1 with `exec_unconfirmed` (stage
+`running`, remediation `configuration`) in `errors[]` and on stderr.
+`--observe on` confirms such an exec. Measured on the reference host,
+`/usr/bin/true` under `tool` or `agent` with observation off ends this way on
+every launch.
 
 Inspection commands use 0 for success, 2 for invalid syntax/config, and 1 for
 an operational failure. `doctor` and `run --label-only` additionally use 125
@@ -761,8 +944,11 @@ Initial codes include `invalid_config`, `policy_widening`,
 `unsafe_state_path`, `unsupported_platform`, `missing_capability`,
 `backend_unavailable`, `observer_unavailable`, `nesting_failed`,
 `credential_unavailable`, `invalid_fd`, `gate_invalid`, `gate_closed`,
-`prepare_timeout`, `attempt_exists`, `exec_failed`, `evidence_lost`, `tree_unknown`, and
-`state_write_failed`. Do not include raw credentials, raw argv or environment
+`prepare_timeout`, `attempt_exists`, `exec_failed`,
+`exec_interpreter_missing` (§13.2), `evidence_lost`, `exec_unconfirmed`,
+`tree_unknown`, `state_write_failed`, and `internal_error` (a defect of the
+implementation, reported rather than papered over). An error's stage is one of
+the §8.1 states. Do not include raw credentials, raw argv or environment
 values in an error.
 
 ## 7. Attempt state and persistence
@@ -865,7 +1051,8 @@ Preparation steps, in order:
    prepared receipt; publish a `prepared` control message with attempt id and
    policy digest. No target instruction has run.
 6. Wait for a valid external release if `--gate-fd` was supplied; otherwise
-   release locally. Start the monotonic wall clock at release.
+   release locally. Start the wall deadline, on the continuous clock of §6.4, at
+   release.
 7. Execute the exact target argv through the blocked launcher. Use a dedicated
    close-on-exec error channel plus backend/observer evidence to distinguish
    success from exec failure. EOF alone is insufficient if launcher death could
@@ -910,8 +1097,14 @@ after that LF refuse. The byte cap includes LF. JSON whitespace inside the
 single line is allowed; parse duplicate object keys as an error.
 
 Initial preparation budget: 30 seconds; external gate wait: 60 seconds after
-prepared. Both use monotonic time and are distinct from the execution wall
-budget. Expiry refuses and tears down prepared resources. A future owner must
+prepared. Both run on the continuous clock of §6.4 (`CLOCK_BOOTTIME` on
+Linux), so suspend counts against them, and are distinct from the execution
+wall budget. A wait for the gate re-checks its deadline at least every 250 ms,
+so an expiry is acted on soon after execution resumes. Expiry refuses and
+tears down prepared resources. A step of preparation whose own wait the budget
+ended refuses with `prepare_timeout` and remediation `retry`, never as the
+failure of that step, and an attempt whose budget is spent before its prepared
+receipt is persisted refuses without publishing `prepared`. A future owner must
 handle a timed-out prepared attempt through reconciliation, not reuse the gate.
 
 For managed Linux mode, verify and record the direct owner's birth identity,
@@ -921,7 +1114,7 @@ namespace init. In `none`, owner/supervisor loss preserves the accepted unknown
 lifetime limit; there is no new watchdog.
 
 Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id,
-monotonically increasing message number, and kind `prepared`, `exec_confirmed`,
+monotonically increasing message number starting at 1, and kind `prepared`, `exec_confirmed`,
 `refused`, `settled`, or `unsettled`. `refused` is sent only while the target
 has not executed: before release, or when the released target's `exec` fails,
 which §8.1 counts as a pre-exec failure; once the target has executed, the
@@ -937,7 +1130,17 @@ interactive approval protocol.
 ### 8.3 Fds, stdio and supervision
 
 Foreground stdio is inherited without capture or parsing. The supervisor must
-not retain writable copies that postpone EOF. No PTY or interactive job-control
+not retain writable copies that postpone EOF: once the attempt is prepared and
+every child that needs stdout has it, the `ouro-jail` binary points its own
+stdout at `/dev/null`, so under `none` the caller sees end-of-file on stdout
+when the target closes it, as in direct execution (a program that runs the
+library in-process keeps its stdout). Named limits: the supervisor keeps
+stderr, which carries its own diagnostics (§6.1), so end-of-file on stderr
+comes when the jail exits; under the contained profiles bubblewrap's outer
+process and namespace init hold the stdout and stderr they hand the target
+until the jail exits, so the caller's end-of-file on either comes then. A
+stdio consumer must not treat end-of-file as the only sign that a run ended
+(§9.3). No PTY or interactive job-control
 emulation is provided. The command runs in a new session; INT/TERM/HUP received
 by the supervisor request termination. Existing terminal fds are explicit I/O
 authority; the backend must prevent TIOCSTI-style terminal injection.
@@ -978,7 +1181,15 @@ isolation belongs to managed MT04–MT05, not to a successful workspace mount.
 
 Mount a private `/proc` for the child PID namespace and a minimal `/dev`.
 Do not expose host `/proc`, `/sys`, cgroupfs, host namespace handles, Docker or
-SSH-agent sockets. Denied subtrees within visible parents are absent or masked
+SSH-agent sockets. An operator grant (`--ro`, `--rw`, an operator profile or a
+launch profile) whose resolved source is on a `proc`, `sysfs` or cgroup (v1 or
+v2) filesystem, or that is an ancestor of such a mount, refuses before exec
+with `policy_widening`, remediation `configuration`, naming the grant's key
+path. The decision is by the pinned source's filesystem type (`statfs`) and the
+mount topology, never by path spelling, so a symlink onto `/proc` refuses too;
+`--ro /` is refused earlier by the state-isolation rule (§§6.2, 7). The
+built-in runtime roots are on the root filesystem, and the child's private
+`/proc` and `/dev` are made by the backend, not bound from a grant. Denied subtrees within visible parents are absent or masked
 by the backend. Scratch provides the child's temporary directory; generated
 `TMPDIR` is a reserved environment variable, not an inherited host path.
 
@@ -1150,7 +1361,11 @@ during bubblewrap's startup can leave the namespace init, and under `agent`
 its bridge, alive and holding the run's stdout, where `gc` cannot find them
 (measured 2026-09-24 from a plain login session before the step existed: 20
 of 20 synchronized `agent` kills; with it, 0 of 20). Enabling lingering
-(`loginctl enable-linger`) or running in a delegated user scope closes it. A
+(`loginctl enable-linger`) or running in a delegated user scope closes it.
+Lingering is a per-user logind setting of the account that runs the jail, an
+operator step, not host configuration: it changes no sysctl, security profile
+or capability, and whether an account may enable it for itself is the host's
+logind policy; `doctor` reports it (`host.linger`, §3.2). A
 synchronized fixture covers death before bootstrap release and after a
 backend clears its parent-death signal; a stand-in fixture covers a leaf
 member that is not the backend. Every process `doctor` starts for a probe
@@ -1179,11 +1394,25 @@ It mounts no jail, installs no containment filter and inherits the host view.
 It still closes private control fds, strips reserved environment variables and
 uses the same deadline logic. Same-UID interference remains possible, including
 interference with the supervisor's resources; `unprotected` is never upgraded.
+In every profile the supervisor makes itself non-dumpable (`PR_SET_DUMPABLE`
+0) once the target is about to run, after the capability probes and the
+observer's attach: a same-UID process can then no longer read its `/proc`
+entries (`fd`, `environ`, `mem`, `exe`) or trace it, so it cannot reopen the
+operator's live trace or control stream, read the operator's environment or
+seize the supervisor. Signals, the shared records in the data directory (R05)
+and the cgroup remain open to a same-UID peer.
 A narrowing that asks `none` for a restriction it cannot apply (read denials,
 read-only grants, protected coverage, network `none`) makes the requirement
 unsatisfiable and the run refuses with remediation `configuration`. The
 supervisor reads membership from `/proc/<pid>/cgroup`, is a child subreaper,
-and checks an exited child's zombie before reaping it; a detected loss adds a
+and checks an exited child's zombie before reaping it; what was below the
+supervisor before it started the launcher (a child it was started beside,
+such as a shell's process substitution reading `--trace-fd`, and that child's
+descendants) is recorded by birth identity then and is not an attempt
+descendant: it is never walked, reaped, recorded as an escape or signalled. A
+process born into such a subtree after that and orphaned to the supervisor
+cannot be told from an escaped attempt process and is treated as one (a named
+limit). A detected loss adds a
 wrapper note (`fields.kind = lifetime`) and reaches the next receipt, and does
 not by itself stop the attempt. `none` adds no watcher of its own.
 Tree termination describes the verified boundary, not proof that an uncontained
@@ -1386,11 +1615,24 @@ resolver and server fixtures cover rebinding, IPv6 and forbidden addresses.
 ### 11.1 Scope and attachment
 
 The observer belongs to the supervisor and attaches before target release.
-The initial eBPF design filters on the registered execution cgroup and tracks
-task birth identity/fork ancestry as needed for attribution. The feasibility
-gate must establish namespace-safe descendant tracking, PID reuse handling
-and parent-exits-before-child behavior. Setup helpers are tagged as helpers,
-not attributed as user target operations.
+The ptrace observer (§5.2) attaches to the blocked launcher and follows its
+descendants through their fork, vfork and clone events, tracking task birth
+identity and fork ancestry for attribution; namespace-safe descendant
+tracking, PID reuse handling and parent-exits-before-child behavior are O02's
+(§11.3 states what is simulated). Setup helpers are tagged as helpers, not
+attributed as user target operations.
+
+The observer's scope is the attempt tree and nothing else the supervisor has.
+It ends when every task it traces has been reaped, every child the supervisor
+gained after the attach (an orphan of the traced tree) has been reaped and
+delivered as an untraced exit, and the backend the launcher
+descends through has exited, never on the absence of any child. A process the
+supervisor was started beside, a child it already had when it began (such as
+a shell's process substitution reading `--trace-fd`), is an unrelated host
+process: it is not observed, its state changes are neither events nor loss,
+and it does not delay the observer's end. Its exit while the observer owns the
+supervisor's waits is delivered as an untraced exit, not recorded as loss; one
+still alive when the observer ends is left to its owner.
 
 Read only the arguments needed for the closed set after the attempt filter
 matches. Never stream unrelated host processes into user space and filter them
@@ -1410,7 +1652,10 @@ generated from the observer's rows and by running the installed narrowing
 filter; it names the narrowing-filter digest that receipts record in
 `lifetime.native.details.narrowing_filter_digest`, and conformance compares
 the table with the build and the digest with a live receipt. A successful
-exec's `proc.exec` names its call in `fields.syscall`. A call
+exec's `proc.exec` names its call in `fields.syscall`, unless the observer did
+not follow that exec's entry (the in-flight bound refused it, or the process
+was taken on inside its own `execve`): then the result names no call and its
+path is `{unavailable, argument_not_read}`. A call
 under another ABI (a non-native architecture, or the x32 bit) is never decoded
 from the native table. Contained baselines refuse those ABIs; in `none` the
 observer stops on each, and one the kernel did not reject as nonexistent
@@ -1493,8 +1738,10 @@ presenting it as a content diff.
 ### 11.3 Paths, arguments and identities
 
 Relative pathname arguments are not blindly appended to a host cwd. Account
-for `dirfd`, cwd/root, namespaces and native path bytes. Emit a workspace-relative
-path only when its relationship to that workspace is established. Otherwise
+for `dirfd`, cwd/root, namespaces and native path bytes. Emit a path relative
+to the workspace (`workspace_relative`) or to the attempt's scratch root
+(`scratch_relative`) only when its relationship to that root is established.
+Otherwise
 emit a digest or unavailable marker, with a reason. Record `path_basis` as
 `argument_snapshot` or a specifically proven kernel-resolved observation.
 The initial sensor does not claim an argument-memory snapshot is the exact
@@ -1516,7 +1763,9 @@ unchanged. Public numeric PIDs are diagnostic; internal attribution includes
 boot/birth identity and namespace mapping. Every audit result carries
 `fields.pid` (host thread-group id) and `fields.pid_start_ticks`, the start
 time of that group's leader, read when the observer first takes the group on
-(null if unknown); with the receipt's `boot_id` the pair names one process on
+(each null if unknown: the `agent` mediator writes null when `/proc` does
+not say which thread group a connecting thread belongs to); with the
+receipt's `boot_id` the pair names one process on
 one boot. A non-leader exec keeps it, and a later process given the same
 number has its own. Namespace pids are not recorded per event. PID reuse is
 not forced live: on a stock host `ns_last_pid`, `clone3` `set_tid` and a
@@ -1625,6 +1874,10 @@ counter. The [BPF ring-buffer contract](https://docs.kernel.org/bpf/ringbuf.html
 allows reservation failure; a quiet ring is not proof that no event occurred.
 
 Read loss counters continuously and once more after tree death and drain.
+A child the observer owed a status for and never reaped is loss
+(`unreaped_children`); only the backend the launcher descends through, or an
+orphan of the traced tree gained after the attach, can be one, never a child
+the supervisor was started beside (§11.1).
 Bound the affected interval conservatively from the last known healthy point
 to recovery. Counts/ranges are null when exact loss cannot be established.
 Coalesce repeated losses into bounded interval summaries. Exit,
@@ -1739,33 +1992,73 @@ validated and recorded by the managed owner and registered service integration.
 
 ## 13. Wire records, receipts and bounded trace
 
-Draft JSON Schemas accompany this specification:
+The wire schemas are frozen at milestone 1:
 
-- [Event envelope](jail-v1/event.schema.json).
-- [Jail producer restriction](jail-v1/jail-event.schema.json).
-- [Jail receipt](jail-v1/jail-receipt.schema.json).
-- [Canonical policy snapshot](jail-v1/policy-snapshot.schema.json) and
+- [Event envelope](jail-v1/event.schema.json) (`ouro.event/1`).
+- [Jail producer restriction](jail-v1/jail-event.schema.json) (its events are
+  `ouro.event/1` events).
+- [Jail receipt](jail-v1/jail-receipt.schema.json) (`ouro.jail.receipt/1`).
+- [Canonical policy snapshot](jail-v1/policy-snapshot.schema.json)
+  (`ouro.jail.policy-snapshot/1`) and
   [canonical byte rules](jail-v1/canonicalization.md).
+- [Gate release frame](jail-v1/jail-gate.schema.json) (`ouro.jail.gate/1`) and
+  [control message](jail-v1/jail-control.schema.json) (`ouro.jail.control/1`),
+  §8.2.
+- [Doctor report](jail-v1/jail-doctor.schema.json) (`ouro.jail.doctor/1`),
+  §§3.2, 14.1.
 
-Synthetic examples: [observed open](jail-v1/examples/event-open.json),
+[frozen-schemas.toml](jail-v1/frozen-schemas.toml) pins each file by SHA-256,
+and `version --json` announces `"frozen": true`. The freeze covers every
+identifier `version` announces: the schemas above by their files, and
+`ouro.jail.policy/1`, `ouro.jail.policy-file/1` and `ouro.jail.network/1` by
+the artifacts that define them (canonicalization.md and its golden fixtures,
+network-rules.md, network-addresses.json and the address fixtures), with the
+gate frame corpus and the semantic corpus (and the instances it changes) for
+the rules no schema states. A frozen file whose bytes change is, by rule, a new
+identifier: its entry is never re-blessed in place. The drift test and the
+contract validator refuse any byte change under a recorded SHA-256; they cannot
+refuse an edit of the recorded SHA-256 itself, which is visible in review and
+which this rule forbids. No two schema files may declare one `$id`. After
+freeze, a breaking semantic change needs a new schema identifier. Additive
+platform details cannot change a shared field's meaning. `explain --json`,
+`gc --json` and the private `jail-state.json` (`ouro.jail.state/1`) are not
+wire records and are not frozen (§6.1).
+
+Synthetic examples: one per event kind (`examples/event-*.json`, for example
+[observed open](jail-v1/examples/event-open.json)), receipts for the phase and
+tuple cases of §13.2 (for example
 [contained completion](jail-v1/examples/receipt-tool.json),
-[unprotected completion](jail-v1/examples/receipt-none.json), and
-[macOS refusal](jail-v1/examples/receipt-macos-refused.json).
-Every example uses fixture identities; none is evidence of an actual run.
-Additional fixtures cover prepared contained/none runs, proxy-only observation,
-unknown exec with verified settlement, byte-valued paths and credential metadata.
-Run `uv run docs/specs/jail-v1/validate_contract.py` from the repository root to
-validate schemas, examples, the positive/negative mutation corpus, golden hashes
-and address fixtures. This documentation check does not satisfy live Linux or
-macOS execution gates. [Review resolutions](jail-v1/review-resolutions.md) maps
-the corrected findings to their normative clauses and acceptance IDs.
+[unprotected completion](jail-v1/examples/receipt-none.json) and
+[macOS refusal](jail-v1/examples/receipt-macos-refused.json)), the
+[gate frame](jail-v1/examples/gate-release.json), each control kind
+(`examples/control-*.json`) and a
+[Linux](jail-v1/examples/doctor-linux.json) and a
+[macOS](jail-v1/examples/doctor-macos.json) doctor report. Every example uses
+fixture identities except the doctor reports, which are measured output; none
+of them is evidence of a conformance run. The corpora are
+`fixtures/validation-cases.json` (positive and negative schema cases),
+[gate-frames.json](jail-v1/fixtures/gate-frames.json) and
+[semantic-cases.json](jail-v1/fixtures/semantic-cases.json). Run
+`uv run docs/specs/jail-v1/validate_contract.py` from the repository root to
+validate schemas, examples, the corpora, golden hashes and address fixtures.
+This documentation check does not satisfy live Linux or macOS execution gates.
+[Review resolutions](jail-v1/review-resolutions.md) maps the corrected findings
+to their normative clauses and acceptance IDs.
 
-They are executable contract drafts, not a claim that the runtime exists.
-They freeze at milestone 1 after backend/observer evaluation. The schemas
-validate structure; semantic invariants and lifecycle ordering also require
-the tests below. Additive platform details cannot change a shared field's
-meaning. After freeze, a breaking semantic change needs a new schema identifier;
-these unpublished revision-2 drafts replace the revision-1 fixtures together.
+The schemas state every rule JSON Schema can express, including the
+per-source and per-operation event semantics of §§11.2 and 13.1. The rules it
+cannot state (canonical native strings, unique ids and keys, gap interval
+order, and across a stream: one attempt, `source_seq` from 1 per source with no
+hole the stream does not record as a loss, receipt notes in lifecycle order, a
+complete trace ending on the final receipt's note, control messages in order)
+are `ouro_jail::records::semantic`, ported in `validate_contract.py` and
+pinned by the shared semantic corpus. Every live test that reads a receipt,
+trace or control transcript runs both. The line citations in the frozen
+schemas' `$comment`s and in the semantic rules name lines of revision 18 of
+this document (commit `a75225c1`), the text they were written against, and are
+read against that text. From revision 19 on, a schema, test, rule or document
+cites this specification by section (for example §11.4), never by line
+number, so a later revision cannot move a citation silently.
 
 ### 13.1 Event envelope
 
@@ -1773,7 +2066,9 @@ An event is one UTF-8 JSON object plus newline on the trace pipe or file.
 Future socket transport uses a four-byte unsigned big-endian byte length and
 the same JSON payload, with the same maximum. There is one writer per trace
 stream. `source_seq` starts at 1 independently for each source and never
-restarts within an attempt. Events from different sources are not causally
+restarts within an attempt; its numbers are consecutive except after the
+stream's recorded transport loss (§13.3), because a missing number is a lost
+frame. Events from different sources are not causally
 ordered by timestamp or by their eventual ledger sequence.
 
 Required fields: `schema`, `attempt_id`, `source`, `source_seq`, `observed_at`,
@@ -1804,11 +2099,26 @@ Future ledger-owner wrapper events can use `intent.*` under their own producer
 contract. A source label is not authorization; future ingestion also validates
 the authenticated producer role. Audit decisions must be null in the shared
 schema; the jail proxy supplies allow/deny independently of connect success.
+Besides `lifecycle` and `coverage_gap` notes, the jail writes `limit` notes (a
+limit's application: `key`, `applied`, `reason`), `lifetime` notes (a detected
+loss of lifetime integrity: `integrity`, `subject`, `reason`) and `helper`
+notes (an `agent` helper's end: `helper`, `transition`); the frozen producer
+schema pins the shapes of the first two only.
+
+The shared envelope `ouro.event/1` carries only source semantics that hold on
+every platform: an audit result states `ok`, return value, errno and a
+syscall-side completion; an exec transition is `proc.exec`'s success and a
+process exit is `proc.exit`'s; a syscall success has no errno and a failure
+names one; proxy results carry counters. The Linux closed set's conventions
+(the signed raw return, EACCES and EPERM classified as `fs.deny`, and the errno
+names of `fs.deny`) are the jail producer's, in `jail-event.schema.json`, as
+§13.2 keeps Linux errno names out of portable fields.
 
 Audit result outcome contains `ok`, `return_value`, `errno`, and completion
 kind. Confirmed exec can have null return value with
 `completion=exec_transition`; no fictitious return of zero is required.
-Proxy outcome instead describes connect status, counters and duration. Sources
+Every jail wrapper fact has `completion=wrapper`. Proxy outcome instead
+describes connect status, counters and duration. Sources
 have distinct `fields`; consumers must not equate proxy bytes with file bytes,
 or an audited loopback connect with a successful remote API request.
 
@@ -1840,9 +2150,15 @@ pending until a contained boundary is established, enforced when established,
 and unprotected for every `none` receipt, even preparation/refusal. Prepared
 does not mean the target ran; `exec_observed` is false until confirmed.
 
-A proved target exec failure has `outcome.kind = exec_error` with the errno
-name in its own field; `refused` is the outcome kind of every other pre-exec
-refusal. Both keep the `refused` phase. `enforced` is the lifecycle phase
+A proved target exec failure has `outcome.kind = exec_error`, the errno name
+in `outcome.cause`, and `outcome.error.code = exec_failed`, except that an
+`ENOENT` for a target file that exists (its `#!` interpreter or ELF loader is
+what is missing) has `outcome.error.code = exec_interpreter_missing`. A missing
+executable, a missing interpreter and a permission error are therefore
+distinct in machine fields: (`ENOENT`, `exec_failed`), (`ENOENT`,
+`exec_interpreter_missing`) and (`EACCES`, `exec_failed`); a child exiting 125
+is `exited` with code 125. `refused` is the outcome kind of every other
+pre-exec refusal. Both keep the `refused` phase. `enforced` is the lifecycle phase
 after target exec, including for a `none`
 run; its `containment` still says none. `settled` requires verified tree death,
 but can preserve unknown execution outcome if evidence was lost. If tree
@@ -1929,13 +2245,18 @@ trace loss is known, every later receipt records it: the wrapper source is
 degraded, with one `trace_transport_loss` gap on each covered evidence class
 (the audit classes and `proxy.net`), extended on later receipts rather than
 repeated; `limits` keeps what the platform reported, since its count comes from
-the cgroup counters, not the trace.
+the cgroup counters, not the trace. The loss note names the evidence classes
+the attempt covers (the audit classes with observation on, `proxy.net` with a
+proxy), and every later receipt records the loss with the note's start and
+source on each class the note names.
 After any evidence loss a sink keeps a prefix: it refuses and counts ordinary
 events and accepts only reserve notes (the gap and receipt notes, and at most
-one lifecycle note per `agent` helper, whose end can explain a stop). An
+one helper note per `agent` helper, whose end can explain a stop). An
 external frame already partly written when the terminal drain gives up ends
 the stream: nothing is written after its torn bytes, so the consumer sees a
-visibly incomplete last line, never a corrupt one. The first loss writes one wrapper
+visibly incomplete last line, never a corrupt one. A reserve note that the
+terminal drain cannot deliver also ends the stream: nothing is written after
+it, so a consumer never sees a later note after a lost one. The first loss writes one wrapper
 `coverage_gap` note (`trace_transport_loss`) with reserve priority, starting
 from the last point every accepted frame had been delivered. A local write that
 fails part-way is truncated back to the last frame boundary; if that fails,
@@ -1976,6 +2297,16 @@ architecture, binary hashes/versions, operator identity category, relevant
 permissions and each result with safe remediation guidance. Aggregate result
 is ready only for the selected requirements; execution unsupported is a
 normal structured result on macOS, with nonzero readiness exit status.
+`doctor --json` is the host manifest `ouro.jail.doctor/1` (§3.2). The binary
+hashes are this binary's running image and the bubblewrap a run would execute.
+
+The operator identity category is, first match: `unknown` (credentials
+unreadable), `user_namespace` (not the initial user namespace: the uids and
+capabilities are namespace-local), `root` (effective uid 0), `set_id` (real,
+effective and saved uids or gids differ, including a saved set-uid 0),
+`capable` (permitted, effective or ambient capabilities), `privileged_group`
+(a member of root, sudo, admin, wheel, docker, lxd, incus-admin, libvirt or
+disk), else `unprivileged`. The reference host's `ouro-ci` is `unprivileged`.
 
 Required Linux probes:
 
@@ -1990,8 +2321,9 @@ Required Linux probes:
 - Filter loading, an allowed operation and a rejected representative syscall.
 - Delegated cgroup creation, target placement, required controllers, force kill
   and empty verification using a tiny owned fixture.
-- Observer attachment and a matched fixture operation, plus unavailable/loss
-  accounting; loading an empty BPF program is insufficient.
+- Observer attachment to a blocked launcher and a matched fixture operation,
+  plus unavailable/loss accounting; attaching without following a real call
+  is insufficient.
 - Proxy/bridge connectivity, allowed and denied destinations, and direct-egress
   rejection for `agent`.
 - Scripted nested sandbox setup (Landlock and seccomp; nested user namespaces
@@ -2002,7 +2334,10 @@ Required Linux probes:
   be read, the execution probe remains authoritative and the explanation says
   policy details unavailable.
 - Launch profile credential existence/type/permissions without printing values
-  or user-specific paths; experimental/supported status separately.
+  or user-specific paths, and the profile's status: the binary reports every
+  launch profile `experimental`; a tested combination is recorded as
+  supported in [agent compatibility](jail-v1/agent-compatibility.md), not in
+  the binary (§15 A01).
 - For `agent`, measured by one real run: `seccomp_user_notification`,
   `agent_proxy_bridge` (an allowed and a denied destination, direct egress
   refused), `agent_unix_peer_mediation` (a host socket denied, an attempt
@@ -2140,7 +2475,7 @@ its own processes. Never test against the operator's actual credentials.
 | O05 | Observation off emits no audit source and leaves audit net unsupported, even with active proxy.net; unavailable attachment refuses even in best-effort. Directory-operation losses degrade fs.write; denied connect counts only in fs.deny. |
 | O06 | Renamed cwd, dirfd, two-path calls, non-UTF-8 names and a racing pathname never produce a falsely resolved path. |
 | L01 | Wall expiry, INT/TERM/HUP, SIGTERM-ignoring descendant and fork storm end at verified tree death or explicit unknown. |
-| L02 | Kill every actual helper/supervisor link: contained descendants die; none preserves its specified unknown case. |
+| L02 | Kill every lifetime link (backend, watcher, supervisor): contained descendants die within a bound; an `agent` network helper's death fails closed as §10 specifies (the bridge's is recorded and the tree continues; the proxy's is `proxy.net` evidence loss); none preserves its specified unknown case. |
 | L03 | Missing required cgroup/controller refuses; missing preferred pids alone records absent and runs. Exercise cgroup available but pids controller absent, explicit same-value pids, and observe off. None without a usable cgroup refuses. |
 | L04 | pids/memory/CPU scopes are measured; exit 137 alone does not claim OOM; BOOTTIME deadlines ignore clock adjustments and include suspend. |
 | L05 | Simulated uninterruptible/unknown termination retains vendor state and never says settled/tree_empty=true. |
@@ -2161,10 +2496,19 @@ its own processes. Never test against the operator's actual credentials.
 | I03 | A scripted trusted owner compares the prepared policy/argv/requirements with its expected plan. Mismatch closes the gate with no target marker; a matching plan releases once. Untrusted request fields cannot mutate the owner's operator inputs. This proves the composition seam, not company identity or authorization. |
 | A01 | A real batch agent run records revision, OS, backend, vendor version, profile and receipt, without credential archives. |
 
-`A01` marks only the tested profile/platform/mode supported. Missing binary or
-credentials is skipped, never passed. It does not block scripted milestone-1
-conformance, and the other profiles stay experimental. Linux conformance does
+An `A01` record in [agent compatibility](jail-v1/agent-compatibility.md) marks
+only the tested profile, vendor version, platform and mode supported. The
+support claim lives in that record: the binary reports every launch profile
+`experimental` (§14.1). Missing binary or credentials is skipped, never passed.
+It does not block scripted milestone-1 conformance, and the other profiles stay
+experimental. At milestone 1, A01 is OpenCode under `agent` without a
+credential, re-run at the milestone revision. Linux conformance does
 not imply macOS execution support; a native macOS suite will be required later.
+
+I01's "ledger and fleet absent from PATH" is the suite's PATH, which the
+conformance driver sets to the system directories and records; "no BEAM
+installed" means no BEAM entry point on that PATH, no installation directory
+under the usual prefixes and no distribution package.
 
 ## 16. Implementation order and exit criteria
 
@@ -2178,7 +2522,7 @@ fleet scaffolding is needed to complete these steps.
 | J2: authority | Complete mounts/protected paths, filter families, native ABI checks, limits, gate faults and doctor probes. | F01–F04, S01–S02, S04, X02–X06, L01–L05 pass on the named Linux lane. |
 | J3: agent execution | Proxy, agent profile with unprivileged nesting, data-only launch profiles, credential modes/cleanup and explicit none, all on a stock host. | S03, N01–N05, C01–C02 and R05–R06 pass. Profiles remain experimental. |
 | J4: evidence/recovery | Complete closed set, loss handling, bounded trace, atomic records and GC. | O01–O06, R01–R06 and C03 pass, including failure injection. |
-| J5: milestone proof | Full independent suite, performance report, platform compilation, docs and schema freeze. | All noncredential gates pass; A01 is either recorded or explicitly skipped; no Linux mechanism leaks into portable requirements. |
+| J5: milestone proof | Full independent suite, performance report, platform compilation, docs and schema freeze. | All noncredential gates pass, as computed from the suite's own output: the conformance driver evaluates [acceptance-map.toml](jail-v1/acceptance-map.toml) (`ouro.jail.acceptance-map/1`: every §15 row split into its clauses, each with the tests or driver checks that assert it and how) over the run's `test.log`, and the macOS leg evaluates the map's macOS clauses over its own log; a clause the stock reference host cannot produce is recorded by name (`recorded-limit`), never mapped to a weaker test. A01 is either recorded or explicitly skipped; no Linux mechanism leaks into portable requirements; `cargo xtask freeze --check` passes. The milestone report is [J5 authority](jail-v1/j5-authority.md). |
 
 J0 is the next change to this tree and begins on the reference host. It can
 use disposable spike code and fixtures. J1 must keep observations on in
@@ -2194,7 +2538,18 @@ portable tests and on an Apple Silicon runner as the native macOS
 build/refusal lane, skipped until the workspace exists); and `conformance`,
 the provisioned Linux job on the reference host with an explicit
 expected-capability manifest. A required live capability being skipped makes
-the conformance job fail. Generic hosted runners may run portable tests
+the conformance job fail. The job also fails when the contract validator fails
+at the same revision, when the I01 probe finds a ledger, fleet or BEAM binary
+on the suite's PATH (which is the system directories only) or a BEAM
+installation on the host, when the plain-session smoke leg (a `tool` run, a
+`none` run and `doctor`, started from the SSH session without `systemd-run`)
+does not record that the supervisor entered a delegated scope itself, when the
+build provenance `doctor` reports is not the tested revision, clean and
+optimised, when any gate clause in the map fails, and when the suite's ignored
+set differs from the one the map pins. The per-gate verdict is part of the
+evidence (`gates.txt`, `gates.json`). `rust` also compiles
+`aarch64-unknown-linux-gnu` and `x86_64-apple-darwin` without executing them
+(§3.2). Generic hosted runners may run portable tests
 without pretending they exercised a privileged kernel feature.
 
 The conformance runner model: a GitHub-hosted runner drives the reference host
@@ -2212,6 +2567,27 @@ Freeze the Rust toolchain, Cargo.lock, backend version/hashes, filter digest,
 observer object/build provenance and tested host manifest with the milestone
 report. Re-run relevant conformance when any of these change. A dependency
 update must not silently broaden mounted files or allow-hosts.
+The freeze is [milestone-1-freeze.toml](jail-v1/milestone-1-freeze.toml),
+written by `cargo xtask freeze --doctor <run>/doctor.json` from the tree and the
+milestone conformance run: the toolchain channel and `rust-version`, the
+Cargo.lock SHA-256, the tool, agent, agent-namespace and mediation filter
+digests and the closed-set narrowing digest with the evidence tables'
+SHA-256s, the contained mount baselines and each built-in profile's resolved
+baseline, the contained environment names and `PATH`, the bubblewrap
+invocation each contained profile's plan renders to, each bundled launch
+profile's state, credentials (source, destination, mode), `[environment]` and
+`network.allow`, every crate manifest's profiles, dependency selections and
+features, the frozen schemas, and the tested run (clean revision, `rustc`,
+target, the `ouro-jail` and bubblewrap hashes, the bubblewrap version, and the
+host). The observer is compiled into `ouro-jail`, so its build provenance is
+that binary's. The tested run is recorded only for a ready, optimised x86_64
+Linux run of a clean revision built from exactly the frozen tree; with the
+repository present, the revision must be an ancestor of `HEAD`, its own build
+inputs must be the binary's, and no other frozen input may have changed since
+it. `tests/portable_freeze.rs` fails when an in-tree value drifts from the
+file, whose fix is the conformance rerun and then a regenerated file;
+`cargo xtask freeze --check` is the milestone gate, and fails unless the file
+is exactly the tree's and records such a run.
 
 The future `ouro` executable can call the jail library in-process for dispatch;
 `ouro-jail` remains independently usable. Elixir fleet and Rust ledger integrate
@@ -2223,7 +2599,7 @@ installer or old-runtime migration is needed to claim the jail milestone.
 | North-star requirement | This specification |
 |---|---|
 | D3 vendor-independent argv | §§6, 12; X01, I02 |
-| D8 reuse evaluation | §5; J0 |
+| D8 reuse evaluation | §5; J0; decided in [backend-evaluation.md](jail-v1/backend-evaluation.md) (revision 19) |
 | D9 Linux first, D12 eventual macOS | §§3–4; M01–M03 |
 | D10 jail-owned observation | §§5.2, 11, 13; O01–O06 |
 | D11 accepted holes | §§2, 9.3, 12, 14; R05, C02–C03 |
@@ -2232,11 +2608,15 @@ installer or old-runtime migration is needed to claim the jail milestone.
 | §§4.2–4.7 policy, mounts, nesting, network | §§6, 9–10, 12; P/F/S/N tests |
 | §§4.8–4.10 evidence, limits and acceptance | §§9.3, 11, 13–16; O/L/R tests |
 | §7.1 future composition | §8.2; gated fixture owner without a ledger |
+| §16 freeze list | [milestone-1-freeze.toml](jail-v1/milestone-1-freeze.toml), `portable_freeze.rs`, `cargo xtask freeze --check`; `doctor --json` (`ouro.jail.doctor/1`); [frozen-schemas.toml](jail-v1/frozen-schemas.toml) |
 
 Before J0 closes: select exact enforcement/observer integrations, privilege
-provisioning and initial Linux host manifest from measured results. Before J5:
-finish the executable schema constraints, verify all source-specific event
-semantics and freeze the wire versions. Before macOS execution: select native
+provisioning and initial Linux host manifest from measured results (recorded
+in revision 19: [backend-evaluation.md](jail-v1/backend-evaluation.md); no
+privilege is provisioned). Before J5: finish the executable schema
+constraints, verify all source-specific event semantics and freeze the wire
+versions (done in J5: §13, [frozen-schemas.toml](jail-v1/frozen-schemas.toml),
+the schema and semantic corpora). Before macOS execution: select native
 containment/observation/lifetime mechanisms and their deployment model, then
 pass the shared semantic suite and macOS-specific fixtures.
 
@@ -2255,7 +2635,8 @@ none of these links establishes Ouroboros integration conformance.
 - [bubblewrap](https://github.com/containers/bubblewrap): namespace/mount backend;
   it is a mechanism on which a policy is built, not proof of this policy.
 - [sandbox-runtime](https://github.com/anthropics/sandbox-runtime) and
-  [Greywall](https://github.com/GreyhavenHQ/greywall): candidates to pin and test.
+  [Greywall](https://github.com/GreyhavenHQ/greywall): candidates pinned and
+  run in D8, disqualified by named failures (§5.1).
 - [Linux seccomp filters](https://docs.kernel.org/userspace-api/seccomp_filter.html)
   and [seccomp notification](https://man7.org/linux/man-pages/man2/seccomp_unotify.2.html):
   inherited filtering and limits of pre-execution observation.

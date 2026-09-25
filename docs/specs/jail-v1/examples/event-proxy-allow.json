@@ -1,0 +1,29 @@
+{
+  "schema": "ouro.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "proxy",
+  "source_seq": 1,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "310000000",
+  "operation": "net.connect",
+  "stage": "result",
+  "decision": "allow",
+  "outcome": {
+    "ok": true,
+    "return_value": null,
+    "errno": null,
+    "completion": "proxy_close",
+    "bytes_in": 4096,
+    "bytes_out": 512,
+    "duration_ms": 120
+  },
+  "fields": {
+    "request_id": 1,
+    "kind": "connect",
+    "destination": "api.example.test:443",
+    "reason": "relayed",
+    "connected_address": "192.0.2.10:443",
+    "discarded_bytes": 0,
+    "end": "client_closed"
+  }
+}

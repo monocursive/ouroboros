@@ -456,6 +456,22 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
     // 5. The workspace-root `ouro.toml`, which may only narrow.
     let project_path = workspace.join("ouro.toml");
     if let Some(text) = read_project_file(&project_path)? {
+        // J5-B1 begin: P02.9 — §6.3 "Add credentials ... Refuse": a key of
+        // the operator's launch layer in the workspace-owned narrowing file
+        // is a widening, refused with its exact key path, not a typo.
+        if let Some(key) = launch_layer_key_in_project(&text) {
+            return Err(JailError::new(
+                ErrorCode::PolicyWidening,
+                ErrorStage::Resolving,
+                Remediation::Configuration,
+                format!(
+                    "`{key}` is staged only from an operator launch profile (§12); a project \
+                     file may only narrow"
+                ),
+            )
+            .with_key_path(key));
+        }
+        // J5-B1 end
         let project = config::parse_project_config(&text)?;
         if let Some(section) = project.jail {
             config::check_schema("jail.schema", section.schema.as_deref())?;
@@ -673,6 +689,20 @@ fn read_operator_file(path: &Path, key: &str) -> Result<Option<String>, JailErro
         Err(error) => Err(usage(key, format!("{}: {error}", path.display()))),
     }
 }
+
+// J5-B1 begin: P02.9
+/// The key path of a launch-layer grant (`credentials`) under the project
+/// file's `[jail]` table, when there is one. A file that is not TOML is left
+/// to the parser, which reports it.
+fn launch_layer_key_in_project(text: &str) -> Option<&'static str> {
+    let table: toml::Table = toml::from_str(text).ok()?;
+    table
+        .get("jail")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|jail| jail.contains_key("credentials"))
+        .then_some("jail.credentials")
+}
+// J5-B1 end
 
 /// Reads the workspace-root `ouro.toml`, which the contained party writes.
 ///
@@ -1048,6 +1078,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     let mut control = open_control(args)?;
     let trace = open_trace(args, &attempt_dir)?;
+    // J5-C begin: review item 15, a loss note names what this attempt covers
+    if let Ok(mut writer) = trace.lock() {
+        writer.set_stream_classes(&stream_classes(&plan));
+    }
+    // J5-C end
     let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
     // J4-R begin: N6
     if let Err(error) = policy_written {
@@ -1166,6 +1201,15 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     };
 
+    // J5-B1 begin: X05.3 — §8.3 "The supervisor must not retain writable
+    // copies that postpone EOF". Every process that needs the caller's stdout
+    // has it by now; the `ouro-jail` binary's `run` never writes stdout, so it
+    // lets its copy go and a target that closes its stdout gives the caller
+    // EOF. Only the binary opts in: an in-process caller keeps its stdout.
+    if RELEASE_STDOUT_AFTER_PREPARE.load(std::sync::atomic::Ordering::SeqCst) {
+        release_own_stdout();
+    }
+    // J5-B1 end
     let boundary = prepared.boundary();
     apply_boundary(&mut record, &boundary, plan.profile);
     // J4-R: §13.2 row 4 — the application is part of the boundary's facts:
@@ -1212,6 +1256,21 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // exists, so crash reconciliation and GC can identify resources without
     // parsing a receipt.
     if let Err(error) = register_boundary_in_state(&attempt_dir, &boundary) {
+        let teardown = prepared.abort();
+        record_teardown(&mut record, &teardown);
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
+    // §8.2: the preparation budget covers steps 1 to 5. A budget spent by
+    // now refuses before anything announces `prepared`: an owner must never
+    // be told an attempt is ready after its preparation ran out of time.
+    if let Err(error) = budget.check(ErrorStage::Preparing) {
         let teardown = prepared.abort();
         record_teardown(&mut record, &teardown);
         return Ok(refuse(
@@ -1286,6 +1345,21 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         ));
     }
 
+    // J5 §9.3 / X06: before the untrusted target execs, the supervisor makes
+    // itself non-dumpable so a same-uid peer that can address it (a `none`
+    // child, whose target shares the host pid namespace) cannot read its
+    // /proc/<pid>/{fd,environ,mem} — its live trace and control channels and
+    // the operator environment — nor `ptrace` it. The lock is the kernel's
+    // dumpable check, not host Yama (which a peer can waive with
+    // PR_SET_PTRACER). It is set here, after the capability probes and the
+    // observer's attach to the (execve-reset, dumpable) backend and before
+    // release, so no probe fork and no observer attach is affected; children
+    // reset dumpable on execve. `doctor`/`gc` exec no untrusted target.
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl(PR_SET_DUMPABLE, 0, ...) takes scalars only and cannot fail.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
     // Step 7: execute the exact target argv through the blocked launcher.
     // J3-launch begin: a failed release reports its teardown, so the refused
     // receipt carries the verified tree (§13.2 row 4) and vendor state can be
@@ -1437,7 +1511,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 record.outcome.signal = Some(signal);
                 break;
             }
-            RunEvent::ExecError { errno } => {
+            RunEvent::ExecError { errno, detail } => {
                 // §8.1: an unsuccessful target exec is a pre-exec failure, and
                 // §13.2 gives it its own outcome kind. It is not `refused`:
                 // the attempt reached release and the kernel answered, which
@@ -1452,11 +1526,23 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     record_tree(&mut record, &tree);
                 }
                 // J3-launch end
+                // X04: the errno stays in `cause`; a missing interpreter,
+                // which the kernel reports as ENOENT like a missing program,
+                // takes its own code so the two differ in a machine field.
                 let error = JailError::new(
-                    ErrorCode::ExecFailed,
+                    detail.map_or(
+                        ErrorCode::ExecFailed,
+                        crate::platform::ExecFailureDetail::error_code,
+                    ),
                     ErrorStage::Released,
                     Remediation::Configuration,
-                    format!("the target exec failed with {errno}"),
+                    match detail {
+                        Some(detail) => format!(
+                            "the target exec failed with {errno}: {}",
+                            detail.explanation()
+                        ),
+                        None => format!("the target exec failed with {errno}"),
+                    },
                 );
                 // J4-R: a receipt still with the worker lands (or is given up
                 // on) before the refused one.
@@ -1526,6 +1612,29 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 // J4-D5 remainder: the first error is the reported one.
                 outcome_error.get_or_insert(error);
             }
+            // J5-B1 begin: §6.4 — the same honest unknown, and a coded error
+            RunEvent::ExecUnconfirmed { reason } => {
+                record.outcome.kind = OutcomeKind::Unknown;
+                record.outcome.code = None;
+                record.outcome.signal = None;
+                if let Some(cause) = running.limit_cause() {
+                    record.outcome.cause.get_or_insert(cause);
+                }
+                record.outcome.cause.get_or_insert(reason);
+                let error = JailError::new(
+                    ErrorCode::ExecUnconfirmed,
+                    ErrorStage::Running,
+                    Remediation::Configuration,
+                    "with observation off the target's exec could not be confirmed: it ended \
+                     before the supervisor saw its new image, so whether it ran is unknown; \
+                     run with --observe on to confirm it"
+                        .to_owned(),
+                );
+                record.errors.push(error.to_object());
+                outcome_error.get_or_insert(error);
+                break;
+            }
+            // J5-B1 end
             RunEvent::Unknown { reason } => {
                 record.outcome.kind = OutcomeKind::Unknown;
                 record.outcome.code = None;
@@ -1744,7 +1853,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         outcome_error.get_or_insert(error);
     }
     if journal.loss.is_some() {
-        degrade_trace_coverage(&mut record);
+        degrade_trace_coverage(&mut record, &journal);
     }
     let receipt = match persist_terminal(
         state::Site::TerminalReceipt,
@@ -1886,8 +1995,33 @@ fn wall_deadline(plan: &Plan) -> Option<Instant> {
 /// from the cgroup counters, not from the trace (§11.4: no `limit.hit`
 /// event in v1), so no frame of it can have been lost, and it keeps what the
 /// platform reported.
-fn degrade_trace_coverage(record: &mut AttemptRecord) {
+// J5-C begin: review item 15
+/// The evidence classes whose frames this attempt's trace carries (§11.4):
+/// the audit classes with observation on, `proxy.net` with a proxy. A trace
+/// loss can take these and no other.
+fn stream_classes(plan: &Plan) -> Vec<&'static str> {
+    let mut classes = Vec::new();
+    if plan.resolved.snapshot.observation.mode == crate::records::ObserveMode::On {
+        classes.extend(["exec", "fs.write", "fs.deny", "net"]);
+    }
+    if plan.resolved.snapshot.network.mode == NetworkMode::Proxy.as_str() {
+        classes.push("proxy.net");
+    }
+    classes
+}
+// J5-C end
+
+fn degrade_trace_coverage(record: &mut AttemptRecord, journal: &Journal) {
     use crate::records::{Gap, SourceStatus};
+    // J5-C, review item 15: the loss the stream's note records (§13.3), from
+    // the same start and as the same (wrapper) loss. A loss the sink never
+    // noted (a poisoned trace lock) has no known start: the whole attempt.
+    let start = journal
+        .trace
+        .lock()
+        .ok()
+        .and_then(|writer| writer.loss_start_ns())
+        .map_or_else(|| "0".to_owned(), |start| start.to_string());
     record.observer.sources.wrapper = SourceStatus::Degraded;
     for status in [
         &mut record.observer.sources.audit,
@@ -1929,12 +2063,8 @@ fn degrade_trace_coverage(record: &mut AttemptRecord) {
         }
         let gap = Gap {
             classes: vec![name.to_owned()],
-            source: entry
-                .sources
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "wrapper".to_owned()),
-            start_ns: "0".to_owned(),
+            source: "wrapper".to_owned(),
+            start_ns: start.clone(),
             end_ns: end,
             reason: trace::TRANSPORT_LOSS_REASON.to_owned(),
             lost_count: None,
@@ -2042,6 +2172,34 @@ fn child_visible_roots(plan: &Plan) -> Vec<PathBuf> {
     }
     roots
 }
+
+// J5-B1 begin: X05.3
+static RELEASE_STDOUT_AFTER_PREPARE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// For the `ouro-jail` binary only, whose stdout is the target's: once an
+/// attempt is prepared, [`run`] points this process's stdout at `/dev/null`
+/// so the supervisor holds no copy that postpones the caller's EOF (§8.3).
+/// A program that calls the library in-process never calls this and keeps
+/// its stdout.
+pub fn release_stdout_after_prepare() {
+    RELEASE_STDOUT_AFTER_PREPARE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Points this process's own stdout at `/dev/null`. Best effort: a failure
+/// leaves the copy in place, which only delays the caller's EOF.
+fn release_own_stdout() {
+    // SAFETY: open takes a NUL-terminated literal; dup2 and close take
+    // descriptor numbers this process owns.
+    unsafe {
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if null >= 0 {
+            libc::dup2(null, libc::STDOUT_FILENO);
+            libc::close(null);
+        }
+    }
+}
+// J5-B1 end
 
 /// Refuses a state root that the child can reach (§7, H7).
 ///
@@ -2171,16 +2329,45 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
     Ok(())
 }
 
-/// A monotonic budget with a stage-appropriate refusal (§8.2).
+/// The longest single wait for the gate between deadline checks.
+const GATE_POLL_STEP: Duration = Duration::from_millis(250);
+
+/// A deadline on the platform's continuous clock: `CLOCK_BOOTTIME` on Linux,
+/// so suspend counts and a wall-clock step does not (§6.4: "Linux measures
+/// execution wall, preparation/gate/stop budgets ... using CLOCK_BOOTTIME").
+/// `Instant` is `CLOCK_MONOTONIC`, which stops during suspend.
+#[derive(Clone, Copy, Debug)]
+struct ContinuousDeadline {
+    end_ns: u128,
+}
+
+impl ContinuousDeadline {
+    fn after(budget: Duration) -> Self {
+        ContinuousDeadline {
+            end_ns: crate::platform::elapsed_since_start_ns().saturating_add(budget.as_nanos()),
+        }
+    }
+
+    /// Time left, zero once expired.
+    fn remaining(self) -> Duration {
+        let left = self
+            .end_ns
+            .saturating_sub(crate::platform::elapsed_since_start_ns());
+        Duration::from_nanos(u64::try_from(left).unwrap_or(u64::MAX))
+    }
+}
+
+/// A preparation budget with a stage-appropriate refusal (§8.2), on the
+/// continuous clock (§6.4).
 struct Budget {
-    deadline: Instant,
+    deadline: ContinuousDeadline,
     total: Duration,
 }
 
 impl Budget {
     fn new(total: Duration) -> Self {
         Budget {
-            deadline: Instant::now() + total,
+            deadline: ContinuousDeadline::after(total),
             total,
         }
     }
@@ -2190,7 +2377,7 @@ impl Budget {
     /// # Errors
     /// Returns [`ErrorCode::PrepareTimeout`].
     fn check(&self, stage: ErrorStage) -> Result<(), JailError> {
-        if Instant::now() < self.deadline {
+        if !self.deadline.remaining().is_zero() {
             return Ok(());
         }
         Err(JailError::new(
@@ -2438,7 +2625,7 @@ fn submit_receipt(
 ) -> Result<InFlight, JailError> {
     // J4 W2-S: (B) — as in `persist_noted`.
     if journal.loss.is_some() {
-        degrade_trace_coverage(record);
+        degrade_trace_coverage(record, journal);
     }
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
@@ -2595,7 +2782,7 @@ fn prepare_launch(
     attempt_dir: &AttemptDir,
     plan: &Plan,
     record: &mut AttemptRecord,
-    deadline: Instant,
+    deadline: ContinuousDeadline,
 ) -> Result<Option<crate::credentials::LaunchHandoff>, JailError> {
     let snapshot = &plan.resolved.snapshot;
     if snapshot.roots.vendor_state.is_none() {
@@ -2627,7 +2814,9 @@ fn prepare_launch(
     // by what is left of it, and no source may lie in a child-writable grant.
     let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
     let mut staged =
-        match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, deadline) {
+        match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, &|| {
+            deadline.remaining()
+        }) {
             Ok(staged) => staged,
             Err(refusal) => {
                 // Both the receipt rows and the private provenance of every
@@ -3133,7 +3322,7 @@ fn persist_noted(
     // J4 W2-S: (B) — a trace loss already known is in every receipt written
     // after it, not only in the one the settlement writes.
     if journal.loss.is_some() {
-        degrade_trace_coverage(record);
+        degrade_trace_coverage(record, journal);
     }
     let io = state::current_io();
     let receipt = write_receipt_at(
@@ -3169,7 +3358,7 @@ fn persist_terminal(
     }
     if let Some(error) = journal.take_new_loss() {
         record.errors.push(error.to_object());
-        degrade_trace_coverage(record);
+        degrade_trace_coverage(record, journal);
         let io = state::current_io();
         let corrected = write_receipt_at(
             site,
@@ -3527,9 +3716,12 @@ fn open_control(args: &RunArgs) -> Result<Option<ControlSink>, JailError> {
 
 fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, JailError> {
     if let Some(fd) = args.trace_fd {
+        // J5-C, wave 3: the write-size test seam (S9), recorded like every
+        // `OURO_JAIL_TEST_*` variable.
+        let seam = std::env::var(trace::TRACE_FD_WRITE_SEAM).ok();
         // SAFETY: as for the control descriptor: exclusively owned for this
         // invocation and already validated as open for writing.
-        let sink = unsafe { FdSink::from_raw_fd(fd) }?;
+        let sink = unsafe { FdSink::for_attempt(fd, seam.as_deref()) }?;
         return Ok(trace::shared(sink));
     }
     let path = attempt_dir.trace_path();
@@ -3636,7 +3828,7 @@ pub fn await_release(
     // invocation, and `validate_channels` established that it is open for
     // reading and distinct from every other channel.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let deadline = Instant::now() + budget;
+    let deadline = ContinuousDeadline::after(budget);
     // One byte past the maximum, so an oversized frame is detected rather than
     // silently truncated into something that parses.
     let cap = crate::records::GATE_FRAME_MAX + 1;
@@ -3648,7 +3840,7 @@ pub fn await_release(
         {
             return Err(stopped_by_signal(ErrorStage::Prepared));
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.remaining();
         if remaining.is_zero() {
             return Err(JailError::new(
                 ErrorCode::PrepareTimeout,
@@ -3661,7 +3853,10 @@ pub fn await_release(
             ));
         }
         let signal_fd = signals.map(signals::SignalPipe::as_raw_fd);
-        if !poll_readable(fd, signal_fd, remaining)? {
+        // A poll timeout runs on CLOCK_MONOTONIC, which stops during suspend:
+        // bounded steps let an expiry be acted on soon after execution
+        // resumes (§6.4).
+        if !poll_readable(fd, signal_fd, remaining.min(GATE_POLL_STEP))? {
             continue;
         }
         let mut chunk = [0u8; 256];
@@ -3938,6 +4133,128 @@ mod tests {
         assert!(journal.take_new_loss().is_some());
         assert!(journal.loss.is_some());
     }
+
+    // J5-C begin: review item 15
+    fn test_record(coverage: crate::records::Coverage) -> AttemptRecord {
+        use crate::records::{
+            AppliedNetwork, EvidenceMode, JailRecord, ObserveMode, PlatformRecord, PolicyRecord,
+        };
+        let now = SystemTime::now();
+        AttemptRecord {
+            attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+            revision: 1,
+            platform: PlatformRecord {
+                os: Os::Linux,
+                arch: "x86_64".to_owned(),
+                kernel: "test".to_owned(),
+            },
+            jail: JailRecord {
+                component: "ouro-jail".to_owned(),
+                version: "0.0.0".to_owned(),
+                backend: None,
+                backend_version: None,
+            },
+            policy: PolicyRecord {
+                name: "tool".to_owned(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                observe: ObserveMode::On,
+                evidence: EvidenceMode::BestEffort,
+                requirements: Vec::new(),
+                grants: Vec::new(),
+            },
+            containment: crate::records::Containment::Enforced,
+            exec_observed: true,
+            argv_digest: None,
+            applied: crate::records::Applied {
+                filesystem: None,
+                network: AppliedNetwork {
+                    mode: "none".to_owned(),
+                    mechanism: None,
+                    allowed_hosts: Vec::new(),
+                },
+                syscalls: None,
+                limits: Vec::new(),
+                environment_names: Vec::new(),
+                removed_environment_names: Vec::new(),
+            },
+            observer: crate::observer::CoverageSummary::unobserved().to_observer_record(),
+            coverage,
+            process: None,
+            lifetime: crate::records::Lifetime::pending(),
+            outcome: Outcome::pending(),
+            state_cleanup: StateCleanup::NotNeeded,
+            cleanup_error: None,
+            created_at: now,
+            updated_at: now,
+            errors: Vec::new(),
+            credentials: Vec::new(),
+        }
+    }
+
+    /// A receipt records a trace loss as the stream's note does: on each
+    /// covered evidence class, from the note's start, as a wrapper loss.
+    #[test]
+    fn a_receipt_records_the_trace_loss_with_the_notes_start_and_source() {
+        use crate::records::{CoverageEntry, SourceStatus};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = trace::shared(FileSink::with_bounds(file.reopen().unwrap(), 2000, 800));
+        trace
+            .lock()
+            .unwrap()
+            .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
+        let mut journal = Journal::new("att_test", trace.clone());
+        let note = |transition: &str| {
+            crate::records::Event::lifecycle_note("att_test", 0, SystemTime::now(), 0, transition)
+        };
+        // One delivered frame, so the last healthy point is after the start,
+        // then an event past the 1200-byte payload budget: the first loss.
+        // The elapsed clock starts at its first read (the fallback clock, and
+        // the supervisor mark); read it before the sleep, or a test that runs
+        // first in its process would deliver that frame at elapsed zero.
+        let _ = crate::platform::elapsed_since_start_ns();
+        std::thread::sleep(Duration::from_millis(2));
+        trace
+            .lock()
+            .unwrap()
+            .write_event(&note("prepared"), Priority::Normal)
+            .expect("within the budget");
+        assert!(
+            trace
+                .lock()
+                .unwrap()
+                .write_event(&note(&"x".repeat(1500)), Priority::Normal)
+                .is_err()
+        );
+        assert!(journal.take_new_loss().is_some());
+        let start = trace.lock().unwrap().loss_start_ns().expect("a loss start");
+        assert!(start > 0, "the loss starts at the last delivered frame");
+        let active = || CoverageEntry {
+            status: SourceStatus::Active,
+            sources: vec!["audit".to_owned()],
+            observed_count: Some(0),
+            gaps: Vec::new(),
+        };
+        let mut coverage = crate::observer::CoverageSummary::unobserved().to_coverage();
+        coverage.exec = active();
+        coverage.fs_write = active();
+        coverage.fs_deny = active();
+        coverage.net = active();
+        let mut record = test_record(coverage);
+        degrade_trace_coverage(&mut record, &journal);
+        for entry in [
+            &record.coverage.exec,
+            &record.coverage.fs_write,
+            &record.coverage.fs_deny,
+            &record.coverage.net,
+        ] {
+            assert_eq!(entry.status, SourceStatus::Degraded);
+            let gap = &entry.gaps[0];
+            assert_eq!(gap.source, "wrapper", "{gap:?}");
+            assert_eq!(gap.start_ns, start.to_string(), "{gap:?}");
+        }
+        assert!(record.coverage.proxy_net.gaps.is_empty());
+    }
+    // J5-C end
 
     #[test]
     fn the_gate_and_preparation_budgets_are_the_ones_the_specification_names() {

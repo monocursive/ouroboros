@@ -1,0 +1,26 @@
+{
+  "schema": "ouro.jail.control/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "seq": 2,
+  "kind": "refused",
+  "receipt_phase": "refused",
+  "receipt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "gate_invalid",
+      "stage": "prepared",
+      "message": "gate frame carries a different policy digest",
+      "remediation_category": "configuration"
+    }
+  },
+  "error": {
+    "code": "gate_invalid",
+    "stage": "prepared",
+    "message": "gate frame carries a different policy digest",
+    "remediation_category": "configuration"
+  }
+}

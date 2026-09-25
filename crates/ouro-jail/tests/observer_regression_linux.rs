@@ -1554,36 +1554,74 @@ fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
 
 /// R11: an untraced child that outlives the traced tree — bubblewrap, in the
 /// real tree — still has its exit reported. It has exactly one route.
+///
+/// J5-T: bubblewrap is the launcher's ancestor, and the test now builds it
+/// that way: an untraced `sh` is this process's child, the launcher is its
+/// child, and the `sh` outlives the traced tree by two seconds before
+/// exiting 5. Written first with the untraced child as the launcher's
+/// *sibling*, it asserted that the tracer waits for every child the process
+/// had when it attached — which is how a process substitution the
+/// supervisor inherited from the shell that exec'd it held the observer open
+/// and was then counted as lost. A sibling is not the tracer's to wait for
+/// (`j5_tracer_foreign_child_linux`); the child it reached the launcher
+/// through is, and this pins that exit's route.
 #[test]
 fn r11_a_late_untraced_child_exit_is_still_reported() {
     let _serial = serial();
     let Some(work) = setup("r11") else { return };
     let helper = work.helper_s();
     let base = work.base();
-    let sleeper = Command::new("/bin/sleep")
-        .arg("4")
-        .stdout(Stdio::null())
-        .spawn()
-        .expect("spawn /bin/sleep");
-    let sleeper_pid = sleeper.id() as libc::pid_t;
-    // std would reap it on drop; the tracer thread owns every wait instead.
-    std::mem::forget(sleeper);
-
-    let mut run = launch(&work, &[&helper, "quick", &base]);
-    let tracer = attach(run.pid, TracerConfig::default());
+    let filter = work.filter.to_string_lossy().into_owned();
+    // A background job's stdin is `/dev/null` before its own redirections
+    // apply, so the release pipe is passed on fd 3.
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        r#"exec 3<&0; "$@" <&3 3<&- & wait $!; sleep 2; exit 5"#,
+        "sh",
+        &helper,
+        "launch",
+        &filter,
+        &helper,
+        "quick",
+        &base,
+    ]);
+    // Never dropped: `Launched` kills its pid by number on drop, and this
+    // one is reaped by the tracer, after which the number is anyone's.
+    let mut run = std::mem::ManuallyDrop::new(spawn(command));
+    let backend = run.pid;
+    let launcher = ouro_jail::platform::linux::tracer::children(backend)
+        .into_iter()
+        .find(|pid| {
+            ouro_jail::platform::linux::tracer::cmdline(*pid)
+                .is_some_and(|argv| argv.get(1).map(Vec::as_slice) == Some(b"launch".as_slice()))
+        })
+        .unwrap_or_else(|| panic!("no launcher under the untraced sh {backend}"));
+    let tracer = attach(launcher, TracerConfig::default());
     run.release();
     let _ = run.lines();
     let observed = collect(tracer, Duration::from_secs(60));
     println!(
-        "r11: untraced exits {:?}, sleeper state after finish {:?}",
+        "r11: untraced exits {:?}, backend state after finish {:?}",
         observed.untraced(),
-        proc_state(sleeper_pid)
+        proc_state(backend)
     );
+    let exit = observed
+        .untraced()
+        .into_iter()
+        .find(|(p, _)| *p == backend)
+        .unwrap_or_else(|| {
+            panic!(
+                "the exit of the untraced child {backend}, which the launcher descends \
+                 through, must reach the supervisor, which was told not to wait for its own \
+                 children while a tracer is attached: {:?}",
+                observed.untraced()
+            )
+        });
     assert!(
-        observed.untraced().iter().any(|(p, _)| *p == sleeper_pid),
-        "the exit of the untraced child {sleeper_pid} must reach the supervisor, which \
-         was told not to wait for its own children while a tracer is attached: {:?}",
-        observed.untraced()
+        libc::WIFEXITED(exit.1) && libc::WEXITSTATUS(exit.1) == 5,
+        "its own status: {:#x}",
+        exit.1
     );
     assert!(
         observed.summary.unreaped_children.is_empty(),
