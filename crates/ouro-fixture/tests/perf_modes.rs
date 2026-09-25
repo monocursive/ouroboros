@@ -316,13 +316,17 @@ fn perf_launch_reads_the_clock_before_fork_and_again_after_exec() {
     assert!(exec <= u64_at(&start, "monotonic_ns"), "{r:#} {start}");
 }
 
+/// Linux only: sampling reads /proc. On macOS the test does not exist rather
+/// than skipping, because a skip is a failure under OURO_CONFORMANCE=1 and
+/// the macOS lane runs in conformance mode.
+#[cfg(target_os = "linux")]
 #[test]
 fn perf_launch_samples_the_launched_process_not_itself() {
     // A launched process far larger than the launcher: its own high-water
     // mark is what is sampled.
     let python = Path::new("/usr/bin/python3");
-    if !cfg!(target_os = "linux") || !python.exists() {
-        ouro_fixture::harness::skip_or_fail("needs Linux /proc and /usr/bin/python3");
+    if !python.exists() {
+        ouro_fixture::harness::skip_or_fail("needs /usr/bin/python3");
         return;
     }
     let launch = perf_launch(
