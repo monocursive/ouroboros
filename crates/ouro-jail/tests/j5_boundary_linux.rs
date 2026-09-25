@@ -944,19 +944,18 @@ fn s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec() {
             // stderr IS the ring, so `ouro-jail` cannot emit its refusal
             // diagnostic; it still refuses before exec — the fixture `exit 0`
             // would print a report to its (piped) stdout, and that stdout is
-            // empty, so the target never ran — but it exits via a panic (101)
-            // rather than the clean 125. That 125-vs-panic gap is a main.rs
-            // robustness finding for J5-D (see B2/requests.md, w4); the
-            // containment guarantee (no exec) holds.
+            // empty, so the target never ran — and it exits with the refusal
+            // code, not a panic: a diagnostic that cannot be written is
+            // dropped, never allowed to change the exit code (§6.4).
             assert!(
                 out.stdout.is_empty(),
                 "stderr: the target ran despite the io_uring ring on stderr: {:?}",
                 String::from_utf8_lossy(&out.stdout)
             );
-            assert_ne!(
+            assert_eq!(
                 out.status.code(),
-                Some(0),
-                "stderr: the target's clean exit happened, so it ran despite the ring"
+                Some(125),
+                "stderr: an unwritable stderr must not turn the refusal into another exit"
             );
         }
     }

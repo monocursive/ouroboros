@@ -76,7 +76,7 @@ fn build_context() -> Result<Context, JailError> {
 }
 
 fn fail(error: &JailError) -> ExitCode {
-    eprintln!("{error}");
+    ouro_jail::diag!("{error}");
     exit(error.exit_code())
 }
 
@@ -587,7 +587,7 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
         // §6.4: `gc` uses 1 for failed cleanup or state access, whatever the
         // underlying code's usual mapping would be.
         Err(error) => {
-            eprintln!("{error}");
+            ouro_jail::diag!("{error}");
             return ExitCode::from(1);
         }
     };
@@ -599,7 +599,7 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     // J3-launch begin: §6.4 — a cleanup that stopped again exits 1, after the
     // report is printed (J3 review L1).
     if !report.incomplete.is_empty() {
-        eprintln!(
+        ouro_jail::diag!(
             "ouro-jail: cleanup did not complete for: {}",
             report.incomplete.join(", ")
         );
@@ -731,21 +731,21 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
         );
     }
     if let Some(error) = &report.error {
-        eprintln!("{error}");
+        ouro_jail::diag!("{error}");
     }
     // J4 W3, P5: every error no durable receipt carries reaches stderr.
     for error in &report.unrecorded {
-        eprintln!("{error}");
+        ouro_jail::diag!("{error}");
     }
     // I05: evidence health is a separate fact from the attempt's outcome, so a
     // trace failure gets its own diagnostic line rather than replacing one.
     if let Some(error) = &report.trace_error {
-        eprintln!("{error}");
+        ouro_jail::diag!("{error}");
     }
     // J4-G: control messages the consumer never took are reported, never
     // waited on (§13.3); the count comes from `RunReport.control_dropped`.
     if report.control_dropped > 0 {
-        eprintln!(
+        ouro_jail::diag!(
             "ouro-jail: {} control message(s) were dropped: the --control-fd consumer did not \
              read them",
             report.control_dropped
@@ -759,7 +759,7 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
         // supervisor's own diagnostic into it would make the stream differ
         // from direct execution (X05), so the line goes out only when a
         // terminal is watching, where no byte comparison is being made.
-        eprintln!("ouro-jail: receipt {}", path.display());
+        ouro_jail::diag!("ouro-jail: receipt {}", path.display());
     }
     exit(report.exit_code)
 }

@@ -256,7 +256,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
         Err(err) => {
-            eprintln!("ouro-jail {SUBCOMMAND}: {err}");
+            crate::diag!("ouro-jail {SUBCOMMAND}: {err}");
             std::process::exit(EXIT_USAGE);
         }
     };
@@ -267,7 +267,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
     ] {
         // SAFETY: F_GETFD takes a descriptor number and dereferences nothing.
         if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-            eprintln!(
+            crate::diag!(
                 "ouro-jail {SUBCOMMAND}: {}",
                 LaunchUsage::ClosedFd(option, fd)
             );

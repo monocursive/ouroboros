@@ -6,6 +6,28 @@
 //! requirements, lifecycle transitions, redaction, record encoding and resource
 //! budgets; [`platform`] owns everything native.
 
+/// Write one diagnostic line to standard error, ignoring a failed write.
+///
+/// `eprintln!` panics when the write fails, which replaces the exit code the
+/// caller is about to return (§6.4) with a panic's 101. Standard error is
+/// whatever the operator passed, including a descriptor that rejects writes
+/// (an io_uring, which the run then refuses): a diagnostic that cannot be
+/// written is dropped, and the exit code stands.
+pub fn diagnostic(args: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_fmt(args);
+    let _ = stderr.write_all(b"\n");
+}
+
+/// [`diagnostic`] with `format!` syntax: a non-panicking `eprintln!`.
+#[macro_export]
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        $crate::diagnostic(format_args!($($arg)*))
+    };
+}
+
 pub mod canonical;
 pub mod capability;
 pub mod cleanup;

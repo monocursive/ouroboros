@@ -197,7 +197,7 @@ pub fn bootstrap_main(args: &[OsString]) -> ! {
     unsafe {
         libc::write(super::platform::STATUS_FD, note.as_ptr().cast(), note.len());
     }
-    eprintln!("ouro-jail: backend exec failed: {error}");
+    crate::diag!("ouro-jail: backend exec failed: {error}");
     std::process::exit(125);
 }
 
