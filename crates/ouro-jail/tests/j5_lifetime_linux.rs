@@ -9,10 +9,13 @@
 //! target and its descendants are held by pidfds opened from the host pids
 //! the attempt's own receipt names (or that `/proc` lists as the target's
 //! children), and "dead" means the pidfd became readable. Waits are on
-//! protocol events: control messages, pidfd readability, inotify, or kernel
-//! state polled under an explicit bound. Every process a test signals is one
-//! it started: the supervisor it spawned, or a process of that attempt the
-//! attempt's receipt or `/proc` names.
+//! protocol events: control messages, pidfd readability, inotify, or state
+//! polled under an explicit bound (`/proc`, cgroup files, a file the target
+//! renames into place). Every process a test signals is one it started: the
+//! supervisor it spawned, or a process of that attempt the attempt's receipt
+//! or `/proc` names. A failing wait kills the attempt's own leaf and
+//! supervisor and lets `gc` reconcile, so a failure leaves nothing in the
+//! shared delegated subtree.
 //!
 //! The control channel is the test's own pipe at a fixed descriptor number
 //! (and, where a test needs one, a gate at another), so a test can wait for
@@ -1963,22 +1966,25 @@ fn c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resum
     let supervisor = pidfd(attempt.pid());
     kill_by_pidfd(&supervisor, libc::SIGKILL);
     let (run, _) = attempt.finish();
-    assert_eq!(run.signal(), Some(libc::SIGKILL));
+    // What the dead supervisor left, read before gc; gc runs before anything
+    // is asserted, so a failure leaves no leaf in the shared subtree.
     let left = std::fs::read_dir(&many).map_or(0, Iterator::count);
+    let read = |name: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(root.join(name)).expect(name)).expect("JSON")
+    };
+    let before = common::checked_receipt(read("jail.json"));
+    let (output, report) = gc(&run);
+    let after = common::checked_receipt(read("jail.json"));
+
+    assert_eq!(run.signal(), Some(libc::SIGKILL));
     assert!(
         left > 0 && left < FILL_SIZE,
         "the kill did not land inside the cleanup: {left} of {FILL_SIZE} entries left"
     );
-    let read = |name: &str| -> Value {
-        serde_json::from_slice(&std::fs::read(root.join(name)).expect(name)).expect("JSON")
-    };
-    let receipt = common::checked_receipt(read("jail.json"));
-    assert_eq!(receipt["phase"], "settled", "{receipt:#}");
-    assert_eq!(receipt["lifetime"]["tree_empty"], true);
-    assert_eq!(receipt["state_cleanup"], "pending", "{receipt:#}");
-    let revision = receipt["revision"].as_u64().expect("a revision");
-
-    let (output, report) = gc(&run);
+    assert_eq!(before["phase"], "settled", "{before:#}");
+    assert_eq!(before["lifetime"]["tree_empty"], true);
+    assert_eq!(before["state_cleanup"], "pending", "{before:#}");
+    let revision = before["revision"].as_u64().expect("a revision");
     assert!(output.status.success(), "{report:#}");
     assert!(
         report["entries"].as_array().is_some_and(|entries| entries
@@ -1987,9 +1993,8 @@ fn c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resum
         "{report:#}"
     );
     assert!(!root.join("vendor-state").exists(), "{report:#}");
-    let receipt = common::checked_receipt(read("jail.json"));
-    assert_eq!(receipt["state_cleanup"], "complete", "{receipt:#}");
-    assert_eq!(receipt["revision"].as_u64(), Some(revision + 1));
+    assert_eq!(after["state_cleanup"], "complete", "{after:#}");
+    assert_eq!(after["revision"].as_u64(), Some(revision + 1));
     assert_eq!(read("jail-state.json")["state_cleanup"], "complete");
     eprintln!("C02.5: {left} of {FILL_SIZE} entries were left when the supervisor died");
 }
