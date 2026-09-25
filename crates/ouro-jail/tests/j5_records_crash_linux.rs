@@ -1256,6 +1256,17 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
         ExecutionCgroup::create_for_attempt(&limits, &dir)
     });
     let identity = inode(&leaf);
+    // First, so nothing below can leave a leaf behind on the host.
+    if identity.is_some() {
+        problems.push(format!(
+            "{label}: a leaf was left behind at {}",
+            leaf.display()
+        ));
+        // Ours: named by this attempt's id, made by this call, and empty.
+        if !populated(&leaf) {
+            let _ = std::fs::remove_dir(&leaf);
+        }
+    }
     match created {
         Err(error) if error.code == ErrorCode::StateWriteFailed => {}
         Err(error) => problems.push(format!(
@@ -1278,7 +1289,13 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
         ));
     }
     records_valid(&label, &dir, &mut problems);
-    let state = read_json(&dir.join("jail-state.json"));
+    let state = match parse(&dir.join("jail-state.json")) {
+        Ok(Some(state)) => state,
+        other => {
+            problems.push(format!("{label}: jail state is not a record: {other:?}"));
+            return problems;
+        }
+    };
     let renamed = fault == Fault::DirSyncError;
     let expected = match (site, renamed) {
         (Site::ExecutionLeaf, false) => Value::Null,
@@ -1316,7 +1333,7 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
             "{label}: the failed write changed more than the leaf's record"
         ));
     }
-    if std::fs::read(dir.join("policy.json")).unwrap() != policy {
+    if std::fs::read(dir.join("policy.json")).ok() != Some(policy) {
         problems.push(format!("{label}: policy.json changed"));
     }
     let temps = leftover(&data, &dir);
@@ -1324,16 +1341,6 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
         problems.push(format!(
             "{label}: a failed write that was not a crash left temporary files: {temps:?}"
         ));
-    }
-    if identity.is_some() {
-        problems.push(format!(
-            "{label}: a leaf was left behind at {}",
-            leaf.display()
-        ));
-        // Ours: named by this attempt's id, made by this call, and empty.
-        if !populated(&leaf) {
-            let _ = std::fs::remove_dir(&leaf);
-        }
     }
     let before = present(&dir);
     let gc = gc_run(&data, None);
