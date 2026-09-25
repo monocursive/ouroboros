@@ -915,8 +915,11 @@ tests = [
 id = "S02.6"
 gate = "S02"
 clause = "No cgroup filesystem is mounted or reachable in the child"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: mountinfo is captured but never checked for a cgroup fstype. Partial evidence only: j5_boundary_linux.rs s03_the_outer_boundaries_cannot_be_reversed_inside_agent finds /sys/fs/cgroup/cgroup.procs unreachable under agent, one path in one profile."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::s02_no_cgroup_filesystem_is_reachable_in_the_child",
+]
+note = "From inside tool/build/agent the child's /proc/self/mountinfo has no cgroup/cgroup2 mount, /sys/fs/cgroup is not a live cgroup tree, and open_tree/fsopen(cgroup2) fail. none is uncontained by definition (host view) and is not covered. Green survivor (defence in depth, verified on host): removing fsopen from the seccomp DENY_EPERM left fsopen EPERM (the dropped capabilities are the second lock; creating a mount needs CAP_SYS_ADMIN), and the mount absence is by construction — the contained mount plan mounts only the declared roots, /proc and /dev, pinned by the milestone freeze and the bwrap mount-table tests. No single deletion reddens the child-view test; the guarantee is proved live."
 
 [[clause]]
 id = "S02.3"
@@ -1053,15 +1056,21 @@ tests = [
 id = "S04.6"
 gate = "S04"
 clause = "An io_uring on stdout or stderr refuses before exec"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec",
+]
+note = "An io_uring ring on stdout refuses before exec (exit 125, naming stdout and the anonymous inode); on stderr it also refuses before exec (the target never runs) but cannot emit its diagnostic to the ring and exits via a panic instead of 125 — a main.rs robustness gap flagged to J5-D (B2/requests.md, w4), not a containment failure. Extends review_linux::r3_io_uring_as_stdio_refuses_before_exec (stdin only). Mutation-provable via validate_stdio's anon_inode refusal (RED on host)."
 
 [[clause]]
 id = "S04.7"
 gate = "S04"
 clause = "agent and build inherit no ring"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::s04_agent_and_build_inherit_no_ring",
+]
+note = "An io_uring ring created by the parent with close-on-exec cleared does not reach the agent or build target (§9.2 'No ring fd may be inherited'): the target's /proc/self/fd holds no io_uring anonymous inode. Green survivor (defence in depth, verified on host): removing the jail's close_range_cloexec left the ring absent because bwrap's own fd hygiene closes it too. Both locks would need removing to redden; the guarantee is proved live."
 
 [[clause]]
 id = "S04.5"
@@ -2161,8 +2170,13 @@ note = "The tuple tests hand-build an AttemptRecord and receipt() copies lifetim
 id = "R01.5"
 gate = "R01"
 clause = "The integrity (pending, lost) and unknown-exec settlement tuples are what records carry"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: covered only by the validation corpus (R01.1), never built through the record types."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_records_linux.rs::j5_r01_a_refusal_before_the_boundary_carries_integrity_pending",
+  "ouro-jail/tests/j5_records_linux.rs::j5_r01_a_detected_escape_carries_integrity_lost",
+  "ouro-jail/tests/j5_records_linux.rs::j5_r01_an_exec_the_jail_cannot_confirm_settles_with_exec_unknown",
+]
+note = "Real runs of the release binary, every receipt, trace and control transcript held to the frozen contract (common::assert_run_records) and the §13.2 tuple asserted field by field: a tool refusal before boundary creation (stdin a directory, §8.3) carries boundary/integrity pending with no native identity, scope, tree result or time; a none target that moves itself out of its leaf carries integrity lost with null tree result and time, never settled, both in the receipt written while it runs (P7) and in the final one; a tool run with observation off whose target is the jail's own bound binary (so the only no-observer exec evidence, a changed image, cannot confirm it) settles verified with exec_observed false and the coded exec_unconfirmed unknown. The R06 tests in conformance_j3_none.rs also validate lost receipts the same way. Mutation table in J5-C's notes-wave3b.md."
 
 [[clause]]
 id = "R01.3"
@@ -2274,8 +2288,15 @@ note = "The crash is a real abort; the point is chosen by the OURO_JAIL_TEST_ABO
 id = "R02.3"
 gate = "R02"
 clause = "A crash at the integrity-receipt, gc-resume and gc-proxy-dir sites, and at gc's later records, leaves valid records"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H8: those sites are never crashed."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_the_integrity_receipt_leaves_valid_records",
+  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_both_gc_resume_writes_leaves_valid_records",
+  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_the_gc_proxy_dir_record_leaves_valid_records",
+  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_each_later_gc_record_leaves_valid_records",
+  "ouro-jail/src/lib.rs::state::persist::tests::the_abort_seam_names_a_site_a_point_and_an_optional_ordinal",
+]
+note = "The release binary is aborted by OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>] (S9; J5-C added the ordinal n, the nth replacement at the site in one process, so records that are never a process's first at their site are reachable) at all 4 points of: P7 (a live none escape), both P12 writes (the receipt gc completes, then jail state), P13 (a dead agent's proxy directory) and each P14 record of one pass over a dead none supervisor's populated leaf (gc_terminating_orphan, gc_terminated_orphan, gc_removing_cgroup, gc_removed_cgroup, gc_finished) and a dead tool supervisor's empty leaf and scratch (gc_removing_cgroup, gc_removed_cgroup, gc_removed_scratch, gc_finished): 52 crashes. Each: records parse, jail.json passes the frozen contract, the replaced record is the prior one before the rename and the new one after it, the kill/rmdir/removal is on the side of its record the order promises, the temporary files are exactly the crashed replacement's, and the next gc pass finishes keeping every record. The seam only picks the point; the crash is a real abort."
 
 [[clause]]
 id = "R02.2"
@@ -2291,8 +2312,11 @@ note = "Injected through the portable I/O seam. A stalled disk is not producible
 id = "R02.4"
 gate = "R02"
 clause = "The same faults at the execution-leaf and leaf-identity sites leave valid records"
-tag = "untested"
-note = "J5 adversarial review (rev-A) agent table: those two sites are not injected."
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_every_fault_at_the_execution_leaf_sites_leaves_valid_records",
+]
+note = "Disk-full, short-write, fsync, rename and directory-sync faults injected through the persistence seam (state::with_persist_io) into the real leaf creation (ExecutionCgroup::create_for_attempt) in the test process, against a real attempt the release binary left after its policy and a real delegated cgroup: the creation refuses with state_write_failed, jail state is the prior record before the rename and the new one after it, no temporary file and no leaf are left, and gc keeps every record. Simulated because the faults are injected; the portable matrix (R02.2) cannot reach these sites, which only the Linux platform writes."
 
 # ------------------------------------------------------------------ R03
 
@@ -2314,8 +2338,14 @@ tests = [
 id = "R03.5"
 gate = "R03"
 clause = "Trace partial writes cannot block deadline enforcement"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H7: no listed test runs a wall during a partial write (the live frames fit one atomic pipe write). J5-C wave 3 (the trace write-size seam) is pending; its clause is keyed here when its tests land on j5."
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_records_linux.rs::j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces",
+  "ouro-jail/tests/j5_records_linux.rs::j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame",
+  "ouro-jail/src/lib.rs::trace::tests::under_the_write_size_seam_every_frame_is_written_in_pieces",
+  "ouro-jail/src/lib.rs::trace::tests::the_write_size_seam_accepts_only_a_byte_count",
+]
+note = "the partial writes are forced by the release-binary test seam OURO_JAIL_TEST_TRACE_FD_WRITE_MAX (recorded in jail state and native details, like every OURO_JAIL_TEST_* seam); the live test runs the real jail with --trace-fd, a 2 s wall and a consumer that is slow but live (every frame reassembled, the target's exit traced) or stalled mid-frame (the stream honestly marked incomplete: evidence_lost, wrapper degraded); both times the wall fires on time by the receipt's own timestamps. The partial writes are not visible on the wire (a pipe reassembles them), so the seam's write size is proved by the unit test and recorded in test_seams"
 
 [[clause]]
 id = "R03.2"
@@ -2356,8 +2386,11 @@ note = "A 2s wall fires on time (wall_expiry, hit, elapsed < 9s) while a Never t
 id = "R03.7"
 gate = "R03"
 clause = "A wall that expires while the consumer is saturated but not yet declared lost is enforced on time"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: in both wall tests the loss is declared before the wall fires."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::r03_a_wall_expires_before_the_saturation_loss_is_declared",
+]
+note = "Under strict evidence a 500 ms wall (shorter than the 1 s no-progress deadline) with a Never consumer and >4 MiB of events fires on time by wall_expiry (the target is signalled), NOT by an evidence loss — the wall is enforced while the trace is saturated but before the loss is declared (a declared loss under strict would have stopped it first). Saturation is by event volume, not a sleep. Mutation-provable via the nonblocking trace fd (set_nonblocking removed -> the loop hangs on the full pipe, RED on host)."
 
 [[clause]]
 id = "R03.4"
@@ -2517,8 +2550,11 @@ tests = [
 id = "R06.5"
 gate = "R06"
 clause = "Every detected escape retains its state (leaf and vendor state)"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: retention is asserted in one test only; the vendor-state check is vacuous without --launch."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::r06_a_detected_escaped_descendant_loses_integrity_and_retains_state",
+]
+note = "In the detected-escape case the registered leaf is retained and is the pinned inode (not a look-alike), and the attempt's records are retained (state_cleanup != complete). none stages no vendor state (it refuses --launch), so there is no vendor state on the detected-escape path; vendor-state retention on an integrity loss is a contained-profile concern, proved by portable_launch::rm11_a_teardown_that_lost_integrity_retains_vendor_state_and_says_why. Mutation-provable via uncontained.rs self.leaf.retain() (removed -> the leaf is cleaned, RED on host)."
 
 [[clause]]
 id = "R06.3"
