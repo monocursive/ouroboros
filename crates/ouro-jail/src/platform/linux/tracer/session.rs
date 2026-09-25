@@ -132,6 +132,10 @@ pub(super) trait ProcView: Send {
     /// Field 22 of `/proc/<tid>/stat`: the task's start time in clock ticks
     /// since boot.
     fn start_ticks(&self, tid: pid_t) -> Option<u64>;
+    /// The direct children of every thread of `pid` (J5-T).
+    fn children(&self, pid: pid_t) -> Vec<pid_t> {
+        proc::children(pid)
+    }
 }
 
 /// `/proc`, read now.
@@ -158,7 +162,9 @@ impl ProcView for LiveProc {
 /// unreaped. While the tracer runs it still reaps any of them that exits
 /// (`waitpid(-1)` cannot leave them out) and delivers the status as
 /// [`TracerEvent::UntracedChildExit`], so nothing is lost; one alive when it
-/// finishes is left to its owner.
+/// finishes is left to its owner. A child it gains after attaching is the
+/// opposite case — an orphan of the traced tree adopted by a subreaper
+/// supervisor — and is owed like the backend (`Session::adopted`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Owed {
     /// Nothing: the launcher is itself a child of this process.
@@ -422,6 +428,12 @@ pub(super) fn run(
     });
     session.register(launcher);
     session.owed = Owed::toward(launcher, &*session.procfs);
+    session.beside = session
+        .procfs
+        .children(sys::getpid())
+        .into_iter()
+        .filter_map(|pid| session.procfs.start_ticks(pid).map(|birth| (pid, birth)))
+        .collect();
     session.run_loop(&handles);
     session.finish(&handles)
 }
@@ -579,6 +591,10 @@ struct Session {
     force_unmatched_marker: Option<Vec<u8>>,
     /// J5-T: which children, besides the tracees, the tracer answers for.
     owed: Owed,
+    /// J5-T: the children this process had when the tracer attached, by
+    /// birth. Any other child that is not a tracee came after — an orphan
+    /// a subreaper supervisor adopted from the traced tree — and is owed.
+    beside: Vec<(pid_t, u64)>,
 }
 
 impl Session {
@@ -621,6 +637,7 @@ impl Session {
             // `run` reads the real one once the launcher is seized; a
             // session built without it keeps the rule before J5-T.
             owed: Owed::Every,
+            beside: Vec::new(),
         }
     }
 
@@ -926,6 +943,24 @@ impl Session {
                 Owed::Backend { pid, birth, reaped } => reaped || !self.still_there(pid, birth),
                 Owed::Every => false,
             }
+            && self.adopted().is_empty()
+    }
+
+    /// J5-T: this process's children that are not tracees and that it did
+    /// not have, under the same birth, when the tracer attached — orphans of
+    /// the traced tree a subreaper supervisor adopted, zombie or alive. They
+    /// are the attempt's, so the tracer reaps them before it finishes (L01.7).
+    fn adopted(&self) -> Vec<pid_t> {
+        self.procfs
+            .children(sys::getpid())
+            .into_iter()
+            .filter(|pid| !self.tasks.contains_key(pid))
+            .filter(|pid| {
+                !self.beside.iter().any(|(known, birth)| {
+                    known == pid && self.procfs.start_ticks(*pid) == Some(*birth)
+                })
+            })
+            .collect()
     }
 
     /// Whether `pid` still names the process born at `birth`, zombie
@@ -2268,7 +2303,8 @@ impl Session {
         // Direct children that were never reaped have no route left for
         // their exit status: the supervisor was told not to wait for its own
         // children while a tracer is attached. J5-T: only those it answers
-        // for; another child is its owner's to wait for once this ends.
+        // for — the backend and any child gained after it attached; a child
+        // it was attached beside is its owner's to wait for once this ends.
         let unreaped: Vec<pid_t> = match self.owed {
             Owed::Every => proc::children(sys::getpid())
                 .into_iter()
@@ -2278,8 +2314,10 @@ impl Session {
                 pid,
                 birth,
                 reaped: false,
-            } if self.still_there(pid, birth) => vec![pid],
-            Owed::Backend { .. } | Owed::Nothing => Vec::new(),
+            } if self.still_there(pid, birth) => {
+                std::iter::once(pid).chain(self.adopted()).collect()
+            }
+            Owed::Backend { .. } | Owed::Nothing => self.adopted(),
         };
         if !unreaped.is_empty() {
             self.summary.loss.unreaped_children += unreaped.len() as u64;
@@ -2477,6 +2515,11 @@ mod tests {
         }
         fn start_ticks(&self, tid: pid_t) -> Option<u64> {
             self.0.lock().unwrap().get(&tid).map(|(_, ticks)| *ticks)
+        }
+        /// A script has no children: the test binary's real ones are other
+        /// tests' business.
+        fn children(&self, _pid: pid_t) -> Vec<pid_t> {
+            Vec::new()
         }
     }
 

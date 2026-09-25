@@ -666,6 +666,119 @@ fn j5t_the_backend_the_launcher_descends_through_is_awaited_and_delivered() {
     assert!(bystander.alive_and_ours(), "the bystander was left alone");
 }
 
+/// The target forks children that exit at once, waits until every one is
+/// a zombie, and exits without reaping them.
+const ORPHANS: &str = r#"
+import os, sys, time
+pids = []
+for _ in range(int(sys.argv[1])):
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    pids.append(pid)
+def zombie(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        return False
+deadline = time.monotonic() + 20
+while not all(zombie(pid) for pid in pids):
+    if time.monotonic() > deadline:
+        sys.exit(3)
+    time.sleep(0.01)
+os._exit(0)
+"#;
+
+/// J5-T w3 (L01.7 under `none`): a child this process gains after the
+/// tracer attached is the attempt's, not a bystander's. A tracee's children
+/// that exit before it are reaped by the tracer only as tracees: their
+/// zombies stay for the real parent, and when it exits without waiting they
+/// pass to the nearest subreaper — the `none` supervisor, here this test
+/// process. The tracer reaps every one before it finishes, and still does
+/// not wait for the bystander it was attached beside.
+#[test]
+fn j5t_orphans_adopted_while_traced_are_reaped_before_finished() {
+    const N: usize = 8;
+    let _serial = serial();
+    if !tracer_live() {
+        return;
+    }
+    let me = libc::pid_t::try_from(std::process::id()).expect("a pid");
+    let bystander = Bystander::start();
+    // SAFETY: prctl with integer arguments only; undone below.
+    assert_eq!(
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+        0
+    );
+    let n = N.to_string();
+    let target: Vec<&OsStr> = ["/usr/bin/python3", "-c", ORPHANS, n.as_str()]
+        .into_iter()
+        .map(OsStr::new)
+        .collect();
+    let mut launcher = Launcher::direct(&target);
+    let tracer = Tracer::attach(launcher.pid, TracerConfig::default()).expect("attach");
+    let started = Instant::now();
+    launcher.release();
+    let observed = observe_until_finished(tracer, started, FINISH_BOUND);
+    let left: Vec<(libc::pid_t, Option<String>)> = tracer::children(me)
+        .into_iter()
+        .filter(|pid| *pid != bystander.pid)
+        .map(|pid| {
+            let state = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|raw| {
+                    raw.rsplit_once(')')
+                        .and_then(|(_, tail)| tail.split_whitespace().next().map(str::to_owned))
+                });
+            (pid, state)
+        })
+        .collect();
+    // Whatever the tracer left is this test's to reap, never anyone else's.
+    for (pid, _) in &left {
+        let mut status = 0;
+        // SAFETY: `pid` is this process's own child.
+        unsafe { libc::waitpid(*pid, &raw mut status, libc::WNOHANG) };
+    }
+    // SAFETY: as above.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
+    println!(
+        "j5t orphans: finished in {:?}; left {left:?}; loss {:?}; untraced exits {}",
+        observed.finished_in,
+        observed.summary.loss,
+        observed.untraced().len()
+    );
+    assert!(observed.finished_in.is_some(), "the tracer finished");
+    assert!(
+        observed
+            .events
+            .iter()
+            .any(|e| matches!(e, TracerEvent::Exit { pid, status, .. }
+                if *pid == launcher.pid && libc::WIFEXITED(*status) && libc::WEXITSTATUS(*status) == 0)),
+        "the target made its {N} zombies and exited 0: {}",
+        observed.describe()
+    );
+    assert!(
+        left.is_empty(),
+        "the tracer finished leaving {} adopted orphan(s) unreaped: {left:?}",
+        left.len()
+    );
+    assert_eq!(
+        observed.untraced().len(),
+        N,
+        "each orphan's zombie reaped here, as an untraced child"
+    );
+    assert!(observed.gaps().is_empty(), "no gap: {:?}", observed.gaps());
+    assert_eq!(
+        observed.summary.loss.total(),
+        0,
+        "{:?}",
+        observed.summary.loss
+    );
+    assert!(observed.summary.unreaped_children.is_empty());
+    assert!(bystander.alive_and_ours(), "the bystander was left alone");
+}
+
 // ===========================================================================
 // The real `ouro-jail`, exec'd beside a child it did not start
 // ===========================================================================
