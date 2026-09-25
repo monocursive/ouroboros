@@ -713,8 +713,11 @@ tests = [
 id = "F01.3"
 gate = "F01"
 clause = "The operator's HOME is not visible to the child"
-tag = "untested"
-note = "J5 adversarial review (rev-A) agent table: review_linux.rs r1_the_contained_child_sees_only_the_declared_roots accepts an empty `ls -1 $HOME` (dotfiles hidden) and plants no secret; conformance_j2.rs f01_build… never touches HOME."
+tag = "live-lib"
+tests = [
+  "ouro-jail/tests/linux_mechanisms.rs::the_tool_profile_grants_what_it_says_and_nothing_else",
+]
+note = "Through the product's tool plan below the command line, on the reference host: stat of the operator's home (/home/ouro-ci) and a listing of /home are both ENOENT inside the sandbox. No test runs this through ouro-jail run with a secret planted in the real HOME; review_linux.rs r1_the_contained_child_sees_only_the_declared_roots accepts an empty listing (rev-A), and F01.4's secret sits in a stand-in directory outside every root."
 
 [[clause]]
 id = "F01.4"
@@ -913,7 +916,7 @@ id = "S02.6"
 gate = "S02"
 clause = "No cgroup filesystem is mounted or reachable in the child"
 tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: mountinfo is captured but never checked for a cgroup fstype."
+note = "J5 adversarial review (rev-A) §1.2: mountinfo is captured but never checked for a cgroup fstype. Partial evidence only: j5_boundary_linux.rs s03_the_outer_boundaries_cannot_be_reversed_inside_agent finds /sys/fs/cgroup/cgroup.procs unreachable under agent, one path in one profile."
 
 [[clause]]
 id = "S02.3"
@@ -2312,7 +2315,7 @@ id = "R03.5"
 gate = "R03"
 clause = "Trace partial writes cannot block deadline enforcement"
 tag = "untested"
-note = "J5 adversarial review (rev-A) H7: no listed test runs a wall during a partial write (the live frames fit one atomic pipe write)."
+note = "J5 adversarial review (rev-A) H7: no listed test runs a wall during a partial write (the live frames fit one atomic pipe write). J5-C wave 3 (the trace write-size seam) is pending; its clause is keyed here when its tests land on j5."
 
 [[clause]]
 id = "R03.2"
