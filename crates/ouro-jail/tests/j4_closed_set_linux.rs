@@ -1367,16 +1367,20 @@ fn j4_o06_non_utf8_round_trip() {
 }
 
 /// A pathname another thread keeps rewriting while the call runs. The
-/// observer snapshots the argument at the entry; the kernel reads it again.
-/// Every event must be one of the two literal names the buffer ever held,
-/// labelled `argument_snapshot`: the documented limit of §11.3, never a
-/// resolved or blended path. Results stay one per call.
+/// observer snapshots the argument at the entry; the kernel reads it again
+/// after the stop. Since the security audit of 2026-09-25 (F1) the exit
+/// re-reads what the event asserts: a snapshot that still reads the same is
+/// delivered as one of the two literal names the buffer ever held, labelled
+/// `argument_snapshot` — never a resolved or blended path — and a snapshot
+/// that changed is dropped and counted as one `argument_snapshot_unstable`
+/// gap of `fs.write`, so a falsified name can never be presented as an
+/// observed fact. Calls and gap counts together account for every call.
 #[test]
 fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
     if !Profile::Tool.available() {
         return;
     }
-    let c = case(Profile::Tool, "strict");
+    let c = case(Profile::Tool, "best-effort");
     const CALLS: usize = 300;
     let steps = serde_json::json!([[
         "race-mkdir",
@@ -1398,24 +1402,28 @@ fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
         .into_iter()
         .filter(|e| e["fields"]["syscall"] == "mkdir")
         .collect();
-    assert_eq!(events.len(), CALLS, "one result per call\n{context}");
+    let unstable: u64 = receipt["coverage"]["fs.write"]["gaps"]
+        .as_array()
+        .into_iter()
+        .flat_map(|gaps| gaps.iter())
+        .filter(|g| g["reason"] == "argument_snapshot_unstable")
+        .map(|g| g["lost_count"].as_u64().unwrap_or(0))
+        .sum();
+    let observed = events.len() as u64;
+    assert_eq!(
+        observed + unstable,
+        CALLS as u64,
+        "every call is either a stable event or an unstable-snapshot gap \
+         (events {observed}, gaps {unstable})\n{context}"
+    );
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut created = 0;
-    for (line, event) in lines.iter().zip(&events) {
-        let ret = line["ret"].as_i64().unwrap();
-        let raw = if ret < 0 {
-            -i64::from(errno_value(line["errno"].as_str().unwrap()))
-        } else {
-            ret
-        };
-        assert_eq!(
-            event["outcome"]["return_value"].as_i64(),
-            Some(raw),
-            "{event}"
-        );
-        if ret == 0 {
+    for line in &lines {
+        if line["ret"].as_i64() == Some(0) {
             created += 1;
         }
+    }
+    for event in &events {
         assert_eq!(
             event["fields"]["path_basis"], "argument_snapshot",
             "{event}"
@@ -1436,8 +1444,17 @@ fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
         .filter(|n| workspace.join(n).is_dir())
         .count();
     assert_eq!(on_disk, created, "{context}");
-    assert_eq!(receipt["coverage"]["fs.write"]["status"], "active");
-    eprintln!("racing snapshots: {seen:?}, directories created: {created}");
+    assert!(
+        receipt["coverage"]["fs.write"]["status"] == "active"
+            || receipt["coverage"]["fs.write"]["status"] == "degraded",
+        "gaps degrade, never silently weaken\n{:#}",
+        receipt["coverage"]["fs.write"]
+    );
+    eprintln!(
+        "racing snapshots: {seen:?}, unstable gaps: {unstable}, directories created: {created}, \
+         all fs.write gaps: {:#?}",
+        receipt["coverage"]["fs.write"]["gaps"]
+    );
 }
 
 // ---------------------------------------------------------------------------

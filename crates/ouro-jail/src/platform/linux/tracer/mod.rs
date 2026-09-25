@@ -371,6 +371,15 @@ pub enum GapReason {
     /// frame, a continuation through `restart_syscall`, which is outside the
     /// traced set, or a stop out of the sequence the kernel produces.
     RestartUnresolved,
+    /// A covered call's pointed argument — `openat2`'s `open_how.flags`, a
+    /// pathname, or a socket address family — read at the entry stop no
+    /// longer read the same at the syscall exit: a thread of the tracee
+    /// rewrote the memory between the observer's snapshot and the kernel's
+    /// own copy. The event the snapshot would have carried can neither be
+    /// delivered (its classification may be false) nor dropped silently, so
+    /// it is this gap, naming the call's classes. Register arguments cannot
+    /// drift this way; only memory the kernel re-reads after the stop can.
+    ArgumentSnapshotUnstable,
 }
 
 impl GapReason {
@@ -398,6 +407,7 @@ impl GapReason {
             GapReason::ChildNotificationListener => "child_notification_listener",
             GapReason::UntracedDescendant => "untraced_descendant",
             GapReason::RestartUnresolved => "restart_unresolved",
+            GapReason::ArgumentSnapshotUnstable => "argument_snapshot_unstable",
         }
     }
 
@@ -632,6 +642,12 @@ pub struct LossCounters {
     pub untraced_descendants: u64,
     /// Restart-coded syscall exits whose outcome could not be established.
     pub restart_unresolved: u64,
+    /// Covered calls whose pointed arguments — `open_how.flags`, a pathname,
+    /// a socket address family — changed between the entry snapshot and the
+    /// exit re-read. The event was dropped and a gap recorded instead,
+    /// because the tracee can rewrite memory the kernel re-reads after the
+    /// entry stop, which would falsify the snapshot's classification.
+    pub argument_snapshot_unstable: u64,
 }
 
 impl LossCounters {
@@ -659,6 +675,7 @@ impl LossCounters {
             + self.notification_listeners
             + self.untraced_descendants
             + self.restart_unresolved
+            + self.argument_snapshot_unstable
     }
 }
 
@@ -1218,6 +1235,7 @@ mod tests {
             GapReason::ChildNotificationListener,
             GapReason::UntracedDescendant,
             GapReason::RestartUnresolved,
+            GapReason::ArgumentSnapshotUnstable,
         ];
         let names: std::collections::BTreeSet<&str> = reasons.iter().map(|r| r.as_str()).collect();
         assert_eq!(names.len(), reasons.len());

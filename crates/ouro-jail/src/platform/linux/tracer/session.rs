@@ -373,6 +373,7 @@ struct Process {
     birth: Option<u64>,
 }
 
+#[derive(Clone)]
 /// A closed-set call that has entered the kernel and not yet returned.
 struct Pending {
     entry: &'static Entry,
@@ -387,6 +388,11 @@ struct Pending {
     path2_unreadable: bool,
     sockaddr_unreadable: bool,
     flags_unavailable: bool,
+    /// The entry-stop register arguments, kept so the exit can re-read the
+    /// memory the kernel re-reads after the stop and prove the snapshot
+    /// stable. Registers cannot change between the stops; only pointed
+    /// memory can.
+    raw: [u64; 6],
 }
 
 pub(super) fn run(
@@ -1746,6 +1752,22 @@ impl Session {
             }
             return;
         }
+        // Security 2026-09-25 (audit F1): the entry snapshot of pointed
+        // arguments is only an assertion while the same bytes still read at
+        // the exit. A thread of the tracee can rewrite `open_how.flags`, a
+        // pathname or an address family between the entry stop and the
+        // kernel's own copy after it, which would falsify this event's
+        // classification — a mutation recorded as a read, or a path that was
+        // never used. Re-read and compare; on any disagreement the event is
+        // dropped and the call becomes a gap of its own classes, so the
+        // receipt can never present a falsified snapshot as observed fact.
+        // Register arguments need no re-read: the kernel consumes the saved
+        // pt_regs, which this stop pair already saw.
+        if !pending.exec_confirmed && !self.arguments_stable(tid, &pending) {
+            self.summary.loss.argument_snapshot_unstable += 1;
+            self.gap(GapReason::ArgumentSnapshotUnstable, OpSet::of(op), Some(1));
+            return;
+        }
         self.summary.ops.bump(op);
         let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Syscall {
@@ -1758,6 +1780,99 @@ impl Session {
             ret: rval,
             monotonic_ns: clock::boottime_ns(),
         });
+    }
+
+    /// Whether the pointed arguments this event asserts still read at the
+    /// syscall exit as they read at the entry stop (audit F1).
+    ///
+    /// The kernel consumes pointed arguments *after* the entry stop resumes,
+    /// re-reading the same user memory the observer snapshotted; a thread of
+    /// the tracee can rewrite it in that window. At the exit stop the kernel
+    /// has finished with the memory, so a re-read that agrees with the entry
+    /// snapshot is the strongest check a passive observer can make, and any
+    /// disagreement — including memory that can no longer be read — means the
+    /// snapshot may not be what the kernel applied. Only what the event
+    /// asserts is checked: register arguments (immutable between the stops),
+    /// incomplete path snapshots (already carried as weaker assertions) and
+    /// addresses whose family was never read need no re-read.
+    fn arguments_stable(&mut self, tid: pid_t, pending: &Pending) -> bool {
+        let raw = pending.raw;
+        if let FlagSource::OpenHow { ptr, .. } = pending.entry.flags {
+            let mut word = [0u8; 8];
+            if sys::read_remote(tid, raw[ptr as usize], &mut word) != 8 {
+                return false;
+            }
+            if pending.args.flags != Some(u64::from_ne_bytes(word)) {
+                return false;
+            }
+        }
+        for (index, snapshot) in [
+            pending.entry.path.map(|i| (i, pending.args.path.as_ref())),
+            pending.entry
+                .path2
+                .map(|i| (i, pending.args.path2.as_ref())),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(snapshot) = snapshot else { continue };
+            if !snapshot.complete || raw[index as usize] == 0 {
+                // An incomplete snapshot already carries its weaker claim,
+                // and no complete snapshot was ever read from a null pointer.
+                continue;
+            }
+            match self.reread_path(tid, raw[index as usize]) {
+                Some(bytes) if bytes == snapshot.bytes => {}
+                _ => return false,
+            }
+        }
+        if let Some((ptr, _len)) = pending.entry.sockaddr
+            && let Some(snapshot) = pending.args.sockaddr.as_ref()
+            && snapshot.complete
+            && let Some(family) = snapshot.family
+        {
+            let mut word = [0u8; 2];
+            if sys::read_remote(tid, raw[ptr as usize], &mut word) != 2 {
+                return false;
+            }
+            if family != u16::from_ne_bytes(word) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A quiet pathname re-read for [`Self::arguments_stable`]: the same
+    /// bounded, NUL-terminated walk as [`Self::read_path`] without touching
+    /// the loss counters, so verifying a snapshot cannot be mistaken for
+    /// observing a truncated one. `None` when the memory cannot be read or
+    /// no NUL arrives within `path_snapshot_max`.
+    fn reread_path(&mut self, tid: pid_t, addr: u64) -> Option<Vec<u8>> {
+        if addr == 0 {
+            return None;
+        }
+        let max = self.config.path_snapshot_max;
+        let mut bytes: Vec<u8> = Vec::new();
+        while bytes.len() < max {
+            let offset = bytes.len();
+            let want = (max - offset).min(self.scratch.len());
+            let at = addr.wrapping_add(offset as u64);
+            let mut read = sys::read_remote(tid, at, &mut self.scratch[..want]);
+            if read == 0 {
+                let page = 4096u64;
+                let to_page = (page - (at % page)) as usize;
+                if to_page < want {
+                    read = sys::read_remote(tid, at, &mut self.scratch[..to_page]);
+                }
+            }
+            let chunk = self.scratch.get(..read).filter(|c| !c.is_empty())?;
+            if let Some(end) = chunk.iter().position(|b| *b == 0) {
+                bytes.extend_from_slice(&chunk[..end]);
+                return Some(bytes);
+            }
+            bytes.extend_from_slice(chunk);
+        }
+        None
     }
 
     // ------------------------------------------------ restart decisions (O-2)
@@ -2173,6 +2288,7 @@ impl Session {
             path2_unreadable,
             sockaddr_unreadable,
             flags_unavailable: false,
+            raw: *raw,
         }
     }
 
@@ -2389,6 +2505,65 @@ mod tests {
         )
     }
 
+    /// Security 2026-09-25 (audit F1): the exit re-read of pointed
+    /// arguments. A snapshot that still reads at the exit is stable; one
+    /// whose memory changed (or can no longer be read) is not, and its event
+    /// must become an `argument_snapshot_unstable` gap. Verified against
+    /// this very process's memory, which `read_remote` can read.
+    #[test]
+    fn pointed_arguments_are_reverified_at_the_exit() {
+        let (mut session, _rx) = stalled_session();
+        let entry = closed_set::lookup(257).expect("openat");
+        let mut path = b"/workspace/file.txt\0".to_vec();
+        let addr = path.as_ptr() as u64;
+        let mut raw = [0u64; 6];
+        raw[1] = addr; // pathname
+        raw[2] = 0; // O_RDONLY, as a register argument
+        let pending = Pending {
+            entry,
+            args: Args {
+                path: Some(PathSnapshot {
+                    bytes: b"/workspace/file.txt".to_vec(),
+                    complete: true,
+                }),
+                flags: Some(0),
+                ..Args::default()
+            },
+            exec_confirmed: false,
+            path_unreadable: false,
+            path2_unreadable: false,
+            sockaddr_unreadable: false,
+            flags_unavailable: false,
+            raw,
+        };
+        let self_pid = std::process::id() as pid_t;
+        assert!(
+            session.arguments_stable(self_pid, &pending),
+            "unchanged memory is stable"
+        );
+        path[4] = b'X';
+        assert!(
+            !session.arguments_stable(self_pid, &pending),
+            "a rewritten pathname is unstable"
+        );
+        path[4] = b's';
+        raw[1] = 1; // an address nothing can read
+        let mut unreadable = pending.clone();
+        unreadable.raw = raw;
+        assert!(
+            !session.arguments_stable(self_pid, &unreadable),
+            "unreadable memory is unstable"
+        );
+        let zero = Pending {
+            raw: [0; 6],
+            ..pending
+        };
+        assert!(
+            session.arguments_stable(self_pid, &zero),
+            "a null pointer asserted nothing to re-read"
+        );
+    }
+
     fn fork(child: pid_t) -> TracerEvent {
         TracerEvent::Fork {
             parent: 1,
@@ -2545,6 +2720,7 @@ mod tests {
             path2_unreadable: false,
             sockaddr_unreadable: false,
             flags_unavailable: false,
+            raw: [0; 6],
         }));
         session.inflight += 1;
     }

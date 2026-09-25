@@ -2098,11 +2098,14 @@ fn m2_a_credential_source_inside_a_child_writable_grant_refuses() {
 }
 
 #[test]
-fn m2_a_bind_ro_source_with_another_link_refuses_and_a_copy_does_not() {
+fn m2_a_credential_source_with_another_link_refuses_in_either_mode() {
+    // Security audit 2026-09-25 (F5): `copy_rw` refuses a second link too. A
+    // second name is another writer into what is copied; the staging's
+    // stable-copy check keeps an invariant, not a race to win.
     let fixture = Fixture::new();
     let source = fixture.credential("token", b"fixture-token");
     std::fs::hard_link(&source, fixture.outside.join("alias")).unwrap();
-    for (mode, refused) in [("bind_ro", true), ("copy_rw", false)] {
+    for mode in ["bind_ro", "copy_rw"] {
         fixture.launch(
             "fixture",
             &format!(
@@ -2112,17 +2115,13 @@ fn m2_a_bind_ro_source_with_another_link_refuses_and_a_copy_does_not() {
             ),
         );
         let report = fixture.run(Sim::default(), &["--launch", "fixture"]);
-        if refused {
-            let error = report.error.as_ref().expect("a refusal");
-            assert_eq!(error.code, ErrorCode::CredentialUnavailable);
-            assert!(
-                error.message.contains("exactly one link"),
-                "{}",
-                error.message
-            );
-        } else {
-            assert_eq!(report.exit_code, 0, "{:?}", report.error);
-        }
+        let error = report.error.as_ref().expect("a refusal");
+        assert_eq!(error.code, ErrorCode::CredentialUnavailable);
+        assert!(
+            error.message.contains("exactly one link"),
+            "{}",
+            error.message
+        );
     }
 }
 

@@ -495,6 +495,11 @@ impl AgentNet {
             fd,
             seccomp_filters: filters,
         });
+        // Security 2026-09-25 (audit F2): the bridge, and only the bridge,
+        // may connect the authorized proxy node through the mediation.
+        if let Some(mediator) = &self.mediator {
+            mediator.restrict_authorized_connector(Some((pid, start_ticks)));
+        }
         Ok(pid)
     }
 

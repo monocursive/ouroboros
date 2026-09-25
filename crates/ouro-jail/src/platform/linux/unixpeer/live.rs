@@ -240,6 +240,7 @@ pub struct MediatorHandle {
     // drop closes the listener, which is the fail-closed teardown.
     _listener: OwnedFd,
     stop_w: OwnedFd,
+    workers: std::sync::Arc<Workers>,
     joins: Vec<JoinHandle<()>>,
 }
 
@@ -252,6 +253,19 @@ impl MediatorHandle {
     /// Wake workers before other shutdown work consumes the stop budget.
     pub fn request_stop(&self) {
         self.signal_stop();
+    }
+
+    /// Security 2026-09-25 (audit F2): pin the only thread group whose
+    /// connects to the authorized proxy node the mediation will perform.
+    /// Called by the supervisor once the bridge is discovered and its
+    /// identity pinned; until then the authorized node is refused for
+    /// everyone, and the target has not been released.
+    pub fn restrict_authorized_connector(&self, identity: Option<(libc::pid_t, u64)>) {
+        *self
+            .workers
+            .authorized_connector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
     }
 
     fn shutdown(&mut self) {
@@ -298,6 +312,14 @@ struct Workers {
     /// if its task died meanwhile) and never waits. The slow part of a
     /// mediation runs outside the lock.
     recv: std::sync::Mutex<()>,
+    // Security 2026-09-25 (audit F2): the authorized proxy socket is
+    // connectable through the mediation only by the bridge itself. The
+    // inode check alone admitted any process in the sandbox, which made the
+    // bridge's accounting and the bridge's fail-closed budget skippable by
+    // the target. `None` until the supervisor has discovered and pinned the
+    // bridge's identity; before that every connect to the authorized node
+    // is refused (fail closed; the target is not released yet).
+    authorized_connector: std::sync::Mutex<Option<(libc::pid_t, u64)>>,
     // J3-agent end
     // Kept alive so the stop pipe read end outlives every worker.
     _stop_r_owned: OwnedFd,
@@ -337,6 +359,7 @@ pub fn spawn(authority: PeerAuthority, sink: Arc<dyn MediationSink>) -> io::Resu
         sockdiag: std::sync::Mutex::new(sockdiag),
         sink,
         authorized,
+        authorized_connector: std::sync::Mutex::new(None),
         recv: std::sync::Mutex::new(()),
         _stop_r_owned: stop_r,
     });
@@ -352,6 +375,7 @@ pub fn spawn(authority: PeerAuthority, sink: Arc<dyn MediationSink>) -> io::Resu
     Ok(MediatorHandle {
         _listener: listener,
         stop_w,
+        workers,
         joins,
     })
 }
@@ -490,7 +514,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
     facts.address_complete = ualen <= 256 && sockaddr.len() == ualen;
     // J3-agent end
 
-    let (verdict, reason) = decide(w, pid, &dup, &sockaddr, ualen);
+    let (verdict, reason) = decide(w, &facts, &dup, &sockaddr, ualen);
     let verdict = match verdict {
         Ok(()) => Verdict::Allowed,
         Err(errno) => Verdict::Denied(errno),
@@ -503,7 +527,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
 /// `Ok(())` means "connected"; `Err(errno)` means "denied/failed with errno".
 fn decide(
     w: &Workers,
-    pid: libc::pid_t,
+    facts: &Facts,
     dup: &OwnedFd,
     sockaddr: &[u8],
     ualen: usize,
@@ -528,16 +552,17 @@ fn decide(
             )
         }
         PeerAddr::NonUnix(_) => (Err(libc::EAFNOSUPPORT), "family_mismatch"),
-        PeerAddr::Pathname(path) => mediate_pathname(w, pid, dup, &path),
+        PeerAddr::Pathname(path) => mediate_pathname(w, facts, dup, &path),
     }
 }
 
 fn mediate_pathname(
     w: &Workers,
-    pid: libc::pid_t,
+    facts: &Facts,
     dup: &OwnedFd,
     path: &[u8],
 ) -> (Result<(), i32>, &'static str) {
+    let pid = facts.pid;
     let root = base_for(pid, path);
     let Ok(root_fd) = open_o_path(&root) else {
         return (Err(libc::EACCES), "base_unopenable");
@@ -560,7 +585,25 @@ fn mediate_pathname(
     // J3-agent begin: the authorized proxy, by its full pinned identity. It
     // is bound in the host network namespace, so sock_diag in the attempt's
     // namespace never lists it; nothing else from the host is let through.
+    // Security 2026-09-25 (audit F2): the inode match alone is not enough:
+    // every process in the sandbox could name the node, skipping the bridge
+    // and its accounting. Only the bridge's pinned (tgid, start ticks) may
+    // connect here; before the supervisor pins it, and for any other
+    // connector, the node is refused.
     if w.authorized == Some((st.st_dev, st.st_ino)) {
+        let connector = w
+            .authorized_connector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admitted = matches!(
+            (facts.tgid, facts.tgid_start, &*connector),
+            (Some(tgid), Some(ticks), Some((want_tgid, want_ticks)))
+                if tgid == *want_tgid && ticks == *want_ticks
+        );
+        if !admitted {
+            return (Err(libc::EACCES), "proxy_bridge_only");
+        }
+        drop(connector);
         return match connect_pinned(dup, &node, w.stop_r) {
             Ok(()) => (Ok(()), "authorized_proxy"),
             Err(errno) => (Err(errno), "proxy_connect_failed"),

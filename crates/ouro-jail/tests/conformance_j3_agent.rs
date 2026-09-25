@@ -1083,7 +1083,7 @@ fn n04_proxy_death_fails_closed_and_best_effort_continues_degraded() {
             "unix-connect",
             "/run/ouro/proxy/proxy.sock",
             "--expect",
-            "ECONNREFUSED"
+            "EACCES"
         ],
         ["connect", "10.255.255.1:80", "--expect", "ENETUNREACH"]
     ]);
@@ -1270,7 +1270,7 @@ fn n04_rig_takes_the_supervisors_listener_when_a_foreign_one_is_listed_first() {
         "unix-connect",
         "/run/ouro/proxy/proxy.sock",
         "--expect",
-        "ECONNREFUSED"
+        "EACCES"
     ]]);
     let argv = c.script("n04-rig", &steps);
     let mut spawned = c
@@ -1327,8 +1327,8 @@ fn n04_rig_takes_the_supervisors_listener_when_a_foreign_one_is_listed_first() {
     let connect = ops(&lines, "connect");
     assert_eq!(
         connect.last().map(|line| line["errno"].clone()),
-        Some(Value::from("ECONNREFUSED")),
-        "the supervisor's proxy is the one that died: {lines:#?}"
+        Some(Value::from("EACCES")),
+        "the target cannot name the proxy socket itself (audit F2): {lines:#?}"
     );
     settled(&run);
     assert_eq!(
@@ -1467,14 +1467,15 @@ out["overflow"] = status(s)
 s.close()
 held = []
 for _ in range(128):
-    h = socket.socket(socket.AF_UNIX)
-    h.connect("/run/ouro/proxy/proxy.sock")
+    # Security 2026-09-25 (audit F2): the proxy socket is no longer
+    # nameable by the target; the bridge is the only path, and holding
+    # 128 bridged connections holds the budget both layers share.
+    h = socket.create_connection(("127.0.0.1", 3128))
     h.sendall(head.encode())
     held.append(h)
-extra = socket.socket(socket.AF_UNIX)
-extra.connect("/run/ouro/proxy/proxy.sock")
+extra = socket.create_connection(("127.0.0.1", 3128))
 try:
-    # The proxy may answer and close before the request is written.
+    # The bridge may answer and close before the request is written.
     extra.sendall((head + "\r\n").encode())
 except OSError:
     pass
@@ -1514,7 +1515,8 @@ print(json.dumps(out))
         .map(|event| event["fields"]["reason"].as_str().unwrap())
         .collect();
     assert!(reasons.contains(&"header_too_large"), "{reasons:?}");
-    assert!(reasons.contains(&"overload"), "{reasons:?}");
+    // The proxy's own `overload` answer is no longer reachable from the
+    // target (audit F2): the bridge refuses the 129th connection first.
 }
 
 /// N04, slow headers through the bridge. Attempted: a request head sent one
@@ -1745,7 +1747,9 @@ fn n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable() {
     ]));
     steps.push(serde_json::json!([
         "unix-connect",
-        "/run/ouro/proxy/proxy.sock"
+        "/run/ouro/proxy/proxy.sock",
+        "--expect",
+        "EACCES"
     ]));
     let argv = c.script("n05-host", &Value::Array(steps.clone()));
     let mut spawned = c
@@ -1791,10 +1795,13 @@ fn n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable() {
     }
     let lines = run.fixture_lines();
     let connects = ops(&lines, "connect");
+    // Security 2026-09-25 (audit F2): the authorized proxy socket is
+    // reachable only through the bridge; the target naming it directly is
+    // refused like every other host peer.
     assert_eq!(
         connects.last().unwrap()["errno"],
-        Value::Null,
-        "the authorized proxy"
+        "EACCES",
+        "the target naming the proxy socket directly is refused"
     );
     let receipt = settled(&run);
     let denials: Vec<&Value> = mediated(&run)
@@ -1803,8 +1810,8 @@ fn n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable() {
         .collect();
     assert_eq!(
         denials.len(),
-        13,
-        "one audit fs.deny per refused pathname: {denials:#?}"
+        14,
+        "one audit fs.deny per refused pathname, the proxy socket included: {denials:#?}"
     );
     for denial in denials {
         assert_eq!(denial["fields"]["attempted_operation"], "net.connect");
@@ -3131,12 +3138,13 @@ print(json.dumps({"finished": True, "connects": sum(counts)}))
 /// Review r06 and the M06 survivor (§10: bounded, and "at capacity, reject
 /// excess requests with a safe overload reason"). Attempted, through the
 /// bridge: 128 connections each holding an incomplete request head; a
-/// 129th complete request through the bridge; a 129th directly on the proxy
+/// 129th complete request through the bridge; a direct connect on the proxy
 /// socket; then every held request completed; then one more. Verdict: the
 /// bridge carries 128 requests at once (each completes with 200); the 129th
 /// through the bridge is answered `503 bridge_overload` at once rather than
-/// left to time out, and counted in the receipt; the 129th at the proxy is
-/// the proxy's own `503 overload`; the bridge recovers.
+/// left to time out, and counted in the receipt; the direct connect on the
+/// proxy socket is refused by the mediation — the proxy is bridge-only
+/// (security audit 2026-09-25, F2) — and the bridge recovers.
 #[test]
 fn review_the_bridge_carries_its_whole_budget_and_turns_the_next_away_at_once() {
     if !common::live() {
@@ -3182,13 +3190,12 @@ except OSError:
 out["bridge_129th"] = list(reply(s, 5)) + [round(time.monotonic() - t, 2)]
 s.close()
 d = socket.socket(socket.AF_UNIX)
-d.connect("/run/ouro/proxy/proxy.sock")
 try:
-    # The proxy may answer and close before the request is written.
-    d.sendall((head("direct") + "\r\n").encode())
-except OSError:
-    pass
-out["proxy_129th"] = list(reply(d, 5))
+    d.connect("/run/ouro/proxy/proxy.sock")
+    out["direct"] = "connected"
+except OSError as e:
+    # Security 2026-09-25 (audit F2): the proxy socket is bridge-only now.
+    out["direct"] = type(e).__name__ + ":" + str(e.errno)
 d.close()
 for s in held:
     s.sendall(b"\r\n")
@@ -3229,13 +3236,12 @@ print(json.dumps(out))
     assert_eq!(extra[1], "bridge_overload", "{out}");
     assert!(extra[2].as_f64().unwrap() < 1.0, "at once: {out}");
     assert!(
-        out["proxy_129th"][0]
+        out["direct"]
             .as_str()
             .unwrap()
-            .starts_with("HTTP/1.1 503"),
-        "{out}"
+            .starts_with("PermissionError:13"),
+        "the proxy socket is bridge-only (audit F2): {out}"
     );
-    assert_eq!(out["proxy_129th"][1], "overload", "{out}");
     assert_eq!(out["after"], "HTTP/1.1 200 OK", "{out}");
     let receipt = settled(&run);
     assert_eq!(details(&receipt)["helpers"][0]["rejected_at_capacity"], 1);
@@ -3248,7 +3254,9 @@ print(json.dumps(out))
         129,
         "{reasons:?}"
     );
-    assert_eq!(reasons.iter().filter(|r| **r == "overload").count(), 1);
+    // No `overload` reason any more: the direct proxy connect that produced
+    // it is refused by the mediation (audit F2).
+    assert_eq!(reasons.iter().filter(|r| **r == "overload").count(), 0);
     assert_eq!(origin.stop().len(), 129);
 }
 

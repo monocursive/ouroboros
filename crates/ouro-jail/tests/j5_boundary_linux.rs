@@ -1122,8 +1122,15 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
             "--expect",
             "EACCES"
         ],
-        // The authorized proxy still works, proving the mediation is live.
-        ["unix-connect", "/run/ouro/proxy/proxy.sock"]
+        // The authorized proxy socket is itself refused for the target
+        // (audit F2): only the bridge may name it, so the mediation's
+        // carve-out cannot skip the bridge.
+        [
+            "unix-connect",
+            "/run/ouro/proxy/proxy.sock",
+            "--expect",
+            "EACCES"
+        ]
     ]);
     let argv = c.script("n05-late", &steps);
     let mut spawned = c
@@ -1160,7 +1167,7 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
     let connects = ops(&lines, "connect");
     assert_eq!(connects.len(), 2, "{lines:#?}");
     assert_eq!(connects[0]["errno"], "EACCES", "{}", connects[0]);
-    assert_eq!(connects[1]["errno"], Value::Null, "the proxy connect");
+    assert_eq!(connects[1]["errno"], "EACCES", "the proxy socket is bridge-only");
     settled(&run);
 }
 

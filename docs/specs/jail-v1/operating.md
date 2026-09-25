@@ -206,6 +206,12 @@ removes every `OURO_*` variable, enforces the wall and tracks the tree through
 its execution leaf. Its receipts always say `child_protection: unprotected`,
 however clean the run.
 
+Hardened by the 2026-09-25 security audit: the host's proxy socket is
+connectable only by the jail's own bridge (a target that names
+`/run/ouro/proxy/proxy.sock` directly is refused), and the `/etc/resolv.conf`
+the child sees is a sanitized copy that drops the host's `search`/`domain`
+lines (the child's resolver is unreachable in its network namespace anyway).
+
 `--profile FILE` selects an operator profile file that `extends` one built-in
 contained profile and may only narrow or add finite limits. A project's
 `ouro.toml` at the workspace root can only narrow: it may not select a
@@ -257,7 +263,9 @@ staged into the attempt's private vendor state, which the child sees at
 
 - `copy_rw` copies the file at launch; refreshed tokens are never written back.
 - `bind_ro` shows the exact source file read-only; it may prevent the vendor
-  from refreshing it. A source with more than one hard link refuses.
+  from refreshing it. A source with more than one hard link refuses, in either
+  mode (security audit 2026-09-25): a second name is another writer into what
+  is copied or pinned.
 - Sources are regular files you own with private permissions, outside every
   child-writable grant; special files refuse; the total copy budget is 16 MiB
   per attempt.

@@ -866,6 +866,13 @@ impl Boundary {
         // refuses before exec. The baseline runtime roots are on the root
         // filesystem and pass; the child's private /proc and /dev are made by
         // bubblewrap, not bound from these sources.
+        // Security 2026-09-25 (audit F5): bind a sanitized resolver view.
+        // The host's `/etc/resolv.conf` can carry the operator's search
+        // domains — host facts the child has no grant for. The child's
+        // resolver is unreachable inside its network namespace either way;
+        // the copy keeps the nameservers and drops `search`/`domain` lines.
+        bplan.resolv_source = Some(stage_sanitized_resolv_conf(&plan.attempt_dir)?);
+
         refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
         refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")?;
 
@@ -2581,6 +2588,58 @@ fn pseudo_fs_mount_points() -> Vec<PathBuf> {
     out
 }
 // J5-B1-w3 end
+
+/// Security 2026-09-25 (audit F5): write the sanitized `/etc/resolv.conf`
+/// the child will be bound, and return its path.
+///
+/// The host file's `search`/`domain` lines name the operator's networks;
+/// they are host facts no grant covers, and nothing in the child's network
+/// namespace can use the resolver anyway, so the copy keeps the nameservers
+/// (and every other directive) and drops exactly those two lines. The file
+/// lives in the attempt's private state, is created fresh with mode 0600,
+/// and is removed with the attempt by the existing state cleanup.
+///
+/// # Errors
+///
+/// [`JailError`] (`state_write_failed` at preparing) when the attempt state
+/// cannot hold the copy; a host `/etc/resolv.conf` that cannot be read
+/// leaves the plan unchanged rather than refusing the run.
+fn stage_sanitized_resolv_conf(attempt_dir: &Path) -> Result<PathBuf, JailError> {
+    const SOURCE: &str = "/etc/resolv.conf";
+    let Ok(host) = std::fs::read_to_string(SOURCE) else {
+        return Ok(PathBuf::from(SOURCE));
+    };
+    let sanitized: String = host
+        .lines()
+        .filter(|line| {
+            let first = line.split_whitespace().next().unwrap_or_default();
+            !matches!(first, "search" | "domain")
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let dest = attempt_dir.join("resolv.conf");
+    let write = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&dest)?;
+        file.write_all(sanitized.as_bytes())?;
+        if !sanitized.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+        Ok(())
+    };
+    write().map_err(|error| {
+        preparing(
+            ErrorCode::StateWriteFailed,
+            format!("the sanitized resolver view could not be staged: {error}"),
+        )
+    })?;
+    Ok(dest)
+}
 
 /// Pin every source once, scan the pinned writable roots, then give each bind
 /// its own descriptor. Bubblewrap validates the mounted inode against that fd.

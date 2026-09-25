@@ -1,7 +1,12 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 19, 2026-09-25. No implementation
-or backend conformance is claimed by this document. Revision 19 records J5, the
+Status: implementation specification, revision 20, 2026-09-25. No implementation
+or backend conformance is claimed by this document. Revision 20 records the
+security audit's fixes: the observer's exit re-read of pointed arguments and
+the `argument_snapshot_unstable` gap (§§11.3–11.4), the mediator admitting the
+authorized proxy only for the bridge's pinned identity (§10), the sanitized
+`/etc/resolv.conf` copy (§9.1), and the single-link rule for credential
+sources in either mode (§12). Revision 19 records J5, the
 milestone proof: the D8 decision (the native bubblewrap adapter and the ptrace
 observer; `srt` and Greywall disqualified by named failures; eBPF withdrawn
 from v1), the performance budgets' definitions and their adjustment, the
@@ -1190,7 +1195,11 @@ mount topology, never by path spelling, so a symlink onto `/proc` refuses too;
 `--ro /` is refused earlier by the state-isolation rule (§§6.2, 7). The
 built-in runtime roots are on the root filesystem, and the child's private
 `/proc` and `/dev` are made by the backend, not bound from a grant. Denied subtrees within visible parents are absent or masked
-by the backend. Scratch provides the child's temporary directory; generated
+by the backend. `/etc/resolv.conf` is never the host's file: a sanitized
+per-attempt copy keeps the nameservers and drops `search`/`domain` lines,
+which are host facts no grant covers (security audit 2026-09-25, F5); the
+child's resolver is unreachable in its network namespace either way. Scratch
+provides the child's temporary directory; generated
 `TMPDIR` is a reserved environment variable, not an inherited host path.
 
 Preparation pins source path identity with directory/file handles where the
@@ -1469,6 +1478,12 @@ or provider retention. Managed services must supply those permissions and scoped
 credentials outside the jail; an allow-host grant alone never means read-only
 service access, DLP or EU-only processing.
 
+The allowlist authorizes names, not topology: a host that shares addresses
+with hosts no rule allows (content-delivery fronting) can carry traffic for
+them, and DNS labels under a wildcard rule are a covert channel through the
+host resolver. These are inherent to name-based allowlisting; narrower rules
+and prefix grants are the operator's controls.
+
 The host socket is `<data>/attempts/<id>/proxy/proxy.sock`, under an
 operator-owned 0700 directory registered before creation, outside all shared
 workspace/scratch/vendor roots. Expose only its dedicated directory at
@@ -1581,7 +1596,10 @@ by the trusted launcher before the observer's filter, runs under the `agent`
 baseline and the mediation filter, is not a descendant of the target, and its
 own connects are the jail's plumbing, attributed by its pinned identity (pid
 and start time), not to the target. The mediator admits the authorized proxy by
-its full pinned device and inode. At capacity the bridge answers
+its full pinned device and inode **and only for the bridge's own pinned
+identity** (security audit 2026-09-25, F2): a target process that names the
+proxy socket directly is refused (`proxy_bridge_only`), so the bridge's
+accounting and its fail-closed connection budget cannot be skipped. At capacity the bridge answers
 `503 bridge_overload` and closes. A target that signals every process it can
 reach can kill its own bridge; the attempt then loses its own network, which
 fails closed and is recorded.
@@ -1745,7 +1763,9 @@ Otherwise
 emit a digest or unavailable marker, with a reason. Record `path_basis` as
 `argument_snapshot` or a specifically proven kernel-resolved observation.
 The initial sensor does not claim an argument-memory snapshot is the exact
-path later consumed by the kernel under a concurrent mutation.
+path later consumed by the kernel under a concurrent mutation; the exit
+re-read of §11.4 turns any such mutation into an
+`argument_snapshot_unstable` gap rather than a silently weakened claim.
 
 Path snapshots and return codes are distinct evidence. A rename race does not
 change the observed return code, but prevents a stronger path assertion.
@@ -1837,6 +1857,19 @@ observer's stop had no effect; it is a named exclusion, neither a result nor a
 gap. A trace stop the observer did not request, identified by trace data that
 is not the observer's, is continued (the call then runs, as under any tracer)
 and is neither a result nor a loss.
+
+Pointed argument memory is re-read at the syscall exit. The kernel consumes
+`open_how.flags`, pathnames and socket addresses *after* the entry stop
+resumes, re-reading the same user memory the observer snapshotted, so a
+thread of the tracee can rewrite it in that window (security audit
+2026-09-25, F1). The exit stop re-reads what the event asserts and compares:
+agreement is the strongest check a passive observer can make, and any
+disagreement — including memory that can no longer be read — drops the event
+and records one `argument_snapshot_unstable` gap of that call's own classes.
+A falsified classification (a mutation recorded as a read, or a path that
+was never used) can therefore never be presented as an observed fact.
+Register arguments need no re-read: the kernel consumes the saved registers
+this stop pair already saw.
 
 Only a call the observer must follow takes an in-flight slot: a call outside
 the closed set is classified at its entry and is never `inflight_exhausted`. A
@@ -1953,9 +1986,10 @@ cannot change (squashfs, erofs, iso9660) and when the content did not change
 while it was hashed; a read-only mount of a writable filesystem does not
 qualify. Never recurse through a credential directory by default. A credential
 source inside any child-writable grant refuses, compared by identity as for the
-launch profile file, and a `bind_ro` source with more than one hard link
-refuses, because the child could otherwise alter what it was granted
-read-only.
+launch profile file, and a credential source with more than one hard link
+refuses in either mode (security audit 2026-09-25, F5): the child could
+otherwise alter what a `bind_ro` view grants read-only, and a second name is
+another writer into what `copy_rw` copies.
 
 Register vendor state before the first copy, create it mode 0700, and keep its
 parent unavailable to the contained child. Generated HOME/state paths and

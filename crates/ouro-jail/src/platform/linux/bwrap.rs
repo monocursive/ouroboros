@@ -652,6 +652,15 @@ pub struct BwrapPlan {
     /// proxy directory (`--ro-bind-fd` at [`PROXY_INSIDE_PATH`]).
     pub proxy_dir_fd: Option<RawFd>,
     // J3-agent end
+    // Security 2026-09-25 (audit F5) begin: a sanitized resolver view
+    /// When set, the file bound at `/etc/resolv.conf` is this sanitized
+    /// per-attempt copy instead of the host's: the host file can carry the
+    /// operator's search domains, which are host facts the child has no
+    /// grant for. The child's resolver is unreachable in its network
+    /// namespace either way; `etc_paths` still lists `/etc/resolv.conf`
+    /// so operator-grant overlap checks keep their meaning.
+    pub resolv_source: Option<PathBuf>,
+    // Security 2026-09-25 (audit F5) end
 }
 
 // J3-launch begin: one bind_ro credential view
@@ -776,6 +785,7 @@ impl BwrapPlan {
             proxy_dir: None,
             proxy_dir_fd: None,
             // J3-agent end
+            resolv_source: None,
         }
     }
 
@@ -798,9 +808,16 @@ impl BwrapPlan {
             }
         }
         for etc in &self.etc_paths {
+            // Security 2026-09-25 (audit F5): `/etc/resolv.conf` binds the
+            // sanitized per-attempt copy when one was staged.
+            let source = if etc == Path::new("/etc/resolv.conf") {
+                self.resolv_source.clone().unwrap_or_else(|| etc.clone())
+            } else {
+                etc.clone()
+            };
             rows.push(MountRow {
                 kind: "ro-bind",
-                source: Some(etc.as_os_str().to_owned()),
+                source: Some(source.as_os_str().to_owned()),
                 destination: etc.as_os_str().to_owned(),
             });
         }

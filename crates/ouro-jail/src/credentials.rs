@@ -148,8 +148,8 @@ fn state_failure(id: &str, what: &str, error: &std::io::Error) -> JailError {
 ///
 /// # Errors
 /// A [`StagingRefusal`] carrying [`ErrorCode::CredentialUnavailable`] for a
-/// missing, special, foreign, shared-writable, multiply-linked (`bind_ro`),
-/// oversized, changing or child-writable source, or
+/// missing, special, foreign, shared-writable, multiply-linked (either mode,
+/// security 2026-09-25), oversized, changing or child-writable source, or
 /// [`ErrorCode::StateWriteFailed`] when vendor state cannot be written.
 pub fn stage(
     launch: &LaunchSnapshot,
@@ -374,7 +374,7 @@ fn stage_one(
     };
 
     let source = open_source(declaration.source.as_bytes(), forbidden)
-        .and_then(|source| check_mode(mode, &source.stat).map(|()| source))
+        .and_then(|source| check_mode(&source.stat).map(|()| source))
         .map_err(|refused| refused.into_error(id))?;
     let identity = SourceIdentity {
         dev: source.stat.dev,
@@ -439,18 +439,22 @@ fn stage_one(
     })
 }
 
-/// Mode-specific source rules: a `bind_ro` source must have exactly one link.
+/// Mode-specific source rules: a source must have exactly one link.
 ///
-/// The child sees a `bind_ro` source itself, read-only at its view; a second
-/// name for the same inode elsewhere (in the workspace, say) would be a
-/// writable route to the very file the view claims to pin. A `copy_rw` source
-/// is never seen by the child, so its link count does not matter.
-fn check_mode(mode: &str, stat: &Stat) -> Result<(), SourceRefusal> {
-    if mode == MODE_BIND_RO && stat.nlink != 1 {
+/// A `bind_ro` source is seen by the child itself, read-only at its view; a
+/// second name for the same inode elsewhere (in the workspace, say) would be
+/// a writable route to the very file the view claims to pin. Security
+/// 2026-09-25 (audit F5): a `copy_rw` source refuses a second link too. The
+/// copy itself is never seen by the child, but a second name is another
+/// writer into what is being copied, and the staging's stable-copy check
+/// then has a race to win rather than an invariant to hold: one named
+/// object, one content, one digest.
+fn check_mode(stat: &Stat) -> Result<(), SourceRefusal> {
+    if stat.nlink != 1 {
         return Err(SourceRefusal::configuration(
             "source_multiply_linked",
             format!(
-                "a bind_ro source must have exactly one link, and this one has {}",
+                "a credential source must have exactly one link, and this one has {}",
                 stat.nlink
             ),
         ));
@@ -775,7 +779,7 @@ pub fn inspect(launch: &LaunchSnapshot, forbidden: &[(u64, u64)]) -> Vec<Credent
         .into_iter()
         .map(|declaration| {
             let opened = open_source(declaration.source.as_bytes(), forbidden)
-                .and_then(|source| check_mode(&declaration.mode, &source.stat).map(|()| source));
+                .and_then(|source| check_mode(&source.stat).map(|()| source));
             let reason = match opened {
                 Err(refused) => refused.reason,
                 Ok(source)
@@ -1099,17 +1103,22 @@ mod tests {
     }
 
     #[test]
-    fn a_bind_ro_source_must_have_exactly_one_link() {
+    fn a_credential_source_must_have_exactly_one_link() {
         let mut linked = stat(1, 1);
-        assert!(check_mode(MODE_BIND_RO, &linked).is_ok());
+        assert!(check_mode(&linked).is_ok());
         linked.nlink = 2;
         assert_eq!(
-            check_mode(MODE_BIND_RO, &linked).unwrap_err().reason,
+            check_mode(&linked).unwrap_err().reason,
             "source_multiply_linked"
         );
-        assert!(
-            check_mode(MODE_COPY_RW, &linked).is_ok(),
-            "the child never sees a copy_rw source"
+        // Security 2026-09-25 (audit F5): the rule holds for both modes. A
+        // second name is another writer into what is being copied or pinned;
+        // `copy_rw` no longer relies on the child not seeing the source.
+        let mut copy_rw = stat(1, 1);
+        copy_rw.nlink = 2;
+        assert_eq!(
+            check_mode(&copy_rw).unwrap_err().reason,
+            "source_multiply_linked"
         );
     }
 
