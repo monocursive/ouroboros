@@ -930,14 +930,14 @@ sha256 = "bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9"
 [tested]
 debug_assertions = false
 dirty = false
-inputs = "sha256:77e985700baa2d1a998a95c783511571555b1c7e6319f466811c4e1670c18203"
+inputs = "sha256:0494d0e1da38b6314f79b9eea07e17365917ea7d336725b6440385122d0d3bf0"
 opt_level = "3"
-ouro_jail_sha256 = "bf3e5a259a119638c8379e1475e0193ccf3b181867af2bbab58ef7c28284966a"
+ouro_jail_sha256 = "85f2ee2dfac99d4394bfabb001ffbaf4bdbf3bbb9d2bca16a5d34976fbb8fd65"
 platform_arch = "x86_64"
 platform_kernel = "Linux 7.0.0-31-generic"
 platform_os = "linux"
 ready = true
-revision = "918feb3ccd7ae9cf4cdd2947f8c2e5b3637c44f3"
+revision = "dd194ac05617dbc11a5d26ab49eb94ab7ae6a3b7"
 rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
 target = "x86_64-unknown-linux-gnu"
 unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code"]
@@ -985,6 +985,6 @@ swap_total_kib = 8388604
 "user.max_user_namespaces" = "11829"
 
 [tested.supervisor_scope]
-cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-1520234-74cf6dbac6d14af1.scope"
+cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-1620842-9709f33609f94c91.scope"
 state = "entered"
-unit = "ouro-jail-1520234-74cf6dbac6d14af1.scope"
+unit = "ouro-jail-1620842-9709f33609f94c91.scope"
