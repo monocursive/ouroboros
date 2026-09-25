@@ -2450,10 +2450,13 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
             "{bridge_fds:?}"
         );
     }
-    assert_eq!(
-        bridge_fds.get(&2),
-        Some(&report),
-        "stderr is the report socket the launcher holds the other end of"
+    // Audit 2026-09-25-2, S2: the two ends of a SOCK_SEQPACKET pair carry
+    // distinct inodes (a pipe's ends share one), so the ends are identified
+    // by kind here; the pairing itself is what `take_mediation` verifies by
+    // descriptor identity before release.
+    assert!(
+        bridge_fds.get(&2).is_some_and(|l| l.starts_with("socket:")),
+        "stderr is the report socket: {bridge_fds:?}"
     );
     let others: Vec<&String> = bridge_fds
         .iter()
@@ -3386,7 +3389,10 @@ print(json.dumps(out))
     assert_eq!(out["yama"], "1", "the reference host's scope: {out}");
     assert_eq!(out["mem_rdonly"], "EACCES", "{out}");
     assert_eq!(out["mem_rdwr"], "EACCES", "{out}");
-    assert_eq!(out["pidfd_open"], "ok", "{out}");
+    // Audit 2026-09-25-2, S7: the pidfd entry points are denied outright,
+    // so the boundary no longer leans on yama's scope for the bridge's
+    // descriptors.
+    assert_eq!(out["pidfd_open"], "EPERM", "{out}");
     assert_eq!(out["pidfd_getfd"], "EPERM", "{out}");
     assert_eq!(out["before"], 200, "{out}");
     assert_ne!(out["stopped"], 200, "{out}");
@@ -3431,7 +3437,8 @@ fn review_x06_holds_with_observation_off() {
         Some("anon_inode:seccomp notify")
     );
     assert!(launcher.get(&19).is_some_and(|l| l.starts_with("socket:")));
-    assert!(launcher.get(&20).is_some_and(|l| l.starts_with("pipe:")));
+    // Audit 2026-09-25-2, S2: the report channel is a SOCK_SEQPACKET pair.
+    assert!(launcher.get(&20).is_some_and(|l| l.starts_with("socket:")));
     let bridge = readlinks(native["helpers"][0]["pid"].as_i64().unwrap());
     assert_eq!(bridge.len(), 4, "{bridge:?}");
     assert_eq!(native["helpers"][0]["seccomp_filters"], 2);

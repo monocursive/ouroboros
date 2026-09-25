@@ -838,6 +838,13 @@ pub struct Decision {
     pub cgroup: CgroupStep,
     /// Managed scratch.
     pub scratch: ScratchStep,
+    /// Audit 2026-09-25-2, S4: the owner is dead, jail state never
+    /// registered an execution leaf, and no receipt was ever written — so
+    /// nothing was ever charged to a tree and no record claims otherwise.
+    /// Only this combination may clean vendor state without a verified
+    /// leaf: a receipt that exists (even one claiming an unverified tree)
+    /// keeps the conservative retention.
+    pub tree_never_existed: bool,
 }
 
 fn retained(reason: String, failed_access: bool, owner: Option<String>) -> Next {
@@ -850,6 +857,7 @@ fn retained(reason: String, failed_access: bool, owner: Option<String>) -> Next 
         owner_dead: false,
         cgroup: CgroupStep::Nothing,
         scratch: ScratchStep::NotApplicable,
+        tree_never_existed: false,
     })
 }
 
@@ -857,6 +865,16 @@ fn retained(reason: String, failed_access: bool, owner: Option<String>) -> Next 
 const OWNER_DEAD: &str = "dead: ";
 
 fn decided(owner: Option<String>, cgroup: CgroupStep, scratch: ScratchStep) -> Next {
+    decided_with(owner, cgroup, scratch, false)
+}
+
+/// `decided` with the S4 fact: see [`Decision::tree_never_existed`].
+fn decided_with(
+    owner: Option<String>,
+    cgroup: CgroupStep,
+    scratch: ScratchStep,
+    tree_never_existed: bool,
+) -> Next {
     Next::Decided(Decision {
         retain: None,
         owner_dead: owner
@@ -865,6 +883,7 @@ fn decided(owner: Option<String>, cgroup: CgroupStep, scratch: ScratchStep) -> N
         owner,
         cgroup,
         scratch,
+        tree_never_existed,
     })
 }
 
@@ -934,6 +953,8 @@ pub fn decide(facts: &Facts) -> Next {
     };
     // The supervisor verified the tree's end: it owns the cleanup (J3).
     let tree_verified = receipt.is_some_and(|receipt| receipt.tree_empty == Some(true));
+    // Audit 2026-09-25-2, S4: no receipt was ever written.
+    let receipt_is_none = receipt.is_none();
     let source = recorded_leaf(state, receipt);
     let recorded = matches!(source, LeafSource::Recorded(_) | LeafSource::NamedOnly(_));
     // An unverified end keeps whatever scratch exists; a reason is reported.
@@ -1042,10 +1063,18 @@ pub fn decide(facts: &Facts) -> Next {
             } else {
                 CgroupStep::Settled(format!("not_recorded: {reason}"))
             };
-            return decided(
+            // Audit 2026-09-25-2, S4: with no leaf ever registered AND no
+            // receipt ever written, nothing was charged to a tree and no
+            // record claims otherwise — the vendor state may be cleaned. A
+            // receipt, even one claiming an unverified tree, keeps the
+            // retention (its claim may be the only witness of a tree this
+            // state root never learned to name).
+            let never = receipt_is_none && owner_dead_text(owner_text.as_deref());
+            return decided_with(
                 owner_text,
                 cgroup,
                 keep_scratch("no registered leaf verifies the tree's end"),
+                never,
             );
         }
         LeafSource::Malformed(reason) => {
@@ -2163,8 +2192,12 @@ fn verified_by_gc(dir: &AttemptDir) -> bool {
 /// supervisor SIGKILL between staging and preparation would otherwise
 /// retain forever.
 fn never_charged_tree(decision: &Decision) -> bool {
-    decision.owner_dead
-        && matches!(&decision.cgroup, CgroupStep::Settled(text) if text.starts_with("not_recorded"))
+    decision.tree_never_existed
+}
+
+/// Whether the owner text is one `decide` established dead.
+fn owner_dead_text(owner: Option<&str>) -> bool {
+    owner.is_some_and(|owner| owner.starts_with(OWNER_DEAD))
 }
 /// Lists the temporary files crashed durable replacements left in the
 /// attempt root (charged to the bound, S7), and removes those of this
@@ -2282,20 +2315,27 @@ mod tests {
                 "not_recorded: jail state registers no execution cgroup".to_owned(),
             ),
             scratch: ScratchStep::Keep("kept".to_owned()),
+            tree_never_existed: true,
         };
         assert!(never_charged_tree(&base));
         let mut alive = base.clone();
-        alive.owner_dead = false;
-        assert!(!never_charged_tree(&alive), "a live owner decides again");
-        let mut removed = base.clone();
-        removed.cgroup = CgroupStep::Settled("removed by gc earlier".to_owned());
+        alive.tree_never_existed = false;
         assert!(
-            !never_charged_tree(&removed),
-            "a leaf that existed once does not carry the proof"
+            !never_charged_tree(&alive),
+            "a receipt, or a leaf, or a live owner each withdraw the proof"
         );
-        let mut terminated = base.clone();
-        terminated.cgroup = CgroupStep::Remove(leaf());
-        assert!(!never_charged_tree(&terminated));
+        let mut other_step = base.clone();
+        other_step.cgroup = CgroupStep::Settled("removed by gc earlier".to_owned());
+        assert!(
+            never_charged_tree(&other_step),
+            "the flag is decide's to set, not the cgroup step's"
+        );
+        let mut with_receipt = base.clone();
+        with_receipt.tree_never_existed = false;
+        assert!(
+            !never_charged_tree(&with_receipt),
+            "a receipt, or a leaf, withdraws the proof"
+        );
     }
 
 

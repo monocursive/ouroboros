@@ -2871,7 +2871,9 @@ fn r9_deny_read_grants_are_enforced_as_masks() {
             .is_some_and(|d| d.ends_with("/secret")),
         "the mask must cover the denied subtree: {masked:?}"
     );
-    assert_eq!(masked[0]["mode"], "rw", "the empty tmpfs is writable");
+    // Audit 2026-09-25-2, S12: a denied path is absent or masked, never
+    // writable scratch; the mask is sealed read-only.
+    assert_eq!(masked[0]["mode"], "ro", "the empty tmpfs is read-only");
     // The real file is unchanged outside the jail.
     assert_eq!(
         std::fs::read(c.workspace.join("secret/file")).unwrap(),

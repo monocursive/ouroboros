@@ -1127,10 +1127,12 @@ fn c01_c02_a_normal_exit_stages_both_modes_records_provenance_and_cleans_vendor_
     assert_eq!(credentials.len(), 2);
     assert_eq!(credentials[0]["id"], "auth");
     assert_eq!(credentials[0]["mode"], "copy_rw");
-    assert_eq!(credentials[0]["digest"], sha256(auth_bytes));
+    // Audit 2026-09-25-2, S6: the receipt carries no verifier of the
+    // secret's bytes; the digest stays in jail state.
+    assert_eq!(credentials[0]["digest"], serde_json::Value::Null);
     assert_eq!(
         credentials[0]["digest_unavailable_reason"],
-        serde_json::Value::Null
+        "receipt_verifier_withheld"
     );
     assert_eq!(credentials[1]["id"], "config");
     assert_eq!(credentials[1]["mode"], "bind_ro");
@@ -1141,7 +1143,7 @@ fn c01_c02_a_normal_exit_stages_both_modes_records_provenance_and_cleans_vendor_
     );
     assert_eq!(
         credentials[1]["digest_unavailable_reason"],
-        ouro_jail::credentials::REASON_SOURCE_MUTABLE
+        "receipt_verifier_withheld"
     );
     let dir = attempt_dir(&report);
     for file in ["jail.json", "trace.ndjson", "jail-state.json"] {
