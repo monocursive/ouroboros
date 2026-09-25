@@ -591,23 +591,31 @@ fn signal_supervisor(attempt: &Attempt, signal: libc::c_int) {
     assert_eq!(unsafe { libc::kill(attempt.pid(), signal) }, 0);
 }
 
-/// For a gated attempt: wait for `prepared` and release it. Returns the
-/// instant taken just before the release frame was written, which precedes
-/// the start of the execution wall (§8.1 step 6), so `t0 + wall` is a strict
-/// lower bound for the wall's expiry on the test's own clock.
-fn release_now(attempt: &mut Attempt) -> Instant {
-    let prepared = attempt.await_kind("prepared");
-    let id = prepared["attempt_id"]
+/// For a gated attempt: wait for `prepared` and return its durable receipt
+/// (which already names the blocked launcher).
+fn await_prepared(attempt: &mut Attempt) -> Value {
+    attempt.await_kind("prepared");
+    attempt.receipt()
+}
+
+/// Release a prepared attempt. Returns the instant taken just before the
+/// release frame was written, which precedes the start of the execution wall
+/// (§8.1 step 6), so `t0 + wall` is a strict lower bound for the wall's
+/// expiry on the test's own clock.
+fn release_prepared(attempt: &mut Attempt, prepared: &Value) -> Instant {
+    let id = prepared["attempt_id"].as_str().expect("an attempt id");
+    let digest = prepared["policy"]["digest"]
         .as_str()
-        .expect("an attempt id")
-        .to_owned();
-    let digest = attempt.receipt()["policy"]["digest"]
-        .as_str()
-        .expect("a policy digest")
-        .to_owned();
+        .expect("a policy digest");
     let t0 = Instant::now();
-    attempt.release(&id, &digest);
+    attempt.release(id, digest);
     t0
+}
+
+/// [`await_prepared`] then [`release_prepared`].
+fn release_now(attempt: &mut Attempt) -> Instant {
+    let prepared = await_prepared(attempt);
+    release_prepared(attempt, &prepared)
 }
 
 // ===========================================================================
@@ -726,43 +734,63 @@ fn l01_a_sigterm_ignoring_descendant_of_a_contained_run_dies_when_the_operator_s
 /// The §9.3 cooperative grace before the forced stop.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
-/// L01.10 (and L01.1's single-process shape): wall expiry of a gated `tool`
-/// run, observation on and off. The wall runs from release, so the test takes
-/// its own instant just before writing the release frame and holds the
-/// product to both bounds on it: nothing ends before the wall (a target and
-/// descendant that ignore SIGTERM not before the wall plus the 2 s grace,
-/// since only the forced stop can end them), and everything is dead within the
-/// wall plus §9.3's budgets. The receipt settles verified with cause
-/// wall_expiry and the wall's hit. The `plain` leg is a target that dies of
-/// the cooperative stop (its descendant, which ignores SIGTERM, ends with its
-/// pid namespace).
+/// L01.10 and L01.1: wall expiry of a gated `tool` run. The wall runs from
+/// release, so the test takes its own instant just before writing the release
+/// frame and holds the product to both bounds on it: nothing ends before the
+/// wall (a target and descendant that ignore SIGTERM not before the wall plus
+/// the 2 s grace, since only the forced stop can end them), and everything is
+/// dead within the wall plus §9.3's budgets. The receipt settles verified with
+/// cause wall_expiry and the wall's hit.
+///
+/// Legs: `ignore` (L01.10, observation on and off: a multi-process tree whose
+/// target and descendant ignore SIGTERM); `plain` (a target that dies of the
+/// cooperative stop, its SIGTERM-ignoring descendant with the pid namespace);
+/// `single` (L01.1: one `sleep`, no descendant).
 #[test]
 fn l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant() {
     if !common::live() {
         return;
     }
     let wall = Duration::from_secs(2);
-    for (mode, observe) in [("ignore", "on"), ("ignore", "off"), ("plain", "on")] {
+    for (mode, observe) in [
+        ("ignore", "on"),
+        ("ignore", "off"),
+        ("plain", "on"),
+        ("single", "on"),
+        ("single", "off"),
+    ] {
         let (jail, _) = case("tool");
-        let mut attempt = Attempt::start(
-            jail.args(["--observe", observe, "--limit", "wall=2s"])
-                .target(tree(mode)),
-            true,
-        );
-        let t0 = release_now(&mut attempt);
-        attempt.await_kind("exec_confirmed");
-        let tree = started_tree(&attempt.receipt());
-        let Some(descendant) = await_death_by(&tree.descendant, t0, wall + STOP_BOUND) else {
-            attempt.fail(&format!(
-                "{mode} observe {observe}: the SIGTERM-ignoring descendant {} outlived the wall",
-                tree.descendant_pid
-            ));
+        let jail = jail.args(["--observe", observe, "--limit", "wall=2s"]);
+        let jail = if mode == "single" {
+            jail.target(["/bin/sleep", "300"])
+        } else {
+            jail.target(tree(mode))
         };
-        let Some(target) = await_death_by(&tree.launcher, t0, wall + STOP_BOUND) else {
+        let mut attempt = Attempt::start(jail, true);
+        // The launcher, blocked until the release, is held before it: a wall
+        // that fired early cannot end it unseen.
+        let prepared = await_prepared(&mut attempt);
+        let launcher = pidfd(pid_at(&prepared, "launcher_pid"));
+        let t0 = release_prepared(&mut attempt, &prepared);
+        attempt.await_kind("exec_confirmed");
+        let receipt = attempt.receipt();
+        let mut deaths = Vec::new();
+        if mode != "single" {
+            let tree = started_tree(&receipt);
+            let Some(descendant) = await_death_by(&tree.descendant, t0, wall + STOP_BOUND) else {
+                attempt.fail(&format!(
+                    "{mode} observe {observe}: the SIGTERM-ignoring descendant {} outlived the wall",
+                    tree.descendant_pid
+                ));
+            };
+            deaths.push(descendant);
+        }
+        let Some(target) = await_death_by(&launcher, t0, wall + STOP_BOUND) else {
             attempt.fail(&format!(
                 "{mode} observe {observe}: the target outlived the wall"
             ));
         };
+        deaths.push(target);
         let terminal = attempt.await_terminal();
         let (run, _) = attempt.finish();
         let floor = if mode == "ignore" {
@@ -771,9 +799,9 @@ fn l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant() {
             wall
         };
         assert!(
-            target >= floor && descendant >= floor,
-            "{mode} observe {observe}: the tree ended before its wall: target {target:?}, \
-             descendant {descendant:?} after release, floor {floor:?}"
+            deaths.iter().all(|death| *death >= floor),
+            "{mode} observe {observe}: the tree ended before its wall: deaths {deaths:?} after \
+             release, floor {floor:?}"
         );
         assert_eq!(terminal["kind"], "settled");
         let receipt = final_receipt(&run);
@@ -1573,7 +1601,9 @@ fn l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues
     // The tree continues: the target is still alive a full second after the
     // bridge's death, far longer than the supervisor takes to notice it (its
     // note is in the trace) and act on anything it acted on.
-    let continued = await_death(&launcher, BRIDGE_GRACE_WATCH).is_none();
+    if await_death(&launcher, BRIDGE_GRACE_WATCH).is_some() {
+        attempt.fail("the bridge's death ended the target: the tree did not continue");
+    }
     kill_by_pidfd(&launcher, libc::SIGUSR1);
     if await_death(&launcher, STOP_BOUND).is_none() {
         attempt.fail("the target did not finish after SIGUSR1");
@@ -1584,7 +1614,6 @@ fn l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues
         before, "connected",
         "the bridge did not accept before its death"
     );
-    assert!(continued, "the bridge's death ended the target");
     let after = std::fs::read_to_string(workspace.join("after")).expect("the second connect");
     assert_eq!(
         after,
