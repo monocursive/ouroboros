@@ -690,9 +690,10 @@ Apply configuration in this order:
    unix-peer mediation record queue, 1 to 4096), `OURO_JAIL_TEST_TRACE_CAP`
    (the local trace cap, 4096 bytes to 64 MiB, half of it at most 256 KiB
    reserve, and named in every loss it causes), `OURO_JAIL_TEST_ABORT_AT`
-   (`<site>:<point>` aborts at one named point, `temp_written`,
-   `temp_synced`, `renamed` or `dir_synced`, of the first write at one
-   persistence site), `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
+   (`<site>:<point>[:<n>]` aborts at one named point, `temp_written`,
+   `temp_synced`, `renamed` or `dir_synced`, of the `n`th write, 1 to 10,000
+   and the first when omitted, at one persistence site),
+   `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
    entry bound, reported in gc's `test_seams`), and
    `OURO_JAIL_TEST_TRACER_INFLIGHT` (1 to 16,384) and
    `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304; the bound in force,
@@ -720,6 +721,11 @@ Apply configuration in this order:
    `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT=<substring>` follows such a call's
    entry without recording it, so its exit is an `unmatched_exit` gap; each
    manufactures only a gap the observer records for the real loss.
+   `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=<bytes>` makes the external
+   `--trace-fd` sink put at most that many bytes into each write, so a frame
+   longer than it reaches the consumer in several partial writes, each
+   resumed at its offset (§13.3); a value that is not decimal digits without
+   a leading zero, from 1 to the event bound, is ignored.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 

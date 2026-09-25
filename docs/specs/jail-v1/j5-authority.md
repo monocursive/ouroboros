@@ -232,7 +232,7 @@ state and in every receipt with native details.
 |---|---|---|
 | `OURO_JAIL_TEST_MEDIATION_QUEUE` | shrinks `agent`'s mediation record queue | a mediation-queue overflow is evidence loss |
 | `OURO_JAIL_TEST_TRACE_CAP` | shrinks the local trace cap | R03 local-cap loss |
-| `OURO_JAIL_TEST_ABORT_AT` | aborts at one named point of one persistence site | R02 crash points, gc records |
+| `OURO_JAIL_TEST_ABORT_AT` | aborts at one named point of the `n`th write (J5: the optional `:<n>` ordinal) at one persistence site | R02 crash points, gc records (R02.3: gc's later records) |
 | `OURO_JAIL_TEST_GC_MAX_ENTRIES` | shrinks gc's per-invocation bound | C03 (portable) |
 | `OURO_JAIL_TEST_TRACER_INFLIGHT` | shrinks the observer's in-flight bound | O03 map exhaustion (the ptrace analogue), O05 directory-operation loss, R04 |
 | `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` | shrinks the observer's queue | O03 ring loss (the ptrace analogue) |
@@ -241,7 +241,7 @@ state and in every receipt with native details.
 | `OURO_JAIL_TEST_MOUNT_SWAP` (J5) | holds the §9.1 mount handoff open, at most 10 s, so a test can replace a pinned source | F04 source-identity swap |
 | `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH` (J5) | makes a path-marked covered call's path unreadable to the observer | O03 truncation |
 | `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT` (J5) | follows a path-marked call's entry without recording it | O03 unmatched exit, which cannot occur on demand under ptrace |
-| `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX` (J5, only if J5-C's `487874d3` is integrated: **TO BE FILLED**) | caps each `--trace-fd` write, so frames are written in pieces | R03 partial writes and the wall, if integrated |
+| `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX` (J5) | caps each `--trace-fd` write, so frames are written in pieces | R03.5: the wall under forced partial writes (simulated) |
 
 ## Known gaps
 
@@ -261,8 +261,10 @@ simulation leaves out.
   disconnected consumer to create; the disconnect's own handling is tested in
   both evidence modes (`j4_r03_disconnect_strict_stops`,
   `j4_r03_disconnect_best_effort_continues`), and the wall is tested under a
-  saturated trace (R03). Whether it is also tested under forced partial
-  writes depends on the trace write-size seam: **TO BE FILLED**.
+  saturated trace (R03.3) and under forced partial writes through the trace
+  write-size seam (R03.5, simulated:
+  `j5_records_linux.rs::j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces`
+  and `::j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame`).
 - An unobserved migrated descendant. A test cannot migrate a descendant out of
   the registered cgroup without the supervisor being able to see it: an unseen
   migration is a race jail-v1 §9.3 declines to promise to detect. What the
