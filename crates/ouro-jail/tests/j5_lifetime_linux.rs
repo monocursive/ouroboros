@@ -43,6 +43,10 @@ const PYTHON: &str = "/usr/bin/python3";
 /// by the mechanism under test.
 const STOP_BOUND: Duration = Duration::from_secs(10);
 
+/// How soon after its deadline has passed on the boot clock the gate wait
+/// must refuse: its 250 ms re-check (§8.2) plus the refusal's own work.
+const GATE_RECHECK_BOUND: Duration = Duration::from_millis(700);
+
 /// §9.3's forced-stop verification budget: a lifetime link's death ends the
 /// tree within it (measured: tens of milliseconds).
 const LINK_BOUND: Duration = Duration::from_secs(5);
@@ -387,6 +391,16 @@ fn await_death(fd: &OwnedFd, within: Duration) -> Option<Duration> {
     }
 }
 
+/// Block until the process behind `fd` has died, at most until `since +
+/// bound`. Returns the time from `since` (the signal or kill that should end
+/// it) to its death, or `None` when it was still alive at `since + bound`.
+/// Every bound a test states is measured from the event, never chained.
+fn await_death_by(fd: &OwnedFd, since: Instant, bound: Duration) -> Option<Duration> {
+    let until = since + bound;
+    await_death(fd, until.saturating_duration_since(Instant::now()))?;
+    Some(since.elapsed())
+}
+
 fn kill_by_pidfd(fd: &OwnedFd, signal: libc::c_int) {
     identity::pidfd_send_signal(fd.as_raw_fd(), signal).expect("the signal is delivered");
 }
@@ -474,7 +488,8 @@ fn term_ignoring_child(parent: i32) -> (i32, OwnedFd) {
 /// SIGUSR1 makes the target (only the target) exit 0; its handler is in place
 /// before the child exists, so a test that has seen the child may send it.
 /// The child has set its disposition before the target goes on (a pipe byte
-/// orders it). With `ignore` the target then ignores SIGTERM too.
+/// orders it). With `ignore` the target then ignores SIGTERM too; with `catch
+/// <path>` it catches SIGTERM, creates `<path>` and goes on.
 const TREE: &str = r#"
 import os, signal, sys
 signal.signal(signal.SIGUSR1, lambda *_: os._exit(0))
@@ -487,6 +502,10 @@ if os.fork() == 0:
 os.read(r, 1)
 if sys.argv[1] == "ignore":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+elif sys.argv[1] == "catch":
+    def caught(*_):
+        open(sys.argv[2], "w").close()
+    signal.signal(signal.SIGTERM, caught)
 while True:
     signal.pause()
 "#;
@@ -572,6 +591,25 @@ fn signal_supervisor(attempt: &Attempt, signal: libc::c_int) {
     assert_eq!(unsafe { libc::kill(attempt.pid(), signal) }, 0);
 }
 
+/// For a gated attempt: wait for `prepared` and release it. Returns the
+/// instant taken just before the release frame was written, which precedes
+/// the start of the execution wall (§8.1 step 6), so `t0 + wall` is a strict
+/// lower bound for the wall's expiry on the test's own clock.
+fn release_now(attempt: &mut Attempt) -> Instant {
+    let prepared = attempt.await_kind("prepared");
+    let id = prepared["attempt_id"]
+        .as_str()
+        .expect("an attempt id")
+        .to_owned();
+    let digest = attempt.receipt()["policy"]["digest"]
+        .as_str()
+        .expect("a policy digest")
+        .to_owned();
+    let t0 = Instant::now();
+    attempt.release(&id, &digest);
+    t0
+}
+
 // ===========================================================================
 // L01: operator signals to a contained supervisor (L01.3)
 // ===========================================================================
@@ -594,13 +632,14 @@ fn l01_operator_int_term_and_hup_each_end_a_contained_tree() {
             attempt.await_kind("exec_confirmed");
             let tree = started_tree(&attempt.receipt());
             assert_real_supervisor_catches(attempt.pid(), signal);
+            let sent = Instant::now();
             signal_supervisor(&attempt, signal);
-            let Some(took) = await_death(&tree.launcher, STOP_BOUND) else {
+            let Some(took) = await_death_by(&tree.launcher, sent, STOP_BOUND) else {
                 attempt.fail(&format!(
                     "{profile} {name}: the target outlived {STOP_BOUND:?}"
                 ));
             };
-            if await_death(&tree.descendant, STOP_BOUND).is_none() {
+            if await_death_by(&tree.descendant, sent, STOP_BOUND).is_none() {
                 attempt.fail(&format!(
                     "{profile} {name}: the descendant {} outlived the stop",
                     tree.descendant_pid
@@ -658,14 +697,15 @@ fn l01_a_sigterm_ignoring_descendant_of_a_contained_run_dies_when_the_operator_s
             },
         );
         assert_real_supervisor_catches(attempt.pid(), libc::SIGTERM);
+        let sent = Instant::now();
         signal_supervisor(&attempt, libc::SIGTERM);
-        let Some(took) = await_death(&tree.descendant, STOP_BOUND) else {
+        let Some(took) = await_death_by(&tree.descendant, sent, STOP_BOUND) else {
             attempt.fail(&format!(
                 "observe {observe}: the SIGTERM-ignoring descendant {} outlived {STOP_BOUND:?}",
                 tree.descendant_pid
             ));
         };
-        if await_death(&tree.launcher, STOP_BOUND).is_none() {
+        if await_death_by(&tree.launcher, sent, STOP_BOUND).is_none() {
             attempt.fail(&format!("observe {observe}: the target outlived the stop"));
         }
         let terminal = attempt.await_terminal();
@@ -683,40 +723,57 @@ fn l01_a_sigterm_ignoring_descendant_of_a_contained_run_dies_when_the_operator_s
     }
 }
 
-/// L01.10: wall expiry of a `tool` run whose target and descendant both
-/// ignore SIGTERM ends the multi-process tree at verified death, within the
-/// wall plus §9.3's grace and budget, observation on and off.
+/// The §9.3 cooperative grace before the forced stop.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// L01.10 (and L01.1's single-process shape): wall expiry of a gated `tool`
+/// run, observation on and off. The wall runs from release, so the test takes
+/// its own instant just before writing the release frame and holds the
+/// product to both bounds on it: nothing ends before the wall (a target and
+/// descendant that ignore SIGTERM not before the wall plus the 2 s grace,
+/// since only the forced stop can end them), and everything is dead within the
+/// wall plus §9.3's budgets. The receipt settles verified with cause
+/// wall_expiry and the wall's hit. The `plain` leg is a target that dies of
+/// the cooperative stop (its descendant, which ignores SIGTERM, ends with its
+/// pid namespace).
 #[test]
 fn l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant() {
     if !common::live() {
         return;
     }
-    for observe in ["on", "off"] {
+    let wall = Duration::from_secs(2);
+    for (mode, observe) in [("ignore", "on"), ("ignore", "off"), ("plain", "on")] {
         let (jail, _) = case("tool");
         let mut attempt = Attempt::start(
             jail.args(["--observe", observe, "--limit", "wall=2s"])
-                .target(tree("ignore")),
-            false,
+                .target(tree(mode)),
+            true,
         );
+        let t0 = release_now(&mut attempt);
         attempt.await_kind("exec_confirmed");
-        let confirmed = Instant::now();
         let tree = started_tree(&attempt.receipt());
-        let bound = Duration::from_secs(2) + STOP_BOUND;
-        if await_death(&tree.descendant, bound).is_none() {
+        let Some(descendant) = await_death_by(&tree.descendant, t0, wall + STOP_BOUND) else {
             attempt.fail(&format!(
-                "observe {observe}: the SIGTERM-ignoring descendant {} outlived the wall",
+                "{mode} observe {observe}: the SIGTERM-ignoring descendant {} outlived the wall",
                 tree.descendant_pid
             ));
-        }
-        if await_death(&tree.launcher, bound).is_none() {
-            attempt.fail(&format!("observe {observe}: the target outlived the wall"));
-        }
-        let took = confirmed.elapsed();
+        };
+        let Some(target) = await_death_by(&tree.launcher, t0, wall + STOP_BOUND) else {
+            attempt.fail(&format!(
+                "{mode} observe {observe}: the target outlived the wall"
+            ));
+        };
         let terminal = attempt.await_terminal();
         let (run, _) = attempt.finish();
+        let floor = if mode == "ignore" {
+            wall + STOP_GRACE
+        } else {
+            wall
+        };
         assert!(
-            took >= Duration::from_millis(1500),
-            "observe {observe}: the tree ended {took:?} after exec, before the wall"
+            target >= floor && descendant >= floor,
+            "{mode} observe {observe}: the tree ended before its wall: target {target:?}, \
+             descendant {descendant:?} after release, floor {floor:?}"
         );
         assert_eq!(terminal["kind"], "settled");
         let receipt = final_receipt(&run);
@@ -724,10 +781,15 @@ fn l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant() {
         assert_eq!(receipt["outcome"]["cause"], "wall_expiry");
         assert_eq!(limit_row(&receipt, "wall")["hit"], true);
         if observe == "on" {
+            let signal = if mode == "ignore" {
+                libc::SIGKILL
+            } else {
+                libc::SIGTERM
+            };
             assert_eq!(receipt["outcome"]["kind"], "signaled", "{receipt:#}");
-            assert_eq!(receipt["outcome"]["signal"], libc::SIGKILL);
+            assert_eq!(receipt["outcome"]["signal"], signal);
         }
-        eprintln!("L01.10 observe {observe}: tree dead {took:?} after exec");
+        eprintln!("L01.10 {mode} observe {observe}: target dead {target:?} after release");
     }
 }
 
@@ -886,64 +948,80 @@ impl Drop for HeldMember {
 }
 
 /// X07.2: a claim of tree emptiness is made only when it was verified. The
-/// target of a `tool` run exits with a descendant behind it (the pid
-/// namespace ends it), but the execution leaf holds one more member: a
-/// process of the test's own that the supervisor's kill reaches and that
-/// cannot finish dying while the test holds it at its exit stop (a stand-in
-/// for a member that cannot be verified dead within §9.3's 5-second budget).
-/// The run must end `unsettled`: no settled receipt, `tree_empty` null,
-/// `tree_unknown`, exit 1, and the member must have been killed by the
-/// supervisor. A `wait_tree` that claimed the tree empty without seeing the
-/// leaf empty settles and fails this test. Released, the member dies; `gc`
-/// then verifies and removes the retained leaf.
+/// target exits with a descendant behind it, but the execution leaf holds one
+/// more member: a process of the test's own that the supervisor's kill
+/// reaches and that cannot finish dying while the test holds it at its exit
+/// stop (a stand-in for a member that cannot be verified dead within §9.3's
+/// 5-second budget). The run must end `unsettled`: no settled receipt,
+/// `tree_empty` null, `tree_unknown`, exit 1, and the member must have been
+/// killed by the supervisor. A `wait_tree` that claimed the tree empty without
+/// seeing the leaf unpopulated (at once, after its kill, or from the pid
+/// namespace alone) settles and fails this test. Released, the member dies;
+/// `gc` then verifies and removes the retained leaf.
+///
+/// `tool` (the pid namespace ends the descendant) and `none` with observation
+/// off and on (the supervisor's leaf kill ends it; the registered boundary is
+/// the leaf).
 #[test]
 fn x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty() {
     if !common::live() {
         return;
     }
-    let (jail, _) = case("tool");
-    let mut attempt = Attempt::start(jail.target(tree("plain")), false);
-    attempt.await_kind("exec_confirmed");
-    let receipt = attempt.receipt();
-    let tree = started_tree(&receipt);
-    let leaf = leaf_of(&receipt);
-    let mut member = HeldMember::plant(&leaf);
-    kill_by_pidfd(&tree.launcher, libc::SIGUSR1);
-    let terminal = attempt.await_terminal();
-    let killed = member.killed();
-    member.release(killed);
-    let (run, _) = attempt.finish();
-    // Whatever happened, nothing is in the leaf now; gc verifies and removes
-    // the retained leaf before anything is asserted, so a failure leaves
-    // nothing of this test in the shared delegated subtree.
-    poll_until("the leaf to empty", Duration::from_secs(10), || {
-        std::fs::read_to_string(leaf.join("cgroup.events")).map_or(Some(()), |events| {
-            events.contains("populated 0").then_some(())
-        })
-    });
-    let (output, report) = gc(&run);
-    assert!(dead(&tree.descendant), "the target's descendant survived");
-    assert_eq!(
-        terminal["kind"], "unsettled",
-        "a leaf that was never seen empty was announced: {terminal}"
-    );
-    assert!(
-        killed,
-        "the supervisor never killed the leaf's extra member, so nothing was proved"
-    );
-    let receipt = final_receipt(&run);
-    assert_ne!(receipt["phase"], "settled", "{receipt:#}");
-    assert!(receipt["lifetime"]["tree_empty"].is_null(), "{receipt:#}");
-    assert!(receipt["lifetime"]["verified_at"].is_null());
-    assert!(
-        receipt["errors"]
-            .as_array()
-            .is_some_and(|errors| errors.iter().any(|e| e["code"] == "tree_unknown")),
-        "{receipt:#}"
-    );
-    assert_eq!(run.code(), Some(1), "{}", run.stderr_text());
-    assert!(output.status.success(), "{report:#}");
-    assert!(!leaf.exists(), "gc left the leaf: {report:#}");
+    for (profile, observe) in [("tool", "on"), ("none", "off"), ("none", "on")] {
+        let (jail, _) = case(profile);
+        let mut attempt = Attempt::start(
+            jail.args(["--observe", observe]).target(tree("plain")),
+            false,
+        );
+        attempt.await_kind("exec_confirmed");
+        let receipt = attempt.receipt();
+        let tree = started_tree(&receipt);
+        let leaf = leaf_of(&receipt);
+        let mut member = HeldMember::plant(&leaf);
+        kill_by_pidfd(&tree.launcher, libc::SIGUSR1);
+        let terminal = attempt.await_terminal();
+        let killed = member.killed();
+        member.release(killed);
+        let (run, _) = attempt.finish();
+        // Whatever happened, nothing is in the leaf now; gc verifies and
+        // removes the retained leaf before anything is asserted, so a failure
+        // leaves nothing of this test in the shared delegated subtree.
+        poll_until("the leaf to empty", Duration::from_secs(10), || {
+            std::fs::read_to_string(leaf.join("cgroup.events")).map_or(Some(()), |events| {
+                events.contains("populated 0").then_some(())
+            })
+        });
+        let (output, report) = gc(&run);
+        let leg = format!("{profile} observe {observe}");
+        assert!(
+            dead(&tree.descendant),
+            "{leg}: the target's descendant survived"
+        );
+        assert_eq!(
+            terminal["kind"], "unsettled",
+            "{leg}: a leaf that was never seen empty was announced: {terminal}"
+        );
+        assert!(
+            killed,
+            "{leg}: the supervisor never killed the leaf's extra member, so nothing was proved"
+        );
+        let receipt = final_receipt(&run);
+        assert_ne!(receipt["phase"], "settled", "{leg}: {receipt:#}");
+        assert!(
+            receipt["lifetime"]["tree_empty"].is_null(),
+            "{leg}: {receipt:#}"
+        );
+        assert!(receipt["lifetime"]["verified_at"].is_null());
+        assert!(
+            receipt["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|e| e["code"] == "tree_unknown")),
+            "{leg}: {receipt:#}"
+        );
+        assert_eq!(run.code(), Some(1), "{leg}: {}", run.stderr_text());
+        assert!(output.status.success(), "{leg}: {report:#}");
+        assert!(!leaf.exists(), "{leg}: gc left the leaf: {report:#}");
+    }
 }
 
 // ===========================================================================
@@ -1189,11 +1267,12 @@ fn l01_a_fork_storm_stopped_mid_flight_ends_at_verified_tree_death() {
         pids_events_max(&leaf).filter(|count| *count > first)
     });
     assert_real_supervisor_catches(attempt.pid(), libc::SIGTERM);
+    let sent = Instant::now();
     signal_supervisor(&attempt, libc::SIGTERM);
-    let Some(took) = await_death(&init, STOP_BOUND) else {
+    let Some(took) = await_death_by(&init, sent, STOP_BOUND) else {
         attempt.fail(&format!("the storm's namespace outlived {STOP_BOUND:?}"));
     };
-    if await_death(&launcher, STOP_BOUND).is_none() {
+    if await_death_by(&launcher, sent, STOP_BOUND).is_none() {
         attempt.fail("the storm's target outlived the stop");
     }
     let terminal = attempt.await_terminal();
@@ -1234,8 +1313,9 @@ fn l01_operator_int_term_and_hup_each_end_a_none_tree_at_verified_death() {
             attempt.await_kind("exec_confirmed");
             let tree = started_tree(&attempt.receipt());
             assert_real_supervisor_catches(attempt.pid(), signal);
+            let sent = Instant::now();
             signal_supervisor(&attempt, signal);
-            if await_death(&tree.launcher, STOP_BOUND).is_none() {
+            if await_death_by(&tree.launcher, sent, STOP_BOUND).is_none() {
                 attempt.fail(&format!(
                     "{name} observe {observe}: the target outlived the stop"
                 ));
@@ -1285,13 +1365,14 @@ fn l02_killing_the_backend_of_a_real_run_ends_the_tree_and_the_receipt_says_how(
         let receipt = attempt.receipt();
         let tree = started_tree(&receipt);
         let backend = pidfd(pid_at(&receipt, "bwrap_pid"));
+        let killed_at = Instant::now();
         kill_by_pidfd(&backend, libc::SIGKILL);
-        let Some(took) = await_death(&tree.launcher, LINK_BOUND) else {
+        let Some(took) = await_death_by(&tree.launcher, killed_at, LINK_BOUND) else {
             attempt.fail(&format!(
                 "observe {observe}: the target outlived the backend by {LINK_BOUND:?}"
             ));
         };
-        if await_death(&tree.descendant, LINK_BOUND).is_none() {
+        if await_death_by(&tree.descendant, killed_at, LINK_BOUND).is_none() {
             attempt.fail(&format!(
                 "observe {observe}: the descendant outlived the backend"
             ));
@@ -1353,19 +1434,20 @@ fn l02_kill_link(link: &str) {
         } else {
             pidfd(pid_at(&receipt, link))
         };
+        let killed_at = Instant::now();
         kill_by_pidfd(&killed, libc::SIGKILL);
-        let Some(took) = await_death(&tree.launcher, LINK_BOUND) else {
+        let Some(took) = await_death_by(&tree.launcher, killed_at, LINK_BOUND) else {
             attempt.fail(&format!(
                 "{profile} {link}: the target outlived the kill by {LINK_BOUND:?}"
             ));
         };
-        if await_death(&tree.descendant, LINK_BOUND).is_none() {
+        if await_death_by(&tree.descendant, killed_at, LINK_BOUND).is_none() {
             attempt.fail(&format!(
                 "{profile} {link}: the descendant outlived the kill"
             ));
         }
         for (role, fd) in &held {
-            if await_death(fd, LINK_BOUND).is_none() {
+            if await_death_by(fd, killed_at, LINK_BOUND).is_none() {
                 attempt.fail(&format!("{profile} {link}: the {role} outlived the kill"));
             }
         }
@@ -1419,6 +1501,9 @@ fn l02_killing_the_supervisor_of_agent_or_build_ends_the_tree_within_a_bound() {
         l02_kill_link("supervisor");
     }
 }
+
+/// How long the bridge test watches the target after the bridge's death.
+const BRIDGE_GRACE_WATCH: Duration = Duration::from_secs(1);
 
 /// The target of the bridge test: connect to the bridge once, report, wait
 /// for SIGUSR1, connect again, report, exit 0.
@@ -1485,7 +1570,10 @@ fn l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues
     if await_death(&bridge, LINK_BOUND).is_none() {
         attempt.fail("the bridge outlived SIGKILL");
     }
-    let continued = !dead(&launcher);
+    // The tree continues: the target is still alive a full second after the
+    // bridge's death, far longer than the supervisor takes to notice it (its
+    // note is in the trace) and act on anything it acted on.
+    let continued = await_death(&launcher, BRIDGE_GRACE_WATCH).is_none();
     kill_by_pidfd(&launcher, libc::SIGUSR1);
     if await_death(&launcher, STOP_BOUND).is_none() {
         attempt.fail("the target did not finish after SIGUSR1");
@@ -1508,6 +1596,10 @@ fn l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues
     assert_verified(&receipt, "attempt_tree");
     assert_eq!(receipt["outcome"]["kind"], "exited", "{receipt:#}");
     assert_eq!(receipt["outcome"]["code"], 0);
+    assert!(
+        receipt["outcome"]["cause"].is_null(),
+        "the bridge's death stopped the attempt: {receipt:#}"
+    );
     assert!(
         receipt["errors"].as_array().is_some_and(Vec::is_empty),
         "the bridge's death lost evidence: {receipt:#}"
@@ -1764,86 +1856,256 @@ fn build_shim(dir: &Path) -> PathBuf {
     library
 }
 
-/// One `tool` run of `/bin/sleep 300` under `wall`, with the shim shifting
-/// `clock` by `offset_ns` from the moment exec is confirmed. Returns the time
-/// from `exec_confirmed` to the terminal message on the test's own
-/// (unshifted) monotonic clock, and the final receipt.
-fn shifted_wall_run(wall: &str, clock: libc::clockid_t, offset_ns: i64) -> (Duration, Value) {
-    let (jail, _) = case("tool");
+/// A jail whose every process preloads the clock shim: once `trigger`
+/// exists, CLOCK id `clock` reads `offset_ns` later than it is.
+fn shimmed(jail: Jail, trigger: &Path, clock: libc::clockid_t, offset_ns: i64) -> Jail {
     let library = build_shim(jail.root());
-    let trigger = jail.root().join("clock-trigger");
-    let jail = jail
-        .timeout(Duration::from_secs(120))
+    jail.timeout(Duration::from_secs(120))
         .env("LD_PRELOAD", &library)
-        .env("OURO_B3_CLOCK_TRIGGER", &trigger)
+        .env("OURO_B3_CLOCK_TRIGGER", trigger)
         .env("OURO_B3_CLOCK_ID", clock.to_string())
         .env("OURO_B3_CLOCK_OFFSET_NS", offset_ns.to_string())
-        .args(["--limit", &format!("wall={wall}")])
-        .target(["/bin/sleep", "300"]);
-    let mut attempt = Attempt::start(jail, false);
-    attempt.await_kind("exec_confirmed");
-    let confirmed = Instant::now();
-    std::fs::write(&trigger, b"").expect("the trigger");
-    let terminal = attempt.await_terminal();
-    let took = confirmed.elapsed();
-    let (run, _) = attempt.finish();
-    assert_eq!(terminal["kind"], "settled", "{terminal}");
-    (took, final_receipt(&run))
 }
 
-fn assert_wall_expired(receipt: &Value) {
-    assert_verified(receipt, "attempt_tree");
-    assert_eq!(receipt["outcome"]["cause"], "wall_expiry", "{receipt:#}");
+/// What a shifted wall run measured on the test's own (unshifted) clock.
+struct ShiftedWall {
+    /// From just before the release frame (the wall starts after it) to the
+    /// terminal message.
+    from_release: Duration,
+    /// From the clock shift to the terminal message.
+    from_shift: Duration,
+    receipt: Value,
+}
+
+/// One gated run of `/bin/sleep 300` in `profile` under `wall`, with the shim
+/// shifting `clock` by `offset_ns` from the moment exec is confirmed.
+fn shifted_wall_run(
+    profile: &str,
+    wall: &str,
+    clock: libc::clockid_t,
+    offset_ns: i64,
+) -> ShiftedWall {
+    let (jail, _) = case(profile);
+    let trigger = jail.root().join("clock-trigger");
+    let jail = shimmed(jail, &trigger, clock, offset_ns)
+        .args(["--limit", &format!("wall={wall}")])
+        .target(["/bin/sleep", "300"]);
+    let mut attempt = Attempt::start(jail, true);
+    let released = release_now(&mut attempt);
+    attempt.await_kind("exec_confirmed");
+    let shifted = Instant::now();
+    std::fs::write(&trigger, b"").expect("the trigger");
+    let terminal = attempt.await_terminal();
+    let (from_release, from_shift) = (released.elapsed(), shifted.elapsed());
+    let (run, _) = attempt.finish();
+    assert_eq!(terminal["kind"], "settled", "{profile}: {terminal}");
+    ShiftedWall {
+        from_release,
+        from_shift,
+        receipt: final_receipt(&run),
+    }
+}
+
+fn scope_of(profile: &str) -> &'static str {
+    if profile == "none" {
+        "registered_boundary"
+    } else {
+        "attempt_tree"
+    }
+}
+
+fn assert_wall_expired(profile: &str, receipt: &Value) {
+    assert_verified(receipt, scope_of(profile));
+    assert_eq!(
+        receipt["outcome"]["cause"], "wall_expiry",
+        "{profile}: {receipt:#}"
+    );
     let wall = limit_row(receipt, "wall");
-    assert_eq!(wall["hit"], true);
-    assert_eq!(wall["mechanism"], "boottime-deadline");
+    assert_eq!(wall["hit"], true, "{profile}: {wall:#}");
+    assert_eq!(
+        wall["mechanism"], "boottime-deadline",
+        "{profile}: {wall:#}"
+    );
 }
 
 const HOUR_NS: i64 = 3_600_000_000_000;
+const TWO_MINUTES_NS: i64 = 120_000_000_000;
 
-/// L04.4 (the execution wall) and L04.6: the wall deadline of a real run
-/// follows CLOCK_BOOTTIME. A 20 s wall; right after exec the shim advances
-/// only CLOCK_BOOTTIME by two minutes — what a suspend looks like to a
-/// process: the boot clock moves, the monotonic clock does not. The wall
-/// expires at once (within 8 s of the jump on the test's own clock), which a
-/// deadline on CLOCK_MONOTONIC or CLOCK_REALTIME would not do for 20 s.
+/// L04.4 (the execution wall) and L04.6, for `tool` and for `none` (a
+/// separate implementation): the wall deadline of a real run follows
+/// CLOCK_BOOTTIME. A 20 s wall; right after exec the shim advances only
+/// CLOCK_BOOTTIME by two minutes — what a suspend looks like to a process:
+/// the boot clock moves, the monotonic clock does not. The wall expires at
+/// once (within 8 s of the jump on the test's own clock), which a deadline on
+/// CLOCK_MONOTONIC or CLOCK_REALTIME would not do for 20 s.
 #[test]
 fn l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump() {
     if !common::live() {
         return;
     }
-    let (took, receipt) = shifted_wall_run("20s", libc::CLOCK_BOOTTIME, 2 * 60_000_000_000);
-    assert_wall_expired(&receipt);
-    assert!(
-        took < Duration::from_secs(8),
-        "the wall ignored a two-minute CLOCK_BOOTTIME advance: it expired {took:?} after it"
-    );
-    eprintln!("L04.4/L04.6: wall expired {took:?} after the boot clock advanced");
+    for profile in ["tool", "none"] {
+        let run = shifted_wall_run(profile, "20s", libc::CLOCK_BOOTTIME, TWO_MINUTES_NS);
+        assert_wall_expired(profile, &run.receipt);
+        assert!(
+            run.from_shift < Duration::from_secs(8),
+            "{profile}: the wall ignored a two-minute CLOCK_BOOTTIME advance: it expired {:?} \
+             after it",
+            run.from_shift
+        );
+        eprintln!(
+            "L04.4/L04.6 {profile}: wall expired {:?} after the boot clock advanced",
+            run.from_shift
+        );
+    }
 }
 
-/// L04.5: the wall deadline ignores wall-clock adjustments. A 6 s wall; right
-/// after exec the shim steps only CLOCK_REALTIME by an hour forward, and in a
-/// second run an hour back. Both walls expire on time: not before 3 s after
-/// exec (a deadline on the stepped clock would expire at once forward, or
-/// never backward; the margin absorbs the delay between release, where the
-/// wall starts, and `exec_confirmed` on a loaded host), and within the wall
-/// plus §9.3's budgets.
+/// L04.5, for `tool` and `none`: the wall deadline ignores wall-clock
+/// adjustments. A 6 s wall; right after exec the shim steps only
+/// CLOCK_REALTIME by an hour forward, and in a second run an hour back. Both
+/// walls expire on time: not before 6 s after the test's own instant taken
+/// just before the release (a deadline on the stepped clock would expire at
+/// once forward, or never backward; nothing may expire before its value),
+/// and within the wall plus §9.3's budgets.
 #[test]
 fn l04_the_execution_wall_ignores_wall_clock_steps() {
     if !common::live() {
         return;
     }
-    for offset in [HOUR_NS, -HOUR_NS] {
-        let (took, receipt) = shifted_wall_run("6s", libc::CLOCK_REALTIME, offset);
-        assert_wall_expired(&receipt);
-        assert!(
-            took >= Duration::from_secs(3) && took < Duration::from_secs(6) + STOP_BOUND,
-            "a {}h wall-clock step moved the 6 s wall: it expired {took:?} after exec",
-            offset / HOUR_NS
+    let wall = Duration::from_secs(6);
+    for profile in ["tool", "none"] {
+        for offset in [HOUR_NS, -HOUR_NS] {
+            let run = shifted_wall_run(profile, "6s", libc::CLOCK_REALTIME, offset);
+            assert_wall_expired(profile, &run.receipt);
+            assert!(
+                run.from_release >= wall && run.from_release < wall + STOP_BOUND,
+                "{profile}: a {}h wall-clock step moved the 6 s wall: it expired {:?} after the \
+                 release",
+                offset / HOUR_NS,
+                run.from_release
+            );
+            eprintln!(
+                "L04.5 {profile}: {}h step, wall expired {:?} after the release",
+                offset / HOUR_NS,
+                run.from_release
+            );
+        }
+    }
+}
+
+/// L04.4, the stop grace (§6.4 puts "stop budgets" on CLOCK_BOOTTIME), for
+/// `tool` and `none`. The target catches SIGTERM and goes on, so after an
+/// operator SIGTERM only the forced stop ends it, after the 2 s grace. The
+/// moment the target reports that the cooperative SIGTERM reached it (the
+/// supervisor records the grace's start before sending it), the shim advances
+/// only CLOCK_BOOTTIME by two minutes: a grace on the boot clock is over at
+/// once and the target is SIGKILLed within a second of the jump; a grace on
+/// CLOCK_MONOTONIC would still wait out its ~2 s.
+#[test]
+fn l04_the_stop_grace_follows_the_boot_clock() {
+    if !common::live() {
+        return;
+    }
+    for profile in ["tool", "none"] {
+        let (jail, workspace) = case(profile);
+        let trigger = jail.root().join("clock-trigger");
+        let caught = workspace.join("caught-term");
+        let jail = shimmed(jail, &trigger, libc::CLOCK_BOOTTIME, TWO_MINUTES_NS).target([
+            PYTHON,
+            "-c",
+            TREE,
+            "catch",
+            caught.to_str().expect("UTF-8"),
+        ]);
+        let mut attempt = Attempt::start(jail, false);
+        attempt.await_kind("exec_confirmed");
+        let tree = started_tree(&attempt.receipt());
+        poll_until(
+            "the target to catch SIGTERM",
+            Duration::from_secs(10),
+            || {
+                signal_mask(tree.launcher_pid, "SigCgt")
+                    .is_some_and(|mask| mask & bit(libc::SIGTERM) != 0)
+                    .then_some(())
+            },
         );
-        eprintln!(
-            "L04.5: {}h step, wall expired {took:?} after exec",
-            offset / HOUR_NS
+        signal_supervisor(&attempt, libc::SIGTERM);
+        poll_until(
+            "the cooperative SIGTERM to reach the target",
+            Duration::from_secs(10),
+            || caught.exists().then_some(()),
+        );
+        let shifted = Instant::now();
+        std::fs::write(&trigger, b"").expect("the trigger");
+        let Some(took) = await_death_by(&tree.launcher, shifted, STOP_BOUND) else {
+            attempt.fail(&format!("{profile}: the target outlived the forced stop"));
+        };
+        if await_death_by(&tree.descendant, shifted, STOP_BOUND).is_none() {
+            attempt.fail(&format!(
+                "{profile}: the descendant outlived the forced stop"
+            ));
+        }
+        let terminal = attempt.await_terminal();
+        let (run, _) = attempt.finish();
+        assert_eq!(terminal["kind"], "settled", "{profile}: {terminal}");
+        let receipt = final_receipt(&run);
+        assert_verified(&receipt, scope_of(profile));
+        assert_eq!(receipt["outcome"]["cause"], "operator_signal");
+        assert!(
+            took < Duration::from_secs(1),
+            "{profile}: the stop grace ignored a two-minute CLOCK_BOOTTIME advance: the forced \
+             stop came {took:?} after it"
+        );
+        eprintln!("L04.4 {profile}: forced stop {took:?} after the boot clock advanced");
+    }
+}
+
+/// L04.4, the preparation budget (§8.2's 30 s, on CLOCK_BOOTTIME by §6.4),
+/// for `tool` and `none`. The owner binds the attempt id, so the execution
+/// leaf's path is known in advance; the shim's trigger is that path, so the
+/// boot clock alone jumps two minutes the moment the supervisor creates its
+/// leaf, in the middle of preparation. The attempt refuses before `prepared`
+/// with `prepare_timeout` and remediation `retry` (not a host-setup failure of
+/// whatever step was waiting when the budget ran out); a preparation budget
+/// on CLOCK_MONOTONIC would reach `prepared`.
+#[test]
+fn l04_the_preparation_budget_follows_the_boot_clock() {
+    if !common::live() {
+        return;
+    }
+    for profile in ["tool", "none"] {
+        let id = attempt_id();
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let leaf = ouro_jail::platform::linux::cgroup::delegated_root(uid)
+            .expect("the reference host delegates a cgroup subtree")
+            .join(format!("ouro-{id}.leaf"));
+        let (jail, _) = case(profile);
+        let jail = shimmed(jail, &leaf, libc::CLOCK_BOOTTIME, TWO_MINUTES_NS)
+            .args(["--attempt-id", &id])
+            .target(["/bin/true"]);
+        let mut attempt = Attempt::start(jail, true);
+        let Some(first) = attempt.next() else {
+            attempt.fail(&format!("{profile}: no control message at all"));
+        };
+        if first["kind"] != "refused" {
+            attempt.fail(&format!(
+                "{profile}: preparation went on past its budget: {first}"
+            ));
+        }
+        let (run, _) = attempt.finish();
+        let _ = gc_output(&run);
+        let receipt = final_receipt(&run);
+        let error = &receipt["outcome"]["error"];
+        eprintln!("L04.4 preparation {profile}: refused with {error}");
+        assert_eq!(run.code(), Some(125), "{profile}: {}", run.stderr_text());
+        assert_eq!(error["code"], "prepare_timeout", "{profile}: {receipt:#}");
+        assert_eq!(
+            error["remediation_category"], "retry",
+            "{profile}: {error:#}"
+        );
+        assert!(
+            !leaf.exists(),
+            "{profile}: the attempt's leaf was left behind"
         );
     }
 }
@@ -2002,9 +2264,13 @@ fn c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resum
 /// L04.4 (the gate budget): §6.4 puts the preparation and gate budgets on
 /// CLOCK_BOOTTIME too. A gated `tool` run is never released; right after
 /// `prepared` the shim advances only CLOCK_BOOTTIME by two minutes, past the
-/// 60-second gate budget. The run refuses with `prepare_timeout` at once
-/// (within 8 s of the jump on the test's own clock), which a gate wait on
-/// CLOCK_MONOTONIC would not do for 60 s.
+/// 60-second gate budget. The run refuses with `prepare_timeout` at once,
+/// which a gate wait on CLOCK_MONOTONIC would not do for 60 s. "At once" is
+/// bounded at 700 ms of the jump: the wait's first poll began when `prepared`
+/// was sent, just before the jump, and the supervisor re-reads its deadline
+/// when that poll returns (every 250 ms, §8.2); a wait that re-read it only
+/// at the older one-second poll cap would refuse about a second after the
+/// jump and fail this bound.
 #[test]
 fn l04_the_gate_wait_follows_the_boot_clock() {
     if !common::live() {
@@ -2038,7 +2304,9 @@ fn l04_the_gate_wait_follows_the_boot_clock() {
         "{receipt:#}"
     );
     assert!(
-        took < Duration::from_secs(8),
-        "the gate wait ignored a two-minute CLOCK_BOOTTIME advance: it expired {took:?} after it"
+        took < GATE_RECHECK_BOUND,
+        "the gate wait did not act on a two-minute CLOCK_BOOTTIME advance within \
+         {GATE_RECHECK_BOUND:?}: it expired {took:?} after it"
     );
+    eprintln!("L04.4 gate: refused {took:?} after the boot clock advanced");
 }
