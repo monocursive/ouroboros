@@ -330,9 +330,11 @@ the planted `ouro.toml` now refuses with `invalid_config` instead of
 silently removing the next run's proxy socket.
 
 ### S4 — fixed: gc cleans never-prepared attempts
-`never_charged_tree`: an owner `decide` established dead plus a
-`not_recorded` leaf proves no cgroup was ever created, which permits the
-vendor-state cleanup exactly like a verified-empty leaf. Verified live: 5/5
+`never_charged_tree`: an owner `decide` established dead, no leaf ever
+registered and **no receipt ever written** (a receipt, even one claiming an
+unverified tree, keeps the conservative retention) proves no cgroup was ever
+created, which permits the vendor-state cleanup exactly like a
+verified-empty leaf. Verified live: 5/5
 SIGKILLed staging runs cleaned by the next `gc` (pre-fix: 4/5 retained
 forever).
 
@@ -385,11 +387,21 @@ wrong guess and strict evidence fails on the first.
 
 ### Post-fix verification (reference host)
 
-- Full build and suite run on the VPS follows in the same session (see the
-  commit); clippy clean on both targets.
-- A01 regression: opencode 1.18.32 under `--launch opencode` → exit 0, file
-  written, `settled`, every coverage class active, 31 `proxy.net` events.
-- All audit PoCs re-run: `race7` (gaps, not silence), `forge` (ENXIO),
-  `ouro.toml` mask (refusal), `credkill` (gc completes), `probes2`
-  (EPERM set), mask writes (EROFS), receipts (`none`,
-  `receipt_verifier_withheld`, private digest in jail state).
+- Clippy clean and portable tests 220/220 on both targets; the evidence
+  tables and `milestone-1-freeze.toml` regenerated on the reference host from
+  the fix revision (`cargo xtask freeze --doctor`).
+- Full Linux suite (`cargo test -p ouro-jail --release --no-fail-fast`):
+  every binary green except `conformance_j1::s11_wall_expiry`,
+  `review_linux::r9_explicit_pids` and `j5_lifetime::x07` — the three
+  pre-existing baseline failures the first audit already showed failing
+  identically on pristine `d7c0d36b` from a plain SSH session (the
+  conformance lane runs them under `ouro-ci` with lingering). `j5_lifetime`
+  run serially: 20/21, `x07` only; the other parallel-run failures in that
+  binary pass serially, as the first audit also observed.
+- A01 regression, re-run on the final binary: opencode 1.18.32 under
+  `--launch opencode` → exit 0, file written, `settled`, every coverage class
+  active.
+- All audit PoCs re-run on the final binary: `race7` (gaps, not silence),
+  `forge` (ENXIO), `ouro.toml` mask (refusal), `credkill` (gc completes,
+  nothing retained), `probes2` (EPERM set), mask writes (EROFS), receipts
+  (`none`, `receipt_verifier_withheld`, private digest in jail state).

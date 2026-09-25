@@ -10,7 +10,7 @@ leans on `kernel.yama.ptrace_scope` (§9.2), the bridge's report channel is a
 `SOCK_SEQPACKET` pair a same-uid peer cannot reopen (§10), `deny_read` masks
 over `/run/ouro` are refused and every mask is sealed read-only (§9.1), gc
 cleans vendor state of attempts whose owner died before any leaf was
-registered (§14.2), a coverage level that was never requested is recorded as
+registered and before any receipt was written (§14.2), a coverage level that was never requested is recorded as
 `none` (§13.2), receipts carry no credential digest (§12), and the narrowing
 filter's trace data is chosen per attempt (§11.2). Revision 20 records the
 first security audit's fixes: the observer's exit re-read of pointed arguments and
