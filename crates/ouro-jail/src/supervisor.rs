@@ -1335,6 +1335,21 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         ));
     }
 
+    // J5 §9.3 / X06: before the untrusted target execs, the supervisor makes
+    // itself non-dumpable so a same-uid peer that can address it (a `none`
+    // child, whose target shares the host pid namespace) cannot read its
+    // /proc/<pid>/{fd,environ,mem} — its live trace and control channels and
+    // the operator environment — nor `ptrace` it. The lock is the kernel's
+    // dumpable check, not host Yama (which a peer can waive with
+    // PR_SET_PTRACER). It is set here, after the capability probes and the
+    // observer's attach to the (execve-reset, dumpable) backend and before
+    // release, so no probe fork and no observer attach is affected; children
+    // reset dumpable on execve. `doctor`/`gc` exec no untrusted target.
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl(PR_SET_DUMPABLE, 0, ...) takes scalars only and cannot fail.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
     // Step 7: execute the exact target argv through the blocked launcher.
     // J3-launch begin: a failed release reports its teardown, so the refused
     // receipt carries the verified tree (§13.2 row 4) and vendor state can be

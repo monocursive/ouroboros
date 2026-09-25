@@ -963,14 +963,18 @@ fn s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec() {
 
 /// S04.7: `agent` and `build` inherit no ring (§15 S04; §9.2 "No ring fd may
 /// be inherited"). Attempted, live: an io_uring ring is created in the parent
-/// and its close-on-exec flag cleared, so an ordinary fork/exec would inherit
-/// it, then `ouro-jail run` starts the target. Verdict: the ring never reaches
-/// the target — its `/proc/self/fd` holds no io_uring anonymous inode (the
-/// spec's guarantee is non-inheritance, not a refusal). The enforcement point
-/// is `close_range_cloexec()` in the backend bootstrap's pre-exec
-/// (`exec.rs`), which marks every inherited descriptor except the plumbed
-/// channels close-on-exec before `bwrap` execs: deleting it lets the ring
-/// survive into the target.
+/// and duplicated to a HIGH descriptor (200) with close-on-exec clear, so an
+/// ordinary fork/exec would inherit it, then `ouro-jail run` starts the
+/// target. The high number matters: the harness assigns its channel targets
+/// from fd 3 upward and `dup2`s the trace channel onto low fds, so a ring
+/// created at fd 3 would be overwritten before the jail ever ran (the earlier
+/// version of this test was vacuous for that reason); fd 200 is above every
+/// channel target and is genuinely inheritable. Verdict: the ring never
+/// reaches the target — its `/proc/self/fd` holds no io_uring anonymous inode
+/// (the spec's guarantee is non-inheritance, not a refusal). The enforcement
+/// point is `close_range_cloexec()` in the backend bootstrap's pre-exec
+/// (`exec.rs`): deleting it lets the ring at fd 200 survive into the target
+/// (verified RED on the host — `bwrap` does NOT close inherited descriptors).
 #[test]
 fn s04_agent_and_build_inherit_no_ring() {
     if !common::live() {
@@ -986,12 +990,12 @@ print(json.dumps(fds))
 "#;
     for profile in ["agent", "build"] {
         let ring = io_uring_ring();
-        // Clear close-on-exec so an ordinary fork/exec would inherit the ring;
-        // the jail must still keep it from the target.
-        // SAFETY: `ring` is a live owned descriptor; F_SETFD takes a scalar.
-        unsafe {
-            libc::fcntl(ring.as_raw_fd(), libc::F_SETFD, 0);
-        }
+        // Park the ring at fd 200, above every harness channel target, with
+        // close-on-exec clear (F_DUPFD does not set it), so it is genuinely
+        // inheritable and not overwritten by the plumbed channels.
+        // SAFETY: `ring` is a live owned descriptor; F_DUPFD takes a scalar.
+        let high = unsafe { libc::fcntl(ring.as_raw_fd(), libc::F_DUPFD, 200) };
+        assert!(high >= 200, "could not park the ring at a high fd: {high}");
         let c = case(profile);
         let jail = if profile == "build" {
             c.jail.args(["--limit", "mem=64MiB"])
@@ -999,7 +1003,12 @@ print(json.dumps(fds))
             c.jail
         };
         let run = jail.target(py(SCRIPT)).run().unwrap();
-        // Keep the ring open across the run so it is genuinely inheritable.
+        // Keep both descriptors open across the run so the ring is genuinely
+        // inheritable, then close our copies.
+        // SAFETY: `high` is our own duplicate descriptor.
+        unsafe {
+            libc::close(high);
+        }
         drop(ring);
         assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
         let fds = py_out(&run);
@@ -1705,21 +1714,26 @@ while p > 1 and p not in seen:
 print(json.dumps({'me': me, 'caps': caps(), 'addressable': addressable, 'ancestors': ancestors}))
 "#;
 
-/// No target may steal a descriptor or seize a tracer over any process it can
-/// address. Verdict, from inside every profile: `pidfd_getfd` and
-/// `ptrace(PTRACE_SEIZE)` fail against every addressable process and every
-/// ancestor — for the contained profiles the child's `/proc` holds only its
-/// own pid namespace (bubblewrap's init, and under `agent` the launcher and
-/// bridge), so the supervisor and observer are not even addressable; for
-/// `none` the ancestor chain reaches the supervisor/observer and the calls
-/// still fail (EPERM). The mutation-provable anchor is the jail's capability
-/// drop: for the contained profiles the child's CapEff/CapPrm/CapInh/CapAmb
-/// are empty (adding a capability, e.g. `bwrap --cap-add CAP_SYS_PTRACE` with
-/// the CapEff check disabled, reddens this — verified on the host). The
-/// `pidfd_getfd`/`ptrace` denials themselves are kernel-enforced defence in
-/// depth (Yama ptrace scope, the user-namespace credential mapping, and, for
-/// `ptrace` under a contained profile, the baseline seccomp deny) on top of
-/// that empty capability set.
+/// No CONTAINED target may steal a descriptor or seize a tracer over any
+/// process it can address. Verdict, from inside `tool`, `build` and `agent`:
+/// `pidfd_getfd` and `ptrace(PTRACE_SEIZE)` fail against every addressable
+/// process and every ancestor — the child's `/proc` holds only its own pid
+/// namespace (bubblewrap's init, and under `agent` the launcher and bridge),
+/// so the supervisor and observer are not even addressable. The
+/// mutation-provable anchor is the jail's capability drop: the child's
+/// CapEff/CapPrm/CapInh/CapAmb are empty (adding a capability, e.g.
+/// `bwrap --cap-add CAP_SYS_PTRACE` with the CapEff check disabled, reddens
+/// this — verified on the host). The `pidfd_getfd`/`ptrace` denials themselves
+/// are kernel-enforced defence in depth (the user-namespace credential
+/// mapping, and the baseline seccomp `ptrace` deny) on top of that empty set.
+///
+/// `none` is not covered here: it is uncontained, its child shares the host
+/// pid namespace, and — as a normal same-uid process — it may legitimately
+/// address and even ptrace other same-uid processes (its own descendants, or,
+/// depending on the host's ptrace scope, unrelated peers). The X06 guarantee
+/// that matters for `none` is that the SUPERVISOR and OBSERVER stay closed to
+/// the child, which `r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer`
+/// proves via the `PR_SET_DUMPABLE 0` hardening.
 #[test]
 fn x06_no_tracing_privilege_reaches_the_child() {
     if !common::live() {
@@ -1758,22 +1772,6 @@ fn x06_no_tracing_privilege_reaches_the_child() {
         );
         settled(&run);
     }
-    // none: the child shares the host pid namespace, so its ancestor chain
-    // reaches the supervisor/observer; the calls still fail.
-    if let Some((jail, _)) = none_case("on") {
-        let run = jail.target(py(X06_PROBE)).run().unwrap();
-        assert_eq!(run.code(), Some(0), "none: {}", run.stderr_text());
-        let out = py_out(&run);
-        assert_no_tracing("none", &out);
-        // The supervisor (`ouro-jail`) is an ancestor and was actually probed.
-        let ancestors = out["ancestors"].as_array().unwrap();
-        assert!(
-            ancestors
-                .iter()
-                .any(|entry| entry["comm"].as_str() == Some("ouro-jail")),
-            "none: the supervisor was not reached up the ancestor chain: {ancestors:#?}"
-        );
-    }
 }
 
 /// Every probed target (addressable process and ancestor) refused both
@@ -1808,15 +1806,18 @@ fn assert_no_tracing(profile: &str, out: &Value) {
 // evidence assurance while the run still ends as it would (§15 R05; §9.3).
 // ===========================================================================
 
-/// Attempted, live, `none` (observation on): the target — the same uid as the
-/// supervisor — overwrites the attempt's receipt (`jail.json`), trace sink
-/// (`trace.ndjson`) and jail state (`jail-state.json`) WHILE the run is live,
-/// then exits 0. Verdict: the run's own outcome is exactly what it would be
-/// without the forgery — it settles, exits 0, the tree verifies — and its
-/// records still make no protection claim (`unprotected`); no error and no
-/// note reports the tampering, because `none` offers no local evidence
-/// assurance against a same-uid peer (§9.3: "same-UID interference remains
-/// possible ... `unprotected` is never upgraded"). This strengthens
+/// Attempted, live, `none` (observation on, and — per the J5-B1 review F3 — no
+/// external `--trace-fd`, so the trace is kept in the local `trace.ndjson`
+/// sink the run actually reads, created at prepare time): the target, the same
+/// uid as the supervisor, overwrites the attempt's receipt (`jail.json`),
+/// local trace sink (`trace.ndjson`) and jail state (`jail-state.json`) WHILE
+/// the run is live — each of which already exists at that moment — then exits
+/// 0. Verdict: the run's own outcome is exactly what it would be without the
+/// forgery — it settles, exits 0, the tree verifies — and its records still
+/// make no protection claim (`unprotected`); no error and no note reports the
+/// tampering, because `none` offers no local evidence assurance against a
+/// same-uid peer (§9.3: "same-UID interference remains possible ...
+/// `unprotected` is never upgraded"). This strengthens
 /// `conformance_j3_none.rs::r05_same_uid_tampering...`, which forges only the
 /// static `policy.json`. The mutation-provable anchor is the `none`
 /// `unprotected` labeling (records.rs `Containment::None => Unprotected`):
@@ -1825,14 +1826,25 @@ fn assert_no_tracing(profile: &str, out: &Value) {
 /// product does not falsely claim to have detected the forgery.
 #[test]
 fn r05_forging_records_mid_run_is_outside_local_evidence_assurance() {
-    let (jail, _) = match none_case("on") {
-        Some(pair) => pair,
-        None => return,
-    };
+    if !none_live() {
+        return;
+    }
+    let jail = Jail::new().expect("a private harness");
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir(&workspace).expect("the workspace");
     let data = jail.data_dir();
+    // none, observation on, NO --trace-fd: the trace goes to the local
+    // trace.ndjson sink (opened at prepare time), so it exists mid-run and the
+    // child forges the file the run really keeps, not a decoy the run ignores.
+    let jail = jail
+        .arg("run")
+        .args(["--profile", "none", "--observe", "on", "--workspace"])
+        .arg(&workspace)
+        .receipt();
     // The same-uid child recovers the attempt directory (a host path it can
-    // see under `none`) and overwrites all three live record files, then lives
-    // just long enough for the supervisor to keep running past the forgery.
+    // see under `none`) and overwrites all three live record files — asserting
+    // each existed first — then lives long enough for the supervisor to keep
+    // running past the forgery.
     let code = format!(
         "import glob, os, time\n\
          d = glob.glob({data:?} + '/attempts/*/')[0]\n\
@@ -1849,26 +1861,26 @@ fn r05_forging_records_mid_run_is_outside_local_evidence_assurance() {
         data = data.to_str().unwrap(),
     );
     let run = jail
-        .receipt()
         .target([PYTHON, "-c", &code])
         .run()
         .expect("the jail runs");
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    // The forgery really happened: all three record files existed and were
-    // overwritten by the same-uid child mid-run.
+    // Every forged record existed before the child overwrote it — the forgery
+    // hit the files the run actually keeps, not decoys.
     let forged = run
         .stdout_text()
         .lines()
         .find(|line| line.starts_with("FORGED "))
         .unwrap_or_else(|| panic!("the child did not forge: {}", run.stdout_text()))
         .to_owned();
-    // Whether each file pre-existed at that instant is a timing detail; the
-    // write always lands in the attempt dir. The child reports one entry per
-    // record it wrote.
-    for name in ["jail.json:", "trace.ndjson:", "jail-state.json:"] {
+    for name in [
+        "jail.json:True",
+        "trace.ndjson:True",
+        "jail-state.json:True",
+    ] {
         assert!(
             forged.contains(name),
-            "the child did not write a forged record: {forged}"
+            "a forged record did not exist before the forge (a decoy, not a live record): {forged}"
         );
     }
     // The run's own outcome is exactly what it would be without the forgery.
@@ -1894,6 +1906,128 @@ fn r05_forging_records_mid_run_is_outside_local_evidence_assurance() {
         errors.is_empty(),
         "the settled receipt claims to have detected the forgery: {errors:#?}"
     );
+}
+
+// ===========================================================================
+// X06.5 / R05.4: the supervisor's own /proc is closed to a same-uid peer
+// (§15 X06, R05; §9.3). J5-B1 review F4: without hardening, a `none` child can
+// reopen /proc/<supervisor>/fd/<trace,control> and inject into the operator's
+// live streams, read the supervisor's environ, and ptrace-seize it — host Yama
+// is the only lock. The product now makes the supervisor non-dumpable
+// (main.rs PR_SET_DUMPABLE 0), which closes /proc/<pid>/{fd,environ,mem} and
+// makes ptrace fail by the kernel's dumpable check, independent of Yama.
+// ===========================================================================
+
+/// From inside `none` (where the supervisor is a reachable ancestor) the
+/// same-uid target cannot open the supervisor's `/proc/<pid>/environ` or
+/// `/proc/<pid>/fd/<n>` (its live trace/control channels), nor `ptrace`-seize
+/// it: every attempt fails `EACCES`/`EPERM`. From inside `tool` the supervisor
+/// is outside the child's pid namespace and not addressable at all. The lock
+/// is the kernel's dumpable check (`PR_SET_DUMPABLE 0` in main.rs), not host
+/// Yama — which a peer can waive with `PR_SET_PTRACER`; the reviewer confirmed
+/// the failures hold with a supervisor Yama exception (M5) applied. Enforcement
+/// point: the `PR_SET_DUMPABLE 0` hunk in main.rs; removing it lets the child
+/// read the supervisor's environ and fd and inject into the live streams
+/// (verified RED on the host).
+#[test]
+fn r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer() {
+    if !none_live() {
+        return;
+    }
+    // The child finds the supervisor (comm ouro-jail up the PPid chain), reads
+    // the trace/control fd numbers from its cmdline, and tries to open its
+    // environ and those fds and to ptrace-seize it.
+    const CODE: &str = r#"
+import os, ctypes, json
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+def comm(p):
+    try: return open('/proc/%d/comm' % p).read().strip()
+    except OSError: return '?'
+def ppid(p):
+    return int(open('/proc/%d/stat' % p).read().split(') ')[1].split()[1])
+p = os.getppid(); sup = None
+while p > 1:
+    if comm(p) == 'ouro-jail':
+        sup = p; break
+    p = ppid(p)
+out = {'sup': sup}
+def attempt(fn):
+    try: fn(); return 'ok'
+    except OSError as e: return e.errno
+out['environ'] = attempt(lambda: open('/proc/%d/environ' % sup, 'rb').read())
+out['fd_dir'] = attempt(lambda: os.listdir('/proc/%d/fd' % sup))
+argv = open('/proc/%d/cmdline' % sup, 'rb').read().split(b'\0')
+for flag in (b'--trace-fd', b'--control-fd'):
+    if flag in argv:
+        n = int(argv[argv.index(flag) + 1])
+        out[flag.decode()] = attempt(lambda: os.close(os.open('/proc/%d/fd/%d' % (sup, n), os.O_WRONLY)))
+ctypes.set_errno(0)
+r = libc.syscall(101, 0x4206, sup, 0, 0)  # ptrace(PTRACE_SEIZE, sup)
+out['ptrace'] = 'ok' if r >= 0 else ctypes.get_errno()
+print(json.dumps(out))
+"#;
+    // none: the supervisor is reachable, and every access to its /proc fails.
+    let (jail, _) = none_case("on").expect("none precondition already checked");
+    let run = jail
+        .target([PYTHON, "-c", CODE])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(run.code(), Some(0), "none: {}", run.stderr_text());
+    let out = py_out(&run);
+    assert!(
+        out["sup"].as_i64().is_some(),
+        "none: the supervisor was not found up the ancestor chain: {out}"
+    );
+    // environ and the fd directory are closed (EACCES); the trace/control
+    // channels cannot be reopened; ptrace cannot seize the supervisor.
+    assert_eq!(
+        out["environ"],
+        i64::from(libc::EACCES),
+        "none: environ readable: {out}"
+    );
+    assert_eq!(
+        out["fd_dir"],
+        i64::from(libc::EACCES),
+        "none: fd dir readable: {out}"
+    );
+    for flag in ["--trace-fd", "--control-fd"] {
+        if let Some(errno) = out[flag].as_i64() {
+            assert_eq!(
+                errno,
+                i64::from(libc::EACCES),
+                "none: {flag} reopened: {out}"
+            );
+        } else {
+            panic!("none: {flag} channel was written, not refused: {out}");
+        }
+    }
+    assert_ne!(
+        out["ptrace"], "ok",
+        "none: ptrace seized the supervisor: {out}"
+    );
+    // The forged marks never reach the operator's live streams.
+    assert!(
+        !String::from_utf8_lossy(&run.trace_bytes).contains("forged"),
+        "none: a forged line reached the live trace stream"
+    );
+    // tool: the supervisor is not even addressable (its host pid is outside
+    // the child's pid namespace); the reach the none child had does not exist.
+    let c = case("tool");
+    let probe = r#"
+import os, json
+sup = [int(d) for d in os.listdir('/proc') if d.isdigit()
+       and (open('/proc/%s/comm' % d).read().strip() if os.path.exists('/proc/%s/comm' % d) else '') == 'ouro-jail']
+print(json.dumps({'ouro_jail_pids_visible': sup}))
+"#;
+    let run = c.jail.target(py(probe)).run().expect("the jail runs");
+    assert_eq!(run.code(), Some(0), "tool: {}", run.stderr_text());
+    assert_eq!(
+        py_out(&run)["ouro_jail_pids_visible"],
+        serde_json::json!([]),
+        "tool: the supervisor is visible inside the pid namespace"
+    );
+    settled(&run);
 }
 
 // ---------------------------------------------------------------------------
