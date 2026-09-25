@@ -30,7 +30,12 @@ Milestone 1's evidence, all at revision
 - The plain-session smoke leg ([smoke](evidence/j5-smoke-2026-09-25-ouro-ci.txt)):
   a `tool` run, a `none` run and `doctor`, started from the SSH session's own
   `session-8798.scope` without `systemd-run`, each exit 0; the driver requires
-  each to have entered a delegated scope itself.
+  each to have entered a delegated scope itself, and their records show it:
+  the [tool](evidence/j5-smoke-tool-receipt-2026-09-25-ouro-ci.json) and
+  [none](evidence/j5-smoke-none-receipt-2026-09-25-ouro-ci.json) receipts are
+  settled, exit 0, with `supervisor_scope` `entered` and an execution leaf,
+  and [doctor](evidence/j5-smoke-doctor-2026-09-25-ouro-ci.json) is ready with
+  its scope `entered`.
 - The I01 probe ([i01](evidence/j5-i01-2026-09-25-ouro-ci.txt)): the suite's
   PATH is the system directories, and no ledger, fleet or BEAM binary,
   installation directory or package is present.
