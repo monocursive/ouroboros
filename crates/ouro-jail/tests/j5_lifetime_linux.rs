@@ -819,17 +819,29 @@ fn l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant() {
         let launcher = pidfd(pid_at(&prepared, "launcher_pid"));
         let t0 = release_prepared(&mut attempt, &prepared);
         attempt.await_kind("exec_confirmed");
-        let receipt = attempt.receipt();
+        let floor = if mode == "ignore" {
+            wall + STOP_GRACE
+        } else {
+            wall
+        };
+        if dead(&launcher) {
+            attempt.fail(&format!(
+                "{mode} observe {observe}: the target was already dead {:?} after the release, \
+                 before its {floor:?} floor",
+                t0.elapsed()
+            ));
+        }
         let mut deaths = Vec::new();
         if mode != "single" {
-            let tree = started_tree(&receipt);
-            let Some(descendant) = await_death_by(&tree.descendant, t0, wall + STOP_BOUND) else {
+            let (descendant_pid, descendant) =
+                term_ignoring_child(pid_at(&prepared, "launcher_pid"));
+            let Some(death) = await_death_by(&descendant, t0, wall + STOP_BOUND) else {
                 attempt.fail(&format!(
-                    "{mode} observe {observe}: the SIGTERM-ignoring descendant {} outlived the wall",
-                    tree.descendant_pid
+                    "{mode} observe {observe}: the SIGTERM-ignoring descendant {descendant_pid} \
+                     outlived the wall"
                 ));
             };
-            deaths.push(descendant);
+            deaths.push(death);
         }
         let Some(target) = await_death_by(&launcher, t0, wall + STOP_BOUND) else {
             attempt.fail(&format!(
@@ -839,11 +851,6 @@ fn l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant() {
         deaths.push(target);
         let terminal = attempt.await_terminal();
         let (run, _) = attempt.finish();
-        let floor = if mode == "ignore" {
-            wall + STOP_GRACE
-        } else {
-            wall
-        };
         assert!(
             deaths.iter().all(|death| *death >= floor),
             "{mode} observe {observe}: the tree ended before its wall: deaths {deaths:?} after \
