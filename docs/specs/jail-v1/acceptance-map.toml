@@ -67,8 +67,11 @@ note = "The test changes the already-resolved canonical value; that the resolver
 id = "P01.6"
 gate = "P01"
 clause = "A semantic change in a canonical TOML input (a limit, grant or environment value) changes the policy digest, and only the right one"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: portable_canonical.rs::p01_semantic_changes_change_the_right_digest mutates the resolved JSON, not the policy input."
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_digest",
+]
+note = "Through resolve_plan over real files: a limit or grant changed in the canonical TOML profile, or an environment value in a launch profile, changes the policy digest; comments/blank lines do not; the argv digest is independent."
 
 [[clause]]
 id = "P01.4"
@@ -103,8 +106,11 @@ note = "No live test recomputes a run's argv_digest against the canonical framin
 id = "P01.8"
 gate = "P01"
 clause = "A non-UTF-8 policy path (a grant or deny_read) survives execution into the receipt"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: no live run passes a non-UTF-8 policy path."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p01_a_non_utf8_policy_path_survives_execution_into_the_receipt",
+]
+note = "A --deny-read of a non-UTF-8 directory is enforced (ENOENT inside) and both the grant and the applied mask carry the exact bytes. Found and fixed a product defect: mountinfo was read as UTF-8 text, so one such mount point emptied applied.filesystem.mounts."
 
 # ------------------------------------------------------------------ P02
 
@@ -139,7 +145,10 @@ note = "These two tests assert the refusal code and message, not the key path (n
 id = "P02.12"
 gate = "P02"
 clause = "A symlink component and a case variation refuse with the key path"
-tag = "untested"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::p02_a_symlink_component_and_a_case_variation_refuse_with_the_key_path",
+]
 note = "J5 adversarial review (rev-A) §1.2."
 
 [[clause]]
@@ -183,7 +192,11 @@ tests = [
 id = "P02.6"
 gate = "P02"
 clause = "Raising the memory or CPU ceiling refuses with that limit key"
-tag = "untested"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::p02_raising_mem_or_cpu_refuses_with_that_limit_key",
+  "ouro-jail/tests/portable_policy.rs::p02_raising_mem_or_cpu_through_the_project_file_refuses_with_the_limit_key",
+]
 note = "Owned by J5-B1 (portable_policy.rs)."
 
 [[clause]]
@@ -199,28 +212,40 @@ tests = [
 id = "P02.8"
 gate = "P02"
 clause = "A project file may not select or extend a profile"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H5: portable_policy.rs::p02_a_project_file_may_not_select_a_profile_or_extend_one injects the forbidden key into the PolicyDelta directly; deleting the detection in supervisor.rs leaves it green. A CLI-level check exists on macOS only (macos_refusal.rs::a_project_file_may_narrow_but_may_not_select_a_profile)."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p02_a_project_file_selecting_or_extending_a_profile_refuses_through_run",
+]
+note = "Through ouro-jail run: policy_widening at jail.profile / jail.extends, exit 125, nothing prepared. Red when resolve_plan's forbidden-key detection is removed."
 
 [[clause]]
 id = "P02.9"
 gate = "P02"
 clause = "Adding a credential through a project file refuses with its key path"
-tag = "untested"
-note = "portable_launch.rs::a_project_file_can_shrink_the_launch_hosts_but_not_add_credentials checks is_err() only, without the key path. Owned by J5-B1."
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::p02_a_credential_in_the_project_file_refuses_with_its_key_path",
+]
+note = "Product change: a [jail.credentials] table in the project file was a syntax error at key `jail`; it is now policy_widening at jail.credentials (credentials are a key of the operator's launch layer, §12)."
 
 [[clause]]
 id = "P02.10"
 gate = "P02"
-clause = "Widening through a launch profile, executable or backend setting refuses with its key path"
-tag = "untested"
-note = "Owned by J5-B1."
+clause = "Widening through a launch profile (credentials, network allow-hosts, a launch under none) refuses with its key path"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::p02_widening_through_a_launch_profile_refuses_with_its_key_path",
+]
+note = "launch.credentials and launch.network.allow under tool, and --launch under none. Narrowed to launch profiles (integrator decision, J5 wave 3): no v1 configuration layer has an executable or backend key (§6.3 last paragraph, §12 'path references, never commands'), so that half has nothing to refuse."
 
 [[clause]]
 id = "P02.13"
 gate = "P02"
 clause = "Selecting `none` through an untrusted layer (a project file or an operator profile extending it) refuses"
-tag = "untested"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::p02_none_cannot_be_selected_through_a_project_or_profile_file",
+]
 note = "J5 adversarial review (rev-A) §1.2: §6.3's `none` row has no clause."
 
 # ------------------------------------------------------------------ P03
@@ -243,8 +268,11 @@ note = "The edit is made by the harness, not the child, and only ouro.toml is ed
 id = "P03.2"
 gate = "P03"
 clause = "The child itself edits project and profile files after preparation; the active authority and digest stay unchanged and the denial still holds at run time"
-tag = "untested"
-note = "Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p03_the_child_truncating_its_selected_profile_and_project_file_does_not_widen_the_run",
+]
+note = "The child truncates the operator profile file selected with --profile (in its workspace) and the project file; digest, mounts and both denials hold."
 
 # ------------------------------------------------------------------ P04
 
@@ -265,15 +293,22 @@ tests = [
 id = "P04.6"
 gate = "P04"
 clause = "A state root overlapping an --ro or --rw grant, or a grant beneath the state root, refuses before exec"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p04_a_state_root_overlapping_an_ro_or_rw_grant_refuses",
+]
 note = "J5 adversarial review (rev-A) §1.2: check_state_isolation covers these; no test does."
 
 [[clause]]
 id = "P04.2"
 gate = "P04"
-clause = "A scratch root overlapping a writable grant refuses before exec"
-tag = "untested"
-note = "supervisor.rs child_visible_roots includes scratch; no test. Owned by J5-B1."
+clause = "A scratch root overlapping the state root, or a receipt path inside the scratch root, refuses before exec"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p04_a_scratch_root_overlapping_the_state_directory_refuses",
+  "ouro-jail/tests/j5_process_linux.rs::p04_a_receipt_path_inside_the_scratch_root_refuses",
+]
+note = "The state/scratch/receipt overlaps of the §15 row (integrator decision, J5 wave 3: re-worded to J5-B1's clause). A scratch root inside a writable grant is not a rule the spec states, and the product does not refuse it (J5-B1, measured)."
 
 [[clause]]
 id = "P04.3"
@@ -289,14 +324,20 @@ tests = [
 id = "P04.7"
 gate = "P04"
 clause = "Through ouro-jail run, a symlinked state root refuses before exec"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p04_a_symlinked_state_root_refuses_through_run",
+]
 note = "J5 adversarial review (rev-A) §1.2: the tests call the predicate only."
 
 [[clause]]
 id = "P04.8"
 gate = "P04"
 clause = "A symlinked --receipt path refuses before exec"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p04_a_symlinked_receipt_path_refuses",
+]
 note = "J5 adversarial review (rev-A) §1.2."
 
 [[clause]]
@@ -314,8 +355,11 @@ note = "The foreign-owner case is the library predicate with a synthetic uid."
 id = "P04.9"
 gate = "P04"
 clause = "Through ouro-jail run, an unsafe state-root owner or mode refuses before exec"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p04_an_unsafe_state_root_mode_or_owner_refuses_through_run",
+]
+note = "Mode 0777 and a root-owned 0700 directory (/root), so each rule is seen on its own."
 
 [[clause]]
 id = "P04.5"
@@ -358,14 +402,18 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/review_linux.rs::r5_malformed_gate_frames_refuse_without_running_the_target",
   "ouro-jail/tests/portable_gate.rs::x02_an_empty_gate_is_a_closed_gate",
+  "ouro-jail/tests/j5_process_linux.rs::x02_a_closed_and_a_withheld_gate_differ_and_neither_runs_the_target",
 ]
 
 [[clause]]
 id = "X02.2"
 gate = "X02"
 clause = "A withheld gate (held open, nothing written): target marker absent, distinct from closed"
-tag = "untested"
-note = "The harness's withhold() closes the gate, the same bytes as a closed gate (ouro-fixture harness/gate.rs). Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x02_a_closed_and_a_withheld_gate_differ_and_neither_runs_the_target",
+]
+note = "Closed = EOF at once (gate_closed, within seconds); withheld = held open with nothing written (prepare_timeout at the 60 s budget). Different bytes, different outcomes."
 
 [[clause]]
 id = "X02.3"
@@ -377,20 +425,27 @@ tests = [
   "ouro-jail/tests/portable_gate.rs::x02_framing_faults_refuse",
   "ouro-jail/tests/portable_gate.rs::x02_content_faults_refuse",
   "ouro-jail/tests/portable_gate.rs::x02_an_oversized_frame_refuses_rather_than_being_truncated",
+  "ouro-jail/tests/j5_process_linux.rs::x02_every_malformed_release_refuses_without_running_the_target",
 ]
 
 [[clause]]
 id = "X02.4"
 gate = "X02"
 clause = "An extra LF after the frame: target marker absent"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x02_every_malformed_release_refuses_without_running_the_target",
+]
 note = "Parser only today (portable_gate.rs::x02_framing_faults_refuse), no live marker check. Owned by J5-B1."
 
 [[clause]]
 id = "X02.5"
 gate = "X02"
 clause = "A gate that times out: target marker absent"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x02_a_closed_and_a_withheld_gate_differ_and_neither_runs_the_target",
+]
 note = "Parser only today (portable_gate.rs::x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever), no target. Owned by J5-B1."
 
 [[clause]]
@@ -418,8 +473,21 @@ tests = [
 id = "X02.8"
 gate = "X02"
 clause = "An attempt id with a wrong RFC 9562 variant or uppercase hex refuses as a usage error"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x02_an_attempt_id_with_a_wrong_variant_or_uppercase_hex_is_a_usage_error",
+]
 note = "J5 adversarial review (rev-A) agent table: the variant check (state.rs) is never exercised."
+
+[[clause]]
+id = "X02.9"
+gate = "X02"
+clause = "The frame rules (oversized, duplicated, missing or extra LF, CRLF, bytes after the LF, duplicate JSON keys, wrong schema, action, attempt or digest, empty EOF) as the supervisor's parser applies them, pinned by a corpus the contract validator shares"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_records.rs::x02_the_gate_frame_corpus_gets_the_verdicts_it_expects",
+]
+note = "parser level only; the target-marker checks are J5-B1's live tests"
 
 # ------------------------------------------------------------------ X03
 
@@ -441,14 +509,21 @@ tests = [
 id = "X03.2"
 gate = "X03"
 clause = "Owner death before release never causes an exec"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x03_owner_death_before_release_runs_no_target",
+]
 note = "conformance_j1.rs::x03_observation_off_does_not_confirm_an_exec_that_never_happened kills the launcher, not the owner. Owned by J5-B1."
 
 [[clause]]
 id = "X03.3"
 gate = "X03"
 clause = "Owner death during release never causes a second exec"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x03_owner_death_during_release_execs_exactly_once",
+  "ouro-jail/tests/j5_process_linux.rs::x03_owner_death_mid_frame_runs_no_target",
+]
 note = "Owned by J5-B1."
 
 # ------------------------------------------------------------------ X04
@@ -464,14 +539,30 @@ clause = "Child exit 125 is an exit, distinct from every exec failure (which ref
 tag = "live-cli"
 tests = [
   "ouro-jail/tests/review_linux.rs::r2_exec_failures_are_distinguishable_and_exit_125_is_an_exit",
+  "ouro-jail/tests/j5_process_linux.rs::x04_missing_program_missing_interpreter_permission_and_exit_125_are_distinct_in_tool",
+  "ouro-jail/tests/j5_process_linux.rs::x04_missing_program_missing_interpreter_permission_and_exit_125_are_distinct_in_none",
 ]
 
 [[clause]]
 id = "X04.2"
 gate = "X04"
 clause = "Missing executable, missing interpreter and permission error have outcomes distinct from each other"
-tag = "untested"
-note = "review_linux.rs r2 prints the distinct messages and never asserts they differ. Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x04_missing_program_missing_interpreter_permission_and_exit_125_are_distinct_in_tool",
+  "ouro-jail/tests/j5_process_linux.rs::x04_missing_program_missing_interpreter_permission_and_exit_125_are_distinct_in_none",
+]
+note = "Machine-distinct: (outcome.cause, outcome.error.code) = (ENOENT, exec_failed), (ENOENT, exec_interpreter_missing), (EACCES, exec_failed). New code exec_interpreter_missing; proposed text in j5/B1/spec-proposal.md."
+
+[[clause]]
+id = "X04.3"
+gate = "X04"
+clause = "With observation off, a target exec that cannot be confirmed is a coded tool error (exit 1, exec_unconfirmed in errors[] and one stderr line), never a bare unknown; a confirmed one exits as the target did"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::observe_off_an_unconfirmed_fast_exec_is_the_coded_error_exec_unconfirmed",
+]
+note = "Found by the J5-C and J5-E reviews (§6.4). New code exec_unconfirmed; proposed text in j5/B1/spec-proposal.md. The integrator may prefer to file it under another gate."
 
 # ------------------------------------------------------------------ X05
 
@@ -491,9 +582,13 @@ tests = [
 [[clause]]
 id = "X05.3"
 gate = "X05"
-clause = "EOF reaches the caller when the target closes its streams, as in direct execution (no retained writable copy postpones it)"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: the harness waits for the jail to exit; EOF timing is never compared."
+clause = "Under none, EOF on stdout reaches the caller when the target closes it, as in direct execution"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x05_under_none_eof_reaches_the_caller_when_the_target_closes_its_stdout",
+  "ouro-jail/tests/j5_process_portable.rs::an_in_process_run_leaves_the_hosts_stdout_where_it_was",
+]
+note = "Product fix (J5-B1): the supervisor kept its own stdout copy for the whole run. The portable test guards that releasing stdout is the binary's opt-in, not the library's (in-process use). The contained profiles, and stderr, are X05.4's recorded limit."
 
 [[clause]]
 id = "X05.2"
@@ -503,6 +598,14 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/conformance_j1.rs::x05_streams",
 ]
+
+[[clause]]
+id = "X05.4"
+gate = "X05"
+clause = "Under tool, agent and build, EOF on stdout and stderr, and under none EOF on stderr, reach the caller when the target closes them, as in direct execution"
+tag = "recorded-limit"
+limit = "docs/specs/jail-v1/j5-authority.md § Known gaps: Under the contained profiles bubblewrap's outer process and namespace init hold the stdout and stderr they hand the target until the jail exits, so the caller's end-of-file comes when the jail exits, not when the target closes its streams. The supervisor also keeps its own stderr, which carries its diagnostics."
+note = "Integrator decision (J5 wave 3): the contained half of the EOF claim, and stderr under none (it carries the supervisor's diagnostics). The none stdout half is X05.3."
 
 # ------------------------------------------------------------------ X06
 
@@ -537,15 +640,21 @@ tests = [
 id = "X06.3"
 gate = "X06"
 clause = "CapPrm, CapInh, CapBnd and CapAmb are empty for every contained profile"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::x06_every_contained_profile_hands_the_target_an_empty_capability_set",
+]
 note = "Owned by J5-B1."
 
 [[clause]]
 id = "X06.4"
 gate = "X06"
 clause = "No tracing privilege: ptrace and pidfd_getfd against the supervisor and observer fail"
-tag = "untested"
-note = "Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::x06_no_tracing_privilege_reaches_the_child",
+]
+note = "From inside tool/build/agent/none the child probes every process it can address (its own /proc and every ancestor up the PPid chain): pidfd_getfd against each of the target's first descriptors and ptrace(PTRACE_SEIZE) both fail. For the contained profiles the child's /proc is its own pid namespace only (bwrap init, and under agent the launcher/bridge), so the supervisor/observer are not addressable; for none the ancestor chain reaches the supervisor (comm ouro-jail) and the calls still fail EPERM. Mutation-provable anchor: the jail's capability drop — the child's CapEff/CapPrm/CapInh/CapAmb are empty; adding CAP_SYS_PTRACE via bwrap --cap-add with the CapEff verify disabled reddens it (verified RED on host). The pidfd_getfd/ptrace denials are kernel-enforced defence in depth (Yama, user-namespace credential mapping, and the baseline seccomp ptrace deny for contained profiles) on top of that empty set. Fixes the B1 test that never called pidfd_getfd and targeted a pid absent from the child's namespace."
 
 # ------------------------------------------------------------------ X07
 
@@ -567,8 +676,12 @@ note = "Three independent mechanisms kill the tree, so the test cannot tell whet
 id = "X07.2"
 gate = "X07"
 clause = "The termination is verified: a tree-emptiness claim that was not verified fails a test"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: conformance_j1.rs's own comment and review_linux.rs record that a wait_tree claiming emptiness without verifying survives."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty",
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_a_sigterm_ignoring_descendant_is_dead_before_settlement_is_announced",
+]
+note = "tool: the target exits with a background descendant (the pid namespace ends it) while the leaf holds one more member, a process of the test's own traced with PTRACE_O_TRACEEXIT, which the supervisor's cgroup.kill reaches and which then waits at its exit stop, still a member of the leaf (measured on kernel 7.0); the run ends `unsettled`, tree_empty null, tree_unknown, exit 1, and the member was killed; released, it dies and gc removes the retained leaf. A stand-in for a member that cannot be verified dead within §9.3's budget. Red under M4 (contained wait_tree claims empty at once) and M4d (it verifies the pid namespace but not the leaf). none: the background descendant is dead before `settled` is announced (the L01.6 test's none legs), red under M4b."
 
 # ------------------------------------------------------------------ F01
 
@@ -607,7 +720,10 @@ note = "J5 adversarial review (rev-A) agent table: review_linux.rs r1_the_contai
 id = "F01.4"
 gate = "F01"
 clause = "A workspace symlink to a HOME secret reads as absent or denied (symlink escape)"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::f01_a_workspace_symlink_to_a_home_secret_reads_as_absent",
+]
 note = "Only resolution and scanner tests exist. Owned by J5-B2."
 
 # ------------------------------------------------------------------ F02
@@ -650,8 +766,11 @@ tests = [
 id = "F02.3"
 gate = "F02"
 clause = "Mount replacement of a protected object (unmount, rename or mount over it) fails"
-tag = "untested"
-note = "Only the generic mount-syscall denial exists (review_linux.rs r1_the_baseline_filter_denies_what_the_spec_lists). Owned by J5-B2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::f02_mount_replacement_of_a_protected_git_is_denied",
+]
+note = "The protected object cannot be mount-replaced (mount/umount2/move_mount/open_tree/fsopen all EPERM, object unchanged, still EROFS). Two independent locks (seccomp mount deny + CapEff=0); a seccomp-only mutation is a documented green survivor."
 
 # ------------------------------------------------------------------ F03
 
@@ -681,7 +800,10 @@ tests = [
 id = "F03.3"
 gate = "F03"
 clause = "A new deep protected segment created at run time is outside existing_and_root coverage, and the receipt says so"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::f03_a_new_deep_protected_segment_is_outside_existing_and_root_coverage",
+]
 note = "Owned by J5-B2."
 
 # ------------------------------------------------------------------ F04
@@ -705,14 +827,20 @@ tests = [
 id = "F04.2"
 gate = "F04"
 clause = "A source-identity swap refuses"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H4: deleting the mount-handoff refusal (platform.rs pin.verify loop) leaves linux_mechanisms.rs a_pinned_path_notices_that_it_was_replaced (detection in a library pin) and conformance_j3_credentials.rs c01_bwrap_refuses_a_bind_ro_source_swapped_between_resolution_and_mount (a credential source) green. No test swaps a workspace, grant or protected-segment source."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::f04_a_source_identity_swap_at_the_mount_handoff_refuses",
+]
+note = "A real workspace-source swap between pinning and the mount handoff (the OURO_JAIL_TEST_MOUNT_SWAP rendezvous seam opens the window; the rename is real) makes pin.verify refuse before exec, no marker, refused receipt claiming no boundary. Enforcement: the pin.verify() refusal loop in platform.rs; iterating no pins reddens it."
 
 [[clause]]
 id = "F04.3"
 gate = "F04"
 clause = "Through ouro-jail run, each refusal writes a refused receipt that claims no complete boundary"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::f04_a_workspace_deeper_than_the_scan_limit_refuses_without_claiming_coverage",
+]
 note = "The product's refusal paths (platform.rs) are reached by no test. Owned by J5-B2."
 
 # ------------------------------------------------------------------ S01
@@ -764,10 +892,12 @@ row = "Child cannot reach host processes, cgroups, namespace fds, host sockets o
 id = "S02.1"
 gate = "S02"
 clause = "The child cannot see host processes (private pid namespace and /proc)"
-tag = "live-lib"
+tag = "live-cli"
 tests = [
   "ouro-jail/tests/linux_mechanisms.rs::the_tool_profile_grants_what_it_says_and_nothing_else",
+  "ouro-jail/tests/j5_boundary_linux.rs::s02_a_host_namespace_fd_cannot_be_opened_or_entered",
 ]
+note = "B2: the private /proc shows no host process, through ouro-jail run."
 
 [[clause]]
 id = "S02.2"
@@ -789,7 +919,10 @@ note = "J5 adversarial review (rev-A) §1.2: mountinfo is captured but never che
 id = "S02.3"
 gate = "S02"
 clause = "Opening a host namespace descriptor fails"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::s02_a_host_namespace_fd_cannot_be_opened_or_entered",
+]
 note = "Covered only indirectly (private /proc; setns and unshare EPERM). Owned by J5-B2."
 
 [[clause]]
@@ -861,8 +994,11 @@ tests = [
 id = "S03.5"
 gate = "S03"
 clause = "Attempts to undo the cgroup, Landlock, seccomp and no_new_privs boundaries fail"
-tag = "untested"
-note = "Owned by J5-B2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::s03_the_outer_boundaries_cannot_be_reversed_inside_agent",
+]
+note = "no_new_privs, seccomp baseline (probed with keyctl, a DENY_EPERM call the observer does not block, so its EPERM is the baseline alone), execution cgroup and Landlock reversal attempts inside agent all fail, under --observe on and off. keyctl removed from DENY_EPERM reddens it under both modes; ptrace is a defence-in-depth check under observe on only."
 
 # ------------------------------------------------------------------ S04
 
@@ -883,9 +1019,10 @@ tests = [
 id = "S04.2"
 gate = "S04"
 clause = "agent's baseline rejects io_uring as tool's does"
-tag = "portable"
+tag = "live-cli"
 tests = [
   "ouro-jail/src/lib.rs::platform::linux::seccomp::tests::the_unprivileged_agent_baseline_is_tool_without_the_af_unix_rule",
+  "ouro-jail/tests/j5_boundary_linux.rs::s04_agent_and_build_refuse_every_io_uring_interface",
 ]
 note = "Filter interpreter only; J5-B2 adds the live agent run."
 
@@ -893,7 +1030,10 @@ note = "Filter interpreter only; J5-B2 adds the live agent run."
 id = "S04.3"
 gate = "S04"
 clause = "build rejects io_uring"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::s04_agent_and_build_refuse_every_io_uring_interface",
+]
 note = "build shares the tool filter (inferred, platform.rs). Owned by J5-B2."
 
 [[clause]]
@@ -924,7 +1064,10 @@ note = "J5 adversarial review (rev-A) §1.2."
 id = "S04.5"
 gate = "S04"
 clause = "none retains its explicit io_uring exclusion: io_uring is not filtered under none"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::s04_none_installs_no_io_uring_filter",
+]
 note = "Named in j4-authority.md Known gaps; no live none run exercises it. Owned by J5-B2."
 
 # ------------------------------------------------------------------ N01
@@ -947,7 +1090,10 @@ tests = [
 id = "N01.2"
 gate = "N01"
 clause = "The same egress attempts fail under build"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::n01_build_direct_egress_fails",
+]
 note = "The egress loop is agent and tool only. Owned by J5-B2."
 
 # ------------------------------------------------------------------ N02
@@ -1168,8 +1314,11 @@ note = "The sockets in extra grants are bound before launch."
 id = "N05.4"
 gate = "N05"
 clause = "Late-created aliases, and late sockets in extra grants, are unreachable"
-tag = "untested"
-note = "Owned by J5-B2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::n05_a_late_socket_in_an_extra_grant_is_unreachable",
+]
+note = "A host socket bound in an operator --rw extra grant AFTER prepared is unreachable (EACCES); the authorized proxy still works. New over conformance_j3_agent's n05 (which binds extra-grant sockets before launch). The late hard-link/symlink-in-workspace cases were dropped as duplicates of that test's late-workspace-socket path."
 
 [[clause]]
 id = "N05.5"
@@ -1185,7 +1334,10 @@ tests = [
 id = "N05.6"
 gate = "N05"
 clause = "Nested IPC (AF_UNIX inside the inner sandbox) works"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::n05_nested_sandbox_ipc_is_allowed",
+]
 note = "Owned by J5-B2."
 
 [[clause]]
@@ -1237,8 +1389,11 @@ tests = [
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o01_every_variant_is_one_event_per_result_build",
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o01_every_variant_is_one_event_per_result_none",
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o01_every_variant_is_one_event_per_result_agent",
+  "ouro-jail/tests/portable_records.rs::r01_every_validation_case_gets_the_verdict_the_corpus_expects",
+  "ouro-jail/tests/j5_records_linux.rs::j5_tool_records_pass_the_frozen_contract",
+  "ouro-jail/tests/j5_records_linux.rs::j5_agent_records_pass_the_frozen_contract",
 ]
-note = "Asserted on every audit outcome these runs produce; the event schema itself does not yet forbid bytes_* on audit outcomes (J5-C)."
+note = "Asserted on every audit outcome these runs produce; the event schema itself does not yet forbid bytes_* on audit outcomes (J5-C). event.schema.json and jail-event.schema.json forbid bytes_in/bytes_out/duration_ms on audit and jail wrapper outcomes; every live event is validated against them"
 
 # ------------------------------------------------------------------ O02
 
@@ -1354,15 +1509,21 @@ row = "Truncation, unmatched exit, map exhaustion and ring loss produce gaps, ne
 id = "O03.1"
 gate = "O03"
 clause = "Truncation (a required structure the kernel accepted but the tracer could not read) produces a gap"
-tag = "untested"
-note = "The gap branch in tracer/session.rs is driven by no test; conformance_j1.rs o03_an_unreadable_argument_is_not_a_hole_in_coverage covers an argument the kernel also rejects. Owned by J5-B2 (or a requested seam)."
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::o03_a_truncated_path_is_a_gap_not_a_result",
+]
+note = "Truncation: a covered call whose path the tracer could not read (kernel accepted) becomes a path_unreadable gap in a degraded coverage class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_TRUNCATE_PATH (recorded in native details). Enforcement: self.gap(GapReason::PathUnreadable, ..) in tracer/session.rs; deleting it makes the truncated call vanish."
 
 [[clause]]
 id = "O03.2"
 gate = "O03"
 clause = "An unmatched exit produces a gap, never a result"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H3: deleting the UnmatchedExit gap in tracer/session.rs leaves both former tests green; they call Tracer::attach directly. Spec §11.4 says an unmatched exit cannot occur under ptrace (next clause)."
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::o03_an_unmatched_exit_is_a_gap_not_a_result",
+]
+note = "A covered exit with no entry to pair with becomes an unmatched_exit gap in a degraded class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT. Enforcement: self.gap(GapReason::UnmatchedExit, ..) at the seam site in tracer/session.rs; deleting it counts the call as a normal result."
 
 [[clause]]
 id = "O03.6"
@@ -1429,6 +1590,20 @@ tests = [
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o04_an_unrelated_host_process_is_never_observed",
 ]
 note = "Under none only."
+
+[[clause]]
+id = "O04.3"
+gate = "O04"
+clause = "A process the supervisor was started beside (its own child that the attempt did not create) is not observed, is not loss and does not hold the observer open: doctor reports the observer available and an observed strict run settles verified"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_the_tracer_finishes_beside_a_live_child_it_does_not_trace",
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_a_child_it_does_not_trace_that_exits_while_traced_is_delivered_not_lost",
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_the_backend_the_launcher_descends_through_is_awaited_and_delivered",
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_doctor_reports_the_observer_available_beside_an_inherited_child",
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_a_strict_tool_run_traced_to_an_inherited_reader_settles_verified",
+]
+note = "The jail is exec'd by a helper that forked a child first (the process-substitution shape, made explicit). Three tests drive the tracer in-process (live-lib): Finished beside a live child that stops and continues while traced, no gap, no unreaped child, the child still the test's to reap; an exit of such a child while traced is one UntracedChildExit and no loss; the backend the launcher descends through is still awaited and its exit delivered before Finished. Two drive the real ouro-jail (live-cli): doctor's observer_closed_set and closed_set_observation available; a strict tool run with --trace-fd to that child exits 0, settles with tree_empty true and integrity verified, every class active with no gap, and the child reads the whole stream, which passes check_trace ending in the receipt. All five were red on 91a347ad except the exit-while-traced guard."
 
 # ------------------------------------------------------------------ O05
 
@@ -1568,8 +1743,11 @@ tests = [
 id = "L01.10"
 gate = "L01"
 clause = "Wall expiry under a contained profile ends a multi-process tree, including a SIGTERM-ignoring descendant, at verified death"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: the tool tests run one `sleep` and read only the receipt's tree_empty."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant",
+]
+note = "tool, wall=2s, observation on and off: the target and its descendant both ignore SIGTERM, so only the forced stop ends them; both die after the wall and within wall + 10 s of exec (measured ~4.0 s: wall, grace, kill), the receipt is verified with cause wall_expiry, the wall row hit, and the target SIGKILLed. Red under M2."
 
 [[clause]]
 id = "L01.2"
@@ -1585,22 +1763,31 @@ tests = [
 id = "L01.11"
 gate = "L01"
 clause = "Operator TERM to a none supervisor with an intact leaf ends at verified tree death"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_operator_int_term_and_hup_each_end_a_none_tree_at_verified_death",
+]
+note = "The TERM legs of the none operator-signal test (observation on and off): intact leaf, verified death with a SIGTERM-ignoring descendant dead before `settled`. Red under M1 and M3."
 
 [[clause]]
 id = "L01.3"
 gate = "L01"
 clause = "Operator INT, TERM and HUP to the supervisor of a contained run each end the tree at verified death"
-tag = "untested"
-note = "portable_signals.rs proves the TERM handler wakes the supervisor; nothing sends INT or HUP. Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_operator_int_term_and_hup_each_end_a_contained_tree",
+]
+note = "tool, agent and build; INT, TERM and HUP each sent to the spawned ouro-jail supervisor after checking /proc/<pid>/exe is the jail binary and SigCgt holds the signal; the target and its SIGTERM-ignoring descendant (host pids, pidfds) die within 10 s of the signal (measured 1-15 ms), `settled` arrives, the receipt is verified with cause operator_signal and the target signaled 15. Red under M1 (the signal requests no stop)."
 
 [[clause]]
 id = "L01.4"
 gate = "L01"
 clause = "Operator INT and HUP to a none supervisor end at verified death or explicit unknown"
-tag = "untested"
-note = "Not assigned to a J5 slice by the contract; see J5-A report."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_operator_int_term_and_hup_each_end_a_none_tree_at_verified_death",
+]
+note = "none with an intact leaf, observation on and off: INT and HUP (and TERM) to the real supervisor end at verified death (registered_boundary), the target within 10 s and its SIGTERM-ignoring descendant before `settled` is announced. Only the verified-death branch is produced here; the explicit-unknown branch is L01.2's. Red under M1 (no stop) and M3 (no cgroup.kill of the leaf)."
 
 [[clause]]
 id = "L01.5"
@@ -1615,29 +1802,41 @@ tests = [
 id = "L01.6"
 gate = "L01"
 clause = "A SIGTERM-ignoring descendant dies at settlement"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H1: review_linux.rs r4_a_sigterm_ignoring_descendant_dies_at_settlement runs `ouro-fixture ignore-term`, which ignores SIGTERM itself and forks nothing, and asserts only tree_empty."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_a_sigterm_ignoring_descendant_is_dead_before_settlement_is_announced",
+]
+note = "The target (tool and none, observation on and off) forks a descendant that ignores SIGTERM (proved from /proc SigIgn before anything else happens) and exits 0; when the terminal control message arrives the descendant's pidfd is already readable, and the receipt settles verified with the target's exit 0. Under tool the pid namespace ends the descendant with its target, so no single product mutation reddens the tool legs; under none only the supervisor's leaf kill can, and the none legs are red under M3 (no cgroup.kill) and M4b (wait_tree claims empty at once)."
 
 [[clause]]
 id = "L01.7"
 gate = "L01"
 clause = "A fork burst is fully reaped"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: review_linux.rs r4_a_fork_burst_is_fully_reaped: the fixture reaps its own children, its exit code is never read, and under the 256-pid preferred ceiling it very likely exits 1 at EAGAIN; only tree_empty and kind=exited are asserted."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_a_fork_burst_is_fully_reaped",
+]
+note = "tool: the target forks 120 children that exec /bin/true, reaps them and exits 0 only if all 120 forked and exited 0 (its report is asserted); the trace holds a clean proc.exit for every child and the target; the tree is verified. none (observation on and off): 120 children are left as unreaped zombies and orphaned to the subreaping supervisor at the target's exit; the test is itself a child subreaper for the run, so whatever the supervisor leaves behind at its exit comes back to it, and nothing does. Red under M5 and M5b (J5-B3). At the wave-3 merge the test fails under none --observe on; J5-T's fix is pending, and until it lands this clause fails the verdict."
 
 [[clause]]
 id = "L01.8"
 gate = "L01"
 clause = "A fork storm stopped mid-flight ends at verified tree death"
-tag = "untested"
-note = "Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_a_fork_storm_stopped_mid_flight_ends_at_verified_tree_death",
+]
+note = "tool, pids=64: a storm whose every process ignores SIGTERM is proved running when stopped (the leaf's pids.current >= 60 and the kernel's pids.events max count rising between two reads); operator SIGTERM then ends it through the forced stop: the namespace init dies within 10 s of the signal (measured ~2.03 s: grace plus kill), the receipt is verified with cause operator_signal and the pids hit recorded, and the leaf is gone. Red under M2 (no forced stop)."
 
 [[clause]]
 id = "L01.12"
 gate = "L01"
 clause = "A SIGTERM-ignoring descendant of a contained run dies when the operator signals the supervisor"
-tag = "untested"
-note = "Split from L01.3: the operator-signal test runs a target with no SIGTERM-ignoring descendant."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l01_a_sigterm_ignoring_descendant_of_a_contained_run_dies_when_the_operator_signals",
+]
+note = "tool, observation on and off: target and descendant both ignore SIGTERM (checked in /proc before the signal); operator SIGTERM to the real supervisor; the descendant dies within 10 s (measured ~2.01 s: the 2 s grace, then the forced stop), the receipt is verified, cause operator_signal, target SIGKILLed. Red under M2. The contained operator INT/TERM/HUP test (L01.3) also ends a SIGTERM-ignoring descendant, through the target's death."
 
 # ------------------------------------------------------------------ L02
 
@@ -1699,16 +1898,24 @@ note = "A stand-in backend and supervisor with the real watcher."
 [[clause]]
 id = "L02.9"
 gate = "L02"
-clause = "When the backend of a real run is killed, the target and its tree die and the receipt records how"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: the CLI backend kill asserts only outcome.kind != exited."
+clause = "When the backend of a real run is killed, the target and its tree die within a bound and the verified receipt claims no exit"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l02_killing_the_backend_of_a_real_run_ends_the_tree_and_the_receipt_says_how",
+]
+note = "tool, observation on and off: SIGKILL of bubblewrap's outer process kills the target and its descendant within 5 s (measured 2-140 ms); the receipt is verified and claims no exit: with observation the target is signaled 9 (no cause: the kernel's parent-death chain acted), without it unknown (exit 1). Red under M6 with observation on (J5-B3). The receipt does not name the lost helper; that is a recorded gap (j5-authority.md, Known gaps), not claimed here."
 
 [[clause]]
 id = "L02.4"
 gate = "L02"
-clause = "Under agent and build, killing each actual helper ends the tree"
-tag = "untested"
-note = "Helper kills are enumerated for tool only. Owned by J5-B1."
+clause = "Under agent and build, killing each lifetime link (backend, watcher, supervisor) ends the tree within a bound"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l02_killing_the_backend_of_agent_or_build_ends_the_tree_within_a_bound",
+  "ouro-jail/tests/j5_lifetime_linux.rs::l02_killing_the_watcher_of_agent_or_build_ends_the_tree_within_a_bound",
+  "ouro-jail/tests/j5_lifetime_linux.rs::l02_killing_the_supervisor_of_agent_or_build_ends_the_tree_within_a_bound",
+]
+note = "agent and build, one test per lifetime link §9.3 names: its SIGKILL ends the target, its SIGTERM-ignoring descendant, every charged helper and the watcher within 5 s of the kill (measured 0.7-6 ms); backend and watcher kills settle verified with the target SIGKILLed; after a supervisor kill the last receipt claims no outcome and gc removes the leaf (J5-B3). Re-worded to the revision-19 row (J5 wave 3): the bridge is not a lifetime link; its death is L02.10."
 
 [[clause]]
 id = "L02.5"
@@ -1726,6 +1933,27 @@ clause = "A supervisor killed during bubblewrap's startup in an attempt without 
 tag = "recorded-limit"
 limit = "docs/specs/jail-v1/j4-authority.md § Known gaps: A supervisor killed during bubblewrap's startup, in an attempt without an execution leaf, can leave the namespace init (and under `agent` its bridge) alive; §9.3 states the limit."
 note = "A named v1 limit: the L02 row's claim fails here without lingering."
+
+[[clause]]
+id = "L02.10"
+gate = "L02"
+clause = "Under agent, the bridge's death is recorded once, a new connect fails closed and the tree continues"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues",
+]
+note = "Killed, the bridge is noted once (bridge_exited), a new connect fails with ECONNREFUSED, the receipt has no error and the proxy source stays active, and the target exits 0 on its own. Red under M9 (no note) (J5-B3). The revision-19 L02 row's bridge sentence (§10)."
+
+[[clause]]
+id = "L02.11"
+gate = "L02"
+clause = "Under agent, the proxy's death is proxy.net evidence loss: strict stops the attempt, best-effort continues degraded"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/conformance_j3_agent.rs::n04_proxy_death_under_strict_evidence_stops_the_attempt",
+  "ouro-jail/tests/conformance_j3_agent.rs::n04_proxy_death_fails_closed_and_best_effort_continues_degraded",
+]
+note = "The revision-19 L02 row's proxy sentence (§10). The same tests prove N04.1; proxy death is produced by shutting its listener down through pidfd_getfd."
 
 # ------------------------------------------------------------------ L03
 
@@ -1766,8 +1994,12 @@ tests = [
 id = "L03.6"
 gate = "L03"
 clause = "On a host without pids, the receipt records the preferred ceiling absent (required false, applied false) with that note"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: only the in-memory `applied == false` is asserted."
+tag = "recorded-limit"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l03_a_preferred_pids_ceiling_without_a_leaf_is_recorded_absent_and_the_run_proceeds",
+]
+limit = "docs/specs/jail-v1/j5-authority.md § Known gaps: A leaf without the pids controller cannot be produced through `ouro-jail run` on the stock reference host."
+note = "The trigger, a leaf without the pids controller, is not producible through ouro-jail run on the stock host (the cited record): the leaf is always made directly beneath user@<uid>.service, whose cgroup.subtree_control enables pids and is shared by every session and service of the account. The listed test proves the recording through the command line with no leaf at all (the leaf's name taken by an owner-bound attempt id): the preferred pids row required false, applied false, null mechanism, scope and hit; the reason in native details; a wrapper limit note naming pids; the run proceeds. The controller-absent branch itself is L03.1/L03.2's library test."
 
 [[clause]]
 id = "L03.3"
@@ -1787,14 +2019,17 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/conformance_j3_none.rs::l03_none_without_a_usable_cgroup_refuses",
 ]
-note = "In the conformance scope the real jail runs inside a bubblewrap cgroup namespace rooted at the test's scope, so the delegated subtree is outside it; from a plain session the test holds the scope step to its no-lingering branch through OURO_JAIL_TEST_SUPERVISOR_SCOPE."
+note = "In the conformance scope the real jail runs inside a bubblewrap cgroup namespace rooted at the test's scope, so the delegated subtree is outside it; from a plain session the test holds the scope step to its no-lingering branch through OURO_JAIL_TEST_SUPERVISOR_SCOPE. Requirement name updated for decision 1 (execution_cgroup -> execution_boundary); the refusal itself is unchanged"
 
 [[clause]]
 id = "L03.7"
 gate = "L03"
 clause = "A contained profile whose required limit needs a cgroup that cannot be created refuses"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2: a row claim with no clause."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l03_a_required_limit_whose_leaf_cannot_be_created_refuses_before_exec",
+]
+note = "tool and agent with an explicit pids ceiling, build with its required memory ceiling: the owner binds the attempt id (--attempt-id with --gate-fd), the test takes the leaf's name ouro-<id>.leaf in the delegated subtree first, the supervisor's exclusive mkdir fails, and the run refuses: exit 125, missing_capability, `refused` with no `prepared` or `exec_confirmed`, no target marker, and the taken directory untouched (same device and inode). The trigger is a name collision; every leaf-creation failure takes the same branch. Red under M10."
 
 # ------------------------------------------------------------------ L04
 
@@ -1834,22 +2069,32 @@ tests = [
 id = "L04.4"
 gate = "L04"
 clause = "Deadlines run on CLOCK_BOOTTIME"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H2: linux_mechanisms.rs the_boot_clock_advances_and_a_deadline_expires times a Deadline against the same boottime_ns(); it passes if that reads CLOCK_REALTIME. clock.rs boottime_is_not_the_realtime_clock (unit) excludes REALTIME only; BOOTTIME and MONOTONIC differ only across a suspend."
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump",
+  "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_gate_wait_follows_the_boot_clock",
+]
+note = "The boot, monotonic and real-time clocks are equal on the reference host (never suspended, never set), so an LD_PRELOAD clock_gettime shim makes them differ inside the real ouro-jail run: advancing only CLOCK_BOOTTIME by 120 s expires the 20 s execution wall and the 60 s gate budget within 8 s of the jump, which a deadline on CLOCK_MONOTONIC or CLOCK_REALTIME would not do. The preparation budget shares the gate's clock code (21ff0362) and has no test of its own: no stock-host fixture holds preparation open."
 
 [[clause]]
 id = "L04.5"
 gate = "L04"
 clause = "BOOTTIME deadlines ignore wall-clock adjustments"
-tag = "untested"
-note = "No document records this as a limit yet (the J5 milestone report will); until then it is untested. Setting the clock needs CAP_SYS_TIME, which the stock reference account lacks."
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_execution_wall_ignores_wall_clock_steps",
+]
+note = "A real clock step needs CAP_SYS_TIME. The real ouro-jail run is started with an LD_PRELOAD clock_gettime shim that, from exec on, steps only CLOCK_REALTIME by +1 h (and, in a second run, -1 h); the 6 s wall still expires between 3 s and 16 s after exec on the test's own unshifted clock, cause wall_expiry, mechanism boottime-deadline. Red under M12b (boottime_ns reads CLOCK_REALTIME). The kernel's own clock-step path is not exercised (j5-authority.md, Known gaps)."
 
 [[clause]]
 id = "L04.6"
 gate = "L04"
 clause = "BOOTTIME deadlines include suspend"
-tag = "untested"
-note = "No document records this as a limit yet (the J5 milestone report will); until then it is untested. The unprivileged account cannot suspend the reference VM."
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump",
+]
+note = "A real suspend cannot be produced on the shared reference VM. The shim advances only CLOCK_BOOTTIME by 120 s right after exec (a suspend's signature: the boot clock moves, the monotonic clock does not); the 20 s wall expires within 8 s of the jump (measured ~15 ms), cause wall_expiry. Red under M12 (boottime_ns reads CLOCK_MONOTONIC) and M12b. The gate wait follows the boot clock too since 21ff0362 (L04.4). The kernel's own suspend path, timers acted on at resume, is not exercised (j5-authority.md, Known gaps)."
 
 # ------------------------------------------------------------------ L05
 
@@ -1893,6 +2138,7 @@ tests = [
   "ouro-jail/tests/portable_records.rs::r01_every_validation_case_gets_the_verdict_the_corpus_expects",
 ]
 checks = ["contract_validation"]
+note = "127 schema cases in fixtures/validation-cases.json; every J5-C schema rule is caught by at least one negative case (mutation table in the J5-C report)"
 
 [[clause]]
 id = "R01.2"
@@ -1922,7 +2168,9 @@ clause = "The semantic checks reject what the schema accepts"
 tag = "portable"
 tests = [
   "ouro-jail/tests/portable_records.rs::r01_the_semantic_checks_reject_what_the_schema_accepts",
+  "ouro-jail/tests/portable_records.rs::r01_the_semantic_corpus_gets_the_verdicts_it_expects",
 ]
+note = "45 cases in fixtures/semantic-cases.json naming the rule each must break; both implementations must name the same rule set"
 
 [[clause]]
 id = "R01.4"
@@ -1933,6 +2181,74 @@ tests = [
   "ouro-jail/tests/portable_records.rs::r01_every_validation_case_gets_the_verdict_the_corpus_expects",
 ]
 checks = ["contract_validation"]
+
+[[clause]]
+id = "R01.6"
+gate = "R01"
+clause = "One example per kind of event the jail writes (each audit operation and completion, both proxy decisions, the receipt note and every wrapper note kind)"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_records.rs::r01_every_event_kind_has_an_example",
+]
+
+[[clause]]
+id = "R01.7"
+gate = "R01"
+clause = "Every receipt, trace and control transcript the real jail writes under tool, build, agent and none, released through the gate, refused at the gate, and with observation off, passes the frozen contract, and the live trace carries each event kind the run was built to produce"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_records_linux.rs::j5_tool_records_pass_the_frozen_contract",
+  "ouro-jail/tests/j5_records_linux.rs::j5_build_records_pass_the_frozen_contract",
+  "ouro-jail/tests/j5_records_linux.rs::j5_agent_records_pass_the_frozen_contract",
+  "ouro-jail/tests/j5_records_linux.rs::j5_none_records_pass_the_frozen_contract",
+  "ouro-jail/tests/j5_records_linux.rs::j5_a_refused_release_writes_records_that_pass_the_frozen_contract",
+  "ouro-jail/tests/j5_records_linux.rs::j5_observation_off_records_pass_the_frozen_contract",
+]
+
+[[clause]]
+id = "R01.8"
+gate = "R01"
+clause = "The live loss and observer tests hold every receipt, trace and control transcript they read to the whole contract (they ran the schema only, or nothing)"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/observer_j4_linux.rs::j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops",
+  "ouro-jail/tests/observer_j4_linux.rs::j4_d2_none_a_foreign_abi_call_degrades_the_receipt",
+]
+note = "and every j4_loss_linux.rs test that calls its receipt() helper (O03, O05, R04); the helper change is J5-C's, the tests are J4's"
+
+[[clause]]
+id = "R01.9"
+gate = "R01"
+clause = "The observer's failure paths (a panicked tracer thread, a result a poisoned trace lock could not take) write receipts that pass the frozen contract: every degraded class names its gap"
+tag = "simulated"
+tests = [
+  "ouro-jail/tests/j5_audit_gaps_linux.rs::j5_a_panicked_observer_writes_a_receipt_that_passes_the_frozen_contract",
+  "ouro-jail/tests/j5_audit_gaps_linux.rs::j5_a_poisoned_trace_writes_a_receipt_that_passes_the_frozen_contract",
+  "ouro-jail/src/lib.rs::platform::linux::audit::tests::a_panicked_observer_is_a_gap_in_every_audit_class",
+  "ouro-jail/src/lib.rs::platform::linux::audit::tests::a_result_a_poisoned_trace_cannot_take_is_a_gap_of_its_class",
+  "ouro-jail/src/lib.rs::platform::linux::audit::tests::a_gap_note_a_poisoned_trace_refuses_is_a_lost_frame",
+]
+note = "the panic and the poisoned lock are forced in-process (simulated); no live run reaches either"
+
+[[clause]]
+id = "R01.10"
+gate = "R01"
+clause = "No schema file can shadow a frozen schema: both loaders and the freeze test refuse two files declaring one $id"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_records.rs::r01_the_schema_loader_refuses_two_files_with_one_id",
+  "ouro-jail/tests/portable_version.rs::every_wire_schema_is_frozen_with_the_identifiers_the_binary_announces",
+]
+
+[[clause]]
+id = "R01.11"
+gate = "R01"
+clause = "Every identifier version --json announces is backed by a frozen file, and no frozen artifact changes under its identifiers"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_version.rs::every_announced_identifier_is_backed_by_a_frozen_file",
+  "ouro-jail/tests/portable_version.rs::a_frozen_artifact_never_changes_under_its_frozen_identifiers",
+]
 
 # ------------------------------------------------------------------ R02
 
@@ -2012,8 +2328,13 @@ tests = [
 id = "R03.6"
 gate = "R03"
 clause = "A consumer disconnect cannot block deadline enforcement"
-tag = "untested"
-note = "J5 adversarial review (rev-A) H7: no listed test runs a wall with a disconnected consumer."
+tag = "recorded-limit"
+tests = [
+  "ouro-jail/tests/j4_trace_linux.rs::j4_r03_disconnect_best_effort_continues",
+  "ouro-jail/tests/j4_trace_linux.rs::j4_r03_disconnect_strict_stops",
+]
+limit = "docs/specs/jail-v1/j5-authority.md § Known gaps: A closed pipe returns EPIPE at once and never blocks a writer, so there is no blocking case for a disconnected consumer to create"
+note = "Not produced as a live test: a disconnect cannot delay the wall (EPIPE is immediate), so no jail-code deletion makes it block (J5-B2). The disconnect's handling is proved in both evidence modes by the listed tests (R03.2); the consumer state that can block a writer, a stalled but open one, is R03.3's."
 
 [[clause]]
 id = "R03.3"
@@ -2024,7 +2345,9 @@ tests = [
   "ouro-jail/tests/j4_trace_linux.rs::j4_r03_saturation_strict_stops",
   "ouro-jail/tests/j4_trace_linux.rs::j4_r03_the_wall_is_enforced_while_the_trace_is_saturated",
   "ouro-jail/tests/j4_trace_linux.rs::j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full",
+  "ouro-jail/tests/j5_boundary_linux.rs::r03_a_wall_fires_on_time_under_a_saturated_trace",
 ]
+note = "A 2s wall fires on time (wall_expiry, hit, elapsed < 9s) while a Never trace consumer fills the pipe and the 4 MiB external queue behind it (the boundary frame is written in part; the excess is lost). Enforcement: the nonblocking external trace fd (trace.rs FdSink::from_raw_fd set_nonblocking); a blocking fd hangs the supervision loop on the full pipe and the wall never fires (harness timeout) — verified RED on the host. Complements j4_trace_linux's saturation tests with a best-effort + recognisable-prefix assertion. A guaranteed-torn partial write to the output pipe needs a smaller pipe (harness-owned) or a larger-than-pipe event / FdSink seam (trace.rs, J5-C-owned); see B2/requests.md."
 
 [[clause]]
 id = "R03.7"
@@ -2043,6 +2366,20 @@ tests = [
   "ouro-jail/tests/portable_persistence.rs::j4_r03_control_backpressure_counts_an_undelivered_terminal_frame",
 ]
 note = "On the simulated platform only."
+
+[[clause]]
+id = "R03.8"
+gate = "R03"
+clause = "A trace loss's note and every later receipt record the same loss: the classes the attempt covers, the note's start, the wrapper source; a dropped reserve note ends the external stream"
+tag = "live-cli"
+tests = [
+  "ouro-jail/src/lib.rs::trace::tests::the_loss_note_names_the_covered_classes_and_keeps_its_start",
+  "ouro-jail/src/lib.rs::supervisor::tests::a_receipt_records_the_trace_loss_with_the_notes_start_and_source",
+  "ouro-jail/src/lib.rs::trace::tests::a_drain_that_drops_a_reserve_note_writes_nothing_after_it",
+  "ouro-jail/tests/portable_records.rs::r01_the_semantic_corpus_gets_the_verdicts_it_expects",
+  "ouro-jail/tests/j5_records_linux.rs::j5_a_trace_loss_note_and_its_receipt_agree",
+]
+note = "the live test is a real stalled --trace-fd consumer on the reference host (live-cli); the drain case is a Linux unit test"
 
 # ------------------------------------------------------------------ R04
 
@@ -2130,8 +2467,11 @@ tests = [
 id = "R05.3"
 gate = "R05"
 clause = "Forging the receipt, trace or jail state is outside local evidence assurance while the run still ends as it would"
-tag = "untested"
-note = "Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_boundary_linux.rs::r05_forging_records_mid_run_is_outside_local_evidence_assurance",
+]
+note = "A same-uid child overwrites the attempt's receipt (jail.json), trace sink (trace.ndjson) and jail state (jail-state.json) WHILE a none run is live, then exits 0; the run's own outcome is exactly what it would be without the forgery (settles, exits 0, tree verified) and its records still make no protection claim (unprotected), with no error and no note reporting the tampering — none offers no local evidence assurance against a same-uid peer (§9.3). Strengthens conformance_j3_none::r05_same_uid_tampering (which forges only the static policy.json). Mutation-provable anchor: the none unprotected labeling (records.rs Containment::None => ChildProtection::Unprotected); upgrading none to Enforced reddens the unprotected assertion (verified RED on host). R05 is about the absence of assurance, so the test also asserts the product does not falsely claim to have detected the forgery."
 
 # ------------------------------------------------------------------ R06
 
@@ -2156,7 +2496,9 @@ clause = "A descendant that leaves after the target exits loses integrity and it
 tag = "live-cli"
 tests = [
   "ouro-jail/tests/conformance_j3_none.rs::r06_a_descendant_that_leaves_after_the_target_exits_loses_integrity",
+  "ouro-jail/tests/j5_boundary_linux.rs::r06_a_detected_escaped_descendant_loses_integrity_and_retains_state",
 ]
+note = "R06's SECOND sentence: a detected escaped descendant (subreaper + membership check) loses integrity and retains state, none/observe off. Enforcement: the escaped-membership arms in uncontained.rs; deleting them falsely certifies the survivor dead."
 
 [[clause]]
 id = "R06.4"
@@ -2179,8 +2521,27 @@ note = "J5 adversarial review (rev-A) §1.2: retention is asserted in one test o
 id = "R06.3"
 gate = "R06"
 clause = "An unobserved migrated descendant is not certified dead by registered-boundary verification"
-tag = "untested"
-note = "Only the registered_boundary scope label is asserted. Owned by J5-B2."
+tag = "recorded-limit"
+tests = [
+  "ouro-jail/tests/conformance_j3_none.rs::r05_clean_none_evidence_stays_unprotected",
+  "ouro-jail/tests/conformance_j3_none.rs::none_gate_closed_refuses_after_a_verified_teardown",
+  "ouro-jail/src/lib.rs::platform::linux::uncontained::tests::a_clean_none_tree_is_empty_only_in_the_registered_scope",
+]
+limit = "docs/specs/jail-v1/j5-authority.md § Known gaps: A test cannot migrate a descendant out of the registered cgroup without the supervisor being able to see it: an unseen migration is a race jail-v1 §9.3 declines to promise to detect."
+note = "R06's THIRD sentence, 'an unobserved migrated descendant is not certified dead by registered-boundary verification', is not producible as a deterministic live fixture on the stock host: with observation off the subreaper + zombie-cgroup checks detect every escape, and the genuinely-unseen case is a race §9.3 explicitly declines to promise. It is proved by the honest scope label on the verified path: tree_empty=true is recorded with verification_scope=registered_boundary, which by §9.3 does not certify processes outside the identity-checked cgroup dead. The listed tests assert that label (and the unit test the verdict)."
+
+[[clause]]
+id = "R06.6"
+gate = "R06"
+clause = "Under none, a process the supervisor was started beside is not an attempt descendant: it is never a membership escape and is never reaped or signalled, with observation on or off"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_none_leaves_an_inherited_child_alone_observed",
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_none_leaves_an_inherited_child_alone_unobserved",
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_none_traced_to_an_inherited_reader_delivers_the_whole_stream",
+  "ouro-jail/tests/j5_tracer_foreign_child_linux.rs::j5t_none_unobserved_an_inherited_child_ending_mid_run_is_not_an_escape",
+]
+note = "Each run exits 0 and settles with integrity not lost and tree_empty true; a child that lives through the run is alive afterwards, a --trace-fd reader sees EOF and the whole stream, and one that ends mid-run under observe off is not reaped as an escape. Red on 91a347ad: refused 125 (\"the registered boundary or the blocked launcher was lost before release\" or the observer probe) and the child killed. Not covered, and not claimed: a process born into such a child's subtree after the launcher starts and orphaned to the subreaper supervisor is indistinguishable from an escaped attempt process (uncontained.rs module doc; spec proposal J5-T.3)."
 
 # ------------------------------------------------------------------ C01
 
@@ -2286,8 +2647,11 @@ tests = [
 id = "C02.5"
 gate = "C02"
 clause = "A cleanup interrupted by the supervisor's death stays pending and gc resumes it"
-tag = "untested"
-note = "J5 adversarial review (rev-A) §1.2."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_lifetime_linux.rs::c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resumes_it",
+]
+note = "A launch-profile tool run (observation off) fills its vendor state with 40,000 files; the target exits; on the first deletion of the supervisor's cleanup (inotify IN_DELETE) the test SIGKILLs the real supervisor. The durable receipt is the settled one with state_cleanup pending, and part of the vendor state is left (0 < left < 40,000; measured 39,756-39,995). gc --json then reports removed_vendor_state, the directory is gone, and the receipt (one revision later) and jail state say complete. Red under M13 (gc never resumes) and M13b (no pending receipt before the cleanup)."
 
 [[clause]]
 id = "C02.4"
@@ -2453,6 +2817,39 @@ tests = [
 ]
 note = "Validates a hand-written macOS receipt fixture against the schema; it does not instantiate one through the Rust record types."
 
+[[clause]]
+id = "M02.2"
+gate = "M02"
+clause = "The doctor record validates with macOS identity and carries no Linux host, scope or backend field"
+tag = "portable"
+lane = "macos"
+tests = [
+  "ouro-jail/tests/portable_doctor.rs::doctor_json_on_macos_records_no_linux_host_or_backend",
+  "ouro-jail/tests/portable_doctor.rs::this_hosts_doctor_report_is_valid_against_the_schema",
+]
+note = "Runs the real binary on the macOS leg; the schema's platform partition is pinned by the_doctor_schema_rejects_what_it_must"
+
+[[clause]]
+id = "M02.3"
+gate = "M02"
+clause = "The doctor schema rejects a macOS record with a host, supervisor scope or backend record, and a Linux record without them"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_doctor.rs::the_doctor_schema_rejects_what_it_must",
+  "ouro-jail/tests/portable_doctor.rs::the_checked_in_doctor_examples_are_valid",
+]
+
+[[clause]]
+id = "M02.4"
+gate = "M02"
+clause = "Derived requirement names (receipt policy.requirements) name no Linux mechanism; the tree boundary is execution_boundary"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_vocabulary.rs::derived_requirement_names_name_no_linux_mechanism",
+  "ouro-jail/src/lib.rs::capability::tests::none_requires_a_cgroup_but_no_containment",
+  "ouro-jail/tests/review_core_regressions.rs::an_execution_cgroup_is_required_by_a_tree_limit_not_by_observation",
+]
+
 # ------------------------------------------------------------------ M03
 
 [[gate]]
@@ -2491,6 +2888,27 @@ tests = [
   "ouro-jail/tests/macos_refusal.rs::an_unknown_or_duplicate_configuration_key_refuses",
   "ouro-jail/tests/macos_refusal.rs::doctor_takes_no_policy_override_flags",
   "ouro-jail/tests/macos_refusal.rs::m7_gc_refuses_a_state_root_that_is_not_private",
+]
+
+[[clause]]
+id = "M03.4"
+gate = "M03"
+clause = "macOS version, explain, doctor, gc and run --label-only name no Linux mechanism (closed set null, gc execution_boundary key, execution_boundary requirement)"
+tag = "portable"
+lane = "macos"
+tests = [
+  "ouro-jail/tests/portable_vocabulary.rs::macos_inspection_output_carries_no_linux_vocabulary",
+  "ouro-jail/tests/portable_version.rs::the_announced_closed_set_is_the_one_the_specification_names",
+]
+
+[[clause]]
+id = "M03.5"
+gate = "M03"
+clause = "A macOS doctor record is never ready, carries only unsupported requirement rows (no Linux probe row, no old requirement name) and a macOS build target"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_doctor.rs::the_doctor_schema_rejects_what_it_must",
+  "ouro-jail/tests/portable_vocabulary.rs::macos_inspection_output_carries_no_linux_vocabulary",
 ]
 
 # ------------------------------------------------------------------ I01
@@ -2566,7 +2984,10 @@ tests = [
 id = "I02.4"
 gate = "I02"
 clause = "Selecting a launch profile (--launch NAME) reads only the operator's configuration, with no built-in fallback"
-tag = "untested"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::i02_launch_reads_only_the_operators_configuration",
+]
 note = "J5 adversarial review (rev-A) agent table: neither test drives selection."
 
 # ------------------------------------------------------------------ I03
@@ -2589,22 +3010,32 @@ note = "The owner's expected plan is built from the jail's own proposal (binds o
 id = "I03.2"
 gate = "I03"
 clause = "The owner compares the prepared policy digest, argv digest and requirements with its expected plan"
-tag = "untested"
-note = "Owned by J5-B1 (ouro-fixture harness/gate.rs)."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::i03_an_independent_full_plan_releases_once_and_a_mismatch_closes_the_gate",
+]
+note = "The plan comes from the owner's own inputs (explain --json for digest and requirements, canonical argv framing, an attempt id it allocates), never from the receipt it judges. Red when the product writes a wrong argv_digest or drops a requirement."
 
 [[clause]]
 id = "I03.3"
 gate = "I03"
 clause = "A mismatch closes the gate with no target marker, against the real jail"
-tag = "untested"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::i03_an_independent_full_plan_releases_once_and_a_mismatch_closes_the_gate",
+  "ouro-jail/tests/j5_process_linux.rs::i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs",
+]
 note = "Tested only against the stand-in (ouro-fixture tests/harness_gate.rs). Owned by J5-B1."
 
 [[clause]]
 id = "I03.4"
 gate = "I03"
 clause = "Untrusted request fields cannot mutate the owner's operator inputs"
-tag = "untested"
-note = "Owned by J5-B1."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs",
+]
+note = "The untrusted request's argv (operator-flag look-alikes after --) leaves the owner's planned policy unchanged; its project file selecting a profile refuses before prepared; one that only narrows is caught by the owner's plan and nothing runs."
 
 # ------------------------------------------------------------------ A01
 
@@ -2673,6 +3104,10 @@ reason = "subprocess helper for j4_r03_a_failed_local_write_never_leaves_a_parti
 [[ignored]]
 test = "ouro-fixture/doc::crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail"
 reason = "an `ignore` doc example"
+
+[[ignored]]
+test = "ouro-jail/tests/j5_process_linux.rs::j5_x03_owner_helper"
+reason = "subprocess owner invoked by the X03 driver tests"
 
 # ---------------------------------------- the pinned ignored set, macos lane
 
