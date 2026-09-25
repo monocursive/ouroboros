@@ -41,7 +41,7 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
 
@@ -159,7 +159,13 @@ pub fn stage(
     stage_reporting(launch, vendor_state, forbidden, &|_| {})
 }
 
-/// [`stage`] in a worker thread, bounded by `deadline`.
+/// The longest single wait for the staging worker between two reads of the
+/// caller's deadline.
+const STAGING_WAIT_STEP: Duration = Duration::from_millis(250);
+
+/// [`stage`] in a worker thread, bounded by the caller's deadline, which
+/// `remaining` reads (§6.4: the preparation budget runs on the continuous
+/// clock, `CLOCK_BOOTTIME` on Linux).
 ///
 /// A source on a hung filesystem (FUSE, NFS) can block `read(2)`
 /// indefinitely. The worker is left behind on expiry: it holds only its own
@@ -174,7 +180,7 @@ pub fn stage_within(
     launch: &LaunchSnapshot,
     vendor_state: BorrowedFd<'_>,
     forbidden: &[(u64, u64)],
-    deadline: Instant,
+    remaining: &dyn Fn() -> Duration,
 ) -> Result<Vec<StagedCredential>, StagingRefusal> {
     let vendor = vendor_state
         .try_clone_to_owned()
@@ -183,7 +189,7 @@ pub fn stage_within(
     let forbidden = forbidden.to_vec();
     let progress: Arc<Mutex<Vec<(CredentialRecord, SourceIdentity)>>> = Arc::default();
     let report = Arc::clone(&progress);
-    let result = within(deadline, move || {
+    let result = within(remaining, move || {
         stage_reporting(&launch, vendor.as_fd(), &forbidden, &|credential| {
             if let Ok(mut staged) = report.lock() {
                 staged.push((credential.record.clone(), credential.source));
@@ -220,12 +226,17 @@ pub fn stage_within(
     }
 }
 
-/// Runs `work` on a worker thread and waits for it until `deadline`.
+/// Runs `work` on a worker thread and waits for it until `remaining` reports
+/// no time left.
 ///
-/// `None` means the deadline came first; the worker keeps running detached
-/// and its result is dropped whenever it arrives.
+/// `remaining` is read again at least every [`STAGING_WAIT_STEP`]: a
+/// `recv_timeout` runs on `CLOCK_MONOTONIC`, which stops during suspend, so a
+/// single wait for the whole budget would hold an expired continuous-clock
+/// deadline until its own timeout (§6.4). `None` means the deadline came
+/// first; the worker keeps running detached and its result is dropped
+/// whenever it arrives.
 pub fn within<T: Send + 'static>(
-    deadline: Instant,
+    remaining: &dyn Fn() -> Duration,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -237,8 +248,15 @@ pub fn within<T: Send + 'static>(
     if spawned.is_err() {
         return None;
     }
-    let wait = deadline.saturating_duration_since(Instant::now());
-    receiver.recv_timeout(wait).ok()
+    loop {
+        let left = remaining();
+        match receiver.recv_timeout(left.min(STAGING_WAIT_STEP)) {
+            Ok(value) => return Some(value),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if left.is_zero() => return None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 fn stage_reporting(
@@ -1020,6 +1038,7 @@ impl std::fmt::Debug for LaunchHandoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn a_digest_is_the_prefixed_lowercase_hex_the_receipt_schema_requires() {
@@ -1149,6 +1168,38 @@ mod tests {
         assert!(open_checked(&handle, &name, &now).is_ok());
     }
 
+    /// A deadline on the monotonic clock, as the time left on it.
+    fn until(deadline: Instant) -> impl Fn() -> Duration {
+        move || deadline.saturating_duration_since(Instant::now())
+    }
+
+    #[test]
+    fn a_wait_ends_when_the_continuous_clock_runs_out_not_the_monotonic_one() {
+        // §6.4: the caller's deadline is on the continuous clock, which a
+        // suspend advances while the monotonic clock stands still. Here it
+        // reports 30 s left, then nothing (a suspend-sized jump), while the
+        // worker never finishes: the wait must end within a step of the jump,
+        // not after the 30 s it was first given.
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let remaining = || {
+            if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Duration::from_secs(30)
+            } else {
+                Duration::ZERO
+            }
+        };
+        let (_hold, blocked) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        let result = within(&remaining, move || blocked.recv().is_ok());
+        let waited = started.elapsed();
+        assert_eq!(result, None);
+        assert!(
+            waited < Duration::from_secs(5),
+            "the wait held a deadline the continuous clock had passed: {waited:?}"
+        );
+        assert!(reads.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    }
+
     #[test]
     fn work_past_its_deadline_is_abandoned_and_finishes_harmlessly_later() {
         // The budget path of `stage_within` (J3 review L4), with a source that
@@ -1157,7 +1208,7 @@ mod tests {
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let started = Instant::now();
         let result = within(
-            Instant::now() + std::time::Duration::from_millis(150),
+            &until(Instant::now() + std::time::Duration::from_millis(150)),
             move || {
                 let _ = blocked.recv();
                 let _ = done.send(());
@@ -1176,7 +1227,10 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the abandoned worker still finishes");
         assert_eq!(
-            within(Instant::now() + std::time::Duration::from_secs(5), || 7),
+            within(
+                &until(Instant::now() + std::time::Duration::from_secs(5)),
+                || 7
+            ),
             Some(7)
         );
     }
@@ -1212,11 +1266,11 @@ mod tests {
             &launch,
             vendor.as_fd(),
             &[],
-            Instant::now() + std::time::Duration::from_secs(10),
+            &until(Instant::now() + std::time::Duration::from_secs(10)),
         )
         .expect("within a generous budget");
         assert_eq!(staged.len(), 2);
-        let expired = stage_within(&launch, vendor.as_fd(), &[], Instant::now());
+        let expired = stage_within(&launch, vendor.as_fd(), &[], &|| Duration::ZERO);
         match expired {
             Err(refusal) if refusal.error.remediation == Remediation::Retry => {
                 assert_eq!(refusal.error.code, ErrorCode::CredentialUnavailable);
