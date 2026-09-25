@@ -8,11 +8,13 @@ from v1), the performance budgets' definitions and their adjustment, the
 portable requirement `execution_boundary`, `doctor --json` as the host
 manifest (`ouro.jail.doctor/1`), build provenance and the architecture refusal,
 which bubblewrap runs, the frozen wire schemas and milestone-1 inputs, the
-error codes `exec_interpreter_missing` and `exec_unconfirmed`, the test seams
-J5 added, what the observer and `none` do beside a process the supervisor was
-started beside, and the limits the milestone names (§§3.2, 4, 5, 6.1–6.4,
-8.2, 8.3, 9.3, 11, 13, 14.1, 15–18); the milestone's evidence, acceptance verdict
-and named limits are in [J5 authority](jail-v1/j5-authority.md). Revision 18 has `run` and
+error codes `exec_interpreter_missing` and `exec_unconfirmed`, the
+preparation and gate budgets on the boot clock, the test seams J5 added, the
+L02 row reworded to the lifetime links and §10's network helpers, what the
+observer and `none` do beside a process the supervisor was started beside,
+and the limits the milestone names (§§3.2, 4, 5, 6.1–6.4, 8.2, 8.3, 9.3, 11,
+13, 14.1, 15–18); the milestone's evidence, acceptance verdict and named
+limits are in [J5 authority](jail-v1/j5-authority.md). Revision 18 has `run` and
 `doctor` enter a delegated user scope themselves where the user manager
 lingers, so an attempt gets its execution leaf from a plain login session
 (§§6.2, 9.3, 14.1). Revision 17 records J4's
@@ -718,11 +720,6 @@ Apply configuration in this order:
    `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT=<substring>` follows such a call's
    entry without recording it, so its exit is an `unmatched_exit` gap; each
    manufactures only a gap the observer records for the real loss.
-   `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX` (plain decimal bytes, 1 to 64 KiB;
-   anything else is ignored) makes the `--trace-fd` sink put at most that many
-   bytes into each write, so a longer frame reaches the consumer in several
-   partial writes, each resumed at its offset; it changes how bytes are
-   written, never which, and a loss under it names it.
 4. Explicit CLI grants and limits.
 5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
 
@@ -1016,7 +1013,8 @@ Preparation steps, in order:
    prepared receipt; publish a `prepared` control message with attempt id and
    policy digest. No target instruction has run.
 6. Wait for a valid external release if `--gate-fd` was supplied; otherwise
-   release locally. Start the monotonic wall clock at release.
+   release locally. Start the wall deadline, on the continuous clock of §6.4, at
+   release.
 7. Execute the exact target argv through the blocked launcher. Use a dedicated
    close-on-exec error channel plus backend/observer evidence to distinguish
    success from exec failure. EOF alone is insufficient if launcher death could
@@ -1061,8 +1059,10 @@ after that LF refuse. The byte cap includes LF. JSON whitespace inside the
 single line is allowed; parse duplicate object keys as an error.
 
 Initial preparation budget: 30 seconds; external gate wait: 60 seconds after
-prepared. Both use monotonic time and are distinct from the execution wall
-budget. Expiry refuses and tears down prepared resources. A future owner must
+prepared. Both run on the continuous clock of §6.4 (`CLOCK_BOOTTIME` on
+Linux), so suspend counts against them, and are distinct from the execution
+wall budget. A wait for the gate re-checks its deadline at least every 250 ms,
+so an expiry is acted on soon after execution resumes. Expiry refuses and tears down prepared resources. A future owner must
 handle a timed-out prepared attempt through reconciliation, not reuse the gate.
 
 For managed Linux mode, verify and record the direct owner's birth identity,
@@ -1995,7 +1995,10 @@ are `ouro_jail::records::semantic`, ported in `validate_contract.py` and
 pinned by the shared semantic corpus. Every live test that reads a receipt,
 trace or control transcript runs both. The line citations in the frozen
 schemas' `$comment`s and in the semantic rules name lines of revision 18 of
-this document (commit `a75225c1`), the text they were written against.
+this document (commit `a75225c1`), the text they were written against, and are
+read against that text. From revision 19 on, a schema, test, rule or document
+cites this specification by section (for example §11.4), never by line
+number, so a later revision cannot move a citation silently.
 
 ### 13.1 Event envelope
 
@@ -2412,7 +2415,7 @@ its own processes. Never test against the operator's actual credentials.
 | O05 | Observation off emits no audit source and leaves audit net unsupported, even with active proxy.net; unavailable attachment refuses even in best-effort. Directory-operation losses degrade fs.write; denied connect counts only in fs.deny. |
 | O06 | Renamed cwd, dirfd, two-path calls, non-UTF-8 names and a racing pathname never produce a falsely resolved path. |
 | L01 | Wall expiry, INT/TERM/HUP, SIGTERM-ignoring descendant and fork storm end at verified tree death or explicit unknown. |
-| L02 | Kill every actual helper/supervisor link: contained descendants die; none preserves its specified unknown case. |
+| L02 | Kill every lifetime link (backend, watcher, supervisor): contained descendants die within a bound; an `agent` network helper's death fails closed as §10 specifies (the bridge's is recorded and the tree continues; the proxy's is `proxy.net` evidence loss); none preserves its specified unknown case. |
 | L03 | Missing required cgroup/controller refuses; missing preferred pids alone records absent and runs. Exercise cgroup available but pids controller absent, explicit same-value pids, and observe off. None without a usable cgroup refuses. |
 | L04 | pids/memory/CPU scopes are measured; exit 137 alone does not claim OOM; BOOTTIME deadlines ignore clock adjustments and include suspend. |
 | L05 | Simulated uninterruptible/unknown termination retains vendor state and never says settled/tree_empty=true. |

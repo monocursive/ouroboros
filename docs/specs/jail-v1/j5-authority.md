@@ -77,6 +77,7 @@ specification's revision 19.
 | The first loss note named every stream class (`proxy.net` under `tool`) from the last healthy point, while the receipt's gaps began at 0 with each class's source | Review of J5-C | The note names the covered classes; the receipt takes the note's start and source (`27325dab`) | same, and the semantic corpus |
 | A panicked tracer thread, or a result a poisoned trace lock could not take, degraded audit classes with no gap | Review of J5-C | `observer_panicked` and `trace_writer_poisoned` gaps (`27325dab`) | `j5_audit_gaps_linux.rs` |
 | A single non-UTF-8 mount point failed the whole mount-table read, and the receipt claimed an empty `applied.filesystem.mounts` | J5-B1's new P01 test | `mountinfo` read and parsed as bytes (`7abb3668`) | `j5_process_linux.rs::p01_a_non_utf8_policy_path_survives_execution_into_the_receipt` |
+| The preparation and gate budgets ran on `CLOCK_MONOTONIC`, which stops during suspend, although §6.4 puts them on `CLOCK_BOOTTIME`: with only the boot clock advanced two minutes past `prepared` (an `LD_PRELOAD` clock shim), a gated run still waited its full 60 s | J5-B3 | Both budgets run on the supervisor's boot-clock elapsed time, and a gate wait re-checks its deadline at least every 250 ms (`21ff0362`, J5-B3's patch) | `j5_lifetime_linux.rs::l04_the_gate_wait_follows_the_boot_clock` |
 | A credential in a project file was a syntax error at `jail`, not the widening it is | J5-B1's P02 tests through the real file layers | `policy_widening` at `jail.credentials` (`fe40b0d3`) | `portable_policy.rs` P02 cases |
 | The supervisor kept the caller's stdout for the whole run: a target that closed stdout gave the caller no EOF until the jail exited | J5-B1's X05 test | The binary points its own stdout at `/dev/null` once the attempt is prepared (`7abb3668`); the first version did so inside the library and silently took stdout from in-process callers, so the release is the binary's opt-in (`8012bae5`) | `j5_process_linux.rs::x05_under_none_eof_reaches_the_caller_when_the_target_closes_its_stdout`, `j5_process_portable.rs` |
 | With observation off, a contained target that ended within the supervisor's poll interval settled `unknown` and the jail exited 1 with nothing on stderr and no `errors[]` entry | Reviews of J5-C and J5-E (every `/usr/bin/true` under `tool` or `agent`) | The coded tool error `exec_unconfirmed` (`400eac7a`) | `j5_process_linux.rs::observe_off_an_unconfirmed_fast_exec_is_the_coded_error_exec_unconfirmed` |
@@ -240,12 +241,14 @@ state and in every receipt with native details.
 | `OURO_JAIL_TEST_MOUNT_SWAP` (J5) | holds the §9.1 mount handoff open, at most 10 s, so a test can replace a pinned source | F04 source-identity swap |
 | `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH` (J5) | makes a path-marked covered call's path unreadable to the observer | O03 truncation |
 | `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT` (J5) | follows a path-marked call's entry without recording it | O03 unmatched exit, which cannot occur on demand under ptrace |
-| `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX` (J5) | caps each `--trace-fd` write, so frames are written in pieces | R03 partial writes and the wall |
+| `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX` (J5, only if J5-C's `487874d3` is integrated: **TO BE FILLED**) | caps each `--trace-fd` write, so frames are written in pieces | R03 partial writes and the wall, if integrated |
 
 ## Known gaps
 
-The limits below are recorded, not tested under the clause's name. Each says
-why the stock reference host cannot produce the clause.
+The limits below are recorded, not tested under the clause's name, and each
+says why the stock reference host cannot produce the clause. One entry, L04's
+suspend and clock steps, is simulated rather than recorded, and says what the
+simulation leaves out.
 
 - EOF under the contained profiles. Under the contained profiles bubblewrap's
   outer process and namespace init hold the stdout and stderr they hand the
@@ -258,19 +261,24 @@ why the stock reference host cannot produce the clause.
   disconnected consumer to create; the disconnect's own handling is tested in
   both evidence modes (`j4_r03_disconnect_strict_stops`,
   `j4_r03_disconnect_best_effort_continues`), and the wall is tested under a
-  saturated trace and under partial writes (R03).
+  saturated trace (R03). Whether it is also tested under forced partial
+  writes depends on the trace write-size seam: **TO BE FILLED**.
 - An unobserved migrated descendant. A test cannot migrate a descendant out of
   the registered cgroup without the supervisor being able to see it: an unseen
   migration is a race jail-v1 §9.3 declines to promise to detect. What the
   receipt claims is the registered-boundary scope on a verified settlement,
   and a detected escape loses integrity and retains state (R06).
-- A real suspend and a real wall-clock step are not produced on the reference
-  host: the conformance account can neither suspend the shared VM nor set the
-  clock (`CAP_SYS_TIME`). The kernel's own suspend path, timers acted on at
-  resume, is not exercised (L04). What the suite does instead is in the map's
-  L04 clauses: **TO BE FILLED** (whether J5-B3's clock-shim tests, which
-  advance only `CLOCK_BOOTTIME` or only `CLOCK_REALTIME` under a real
-  `ouro-jail run`, are integrated).
+- Suspend and clock steps are simulated, not produced (L04.5, L04.6, tagged
+  `simulated`): the conformance account can neither suspend the shared VM nor
+  set the clock (`CAP_SYS_TIME`). The deadlines are proved on the real
+  `ouro-jail run` with an `LD_PRELOAD` `clock_gettime` shim that, from exec on,
+  advances only `CLOCK_BOOTTIME` (a suspend's signature: the boot clock moves,
+  the monotonic clock does not) or steps only `CLOCK_REALTIME`: the execution
+  wall expires with the first and ignores the second
+  (`j5_lifetime_linux.rs::l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump`,
+  `::l04_the_execution_wall_ignores_wall_clock_steps`), and the gate wait
+  follows the boot clock (`::l04_the_gate_wait_follows_the_boot_clock`). The
+  kernel's own suspend path, timers acted on at resume, is not exercised.
 - A leaf without the pids controller cannot be produced through `ouro-jail run`
   on the stock reference host. The supervisor always creates its execution leaf
   directly beneath `user@<uid>.service`, whose `cgroup.subtree_control` enables
@@ -309,15 +317,6 @@ why the stock reference host cannot produce the clause.
   attempt unsettled with `tree_unknown`, and `gc` reconciles it later. The
   supervisor kills the leaf once; a same-uid process moved into the leaf after
   that kill is killed by `gc`, not the supervisor (X07).
-- The preparation and gate budgets run on `CLOCK_MONOTONIC`, as §8.2's
-  "monotonic time" says, not on `CLOCK_BOOTTIME` as §6.4 says: measured with a
-  clock shim, a boot-clock advance after `prepared` left the gate waiting its
-  full 60 s. **TO BE FILLED**: whether J5-B3's patch moving both budgets to the
-  boot clock is integrated, and the specification text that settles it.
-- §15 L02 says killing every actual helper ends the tree, while §10 makes the
-  `agent` bridge's death a recorded, fail-closed event after which the tree
-  continues. The tests follow §10; the row's wording is left for a later
-  revision.
 - A `doctor` killed with SIGKILL leaves its probes' directories in the system
   temporary directory; `gc` never searches there (jail-v1 §14.2), so they stay
   until the operator removes them.

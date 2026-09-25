@@ -1643,7 +1643,7 @@ note = "Split from L01.3: the operator-signal test runs a target with no SIGTERM
 
 [[gate]]
 id = "L02"
-row = "Kill every actual helper/supervisor link: contained descendants die; none preserves its specified unknown case."
+row = "Kill every lifetime link (backend, watcher, supervisor): contained descendants die within a bound; an `agent` network helper's death fails closed as §10 specifies (the bridge's is recorded and the tree continues; the proxy's is `proxy.net` evidence loss); none preserves its specified unknown case."
 
 [[clause]]
 id = "L02.1"

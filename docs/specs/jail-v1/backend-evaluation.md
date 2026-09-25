@@ -288,7 +288,7 @@ depend on the host:
 | S03 | A Landlock and seccomp inner sandbox works inside `agent` | A namespace inner sandbox needs a nested user namespace, which the stock host denies | Named limit; the permissive filter variant is unit-tested only |
 | X05 | EOF reaches the caller as in direct execution under `none` | Under the contained profiles bubblewrap's outer process and namespace init hold the stdio they hand the target until the jail exits | Named limit (jail-v1 §8.3) |
 | L03 | The required and preferred branches are proved on a real leaf through the library | A leaf without the pids controller cannot be produced through `run` without reconfiguring the account's shared user-manager tree | Named limit ([J5 authority](j5-authority.md), Known gaps) |
-| L04 | Deadlines run on `CLOCK_BOOTTIME` | A real suspend or clock step cannot be produced by the unprivileged account | Named limit |
+| L04 | The execution wall and the preparation and gate budgets run on `CLOCK_BOOTTIME` | A real suspend or clock step cannot be produced by the unprivileged account | Simulated on a real run with an `LD_PRELOAD` clock shim; the kernel's suspend path is not exercised |
 | O02, C03 | Birth identity on every live result | PID reuse needs `CAP_SYS_ADMIN` in the pid namespace | Simulated by a unit-level hook (jail-v1 §11.3) |
 | all | Linux x86_64 on the reference host | Every syscall table is x86_64's | Other architectures compile and refuse before preparation (jail-v1 §3.2); aarch64 is a later lane |
 

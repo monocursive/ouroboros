@@ -473,12 +473,11 @@ with its evidence.
   call is indistinguishable from a restart.
 - **The workspace is not a repository boundary**: shared inodes and Git
   alternates reach whatever they point to.
-- **Deadlines.** The execution wall runs on `CLOCK_BOOTTIME`, so a suspend
-  counts and a clock step does not; neither a real suspend nor a clock step
-  can be produced on the reference host to test it. The preparation and gate
-  budgets run on `CLOCK_MONOTONIC` at revision `8012bae5` (**TO BE FILLED** at
-  integration: whether J5-B3's patch moves them to `CLOCK_BOOTTIME`; see the
-  milestone report).
+- **Deadlines.** The execution wall and the preparation and gate budgets run
+  on `CLOCK_BOOTTIME`, so a suspend counts and a wall-clock step does not; an
+  expired deadline is acted on when the machine resumes. The conformance suite
+  simulates suspend and clock steps with a clock shim; a real suspend is not
+  produced on the reference host.
 - **A killed helper is not named.** A kill of bubblewrap's outer process or of
   the watcher while the command runs leaves a receipt identical to an
   external `SIGKILL` of the command.
