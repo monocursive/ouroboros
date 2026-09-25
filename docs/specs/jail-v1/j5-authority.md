@@ -7,17 +7,17 @@ same stock host as J3 and J4: Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap
 AppArmor profile, file capability or setuid helper. The unprivileged, lingering
 `ouro-ci` account runs everything.
 
-Milestone 1's evidence, all at revision
-`4380241f3195bcc73a5186282400eda3b174ee41`:
+Milestone 1's evidence, all at the final revision
+`027de7d284b19a8cb7ecc4a1ba496d4408b46627`:
 
-- The milestone conformance run `20260925T015603Z-4380241f3195`, driver
-  verdict PASS. Linux lane on the reference host: 1679 passed, 0 failed, 14
-  ignored, over 68 test binaries
+- The milestone conformance run `20260925T065639Z-027de7d284b1`, driver
+  verdict PASS. Linux lane on the reference host: 1690 passed, 0 failed, 14
+  ignored, over 69 test binaries
   ([test log](evidence/j5-test-log-2026-09-25-ouro-ci.txt)). macOS lane at the
   same revision, run with `OURO_CONFORMANCE=1` on a local Apple Silicon
-  machine: 996 passed, 0 failed, 6 ignored
-  ([test log](evidence/j5-test-log-2026-09-25-macos.txt); its PATH marker is
-  redacted).
+  machine: 1001 passed, 0 failed, 6 ignored, over 69 test binaries
+  ([test log](evidence/j5-test-log-2026-09-25-macos.txt); local paths in it
+  are redacted).
 - The per-gate verdict over both lanes
   ([gates.txt](evidence/j5-gates-2026-09-25.txt),
   [gates.json](evidence/j5-gates-2026-09-25.json)); see
@@ -29,7 +29,7 @@ Milestone 1's evidence, all at revision
   [host manifest](evidence/j5-host-manifest-2026-09-25-ouro-ci.txt) beside it.
 - The plain-session smoke leg ([smoke](evidence/j5-smoke-2026-09-25-ouro-ci.txt)):
   a `tool` run, a `none` run and `doctor`, started from the SSH session's own
-  `session-8798.scope` without `systemd-run`, each exit 0; the driver requires
+  `session-9414.scope` without `systemd-run`, each exit 0; the driver requires
   each to have entered a delegated scope itself, and their records show it:
   the [tool](evidence/j5-smoke-tool-receipt-2026-09-25-ouro-ci.json) and
   [none](evidence/j5-smoke-none-receipt-2026-09-25-ouro-ci.json) receipts are
@@ -43,11 +43,17 @@ Milestone 1's evidence, all at revision
   measurement ([Performance](#performance)) and the A01 run ([A01](#a01)).
   The conformance run, the performance run and A01 ran the same `ouro-jail`
   binary, SHA-256
-  `90dbd434296f8b3679d56fea1c6413f30bf7d8cfe558abc1e6cb2961eef5e898` (the
-  build is reproducible from the revision).
+  `aa2d77aa7efa322fef0afd3e3ae47a3da9ec2776bc91941d2c85ba7773724677`.
 - [`d8-candidates-2026-09-24-ouro-ci.txt`](evidence/d8-candidates-2026-09-24-ouro-ci.txt):
   `srt` and Greywall on the stock host, the evidence of the D8 decision
   ([backend-evaluation.md](backend-evaluation.md)).
+- Superseded: the first milestone run, `20260925T015603Z-4380241f3195` at
+  `4380241f` (Linux 1679 passed, 0 failed, 14 ignored over 68 binaries; macOS
+  996/0/6; the same verdict), with its performance run and A01 run. The late
+  adversarial reviews were measured against it, and the fixes they forced
+  (see [Defects](#defects-found-and-fixed)) are why every piece of evidence
+  was retaken at `027de7d2`. Its files were replaced under the same names; they
+  remain in the repository history (commits `0e33fc67` and `597ed40c`).
 - Earlier, not milestone evidence:
   [`j5-base-test-log-2026-09-24-ouro-ci.txt`](evidence/j5-base-test-log-2026-09-24-ouro-ci.txt),
   the full suite at `1328c381` before any J5 slice (run
@@ -91,10 +97,17 @@ The slices were reviewed adversarially before integration, with mutation
 replay of their enforcement points, and a fix wave followed each review of
 J5-A, J5-B1, J5-B2, J5-C, J5-D and J5-E. The review of J5-T found it sound,
 with no blocking issue; its one low-severity finding, a test gap, was closed
-by unit tests. Review of J5-B3 and the late waves (J5-B2 waves 3 and 4, J5-C
-wave 3): **TO BE FILLED BY THE INTEGRATOR**. Every product fix was written
-test-first and mutation-checked: the fix committed,
-reverted, its test red, restored. The decisions the fixes forced are in
+by unit tests. The review of J5-B3 found one high-severity gap (X07.2 was
+not proved under `none`), two medium ones (L04.4's legs, a race in L02.10)
+and a product misdiagnosis of the preparation budget's expiry. The review of
+the late waves (J5-B2 waves 3 and 4, J5-C wave 3) found two high-severity
+defects (operator grants could expose the host's `/proc`, `/sys` and
+cgroupfs while the receipt claimed `enforced`; S04.7 was a false pass) and
+two medium ones (a `none` target could reopen the supervisor's live streams
+through `/proc`; R03.5 did not prove the write-size seam was applied). All of
+them were fixed test-first and mutation-checked, and the milestone evidence
+was retaken at the final revision. Every product fix was written test-first
+and mutation-checked: the fix committed, reverted, its test red, restored. The decisions the fixes forced are in
 [review-resolutions.md](review-resolutions.md), revision 19, and in the
 specification's revision 19.
 
@@ -121,6 +134,10 @@ specification's revision 19.
 | A frozen entry could be re-blessed by editing the schema and its SHA-256 together; the freeze left `policy/1`, `policy-file/1` and `network/1` without a frozen artifact; Linux conventions sat in the shared envelope | Review of J5-C | The rule: changed bytes are a new identifier; `[[frozen_artifact]]`; conventions moved to the producer schema (`4f322499`) | `frozen-schemas.toml`, `portable_version.rs` |
 | `eprintln!` panics when its write fails, so a run whose stderr could not be written (an io_uring descriptor, which S04 refuses before exec) exited 101 instead of the refusal's 125 | J5-B2, wave 4 (S04.6) | Every product diagnostic goes through one macro that ignores a failed write: diagnostics never change an exit code (`472fda77`) | `j5_boundary_linux.rs` S04.6 stderr leg, red at 101 before |
 | `explain --help` showed an implementation note from a doc comment ("Boxed: `ExplainArgs` carries the full override set…") | J5-F, documenting the commands | The note is a code comment; a test holds every subcommand's summary free of implementation notes (`a369f0e3`) | the CLI help test, red with the old comment |
+| An operator grant of the host's `/proc`, `/sys` or `/sys/fs/cgroup` (for example `--ro /proc`) was accepted: a contained run settled `enforced`/`enforced` while exposing the host's pids, cgroup hierarchy and the supervisor's command line | Review of the late waves (HIGH) | A grant whose resolved source is on a `proc`, `sysfs` or cgroup filesystem, or an ancestor of such a mount, refuses with `policy_widening` and its key path, decided by filesystem type and mount topology (`08994fb6`) | `j5_pseudofs_linux.rs` (S02.7), `portable_policy.rs` |
+| A same-UID process (a `none` target) could reopen the supervisor's live trace and control streams through `/proc/<supervisor>/fd`, read its environment and ptrace it, Yama the only lock | Review of the late waves (MEDIUM) | The supervisor makes itself non-dumpable once the target is about to run (`241ce598`) | `j5_boundary_linux.rs::r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer` (X06.4) |
+| A preparation budget that ran out mid-step was reported as that step's failure (`tool`: `backend_unavailable`, `host_setup`, a false host diagnosis), `none` announced `prepared` before refusing, and credential staging waited on `CLOCK_MONOTONIC` | Review of J5-B3, with a boot-clock shim triggered by the attempt's own leaf | A timed-out step refuses as `prepare_timeout` (`retry`), checked before `prepared` (`9045f6ac`); staging waits on the budget's boot-clock deadline (`f6fb0858`) | `j5_lifetime_linux.rs::l04_the_preparation_budget_follows_the_boot_clock`, a credentials unit test |
+| Tests that passed without proving their clause: S04.7 (the io_uring ring was placed on a descriptor the harness overwrote, so it never reached the jail), R03.5 (the write-size seam's pieces were never observed), X07.2 (not exercised under `none`), L04.4 (legs that could not tell the clocks apart) and a race in L02.10 | Reviews of the late waves and of J5-B3 | The ring moved above every channel (`241ce598`); the trace fd became a `SOCK_SEQPACKET` socket so each write is seen (`462742d3`); the J5-B3 fix wave (`c5c499f9` and following) | the corrected tests, each red with its enforcement point removed |
 | Hosted conformance runs failed when the runner's SSH connection dropped mid-suite (after 4.5, 20 and 10 minutes), while the suite finished on the host | Hosted runs 35883187019, 35884521611, 36033419322 | Build and suite run detached and are polled (`1328c381`) | driver unit tests |
 | The driver started the suite from `setsid nohup sh -c … &`, so INT, QUIT and HUP were ignored and inherited, and the jail (which honours an inherited ignore) could not be tested for an operator INT or HUP | Review of J5-B1 (the L01 INT leg failed under the driver) | `setsid -f` (`91a347ad`); the harness resets the three for every program (`4810c48e`) | a script test reads the step's `SigIgn` (7 before, 0 after) |
 | The suite's PATH was not the tests' PATH: the rustup proxy prepended `~/.cargo/bin`, where a `cargo install`ed ledger would have been invisible to the I01 probe and a `bwrap` there would have been every test's backend | Review of J5-A | The suite runs the pinned toolchain's binaries under the system PATH (`72661260`) | `i01_under_conformance_the_test_process_has_exactly_the_suite_path` |
@@ -142,14 +159,16 @@ run's `test.log` and fails the run when a clause in its lane fails; the macOS
 leg evaluates the macOS clauses over its own log. The map pins the expected
 ignored set per lane, so an `#[ignore]` added to a gate test fails the run.
 
-At the milestone revision the map has 267 clauses over the 51 gates: 171
+At the milestone revision the map has 268 clauses over the 51 gates: 172
 `live-cli`, 53 `portable`, 22 `simulated`, 13 `live-lib`, 7
-`recorded-limit`, 1 `credential` and none `untested`. (At the J5-A fix wave it
-had 248, 72 of them untested; the slices' tests closed them.)
+`recorded-limit`, 1 `credential` and none `untested`. The newest is S02.7,
+the refusal of operator grants that expose the host's pseudo filesystems.
+(At the J5-A fix wave the map had 248 clauses, 72 of them untested; the
+slices' tests closed them.)
 
 The verdict ([gates.txt](evidence/j5-gates-2026-09-25.txt),
 [gates.json](evidence/j5-gates-2026-09-25.json)) combines the Linux and macOS
-lanes of revision `4380241f`, both run with `OURO_CONFORMANCE=1`:
+lanes of revision `027de7d2`, both run with `OURO_CONFORMANCE=1`:
 
 ```text
 gates: 1 credential, 43 pass, 7 pass+limits
@@ -168,7 +187,7 @@ and J4's). A pass is only as strong as its column in `gates.txt`: 22 clauses
 are `simulated`, and the table names them.
 
 The verdict was computed offline over the two logs with
-`cargo xtask gates --revision 4380241f… --map docs/specs/jail-v1/acceptance-map.toml --log linux=… --log macos=… --check contract_validation --check i01_absent --check i01_scrubbed_path --check i02_scan`.
+`cargo xtask gates --revision 027de7d2… --map docs/specs/jail-v1/acceptance-map.toml --log linux=… --log macos=… --check contract_validation --check i01_absent --check i01_scrubbed_path --check i02_scan`.
 Those four driver checks exist only inside a driver run, so the offline
 verdict is told they passed; the driver run itself passed them (PASS), and
 its evidence is the [I01 probe](evidence/j5-i01-2026-09-25-ouro-ci.txt) and
@@ -187,7 +206,7 @@ prefixes, and a test checks the test process sees exactly the suite's PATH.
 | Target | Compiled | Tested | Executed |
 |---|---|---|---|
 | `x86_64-unknown-linux-gnu` | `rust` (hosted Ubuntu) and the reference host | portable suite on hosted Ubuntu; full suite on the reference host | yes, the reference host |
-| `aarch64-apple-darwin` | `rust` (macOS leg) and a local Apple Silicon machine | the shared portable tests and the macOS refusal tests (M01–M03); at the milestone revision 996 passed, 0 failed, 6 ignored | inspection only; execution refuses 125 |
+| `aarch64-apple-darwin` | `rust` (macOS leg) and a local Apple Silicon machine | the shared portable tests and the macOS refusal tests (M01–M03); at the milestone revision 1001 passed, 0 failed, 6 ignored | inspection only; execution refuses 125 |
 | `x86_64-apple-darwin` | `rust` (compile-only check, all targets, warnings denied) | no | no |
 | `aarch64-unknown-linux-gnu` | `rust` (compile-only check, all targets, warnings denied) | the refusal only, on x86_64 through `OURO_JAIL_TEST_ARCH` | no |
 
@@ -247,10 +266,10 @@ and `ouro.jail.network/1` and the gate and semantic corpora):
 The tested run, copied from the milestone run's
 [doctor.json](evidence/j5-doctor-2026-09-25-ouro-ci.json) by
 `cargo xtask freeze --doctor`, is the file's `[tested]` table: revision
-`4380241f3195bcc73a5186282400eda3b174ee41`, `dirty = false`, `opt_level = "3"`,
+`027de7d284b19a8cb7ecc4a1ba496d4408b46627`, `dirty = false`, `opt_level = "3"`,
 `debug_assertions = false`, `rustc 1.98.1 (48a229cea 2026-09-01)`, target
 `x86_64-unknown-linux-gnu`, `ready = true`, the `ouro-jail` binary's SHA-256
-`90dbd434296f8b3679d56fea1c6413f30bf7d8cfe558abc1e6cb2961eef5e898`, bubblewrap
+`aa2d77aa7efa322fef0afd3e3ae47a3da9ec2776bc91941d2c85ba7773724677`, bubblewrap
 0.11.1 at `/usr/bin/bwrap` with SHA-256
 `523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6`, and the
 host (Ubuntu 26.04.1 LTS, kernel `7.0.0-31-generic`, kvm, 4 CPUs, systemd 259,
@@ -267,59 +286,61 @@ packages).
 
 ## Performance
 
-Measured 2026-09-25, 02:20 to 02:27 UTC, on the reference host as `ouro-ci`
-at revision `4380241f` with the tested binary, by
-`cargo xtask perf run --launches 30 --warmup 1 --max-load 3.0 --revision 4380241f…`
+Measured 2026-09-25, 07:19 to 07:27 UTC, on the reference host as `ouro-ci`
+at the final revision `027de7d2` with the tested binary, by
+`cargo xtask perf run --launches 30 --warmup 1 --max-load 3.0 --revision 027de7d2…`
 from a plain SSH session (the harness re-runs itself under
 `systemd-run --user --scope` for the scope session). The 1-minute load before
-the measured launches was 1.21 / 1.67 / 2.09 (minimum, median, maximum) on 4
+the measured launches was 1.41 / 1.67 / 2.03 (minimum, median, maximum) on 4
 CPUs; every one of the 42 arms has 30 valid launches and none excluded
-([summary](evidence/perf-2026-09-25-ouro-ci/summary.md), recomputed with
-`perf summarize --revalidate` under the rule that counts a flagged
-`exec_unconfirmed` no-op launch as valid; the raw records, SHA-256
-`ee1ff987f541c367c7d41f8c8e10302ce7bdddd55116ef6f172e5e1075325e73`, are
-`launches.ndjson.xz` beside it). The tables are in
+([summary](evidence/perf-2026-09-25-ouro-ci/summary.md); the raw records,
+SHA-256 `5447d2925724269e950ea0e7b59f84e032ecce85af1e76762ae69488d99db1e1`,
+are `launches.ndjson.xz` beside it). The tables are in
 [backend-evaluation.md §4](backend-evaluation.md#4-performance-52-budgets).
 
 - **Startup:** p95 added warm startup is under 250 ms in every judged cell;
-  `tool` is 92 to 124 ms, `agent` up to 145 ms, `none` up to 72 ms.
+  `tool` is 101 to 139 ms, `agent` up to 170 ms, `none` up to 75 ms.
 - **The jail's own overhead** (`--observe off` against direct) on the fixed
-  file workload, median: `tool` work phase +30.8% (plain) and +28.4% (scope),
-  post-start +43.4% and +38.7%, end-to-end wall +103.7% and +92.6% (startup
-  included); `agent` post-start +39.0% and +38.9%; `none` post-start +6.7% and
-  +6.5%. On the descendant-heavy workload `tool`'s post-start is +13.1% and
-  +10.4%.
-- **Attribution** ([evidence](evidence/perf-2026-09-25-attribution-ouro-ci.txt)):
-  on the fixed workload's work phase, direct 155.4 ms, bubblewrap alone with
-  the `tool` namespaces under Ubuntu's `unpriv_bwrap` AppArmor confinement and
-  no seccomp filter 185.0 ms (+19.0%), `ouro-jail run --profile tool --observe
-  off` 189.9 ms (+22.2%). About 19 of the 22 points are bubblewrap's
-  containment as the stock distribution confines it; the jail's filter and
-  supervisor add about 3. The jail's teardown (settlement, tree verification,
-  receipts, trace flush) adds a median 17.5 ms (plain) and 19.2 ms (scope).
-- **Observation cost** (`--observe on`): on the fixed workload, +367% to +404%
-  on the work phase against direct (+283% to +373% against observation off), from two ptrace stops per closed-set call at about 100,000
-  such calls per second; on the descendant-heavy workload about +41% to +71%.
-  Every event count was exact and no launch lost evidence.
+  file workload, median: `tool` work phase +29.6% (plain) and +28.9% (scope),
+  post-start +39.5% and +40.3%, end-to-end wall +99.9% and +90.7% (startup
+  included); `agent` post-start +42.0% and +42.5%; `none` post-start +3.1% and
+  +5.8%. On the descendant-heavy workload `tool`'s post-start is +12.4% and
+  +8.9%.
+- **Attribution** ([evidence](evidence/perf-2026-09-25-attribution-ouro-ci.txt)),
+  measured at `4380241f`, before the late fixes, which change neither
+  bubblewrap nor the distribution's confinement: on the fixed workload's work
+  phase, direct 155.4 ms, bubblewrap alone with the `tool` namespaces under
+  Ubuntu's `unpriv_bwrap` AppArmor confinement and no seccomp filter 185.0 ms
+  (+19.0%), `ouro-jail run --profile tool --observe off` 189.9 ms (+22.2%).
+  About 19 of the 22 points are bubblewrap's containment as the stock
+  distribution confines it; the jail's filter and supervisor add about 3. The
+  jail's teardown (settlement, tree verification, receipts, trace flush) adds
+  a median 19.4 ms (plain) and 18.6 ms (scope).
+- **Observation cost** (`--observe on`): on the fixed workload, +389% to +446%
+  on the work phase against direct (+302% to +391% against observation off),
+  from two ptrace stops per closed-set call at about 100,000 such calls per
+  second; on the descendant-heavy workload about +47% to +77%. Every event
+  count was exact and no launch lost evidence.
 
 **The budgets.** The original budget of under 20% median overhead on the fixed
-workload is missed: `tool`'s own overhead is 43.4% and 38.7% post-start, 23
-and 19 points over, and 30.8% and 28.4% on the work phase alone, mostly
+workload is missed: `tool`'s own overhead is 39.5% and 40.3% post-start, about
+20 points over, and 29.6% and 28.9% on the work phase alone, mostly
 bubblewrap's containment under the distribution's confinement. The operator
 decided on 2026-09-25, and jail-v1 §5.2 records, that the startup budget stays
 (met) and that the fixed-workload budget becomes a measured ceiling: the
 jail's own overhead at most 50% median post-start on this syscall-dense
-worst-case workload (met: 43.4% and 38.7%), with the work phase and
+worst-case workload (met: 39.5% and 40.3%), with the work phase and
 end-to-end wall reported and observation cost reported per workload with no
 budget. A representative workload, a build or a test run, joins the §5 set as
-later work.
+later work. The superseded run at `4380241f` measured 43.4% and 38.7%, within
+the same ceiling.
 
 ## A01
 
 OpenCode 1.18.32 under `agent` with no credential, at the milestone revision
 and with the tested binary, on the reference host as the account `ubuntu`
-from a plain SSH session (lingering on), on 2026-09-25 at 02:31 UTC: the jail
-exited 0 after 9 seconds and `greeting.txt` contained `hello`. The receipt is
+from a plain SSH session (lingering on), on 2026-09-25 at 07:28 UTC: the jail
+exited 0 after 12 seconds and `greeting.txt` contained `hello`. The receipt is
 settled, outcome `exited` 0, no error, every coverage class active, integrity
 verified, `tree_empty` true, the scope step `entered`, and vendor state
 cleaned; it records the frozen `agent` filter and narrowing digests. The

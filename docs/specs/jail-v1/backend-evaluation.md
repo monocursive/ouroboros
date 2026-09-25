@@ -40,7 +40,7 @@ on, with the J5 values where they differ.
 | Kernel options | `SECURITY_LANDLOCK`, `SECCOMP_FILTER`, `USER_NS`, `SECURITY_APPARMOR`, `CGROUPS`, `BPF_LSM` all `y` (manual 2026-09-22, [evidence](evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)) |
 | Operator-installed AppArmor profile: name, executables granted `userns` | none installed; AppArmor enabled with Ubuntu's `bwrap-userns-restrict`, `unprivileged_userns`, `lxc-usernsexec` files and `bwrap`, `unpriv_bwrap` loaded; the legacy `ouroboros-sandbox-fleet` profile was removed 2026-09-22 (manual) |
 | Tracing capability provisioning | None. The ptrace observer needs no capability under the default `ptrace_scope=1` of Ubuntu, Debian, Fedora and Arch. The file-capability path J0 described for eBPF is withdrawn with eBPF (§2). Login shell `CapEff` is 0 (manual 2026-09-22); `doctor` reports the operator identity category, `unprivileged` for `ouro-ci` |
-| Raw `doctor --json` output location | The milestone conformance run `20260925T015603Z-4380241f3195`: [evidence/j5-doctor-2026-09-25-ouro-ci.json](evidence/j5-doctor-2026-09-25-ouro-ci.json), with the manual [host manifest](evidence/j5-host-manifest-2026-09-25-ouro-ci.txt) of the same run. Manual collections before `doctor` existed: [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ouro-ci` |
+| Raw `doctor --json` output location | The milestone conformance run `20260925T065639Z-027de7d284b1`: [evidence/j5-doctor-2026-09-25-ouro-ci.json](evidence/j5-doctor-2026-09-25-ouro-ci.json), with the manual [host manifest](evidence/j5-host-manifest-2026-09-25-ouro-ci.txt) of the same run. Manual collections before `doctor` existed: [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ouro-ci` |
 
 ### 1.1 Unprivileged bubblewrap on the reference host
 
@@ -215,25 +215,23 @@ limits or an outside observer to reuse.
 
 ## 4. Performance (§5.2 budgets)
 
-Measured 2026-09-25, 02:20 to 02:27 UTC, on the reference host as `ouro-ci`,
-at revision `4380241f`, with the `ouro-jail` binary the conformance run tested
-(SHA-256 `90dbd434…e5e898`), by
-`cargo xtask perf run --launches 30 --warmup 1 --max-load 3.0 --revision 4380241f…`
+Measured 2026-09-25, 07:19 to 07:27 UTC, on the reference host as `ouro-ci`,
+at the final milestone revision `027de7d2`, with the `ouro-jail` binary the
+conformance run tested (SHA-256 `aa2d77aa…724677`), by
+`cargo xtask perf run --launches 30 --warmup 1 --max-load 3.0 --revision 027de7d2…`
 started from a plain SSH session (the harness re-runs itself under
 `systemd-run --user --scope` for the scope session). Evidence:
-[evidence/perf-2026-09-25-ouro-ci/](evidence/perf-2026-09-25-ouro-ci/summary.md)
-([summary.md](evidence/perf-2026-09-25-ouro-ci/summary.md),
+[summary.md](evidence/perf-2026-09-25-ouro-ci/summary.md),
 [parameters.json](evidence/perf-2026-09-25-ouro-ci/parameters.json),
 [host.json](evidence/perf-2026-09-25-ouro-ci/host.json),
 [passes.ndjson](evidence/perf-2026-09-25-ouro-ci/passes.ndjson), and the raw
-records `launches.ndjson`, SHA-256 `ee1ff987…325e73`, stored compressed as
-`launches.ndjson.xz`; `cargo xtask perf summarize --dir` recomputes the
-summary). The summary was recomputed with `perf summarize --revalidate` under
-the rule that counts an `exec_unconfirmed` no-op launch as valid and flagged;
-the raw file is unchanged. The 1-minute load before the measured launches was
-1.21 / 1.67 / 2.09 (minimum, median, maximum) on 4 CPUs, under the run's 3.0
-threshold. All 42 arms have 30 valid launches and none excluded, so every cell
-has a verdict.
+records `launches.ndjson` (1,302 records, SHA-256 `5447d292…d99db1e1`),
+stored compressed as `launches.ndjson.xz` beside them;
+`cargo xtask perf summarize --dir` recomputes the summary. The 1-minute load
+before the measured launches was 1.41 / 1.67 / 2.03 (minimum, median,
+maximum) on 4 CPUs, under the run's 3.0 threshold. All 42 arms have 30 valid
+launches and none excluded, so every cell has a verdict. An earlier run at
+`4380241f` gave the same verdicts; it is superseded by this one.
 
 Definitions (jail-v1 §5.2): startup runs from the launcher's reading before
 `fork` to the target's first reading; work is the target's own workload phase;
@@ -250,8 +248,8 @@ fixed-workload budget becomes a measured ceiling on the jail's own overhead,
 phase and end-to-end wall are reported; observation cost is reported per
 workload with no budget. As first written, the budget was under 20% median
 overhead on the fixed workload. It is missed: `tool`'s own post-start overhead
-is 43.4% (plain) and 38.7% (scope), 23 and 19 points over, and its work phase
-alone is 30.8% and 28.4% over direct.
+is 39.5% (plain) and 40.3% (scope), about 20 points over, and its work phase
+alone is 29.6% and 28.9% over direct.
 
 ### 4.1 The jail's own overhead: `tool`, `--observe off` against direct (budgeted)
 
@@ -263,68 +261,70 @@ output proves it ran), which is also why its receipts carry 30 errors.
 
 | Session | Workload | Valid (excl.) | Added startup ms | p95 added startup < 250 ms | Added teardown ms | Work overhead | Post-start overhead (≤ 50%) | Wall overhead (reported) | Peak RSS KiB |
 |---|---|---|---|---|---|---|---|---|---|
-| plain | no-op | 30 (0) | 101.3 / 121.7 | pass | 22.2 / 24.8 | n/a | n/a | n/a | 7516 / 7608 |
-| plain | descendant-heavy | 30 (0) | 103.7 / 118.3 | pass | 19.6 / 24.0 | −1.3% | 13.1% | 77.7% | 7538 / 7676 |
-| plain | fixed file workload | 30 (0) | 103.7 / 119.2 | pass | 17.5 / 23.9 | 30.8% | **43.4%** (pass) | 103.7% | 7558 / 7672 |
-| scope | no-op | 30 (0) | 86.2 / 99.1 | pass | 22.1 / 22.9 | n/a | n/a | n/a | 7510 / 7608 |
-| scope | descendant-heavy | 30 (0) | 84.8 / 92.3 | pass | 19.5 / 24.8 | −1.4% | 10.4% | 67.6% | 7524 / 7668 |
-| scope | fixed file workload | 30 (0) | 86.3 / 98.5 | pass | 19.2 / 23.8 | 28.4% | **38.7%** (pass) | 92.6% | 7534 / 7660 |
+| plain | no-op | 30 (0) | 109.2 / 122.1 | pass | 22.5 / 24.1 | n/a | n/a | n/a | 7464 / 7576 |
+| plain | descendant-heavy | 30 (0) | 109.0 / 118.9 | pass | 18.9 / 24.0 | −0.8% | 12.4% | 75.1% | 7480 / 7612 |
+| plain | fixed file workload | 30 (0) | 111.0 / 128.1 | pass | 19.4 / 24.2 | 29.6% | **39.5%** (pass) | 99.9% | 7486 / 7652 |
+| scope | no-op | 30 (0) | 95.2 / 109.0 | pass | 22.6 / 23.5 | n/a | n/a | n/a | 7536 / 7664 |
+| scope | descendant-heavy | 30 (0) | 90.6 / 101.3 | pass | 18.6 / 24.2 | −1.0% | 8.9% | 65.7% | 7482 / 7668 |
+| scope | fixed file workload | 30 (0) | 91.5 / 109.1 | pass | 18.6 / 23.2 | 28.9% | **40.3%** (pass) | 90.7% | 7470 / 7616 |
 
-With observation on (`tool`, against direct) the p95 added startup is 119.6,
-119.7 and 123.7 ms (plain) and 105.1, 101.8 and 106.0 ms (scope) for the three
+With observation on (`tool`, against direct) the p95 added startup is 139.0,
+128.1 and 132.3 ms (plain) and 123.9, 109.2 and 107.7 ms (scope) for the three
 workloads, so the startup budget holds with the observer too; all 12 `tool`
-cells are between 92 and 124 ms. The informational profiles against direct
-with observation off, on the fixed workload: `agent` 39.0% (plain) and 38.9%
-(scope) post-start, p95 added startup 139.9 and 119.1 ms; `none` 6.7% and 6.5%
-post-start, 64.1 and 47.3 ms. The supervisor's sampled peak RSS (median) is
-7,328 to 7,626 KiB for `tool` and `none` and 7,886 to 8,032 KiB for `agent`,
-observation on or off; the target's own peak is 3,824 to 4,016 KiB in every
-arm.
+cells are between 101 and 139 ms. The informational profiles against direct
+with observation off, on the fixed workload: `agent` 42.0% (plain) and 42.5%
+(scope) post-start, p95 added startup 164.0 and 128.5 ms; `none` 3.1% and
+5.8% post-start, 68.7 and 50.2 ms. The supervisor's sampled peak RSS (median)
+is 7,248 to 7,590 KiB for `tool` and `none` and 7,852 to 8,004 KiB for
+`agent`, observation on or off; the target's own peak is 3,854 to 4,016 KiB in
+every arm.
 
-Attribution ([evidence](evidence/perf-2026-09-25-attribution-ouro-ci.txt),
-2026-09-25, quiet host, 15 interleaved launches per arm after a warm-up, the
-fixed workload's work phase): direct 155.4 ms; bubblewrap alone with the
-`tool` profile's namespaces and no seccomp filter, still under Ubuntu's
-`bwrap-userns-restrict`/`unpriv_bwrap` AppArmor confinement, 185.0 ms
+Attribution ([evidence](evidence/perf-2026-09-25-attribution-ouro-ci.txt)),
+measured at revision `4380241f`, before the late fixes; it measures
+bubblewrap and the distribution's AppArmor confinement, which those commits
+did not change. On a quiet host, 15 interleaved launches per arm after a
+warm-up, the fixed workload's work phase: direct 155.4 ms; bubblewrap alone
+with the `tool` profile's namespaces and no seccomp filter, still under
+Ubuntu's `bwrap-userns-restrict`/`unpriv_bwrap` AppArmor confinement, 185.0 ms
 (+19.0%); `ouro-jail run --profile tool --observe off` 189.9 ms (+22.2%).
 About 19 of the jail's 22 points are bubblewrap's containment as the stock
 distribution confines it; the jail's filter and supervisor add about 3. The
 experiment does not separate the user namespace, the mount namespace and
 AppArmor from each other, and the harness reads higher under its own
-workspace layout and sampling (+28.4% to +30.8%).
+workspace layout and sampling (+28.9% to +29.6% at `027de7d2`).
 
 ### 4.2 Observation cost: `--observe on` against off and against direct (reported)
 
 Median overhead of observation, `--observe on` against `--observe off` of the
 same profile (work phase / post-start), and `--observe on` against direct
-(work phase), from the summary's "Observation cost" and "`--observe on`
-against direct" tables. Event counts are exact in every launch: 402 `exec`
-results for the descendant-heavy workload and 15,000 `fs.write` results for
-the fixed one; no observer or coverage gap, no incomplete trace and no
+(work phase), from the summary's "Observation cost", "`--observe on` against
+direct" and informational tables. Event counts are exact in every launch: 402
+`exec` results for the descendant-heavy workload and 15,000 `fs.write` results
+for the fixed one; no observer or coverage gap, no incomplete trace and no
 excluded launch in any arm.
 
 | Session | Profile | Workload | On vs off: work | On vs off: post-start | On vs direct: work |
 |---|---|---|---|---|---|
-| plain | tool | descendant-heavy | 45.2% | 31.7% | 43.3% |
-| plain | tool | fixed file workload | 283.0% | 251.2% | 401.0% |
-| plain | agent | descendant-heavy | 47.2% | 38.4% | 45.1% |
-| plain | agent | fixed file workload | 294.6% | 264.7% | 403.5% |
-| plain | none | descendant-heavy | 70.7% | 61.7% | 70.7% |
-| plain | none | fixed file workload | 363.7% | 338.8% | 366.6% |
-| scope | tool | descendant-heavy | 43.0% | 32.3% | 41.0% |
-| scope | tool | fixed file workload | 288.3% | 262.0% | 398.7% |
-| scope | agent | descendant-heavy | 43.7% | 33.0% | 43.6% |
-| scope | agent | fixed file workload | 292.2% | 263.1% | 400.4% |
-| scope | none | descendant-heavy | 67.0% | 65.0% | 69.6% |
-| scope | none | fixed file workload | 372.8% | 341.3% | 368.8% |
+| plain | tool | descendant-heavy | 50.2% | 36.0% | 49.0% |
+| plain | tool | fixed file workload | 310.9% | 283.5% | 432.6% |
+| plain | agent | descendant-heavy | 48.5% | 34.9% | 47.3% |
+| plain | agent | fixed file workload | 320.6% | 286.5% | 445.8% |
+| plain | none | descendant-heavy | 75.0% | 66.5% | 75.6% |
+| plain | none | fixed file workload | 389.3% | 375.6% | 389.1% |
+| scope | tool | descendant-heavy | 50.4% | 39.9% | 48.9% |
+| scope | tool | fixed file workload | 306.0% | 274.7% | 423.4% |
+| scope | agent | descendant-heavy | 49.0% | 34.8% | 48.2% |
+| scope | agent | fixed file workload | 302.1% | 265.3% | 417.3% |
+| scope | none | descendant-heavy | 76.1% | 69.6% | 77.2% |
+| scope | none | fixed file workload | 390.6% | 363.6% | 389.6% |
 
 Reading: on the fixed workload the observer multiplies the work phase by
-about five (163 ms direct against about 815 ms observed), which is J0's two
-ptrace stops per closed-set call at this call rate. The descendant-heavy
-workload (402 results) costs about 41% to 71% on its work phase. No-op launches record two
-`exec` results and their overheads divide by a near-zero work phase. The cost
-scales with the closed-set call rate; a representative workload (a build or a
-test run) is later work.
+about five (179.5 ms direct against 955.9 ms observed under `tool`, plain
+session), which is J0's two ptrace stops per closed-set call at this call
+rate. The descendant-heavy workload (402 results) costs about 47% to 77% on
+its work phase. No-op launches record two `exec` results and their overheads
+divide by a near-zero work phase. The cost scales with the closed-set call
+rate; a representative workload (a build or a test run) is later work.
 
 ### 4.3 Preliminary numbers from the ptrace stand-in (J0)
 
@@ -354,7 +354,7 @@ reported per workload rather than budgeted.
 The authoritative per-clause state is [acceptance-map.toml](acceptance-map.toml)
 and the milestone run's verdict
 ([evidence/j5-gates-2026-09-25.txt](evidence/j5-gates-2026-09-25.txt), run
-`20260925T015603Z-4380241f3195`: every noncredential gate passes, seven with
+`20260925T065639Z-027de7d284b1`: every noncredential gate passes, seven with
 recorded limits). The
 gaps of the selected integration that the map records as limits, or that
 depend on the host:
@@ -393,7 +393,7 @@ Named blockers: none for the selected path. Named limits: §5 and
 250 ms p95 added warm startup) is met in every judged cell. The fixed-workload
 budget of 20% is missed, and by the operator decision of 2026-09-25 is
 replaced by a measured ceiling on the jail's own overhead of at most 50%
-median post-start (`tool` 43.4% and 38.7%), with bubblewrap's containment
+median post-start (`tool` 39.5% and 40.3%), with bubblewrap's containment
 under the distribution's AppArmor confinement named as the dominant cost;
 observation cost is reported per workload with no budget. Raw fixture
 locations: the `evidence/` files cited above.

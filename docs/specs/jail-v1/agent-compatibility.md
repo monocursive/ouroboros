@@ -9,7 +9,7 @@ credential, or a vendor-state archive.
 
 | Agent | Vendor version | Ouroboros revision | Platform | Backend | Jail mode | Credential | Result |
 |---|---|---|---|---|---|---|---|
-| OpenCode | 1.18.32 | `4380241f` (the milestone revision; the bundled profile at that revision) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, stock host | bubblewrap 0.11.1, ptrace observer; the frozen filters | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active ([milestone run](#opencode-agent-no-credential-at-the-milestone-revision)) |
+| OpenCode | 1.18.32 | `027de7d2` (the milestone revision; the bundled profile at that revision) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, stock host | bubblewrap 0.11.1, ptrace observer; the frozen filters | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active ([milestone run](#opencode-agent-no-credential-at-the-milestone-revision)) |
 | OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d`) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, stock host | bubblewrap 0.11.1, ptrace observer; pre-J4 filters (below) | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active |
 | OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d` with its `auth` input enabled and `api.z.ai` allowed) | same | same | same | the operator's own Z.AI Coding Plan key (`opencode auth login`), staged `copy_rw` | Passed: GLM-5.3 wrote the requested workspace file; receipt settled, exit 0, every coverage class active; the key reached no record |
 
@@ -29,22 +29,22 @@ milestone 1's A01 record: it marks OpenCode 1.18.32 under `agent`, without a
 credential, on this platform, supported. The binary still reports the
 profile `experimental`; this record carries the claim.
 
-- **What ran.** On 2026-09-25 at 02:31 UTC, on the reference host (Ubuntu
+- **What ran.** On 2026-09-25 at 07:28 UTC, on the reference host (Ubuntu
   26.04.1, kernel 7.0.0-31, x86_64, bubblewrap 0.11.1), as the account
   `ubuntu` from a plain SSH session with lingering on. `ouro-jail` at revision
-  `4380241f3195bcc73a5186282400eda3b174ee41`, clean, optimised, SHA-256
-  `90dbd434296f8b3679d56fea1c6413f30bf7d8cfe558abc1e6cb2961eef5e898`: the same
+  `027de7d284b19a8cb7ecc4a1ba496d4408b46627`, clean, optimised, SHA-256
+  `aa2d77aa7efa322fef0afd3e3ae47a3da9ec2776bc91941d2c85ba7773724677`: the same
   binary the milestone conformance run and the performance run tested. OpenCode
   1.18.32 from `~/.opencode/bin`; the launch profile is the bundled
   [`opencode.toml`](../../../crates/ouro-jail/profiles/launch/opencode.toml)
   at that revision, unchanged; a fresh git repository as the workspace; no
   credential (OpenCode Zen's free model `big-pickle`).
 - **Command.** `ouro-jail run --launch opencode --ro ~/.opencode/bin --receipt
-  ~/a01-j5-receipt.json -- ~/.opencode/bin/opencode run "Create a file named
+  ~/a01-j5-final-receipt.json -- ~/.opencode/bin/opencode run "Create a file named
   greeting.txt containing the single word hello."`
-- **Result.** The jail exited 0 after 9 seconds and `greeting.txt` contains
+- **Result.** The jail exited 0 after 12 seconds and `greeting.txt` contains
   `hello`. The receipt is settled: outcome `exited` 0, no error, every
-  coverage class active (`exec` 134, `fs.write` 10,602, `fs.deny` 0, `net` 31,
+  coverage class active (`exec` 162, `fs.write` 13,091, `fs.deny` 0, `net` 31,
   `limits` 0, `proxy.net` 31 results), lifetime integrity verified,
   `tree_empty` true, the supervisor's scope step `entered` (so the attempt had
   its execution leaf and its preferred pids ceiling applied), vendor state
@@ -57,8 +57,9 @@ profile `experimental`; this record carries the claim.
   and the narrowing filter
   `sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66`,
   the digests [milestone-1-freeze.toml](milestone-1-freeze.toml) freezes.
-- **The start-up stall.** It did not recur in this one run. One run is not
-  evidence that it is gone; the item stays open.
+- **The start-up stall.** It did not recur in this run, nor in the superseded
+  run at `4380241f` earlier the same day. Two runs are not evidence that it is
+  gone; the item stays open.
 
 ## OpenCode 1.18.32, `agent`, no credential (2026-09-23)
 
