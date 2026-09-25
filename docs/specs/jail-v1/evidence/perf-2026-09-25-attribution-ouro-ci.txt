@@ -1,0 +1,49 @@
+# Attribution of the jail's own overhead on the fixed file workload (jail-v1 §5; the milestone-1 performance adjustment)
+# 2026-09-25 ~02:40 UTC, reference host as ouro-ci (Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap 0.11.1, kernel.apparmor_restrict_unprivileged_userns=1),
+# quiet host (1-min load 0.57 before, 0.63 after), ouro-jail and ouro-fixture at revision 4380241f (the milestone build, sha256 90dbd434…).
+# Workload: ouro-fixture fileops 5000 (5,000 create/rename/unlink rounds); work phase = the fixture's own end_ns - start_ns.
+# 16 interleaved rounds per arm, the first discarded as warm-up. Arms: direct; bubblewrap alone with the tool profile's namespaces
+# (--unshare-user/pid/net/ipc/uts/cgroup, --ro-bind / /, the workspace bound read-write) and no seccomp filter — Ubuntu's
+# bwrap-userns-restrict/unpriv_bwrap AppArmor confinement still applies, as it does to every bubblewrap on this host; and
+# ouro-jail run --profile tool --observe off.
+
+## Result
+direct         n=15 median=155.4 ms  min=147.5  max=164.4
+bwrap-only     n=15 median=185.0 ms  min=179.4  max=195.8
+jail-tool-off  n=15 median=189.9 ms  min=182.3  max=195.8
+bwrap-only vs direct: +19.0%
+jail-tool-off vs direct: +22.2%
+
+## Reading
+About 19 of the jail's 22 points on this workload are bubblewrap's containment as the stock distribution confines it; the
+jail's own filter and supervisor add about 3. The harness measurement (evidence/perf-2026-09-25-ouro-ci) reads higher
+(tool, work phase +28.4% to +30.8%) under its own workspace layout and 5 ms sampling; the direction is the same. The
+experiment does not separate the user namespace, the mount namespace and AppArmor from each other.
+
+## Script (attr.py)
+import json, subprocess, statistics, os
+H=os.path.expanduser("~/j5/attr"); WS=f"{H}/ws"; F=f"{WS}/bin/ouro-fixture"; D=f"{WS}/data"
+J=os.path.expanduser("~/j5/perf/target/release/ouro-jail")
+env=dict(os.environ, XDG_RUNTIME_DIR=f"/run/user/{os.getuid()}")
+arms={
+ "direct":[F,"fileops","5000",D],
+ "bwrap-only":["bwrap","--unshare-user","--unshare-pid","--unshare-net","--unshare-ipc","--unshare-uts","--unshare-cgroup","--die-with-parent","--ro-bind","/","/","--bind",WS,WS,"--dev","/dev","--proc","/proc","--",F,"fileops","5000",D],
+ "jail-tool-off":[J,"run","--profile","tool","--observe","off","--workspace",WS,"--",F,"fileops","5000",D],
+}
+res={k:[] for k in arms}
+for i in range(16):
+    for name,argv in arms.items():
+        out=subprocess.run(argv,capture_output=True,text=True,env=env,cwd=H)
+        work=None
+        for line in out.stdout.splitlines():
+            try: r=json.loads(line)
+            except Exception: continue
+            if r.get("op")=="fileops": work=(r["args"]["end_ns"]-r["args"]["start_ns"])/1e6
+        if i==0: continue  # warm-up
+        if work is None: print(name,"no result rc",out.returncode,out.stderr[-300:]); continue
+        res[name].append(work)
+for k,v in res.items():
+    print(f"{k:14} n={len(v)} median={statistics.median(v):.1f} ms  min={min(v):.1f}  max={max(v):.1f}")
+b=statistics.median(res["direct"])
+for k in ("bwrap-only","jail-tool-off"):
+    print(f"{k} vs direct: {100*(statistics.median(res[k])/b-1):+.1f}%")
