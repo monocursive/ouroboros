@@ -313,13 +313,16 @@ failed or stays pending, or state could not be read.
 
 ## The managed gate, for owners
 
-A launch owner (a program that authorizes each attempt before it runs) drives
-`run` through three inherited descriptors (jail-v1 §8.2):
+A launch owner (a program that authorizes each attempt before it runs) starts
+`run` with two inherited pipe ends (jail-v1 §8.2): the read end of a private
+gate pipe, and the write end of a control pipe it reads (`--trace-fd` may add
+an event stream the same way). Each descriptor must be open, in the right
+direction, distinct from the others and from stdio, and owned by this
+invocation alone.
 
-```sh
+```text
 ouro-jail run --attempt-id att_<uuid> --gate-fd 3 --control-fd 4 \
-  [--receipt PATH] [policy flags] -- PROGRAM [ARG]... \
-  3<gate-read-end 4>control-write-end
+  [--receipt PATH] [policy flags] -- PROGRAM [ARG]...
 ```
 
 1. Allocate the attempt id: `att_` plus a lowercase, random UUIDv4 with the
@@ -360,10 +363,10 @@ release never starts a second command. If you die before release, the command
 never runs; if you die during release, it runs at most once. The supervisor
 records its direct parent's identity and arms a parent-death signal, so under
 the contained profiles the death of that parent takes the supervisor and the
-tree with it, while under `none` it leaves the accepted unknown case. A timed-out attempt is not retried by
-reusing its gate; reconcile it (`gc`) and start a new attempt. Matching
-digests prove the snapshot's identity, not that its permissions were
-authorized: authorization is yours.
+tree with it, while under `none` it leaves the accepted unknown case. A
+timed-out attempt is not retried by reusing its gate; reconcile it (`gc`) and
+start a new attempt. Matching digests prove the snapshot's identity, not that
+its permissions were authorized: authorization is yours.
 
 ## Reading a receipt
 
