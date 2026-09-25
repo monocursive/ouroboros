@@ -3624,4 +3624,76 @@ mod tests {
         );
         drop(rx);
     }
+    /// J5-T w3: the children a session was attached beside are recognised
+    /// by pid and birth; anything else that is not a tracee was gained since
+    /// and is owed — awaited, and listed unreaped if the tracer stops first.
+    /// A pid the kernel reused after a bystander ended is gained, not beside.
+    /// Scripted: the kernel will not reuse a pid, or hand an unprivileged
+    /// test a live orphan, on demand.
+    #[test]
+    fn j5t_a_child_gained_after_the_attach_is_owed_and_a_bystander_is_not() {
+        struct Family(std::sync::Arc<std::sync::Mutex<Vec<(pid_t, u64)>>>);
+        impl ProcView for Family {
+            fn tgid(&self, tid: pid_t) -> Option<pid_t> {
+                Some(tid)
+            }
+            fn start_ticks(&self, tid: pid_t) -> Option<u64> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(pid, _)| *pid == tid)
+                    .map(|(_, birth)| *birth)
+            }
+            fn children(&self, _pid: pid_t) -> Vec<pid_t> {
+                self.0.lock().unwrap().iter().map(|(pid, _)| *pid).collect()
+            }
+        }
+        const BYSTANDER: pid_t = RECYCLED;
+        const ORPHAN: pid_t = WORKER;
+        let family = std::sync::Arc::new(std::sync::Mutex::new(vec![(BYSTANDER, 1000)]));
+        let session = || {
+            let (tx, _) = std::sync::mpsc::sync_channel(64);
+            let mut session = Session::new(
+                TracerConfig::default(),
+                tx,
+                Arc::default(),
+                0,
+                Box::new(Family(std::sync::Arc::clone(&family))),
+            );
+            session.owed = Owed::Nothing;
+            session.beside = vec![(BYSTANDER, 1000)];
+            session
+        };
+        let set = |children: &[(pid_t, u64)]| *family.lock().unwrap() = children.to_vec();
+
+        let s = session();
+        assert!(s.adopted().is_empty());
+        assert!(s.accounted_for(), "only the bystander: done");
+        set(&[(BYSTANDER, 1000), (ORPHAN, 1500)]);
+        assert_eq!(s.adopted(), vec![ORPHAN]);
+        assert!(!s.accounted_for(), "an orphan gained since: wait for it");
+        set(&[(BYSTANDER, 2000)]);
+        assert_eq!(
+            s.adopted(),
+            vec![BYSTANDER],
+            "the bystander's number under another birth is a new child"
+        );
+        assert!(!s.accounted_for());
+
+        let handles = |session: &Session| Handles {
+            stop: Arc::new(AtomicBool::new(true)),
+            shutdown_ns: Arc::default(),
+            tid: Arc::default(),
+            handed: Arc::clone(&session.handed),
+        };
+        set(&[(BYSTANDER, 1000), (ORPHAN, 1500)]);
+        let s = session();
+        let h = handles(&s);
+        assert_eq!(
+            s.finish(&h).unreaped_children,
+            vec![ORPHAN],
+            "stopped first: the orphan is unreaped, the bystander is not"
+        );
+    }
 }
