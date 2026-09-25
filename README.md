@@ -23,10 +23,11 @@ uv run docs/specs/managed-teams-v1/validate_policy.py
 This checks document contracts; live backend conformance runs on the
 reference host through the `conformance` workflow.
 
-J0–J3 of Jail v1 are implemented, on a stock host with no host configuration. J0 measured the reference host (an x86_64
+J0–J4 of Jail v1 are implemented, on a stock host with no host configuration. J0 measured the reference host (an x86_64
 VPS on Ubuntu 26.04 LTS; manifests under `docs/specs/jail-v1/evidence/`) and
-the observer privilege model: the ptrace tracer is the working baseline, and
-[eBPF remains unselected](docs/specs/jail-v1/backend-evaluation.md). J1 ships
+the observer privilege model; D8 selected the native bubblewrap adapter and the
+ptrace observer, and withdrew eBPF from v1
+([backend evaluation](docs/specs/jail-v1/backend-evaluation.md)). J1 ships
 the first execution slice — policy resolution, capability probes, the
 bubblewrap containment boundary with source-pinned protected binds, the
 ptrace closed-set observer, the managed gate, wall limits,
@@ -40,8 +41,14 @@ inner sandboxes), data-only launch profiles with credential staging and
 cleanup, and the explicit uncontained `none` profile
 ([J3's acceptance map](docs/specs/jail-v1/j3-authority.md)). OpenCode 1.18.32
 runs under `agent` on the stock reference host
-([agent compatibility](docs/specs/jail-v1/agent-compatibility.md)). J4 (evidence
-and recovery) is next. CI is three
+([agent compatibility](docs/specs/jail-v1/agent-compatibility.md)). J4 adds
+the complete closed set, loss handling, the bounded trace, atomic records and
+`gc` reconciliation ([J4's acceptance map](docs/specs/jail-v1/j4-authority.md)).
+J5, the milestone proof, is recorded in
+[J5 authority](docs/specs/jail-v1/j5-authority.md): the per-gate acceptance
+verdict, the frozen schemas and inputs, the performance report, A01 and the
+named limits. Operators start with
+[Operating ouro-jail](docs/specs/jail-v1/operating.md). CI is three
 workflows, `contracts`, `rust` and `conformance`
 ([Jail v1 §16](docs/specs/jail-v1.md#16-implementation-order-and-exit-criteria)).
 The specifications link to the previous implementation at commit `f3b2dbfd`,

@@ -2,13 +2,37 @@
 
 Real agent runs under `ouro-jail` (jail-v1 §15 row A01, north star §7.4). A
 record marks only the tested profile, vendor version, platform and jail mode
-supported; every other combination stays experimental. No record stores a
-token, a credential, or a vendor-state archive.
+supported; every other combination stays experimental. The support claim
+lives here, not in the binary: `doctor` reports every launch profile
+`experimental` (jail-v1 §§14.1, 15, revision 19). No record stores a token, a
+credential, or a vendor-state archive.
 
-| Agent | Vendor version | Ouroboros revision | Platform | Jail mode | Credential | Result |
-|---|---|---|---|---|---|---|
-| OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d`) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, bubblewrap 0.11.1, stock host | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active |
-| OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d` with its `auth` input enabled and `api.z.ai` allowed) | same | same | the operator's own Z.AI Coding Plan key (`opencode auth login`), staged `copy_rw` | Passed: GLM-5.3 wrote the requested workspace file; receipt settled, exit 0, every coverage class active; the key reached no record |
+| Agent | Vendor version | Ouroboros revision | Platform | Backend | Jail mode | Credential | Result |
+|---|---|---|---|---|---|---|---|
+| OpenCode | **TO BE FILLED** | **TO BE FILLED** (the milestone revision) | **TO BE FILLED** | bubblewrap adapter and ptrace observer; filter digests **TO BE FILLED** from the receipt | `agent`, observation on, strict evidence | none | **TO BE FILLED** ([milestone run](#opencode-agent-no-credential-at-the-milestone-revision)) |
+| OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d`) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, stock host | bubblewrap 0.11.1, ptrace observer; pre-J4 filters (below) | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active |
+| OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d` with its `auth` input enabled and `api.z.ai` allowed) | same | same | same | the operator's own Z.AI Coding Plan key (`opencode auth login`), staged `copy_rw` | Passed: GLM-5.3 wrote the requested workspace file; receipt settled, exit 0, every coverage class active; the key reached no record |
+
+The two 2026-09-23 runs predate J4 and the milestone freeze. Their receipts
+record the `agent` filter `sha256:e2108d4f9e9e9b222f946f375af699707a491a637e9914df45a95b3f33affb75`
+and the narrowing filter
+`sha256:4e2c1ab0a6ca9263da038faae8b71fb59d2989a259efc8a067ccddd372a3e2d8`;
+the frozen ones are in [milestone-1-freeze.toml](milestone-1-freeze.toml).
+They are kept as the history of what the first real runs required; the
+milestone's A01 record is the run below.
+
+## OpenCode, `agent`, no credential, at the milestone revision
+
+**TO BE FILLED** by the milestone run: the date; the Ouroboros revision (the
+milestone revision, and the receipt's `build.revision` if the binary carries
+it); the OS, kernel and architecture; the backend and its version, and the
+`agent`, mediation and narrowing filter digests the receipt records, compared
+with [milestone-1-freeze.toml](milestone-1-freeze.toml); the OpenCode version;
+the launch profile (the bundled `opencode` profile, and any change to it); the
+command; the result (receipt phase, outcome, exit code, coverage, and what the
+proxy reached); and the evidence files (`evidence/a01-opencode-run-<date>-ubuntu.txt`
+and `evidence/a01-opencode-receipt-<date>-ubuntu.json`). Whether the
+start-up stall recorded below recurred: **TO BE FILLED**.
 
 ## OpenCode 1.18.32, `agent`, no credential (2026-09-23)
 
@@ -40,8 +64,12 @@ Evidence: [run record](evidence/a01-opencode-run-2026-09-23-ubuntu.txt) and
 ## OpenCode 1.18.32, `agent`, the operator's own credential (2026-09-23)
 
 Evidence: [run record](evidence/a01-opencode-zai-run-2026-09-23-ubuntu.txt) and
-[receipt](evidence/a01-opencode-zai-receipt-2026-09-23-ubuntu.json) (its
-credential digest redacted because this repository is public).
+[receipt](evidence/a01-opencode-zai-receipt-2026-09-23-ubuntu.json).
+The public copy of the credentialed receipt omits the credential's content
+digest: it carries `digest: null` with `digest_unavailable_reason:
+"redacted_in_public_copy"`, because the real digest is a hash of the
+operator's credential. The product wrote a digest; every other field is as
+the product wrote it.
 
 - **How it ran.** The operator logged in with `opencode auth login` on the host
   (Z.AI Coding Plan). The profile's `auth` input copied

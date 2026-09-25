@@ -1,6 +1,7 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 16.** Written 2026-09-21, revised 2026-09-22. Revision 16 makes
+Status: **specification, revision 17.** Written 2026-09-21, revised 2026-09-25. Revision 17
+records D8 and the milestone-1 status (§§2, 8, 11). Revision 16 makes
 the jail require no host configuration (D9, §4.6). Revision 6 cut the
 product to a jail, a ledger, and a fleet around existing agents. Revision 7
 answered five review findings by specifying the mechanism that would close
@@ -206,7 +207,7 @@ remain outside the product. The single-worker pilot does not wait for fleet.
 | D5 | Ledger ownership | One canonical Rust ledger, one writer per stream (`ouro-ledger serve`). No dual-write and no merge-on-query. `audit/` and `agent/effect_ledger.ex` go in the cut, after the history export in §5.4. Independent witness custody is unscheduled. | 2026-09-21 |
 | D6 | Packaging | After milestone 3: three executables (`ouro`, `ouro-jail`, `ouro-ledger`), the pinned D8 dependencies, and a separately fetched BEAM runtime for nodes that run the fleet. `doctor` refuses a missing required component. Packaging is not a gate for milestone 1. The BEAM runtime is not embedded in the jail or the ledger. | 2026-09-21 |
 | D7 | Repository | One workspace, laid out as jail-v1 §4 specifies: Rust crates under `crates/` (one per process the north star names; `ouro-records` carved out of the jail only when the ledger becomes its second consumer; a test-only fixture crate; a BPF object crate outside the default members if J0 selects eBPF; `xtask` for repository tasks), the Elixir fleet as a sibling Mix project outside Cargo, contracts and measured evidence under `docs/specs/`, proposals under `docs/proposals/`, packaging under `packaging/` after milestone 3. Directories are created when their milestone starts; their names and split rules are fixed now. A tool moves to its own repository only after a later decision, once its CLI, contracts and tests stand alone. | 2026-09-21; layout 2026-09-22 |
-| D8 | Jail implementation | Before milestone 1 is declared green, evaluate pinned `srt`, Greywall and the existing in-tree sandbox against §4. Prefer reuse behind `ouro-jail`, with the smallest policy, admission and receipt integration that passes. The enforcement backend is not the audit sensor (§4.8). A backend that leaves no supervisor outside the child, or that hides descendant syscalls from a host probe, fails the evaluation. Record boundary and nesting failures, coverage, lifecycle and limit support, startup cost, dependency footprint, licensing and maintenance cost. A runtime dependency such as Node is a measured packaging tradeoff. Implement or port a missing mechanism only when a named failing gate justifies it. Freeze one backend, version and integration, with provenance and a gap-to-gate plan, in `docs/specs/jail-v1/backend-evaluation.md`. Independent §4 fixtures are authoritative. Differential runs against other candidates are supporting evidence, not an oracle and not a permanent shipping dependency. The decision is scheduled, not made: it is taken in J0's report, whose checked-in skeleton at [`backend-evaluation.md`](docs/specs/jail-v1/backend-evaluation.md) records `not_started` for every measurement until the reference host produces them. J0 measures the observer privilege model before the enforcement candidates, because a blocked observer changes which backend is worth integrating. | pending; scheduled as J0 on 2026-09-22 |
+| D8 | Jail implementation | Before milestone 1 is declared green, evaluate pinned `srt`, Greywall and the existing in-tree sandbox against §4. Prefer reuse behind `ouro-jail`, with the smallest policy, admission and receipt integration that passes. The enforcement backend is not the audit sensor (§4.8). A backend that leaves no supervisor outside the child, or that hides descendant syscalls from a host probe, fails the evaluation. Implement or port a missing mechanism only when a named failing gate justifies it. Independent §4 fixtures are authoritative; differential runs against other candidates are supporting evidence, not an oracle and not a permanent shipping dependency. Recorded in [`backend-evaluation.md`](docs/specs/jail-v1/backend-evaluation.md) (jail-v1 revision 19): the native adapter over unprivileged bubblewrap 0.11.1, seccomp and cgroup v2 delegation, with the ptrace observer in the supervisor. On the stock reference host `srt` 0.0.77 cannot run `true` (its seccomp helper needs a nested user namespace the distribution's `unpriv_bwrap` profile denies), and Greywall 0.3.7 needs `socat` and a downloaded proxy, cannot create its TUN device, and its monitor reports nothing for a write it denied (no jail-owned observation, D10); the legacy sandbox needs BEAM. eBPF is withdrawn from v1: its capabilities are host configuration. | 2026-09-21; recorded 2026-09-25 |
 | D9 | First lane | Linux (bubblewrap, seccomp, cgroup v2 where the host delegates one). Initial launch profiles for Codex, Claude Code, and OpenCode. A profile is experimental until its own §7.4 run. `--jail none` is a real run, still observed unless `--observe off`, and its evidence is unprotected. macOS execution, including Claude's Keychain credential, follows a separate platform implementation; shared contracts must accommodate it now. The jail requires no host configuration: every profile works on a stock install of a supported distribution, with no sysctl, AppArmor profile, file capability, setuid helper or systemd unit (2026-09-22, superseding that day's sysctl decision for the reference host, which stays stock). On Ubuntu 24.04+ that means one user-namespace layer, the one bubblewrap is allowed; nested user namespaces are an optional host capability that `doctor` measures and never a requirement. Optional accelerators may be offered only as opt-in remediations. `doctor` measures the sandbox, the cgroup, and the audit sensor, and never changes host policy. The initial conformance host is an operator-provisioned x86_64 virtual private server that runs its own Linux kernel under hardware virtualization, pinned to the release it runs: Ubuntu 26.04 LTS on the 7.0-series kernel, with the measured manifest recorded in jail-v1 §3.2. A container-based host that cannot create user namespaces, delegate a cgroup v2 subtree or attach the observer is ineligible, whatever the provider calls it. aarch64 is a later, separately conformed lane, not the reference host (jail-v1 §3.2). | 2026-09-21; host added 2026-09-22 |
 | D10 | Audit sensor | The jail supervisor is the only syscall sensor. It attaches before exec, outside the child, including when containment is `none`. The ledger is the store. The closed set and the `--observe` default are §4.8. Seccomp notification is not that sensor. | 2026-09-21 |
 | D11 | The five limits | `none` is labelled unprotected. Its tree kill is the supervisor's cgroup, and supervisor death is an unknown. Fleet I/O is batch with opt-in bounded capture. Vendor state is deleted after tree death. One real-agent run marks that profile supported. The accepted holes are the Enough table in §1. | 2026-09-21 |
@@ -1092,10 +1093,11 @@ Milestone 3 needs milestone 2. Milestone 4's single-worker pilot needs milestone
 The D8 evaluation is recorded before milestone 1 is declared green. No schema
 is frozen before the milestone that ships it.
 
-Status 2026-09-22: no milestone has started and no code exists in this tree.
-The next change is J0 (jail-v1 §16) on the reference host. Until J0's report
-is recorded, revisions of these specifications are corrections and measured
-results, not new requirements or subsystems.
+Status 2026-09-25: J0 to J4 of milestone 1 are implemented on the reference
+host, and J5, the milestone proof, is recorded in
+[J5 authority](docs/specs/jail-v1/j5-authority.md). Milestone 1 is green only
+when that report's acceptance verdict, freeze and A01 record are. D8 is
+recorded (§2).
 
 | Milestone | Deliverable | Exit |
 |---|---|---|
@@ -1207,12 +1209,12 @@ radius per store; `docs/experiments/` is never added.
   the tools. Ubuntu 24.04 restricts unprivileged user namespaces through
   AppArmor and gates BPF tracing behind capabilities the operator must
   provision. J0 measures this on the reference host before anything else
-  (jail-v1 §5.2). J0 measures the ptrace tracer first, because it needs no
-  provisioning on mainstream distributions, and the eBPF candidate second for
-  performance; an installed system gets eBPF capabilities from the installer's
-  file capabilities, never from a required service unit. If neither passes,
-  the blocker is recorded and J1 does not ship with `--observe off` as its
-  acceptance run.
+  (jail-v1 §5.2). J0 measured the ptrace tracer first, because it needs no
+  provisioning on mainstream distributions; it is the selected observer, and
+  eBPF is withdrawn from v1 because its capabilities are host configuration
+  (D8). Its cost is two stops per closed-set call, so the performance budget
+  applies to the jail's own overhead and observation cost is reported per
+  workload (jail-v1 §5.2).
 - **The workspace is not a git boundary.** Shared inodes and alternates are the
   operator's problem until a later proposal says otherwise.
 
