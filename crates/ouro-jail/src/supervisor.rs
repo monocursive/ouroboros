@@ -4208,6 +4208,10 @@ mod tests {
         };
         // One delivered frame, so the last healthy point is after the start,
         // then an event past the 1200-byte payload budget: the first loss.
+        // The elapsed clock starts at its first read (the fallback clock, and
+        // the supervisor mark); read it before the sleep, or a test that runs
+        // first in its process would deliver that frame at elapsed zero.
+        let _ = crate::platform::elapsed_since_start_ns();
         std::thread::sleep(Duration::from_millis(2));
         trace
             .lock()
