@@ -1,8 +1,19 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 20, 2026-09-25. No implementation
-or backend conformance is claimed by this document. Revision 20 records the
-security audit's fixes: the observer's exit re-read of pointed arguments and
+Status: implementation specification, revision 21, 2026-09-25. No implementation
+or backend conformance is claimed by this document. Revision 21 records the
+second security audit's fixes (docs/security-audit-2026-09-25-2.md): every
+`openat2` is followed to its exit so the entry-time read-only skip can no
+longer silently drop a raced mutation (§11.3), the ptrace-class and
+mount-inspection syscalls join the denied set so the boundary no longer
+leans on `kernel.yama.ptrace_scope` (§9.2), the bridge's report channel is a
+`SOCK_SEQPACKET` pair a same-uid peer cannot reopen (§10), `deny_read` masks
+over `/run/ouro` are refused and every mask is sealed read-only (§9.1), gc
+cleans vendor state of attempts whose owner died before any leaf was
+registered (§14.2), a coverage level that was never requested is recorded as
+`none` (§13.2), receipts carry no credential digest (§12), and the narrowing
+filter's trace data is chosen per attempt (§11.2). Revision 20 records the
+first security audit's fixes: the observer's exit re-read of pointed arguments and
 the `argument_snapshot_unstable` gap (§§11.3–11.4), the mediator admitting the
 authorized proxy only for the bridge's pinned identity (§10), the sanitized
 `/etc/resolv.conf` copy (§9.1), and the single-link rule for credential
@@ -2014,10 +2025,13 @@ trees retain state. Cleanup failure does not rewrite a known child exit.
 
 The required `credentials` receipt array reports each successfully staged input
 as `{id, mode, digest, digest_unavailable_reason}`; it is empty when none were
-staged. IDs are unique logical names, modes are `copy_rw` or `bind_ro`, and a
-digest is `sha256:` plus the content hash or null with a safe reason. A present
-digest has a null reason. Source identity/paths and credential contents stay in
-private operational state, never the receipt. Later cleanup does not erase this
+staged. IDs are unique logical names and modes are `copy_rw` or `bind_ro`.
+Revision 21 (audit 2026-09-25-2 S6): the receipt never carries a content
+digest — the receipt is the artifact meant to be shared, and a plain digest is
+an offline guessing oracle for the secret — so `digest` is null with the
+reason `receipt_verifier_withheld`. The digest staging computed, the source
+identity and the paths stay in private operational state, where the operator
+alone can verify what was staged. Later cleanup does not erase this
 historical provenance. Refusal can report inputs staged before the failure.
 No trace, receipt, support bundle or future ledger export includes vendor state.
 Credential provenance records local staging facts; it does not prove upstream

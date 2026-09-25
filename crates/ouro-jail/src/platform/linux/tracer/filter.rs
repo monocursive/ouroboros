@@ -88,7 +88,10 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 ///
 /// Allocation-free by construction, so [`install_narrowing_filter`] can run
 /// between `fork` and `execve`.
-fn build_into(out: &mut [libc::sock_filter; FILTER_LEN]) -> usize {
+/// Audit 2026-09-25-2, S14: `data` is the per-attempt `SECCOMP_RET_DATA`
+/// the tracer expects; the canonical builder below keeps the frozen
+/// evidence value.
+fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16) -> usize {
     let n = CLOSED_SET.len();
     let listener = n + 4;
     let clone = n + 7;
@@ -153,10 +156,7 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN]) -> usize {
         0,
     );
     out[allow] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ALLOW);
-    out[trace] = stmt(
-        sys::BPF_RET_K,
-        sys::SECCOMP_RET_TRACE | u32::from(NARROWING_TRACE_DATA),
-    );
+    out[trace] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_TRACE | u32::from(data));
     out[enosys] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ERRNO | sys::LINUX_ENOSYS);
     FILTER_LEN
 }
@@ -167,8 +167,16 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN]) -> usize {
 /// exactly these bytes.
 #[must_use]
 pub fn narrowing_filter() -> Vec<libc::sock_filter> {
+    narrowing_filter_with(NARROWING_TRACE_DATA)
+}
+
+/// The narrowing filter carrying `data`, the value a per-attempt install
+/// chose (audit 2026-09-25-2, S14). The canonical form above is what the
+/// evidence table and the freeze digest name.
+#[must_use]
+pub fn narrowing_filter_with(data: u16) -> Vec<libc::sock_filter> {
     let mut prog = [ZERO; FILTER_LEN];
-    let len = build_into(&mut prog);
+    let len = build_into(&mut prog, data);
     prog[..len].to_vec()
 }
 
@@ -213,8 +221,19 @@ pub fn narrowing_filter_digest() -> String {
 /// descendant fails with `ENOSYS` until a tracer is attached. Install it and
 /// then block; do not open a file in between.
 pub fn install_narrowing_filter() -> Result<(), i32> {
+    install_narrowing_filter_with(NARROWING_TRACE_DATA)
+}
+
+/// Install the narrowing filter carrying `data` (audit 2026-09-25-2, S14:
+/// the value is chosen per attempt by the supervisor and read by the
+/// launcher from a pipe, so neither the public constant nor any inherited
+/// argument names it). Same guarantees as [`install_narrowing_filter`].
+///
+/// # Errors
+/// The `errno` of whichever of the two calls failed.
+pub fn install_narrowing_filter_with(data: u16) -> Result<(), i32> {
     let mut prog = [ZERO; FILTER_LEN];
-    let len = build_into(&mut prog);
+    let len = build_into(&mut prog, data);
     let fprog = libc::sock_fprog {
         len: len as u16,
         filter: prog.as_mut_ptr(),

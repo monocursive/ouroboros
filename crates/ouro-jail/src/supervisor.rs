@@ -2821,7 +2821,7 @@ fn prepare_launch(
             Err(refusal) => {
                 // Both the receipt rows and the private provenance of every
                 // input staged before the refusal are kept (§12).
-                record.credentials = refusal.records();
+                record.credentials = receipt_credentials(&refusal.staged);
                 state::record_staged_credentials(
                     attempt_dir,
                     &private_provenance(&refusal.staged),
@@ -2829,10 +2829,7 @@ fn prepare_launch(
                 return Err(refusal.error);
             }
         };
-    record.credentials = staged
-        .iter()
-        .map(|credential| credential.record.clone())
-        .collect();
+    record.credentials = receipt_credentials(&staged);
     state::record_staged_credentials(attempt_dir, &private_provenance(&staged))?;
     crate::credentials::LaunchHandoff::new(
         attempt_dir.vendor_state_path(),
@@ -2850,6 +2847,26 @@ fn prepare_launch(
     })
 }
 
+/// Audit 2026-09-25-2, S6: the receipt rows for staged credentials. The
+/// receipt is the artifact meant to be shared, and a plain content digest is
+/// an offline guessing oracle for the secret, so the rows carry no digest;
+/// the digest the staging computed stays in jail state's private provenance
+/// (`private_provenance`), where the operator — and only the operator — can
+/// verify what was staged.
+fn receipt_credentials(
+    staged: &[crate::credentials::StagedCredential],
+) -> Vec<crate::records::CredentialRecord> {
+    staged
+        .iter()
+        .map(|credential| {
+            let mut record = credential.record.clone();
+            record.digest = None;
+            record.digest_unavailable_reason = Some("receipt_verifier_withheld".to_owned());
+            record
+        })
+        .collect()
+}
+
 /// The private provenance of staged credentials: identities, never paths.
 fn private_provenance(
     staged: &[crate::credentials::StagedCredential],
@@ -2862,6 +2879,7 @@ fn private_provenance(
             source_dev: credential.source.dev,
             source_ino: credential.source.ino,
             source_size: credential.source.size,
+            content_digest: credential.record.digest.clone(),
         })
         .collect()
 }

@@ -2354,25 +2354,25 @@ print(json.dumps(out))
         .find(|row| row["id"] == "config")
         .unwrap();
     assert_eq!(auth["mode"], "copy_rw");
-    let expected = {
-        use sha2::Digest as _;
-        let digest = sha2::Sha256::digest(b"fixture-token-copy");
-        format!(
-            "sha256:{}",
-            digest
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        )
-    };
-    assert_eq!(auth["digest"], expected.as_str());
-    assert!(auth["digest_unavailable_reason"].is_null());
+    // Audit 2026-09-25-2, S6: the receipt never carries a content digest —
+    // it is the shared artifact, and a digest is an offline guessing oracle
+    // for the secret. The operator verifies against jail state's private
+    // provenance, asserted below.
+    assert!(
+        auth["digest"].is_null(),
+        "no verifier of secret bytes reaches the receipt: {auth:?}"
+    );
+    assert_eq!(auth["digest_unavailable_reason"], "receipt_verifier_withheld");
     assert_eq!(config["mode"], "bind_ro");
     assert!(
         config["digest"].is_null(),
-        "a writable source is never stable"
+        "no mode publishes a content digest"
     );
-    assert!(config["digest_unavailable_reason"].is_string());
+    assert_eq!(
+        config["digest_unavailable_reason"], "receipt_verifier_withheld",
+        "the withholding outranks the staging's own unavailability reason in \
+         the shared record"
+    );
     let text = receipt.to_string();
     for secret in ["fixture-token-copy", "creds/auth.json", "creds/config.toml"] {
         assert!(!text.contains(secret), "{secret} reached the receipt");
@@ -2424,7 +2424,12 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
             .is_some_and(|link| link.starts_with("socket:"))
     );
     let report = launcher_fds.get(&20).cloned().unwrap_or_default();
-    assert!(report.starts_with("pipe:"), "{launcher_fds:?}");
+    assert!(report.starts_with("socket:"), "{launcher_fds:?}");
+    assert_ne!(
+        report,
+        launcher_fds.get(&19).cloned().unwrap_or_default(),
+        "the report socket is not the sock_diag socket"
+    );
     let bridge = native["helpers"][0]["pid"].as_i64().unwrap();
     assert_eq!(native["helpers"][0]["kind"], "bridge");
     assert_eq!(native["helpers"][0]["seccomp_filters"], 2);
@@ -2448,7 +2453,7 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
     assert_eq!(
         bridge_fds.get(&2),
         Some(&report),
-        "stderr is the report pipe the launcher holds the other end of"
+        "stderr is the report socket the launcher holds the other end of"
     );
     let others: Vec<&String> = bridge_fds
         .iter()

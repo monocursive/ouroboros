@@ -58,7 +58,7 @@
 pub mod clock;
 mod closed_set;
 mod digest;
-mod filter;
+pub(super) mod filter;
 mod proc;
 mod session;
 mod sys;
@@ -113,6 +113,12 @@ pub struct TracerConfig {
     /// known healthy point", which is an age, not an instant on the boot
     /// clock). Zero leaves the raw boottime readings in place.
     pub epoch_boottime_ns: u64,
+    /// The `SECCOMP_RET_DATA` this attempt's narrowing filter carries, which
+    /// a closed-set stop must show to be ours (audit 2026-09-25-2, S14: the
+    /// constant is public, so a child filter echoing it could forge
+    /// `unexpected_trace_stop` gaps; a per-attempt value makes the echo a
+    /// 1-in-65536 guess whose every miss is itself a visible gap).
+    pub trace_data: u16,
 }
 
 /// What one queued event costs besides its snapshots: the enum itself, the
@@ -201,6 +207,7 @@ impl Default for TracerConfig {
             queue_max: 16_384,
             queue_bytes_max: 4 * 1024 * 1024,
             epoch_boottime_ns: 0,
+            trace_data: filter::NARROWING_TRACE_DATA,
         }
     }
 }

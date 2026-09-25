@@ -9,9 +9,10 @@
 //! policy.
 //!
 //! The launcher starts it before the target is released, with a double fork,
-//! `/dev/null` as stdin and stdout, the write end of a report pipe as stderr
-//! (the supervisor holds the read end), no other descriptor, an empty
-//! environment and a session of its own. It runs under the same seccomp filters as the child,
+//! `/dev/null` as stdin and stdout, the report end of a `SOCK_SEQPACKET`
+//! pair as stderr (the supervisor holds the other end), no other descriptor,
+//! an empty environment and a session of its own. It runs under the same
+//! seccomp filters as the child,
 //! so its `connect` to the proxy socket is mediated: the supervisor allows
 //! exactly the pinned proxy socket identity, whatever the path now names.
 //! That is what makes the path unredirectable by a child rename, unlink,
@@ -41,7 +42,7 @@ pub const PROXY_PATH: &str = "/run/ouro/proxy/proxy.sock";
 /// The most relays at once. It matches the proxy's own connection budget
 /// (§10); a client beyond it is answered [`OVERLOAD_RESPONSE`] and closed at
 /// once rather than left in the kernel's backlog until it gives up, and
-/// counted: one byte on the report pipe, which the supervisor records as the
+/// counted: one byte on the report socket, which the supervisor records as the
 /// bridge's `rejected_at_capacity`.
 pub const MAX_CONNECTIONS: usize = 128;
 

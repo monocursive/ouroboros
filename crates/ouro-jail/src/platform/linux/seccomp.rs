@@ -120,6 +120,30 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     ("open_by_handle_at", 304),
     ("name_to_handle_at", 303),
     ("syslog", 103),
+    // Security 2026-09-25-2 (audits S7 and S10): the ptrace-class cousins
+    // of the denied `ptrace`/`process_vm_*`. Each is kernel-gated by a
+    // PTRACE_MODE_* check, but on a host with
+    // `kernel.yama.ptrace_scope=0` a same-uid peer is enough: `pidfd_getfd`
+    // would hand the target the bridge's descriptors (a direct proxy client
+    // that skips the bridge-only pin), and `process_madvise`/`kcmp`/
+    // `move_pages`/`migrate_pages` inspect or steer a peer's memory. The
+    // jail only records that sysctl; it must not depend on it. The sandbox
+    // has no legitimate use for any of them: the supervisor does its fd
+    // taking outside these filters.
+    ("pidfd_send_signal", 424),
+    ("pidfd_open", 434),
+    ("pidfd_getfd", 438),
+    ("process_madvise", 440),
+    ("kcmp", 312),
+    ("move_pages", 279),
+    ("migrate_pages", 256),
+    // Security 2026-09-25-2 (audit S10): `statmount`/`listmount` read the
+    // mount topology. Inside the jail they see only its own mount
+    // namespace, but §9.2's claim is "every mount interface old and new",
+    // and a default-allow table must not ship new kernel surface by
+    // accident.
+    ("statmount", 457),
+    ("listmount", 458),
 ];
 
 /// `clone3`. Denied with `ENOSYS` because seccomp cannot safely dereference

@@ -1450,13 +1450,45 @@ impl Session {
             && let Some(flags) = flags
             && !closed_set::open_is_covered(flags)
         {
-            // A read-only open is outside `linux-closed-v1`. It is not a
-            // loss, it is not an event, and the tracee is continued from
-            // here rather than stepped to a syscall exit nobody reads. It is
-            // filtered before the in-flight bound is consulted (J4 O-1):
-            // with the table full it is still not a call the observer had to
-            // follow, so refusing it would record a read as lost evidence.
-            self.summary.filtered_readonly_opens += 1;
+            // Register-sourced flags are the kernel's own saved pt_regs, so
+            // an entry-time read-only verdict is final. `openat2`'s flags
+            // live in tracee memory the kernel re-reads after this stop
+            // (audit 2026-09-25-2, S1): a read-only verdict there is only an
+            // assertion until an exit re-read confirms it, so the call is
+            // followed to its exit. Unfollowed, a sibling flipping
+            // `open_how.flags` between the two kernel reads could perform a
+            // covered mutation with no event and no gap.
+            if !matches!(entry.flags, FlagSource::OpenHow { .. }) {
+                // A read-only open is outside `linux-closed-v1`. It is not a
+                // loss, it is not an event, and the tracee is continued from
+                // here rather than stepped to a syscall exit nobody reads.
+                // It is filtered before the in-flight bound is consulted
+                // (J4 O-1): with the table full it is still not a call the
+                // observer had to follow, so refusing it would record a read
+                // as lost evidence.
+                self.summary.filtered_readonly_opens += 1;
+                return;
+            }
+            // The verification follow costs an in-flight slot like any
+            // followed call; refused one, the call runs unfollowed, which is
+            // a hole the receipt must name.
+            if !self.admit(OpSet::of(entry.op)) {
+                return;
+            }
+            let pending = Pending {
+                entry,
+                args: Args {
+                    flags: Some(flags),
+                    ..Args::default()
+                },
+                exec_confirmed: false,
+                path_unreadable: false,
+                path2_unreadable: false,
+                sockaddr_unreadable: false,
+                flags_unavailable,
+                raw: info.args,
+            };
+            self.begin(tid, InFlight::Closed(pending), site);
             return;
         }
         if !self.admit(OpSet::of(entry.op)) {
@@ -1559,9 +1591,11 @@ impl Session {
     /// program the launcher installed is not this module's, which is a gap.
     fn stop_not_ours(&mut self, tid: pid_t) {
         match sys::event_msg(tid) {
+            // Audit 2026-09-25-2, S14: the expected data is this attempt's
+            // own, not the public constant a child filter could echo.
             Ok(data)
                 if data & u64::from(sys::SECCOMP_RET_DATA)
-                    != u64::from(super::filter::NARROWING_TRACE_DATA) =>
+                    != u64::from(self.config.trace_data) =>
             {
                 self.summary.requested_by_other_filters += 1;
             }
@@ -1766,6 +1800,18 @@ impl Session {
         if !pending.exec_confirmed && !self.arguments_stable(tid, &pending) {
             self.summary.loss.argument_snapshot_unstable += 1;
             self.gap(GapReason::ArgumentSnapshotUnstable, OpSet::of(op), Some(1));
+            return;
+        }
+        if op == ClosedOp::Open
+            && let Some(flags) = pending.args.flags
+            && !closed_set::open_is_covered(flags)
+        {
+            // A memory-sourced read-only `openat2` followed for
+            // verification (audit 2026-09-25-2, S1): the exit re-read above
+            // agreed with the entry snapshot, so the kernel applied exactly
+            // these read-only flags and the call stayed outside
+            // `linux-closed-v1` — no event, no loss, only the counter.
+            self.summary.filtered_readonly_opens += 1;
             return;
         }
         self.summary.ops.bump(op);
@@ -2564,6 +2610,69 @@ mod tests {
         );
     }
 
+    /// Security 2026-09-25-2 (audit S1): an `openat2` classified read-only
+    /// at its entry is followed to its exit, where the flags are re-read.
+    /// Stable read-only flags stay outside the closed set (a counter, no
+    /// event); flags rewritten between the two kernel reads become an
+    /// `argument_snapshot_unstable` gap, never a silently suppressed
+    /// mutation.
+    #[test]
+    fn a_readonly_openat2_is_reverified_at_its_exit() {
+        let (mut session, rx) = stalled_session();
+        let entry = closed_set::lookup(437).expect("openat2");
+        let mut how: u64 = 0; // O_RDONLY, as the kernel would read it
+        let mut raw = [0u64; 6];
+        raw[1] = c"path".as_ptr() as u64;
+        raw[2] = &mut how as *const u64 as u64; // struct open_how *
+        raw[3] = 24; // size
+        let pending = Pending {
+            entry,
+            args: Args {
+                flags: Some(0),
+                ..Args::default()
+            },
+            exec_confirmed: false,
+            path_unreadable: false,
+            path2_unreadable: false,
+            sockaddr_unreadable: false,
+            flags_unavailable: false,
+            raw,
+        };
+        let self_pid = std::process::id() as pid_t;
+        session.tasks.insert(
+            self_pid,
+            Task {
+                tgid: self_pid,
+                start_ticks: None,
+                pending: Some(InFlight::Closed(pending.clone())),
+                site: Site {
+                    arch: sys::AUDIT_ARCH_X86_64,
+                    nr: 437,
+                    ip: 0,
+                },
+                entry_fresh: false,
+                restart: None,
+            },
+        );
+        session.handle_exit(self_pid, 3);
+        assert_eq!(
+            session.summary.filtered_readonly_opens, 1,
+            "stable read-only flags are counted, not recorded"
+        );
+        assert!(rx.try_recv().is_err(), "no event is emitted");
+        how = libc::O_WRONLY as u64 | libc::O_CREAT as u64;
+        assert_ne!(how, 0, "the raced value is what the kernel will apply");
+        session.tasks.get_mut(&self_pid).unwrap().pending = Some(InFlight::Closed(pending));
+        session.handle_exit(self_pid, 3);
+        assert_eq!(
+            session.summary.loss.argument_snapshot_unstable, 1,
+            "rewritten flags are an unstable gap"
+        );
+        assert_eq!(
+            session.summary.filtered_readonly_opens, 1,
+            "the raced call never counts as filtered"
+        );
+    }
     fn fork(child: pid_t) -> TracerEvent {
         TracerEvent::Fork {
             parent: 1,

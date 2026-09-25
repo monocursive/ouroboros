@@ -1110,6 +1110,12 @@ pub struct PrivateCredential {
     pub source_ino: u64,
     /// Source size at staging.
     pub source_size: u64,
+    /// The content digest as staging computed it (`sha256:…`), or the null
+    /// staging recorded. Audit 2026-09-25-2, S6: the receipt publishes no
+    /// verifier of secret bytes (it is the artifact meant to be shared, and
+    /// a plain digest is an offline guessing oracle); the operator verifies
+    /// against this private record instead.
+    pub content_digest: Option<String>,
 }
 
 fn state_parse_failed(detail: impl std::fmt::Display) -> JailError {
@@ -1726,6 +1732,7 @@ pub fn record_staged_credentials(
                 "source_dev": row.source_dev.to_string(),
                 "source_ino": row.source_ino.to_string(),
                 "source_size": row.source_size.to_string(),
+                "content_digest": row.content_digest,
             })
         })
         .collect();

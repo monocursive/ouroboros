@@ -111,11 +111,6 @@ impl StagingRefusal {
         }
     }
 
-    /// The receipt rows of the credentials staged before the refusal.
-    #[must_use]
-    pub fn records(&self) -> Vec<CredentialRecord> {
-        self.staged.iter().map(|item| item.record.clone()).collect()
-    }
 }
 
 fn refusal(id: &str, remediation: Remediation, message: impl std::fmt::Display) -> JailError {

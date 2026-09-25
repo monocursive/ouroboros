@@ -70,8 +70,8 @@ pub const PROXY_DIR_FD: RawFd = 17;
 pub const LISTENER_FD: RawFd = 18;
 /// Descriptor the launcher places its attempt-netns `sock_diag` socket at.
 pub const SOCKDIAG_FD: RawFd = 19;
-/// Descriptor the launcher places the read end of the bridge's report pipe
-/// at: one byte for every client the bridge turned away at capacity.
+/// Descriptor the launcher places the supervisor's end of the bridge's report
+/// socket at: one datagram for every client the bridge turned away at capacity.
 pub const BRIDGE_REPORT_FD: RawFd = 20;
 
 /// Bound on the queue between the mediator's threads and the supervision
@@ -242,7 +242,7 @@ pub struct AgentNet {
     bridge_reported: bool,
     proxy_reported: bool,
     helper_connects: u64,
-    /// The read end of the bridge's report pipe, taken from the launcher.
+    /// The supervisor's end of the bridge's report socket, taken from the launcher.
     bridge_report: Option<OwnedFd>,
     /// Clients the bridge turned away at capacity, as it reported them.
     bridge_rejected: u64,
@@ -400,12 +400,15 @@ impl AgentNet {
     /// A refusal naming the unix-peer mediation or the bridge.
     pub fn take_mediation(&mut self, launcher: BorrowedFd<'_>) -> Result<(), JailError> {
         let report = unixpeer::pidfd_getfd(launcher, BRIDGE_REPORT_FD)
-            .map_err(|error| refusal("bridge", format!("its report pipe: {error}")))?;
+            .map_err(|error| refusal("bridge", format!("its report socket: {error}")))?;
         let kind = crate::state::anchored::fstat(report.as_fd())
-            .map_err(|error| refusal("bridge", format!("its report pipe: {error}")))?
+            .map_err(|error| refusal("bridge", format!("its report socket: {error}")))?
             .kind;
-        if kind != crate::state::anchored::Kind::Fifo {
-            return Err(refusal("bridge", "its report descriptor is not a pipe"));
+        // Audit 2026-09-25-2, S2: a SOCK_SEQPACKET socket, not a pipe — a
+        // same-uid peer cannot reopen a socket through /proc/<pid>/fd, so
+        // the report channel cannot be forged from inside the jail.
+        if kind != crate::state::anchored::Kind::Socket {
+            return Err(refusal("bridge", "its report descriptor is not a socket"));
         }
         self.bridge_report = Some(report);
         let authority = unixpeer::take_from_launcher(

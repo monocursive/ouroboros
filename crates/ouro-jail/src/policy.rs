@@ -968,6 +968,18 @@ fn refuse(code: ErrorCode, key: &str, message: String) -> JailError {
     )
     .with_key_path(key)
 }
+/// Audit 2026-09-25-2, S3: whether a `deny_read` entry is `/`, `/run`,
+/// `/run/ouro` or beneath `/run/ouro`. The sandbox's own plumbing lives
+/// there (the jail binary, the proxy socket directory, staged state), and a
+/// mask renders after every staged mount, so such a denial would remove the
+/// boundary's own infrastructure instead of narrowing the child's authority.
+fn masks_boundary_plumbing(absolute: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"/run/ouro";
+    absolute == b"/"
+        || absolute == b"/run"
+        || absolute.starts_with(PREFIX)
+            && (absolute.len() == PREFIX.len() || absolute[PREFIX.len()] == b'/')
+}
 
 /// Lexically normalizes `raw` against `base_dir` without touching the
 /// filesystem.
@@ -1240,6 +1252,26 @@ fn apply_layer(
         let grant = kind != "deny_read";
         for raw in entries {
             let absolute = normalize_path(layer.base_dir.as_deref(), &expand(raw), &key)?;
+            if kind == "deny_read" && masks_boundary_plumbing(&absolute) {
+                // Audit 2026-09-25-2, S3: a denial is always admitted as
+                // narrowing — except one whose mask would cover the
+                // boundary's own plumbing. `/run`, `/run/ouro` and beneath
+                // hold the jail binary, the proxy socket directory and the
+                // staged state of the *next* run in this workspace, and the
+                // mask renders after every staged mount, so it would remove
+                // them rather than narrow the child. Refused for every
+                // layer, trusted or not.
+                return Err(refuse(
+                    ErrorCode::InvalidConfig,
+                    &key,
+                    format!(
+                        "denies `{}` at {}, which would mask the boundary's own \
+                         plumbing under /run/ouro rather than narrow the child",
+                        String::from_utf8_lossy(&absolute),
+                        layer.origin.label()
+                    ),
+                ));
+            }
             let reference = tokenizer.tokenize(&absolute, &key)?;
             // A grant written by the contained party is compared by filesystem
             // identity. A denial is not, and the asymmetry is the point: a

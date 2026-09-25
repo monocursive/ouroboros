@@ -694,6 +694,12 @@ pub enum PlanError {
     /// in the NUL-separated `--args` payload.
     ArgumentNul,
     // J3-launch end
+    // Audit 2026-09-25-2, S3 begin
+    /// A `deny_read` mask that would shadow the boundary's own plumbing
+    /// (`/run`, `/run/ouro` or beneath it: the jail binary, the proxy
+    /// directory and staged vendor state).
+    MaskedBoundaryPlumbing(PathBuf),
+    // Audit 2026-09-25-2, S3 end
 }
 
 impl fmt::Display for PlanError {
@@ -716,8 +722,37 @@ impl fmt::Display for PlanError {
                 f,
                 "an argument contains NUL, which would split it into bubblewrap options"
             ), // J3-launch end
+            // Audit 2026-09-25-2, S3 begin
+            Self::MaskedBoundaryPlumbing(path) => write!(
+                f,
+                "a deny_read mask at {} would shadow the boundary's own plumbing \
+                 (/run/ouro: the jail binary, the proxy directory, staged state)",
+                path.display()
+            ),
+            // Audit 2026-09-25-2, S3 end
         }
     }
+}
+
+/// Audit 2026-09-25-2, S3: whether a `deny_read` mask destination would
+/// cover the boundary's own plumbing. The jail binary
+/// ([`JAIL_INSIDE_PATH`]), the proxy directory ([`PROXY_INSIDE_PATH`]) and
+/// staged vendor state ([`VENDOR_STATE_INSIDE_PATH`]) all live under
+/// `/run/ouro` in the sandbox view, so a tmpfs at `/`, `/run` or `/run/ouro`
+/// shadows them all and one beneath `/run/ouro` shadows part of it — the
+/// launcher's own binary or the socket its bridge connects through. Such a
+/// mask never narrows the child's authority; it attacks the next run's
+/// plumbing, so both the policy layer and this renderer refuse it.
+fn shadows_plumbing(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_bytes();
+    bytes == b"/" || bytes == b"/run" || under_run_ouro(bytes)
+}
+
+/// Whether `bytes` is `/run/ouro` or a path beneath it, respecting component
+/// boundaries (`/run/ouroboros` is not).
+fn under_run_ouro(bytes: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"/run/ouro";
+    bytes.starts_with(PREFIX) && (bytes.len() == PREFIX.len() || bytes[PREFIX.len()] == b'/')
 }
 
 impl std::error::Error for PlanError {}
@@ -972,6 +1007,14 @@ impl BwrapPlan {
             return Err(PlanError::StagedFdMissing("proxy directory"));
         }
         // J3-agent end
+        // Audit 2026-09-25-2, S3: a mask is rendered last, over every other
+        // row, so one over the plumbing would unmount the jail's own binary,
+        // proxy socket or staged state for the whole attempt.
+        for path in &self.masked {
+            if shadows_plumbing(path) {
+                return Err(PlanError::MaskedBoundaryPlumbing(path.clone()));
+            }
+        }
         let mut tail: Vec<OsString> = Vec::new();
         // Scoped so the closure's borrow of `tail` ends before the length of
         // the rendered list is measured.
@@ -1002,6 +1045,15 @@ impl BwrapPlan {
                 push(&[OsStr::new("--setenv"), key, value]);
             }
             for (index, row) in self.mount_table().iter().enumerate() {
+                if row.kind == "tmpfs-mask" {
+                    // Audit 2026-09-25-2, S12: a denied path is absent or
+                    // masked, never writable scratch outside every quota
+                    // view; the mask is sealed read-only the moment it
+                    // exists.
+                    push(&[OsStr::new("--tmpfs"), &row.destination]);
+                    push(&[OsStr::new("--remount-ro"), &row.destination]);
+                    continue;
+                }
                 let fd = self.mount_fds.get(index).copied().flatten().or_else(|| {
                     self.protected
                         .iter()
@@ -1129,7 +1181,7 @@ pub fn inner_launch_command(
     narrow: bool,
     target: &[OsString],
 ) -> Vec<OsString> {
-    inner_launch_command_with(release_fd, error_fd, narrow, None, None, target)
+    inner_launch_command_with(release_fd, error_fd, narrow, None, None, None, target)
 }
 
 // J3-agent begin: the agent launcher's mediation and bridge options
@@ -1144,6 +1196,7 @@ pub fn inner_launch_command_with(
     narrow: bool,
     agent: Option<(RawFd, RawFd, RawFd)>,
     sigmask: Option<u64>,
+    trace_data_fd: Option<RawFd>,
     target: &[OsString],
 ) -> Vec<OsString> {
     let mut out = vec![
@@ -1156,6 +1209,12 @@ pub fn inner_launch_command_with(
     ];
     if narrow {
         out.push(OsString::from("--narrow"));
+        // Audit 2026-09-25-2, S14: the descriptor the attempt's narrowing
+        // data arrives through — a number only, never the value.
+        if let Some(fd) = trace_data_fd {
+            out.push(OsString::from("--trace-data-fd"));
+            out.push(OsString::from(fd.to_string()));
+        }
     }
     if let Some((listener, sockdiag, report)) = agent {
         out.push(OsString::from("--mediate"));
@@ -1605,6 +1664,7 @@ mod tests {
             true,
             Some((18, 19, 20)),
             Some(0x201),
+            None,
             &[OsString::from("x")],
         );
         let joined: Vec<String> = inner
@@ -1621,7 +1681,7 @@ mod tests {
         assert!(joined[..sep].windows(2).any(|w| w == ["--sigmask", "201"]));
         assert_eq!(
             inner_launch_command(12, 13, false, &[OsString::from("x")]),
-            inner_launch_command_with(12, 13, false, None, None, &[OsString::from("x")])
+            inner_launch_command_with(12, 13, false, None, None, None, &[OsString::from("x")])
         );
     }
     // J3-agent end

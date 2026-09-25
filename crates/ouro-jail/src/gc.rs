@@ -1570,7 +1570,7 @@ fn visit(
     // an earlier one's) proves the tree dead for the vendor-state cleanup.
     let gc_verified = match done.action {
         Some("would_terminate_orphan" | "would_remove_cgroup") if dry_run => true,
-        _ => verified_by_gc(&dir),
+        _ => verified_by_gc(&dir) || never_charged_tree(&decision),
     };
     // J3: the dead supervisor's proxy directory, then vendor state.
     let (action, reason, visited, resumed_settled) = proxy_then_resume(
@@ -2154,6 +2154,18 @@ fn verified_by_gc(dir: &AttemptDir) -> bool {
     })
 }
 
+/// Audit 2026-09-25-2, S4: an attempt whose owner [`decide`] established
+/// dead and whose jail state never registered an execution leaf
+/// (`CgroupStep::Settled` with a `not_recorded` reason). No leaf means no
+/// cgroup was ever created for it, so nothing was ever charged to a tree and
+/// nothing outside the state dir can be using its vendor state — the same
+/// proof a gc-verified empty leaf gives, which unblocks the cleanup a
+/// supervisor SIGKILL between staging and preparation would otherwise
+/// retain forever.
+fn never_charged_tree(decision: &Decision) -> bool {
+    decision.owner_dead
+        && matches!(&decision.cgroup, CgroupStep::Settled(text) if text.starts_with("not_recorded"))
+}
 /// Lists the temporary files crashed durable replacements left in the
 /// attempt root (charged to the bound, S7), and removes those of this
 /// tool's records when the owner is dead: the caller holds the lease, so no
@@ -2255,6 +2267,37 @@ fn combine(action: String, reason: String, done: &Done) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit 2026-09-25-2, S4: an owner established dead with no leaf ever
+    /// registered proves nothing was ever charged to a tree, which permits
+    /// the vendor-state cleanup exactly like a verified-empty leaf; any
+    /// other combination does not.
+    #[test]
+    fn a_dead_owner_with_no_leaf_ever_registered_never_charged_a_tree() {
+        let base = Decision {
+            retain: None,
+            owner: Some("dead: no process has its pid".to_owned()),
+            owner_dead: true,
+            cgroup: CgroupStep::Settled(
+                "not_recorded: jail state registers no execution cgroup".to_owned(),
+            ),
+            scratch: ScratchStep::Keep("kept".to_owned()),
+        };
+        assert!(never_charged_tree(&base));
+        let mut alive = base.clone();
+        alive.owner_dead = false;
+        assert!(!never_charged_tree(&alive), "a live owner decides again");
+        let mut removed = base.clone();
+        removed.cgroup = CgroupStep::Settled("removed by gc earlier".to_owned());
+        assert!(
+            !never_charged_tree(&removed),
+            "a leaf that existed once does not carry the proof"
+        );
+        let mut terminated = base.clone();
+        terminated.cgroup = CgroupStep::Remove(leaf());
+        assert!(!never_charged_tree(&terminated));
+    }
+
 
     const BOOT: &str = "boot-a";
 

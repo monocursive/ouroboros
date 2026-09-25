@@ -61,6 +61,27 @@ pub(crate) const SECCOMP_FD: RawFd = 10;
 pub(crate) const STATUS_FD: RawFd = 11;
 /// Descriptor the launcher blocks reading.
 const RELEASE_FD: RawFd = 12;
+/// Audit 2026-09-25-2, S14: where the attempt's narrowing `SECCOMP_RET_DATA`
+/// reaches the launcher (two bytes, written before the spawn). Below the
+/// pinned-mount range (20 up) and every named channel (10-19, 15).
+const TRACE_DATA_FD: RawFd = 9;
+
+/// Audit 2026-09-25-2, S14: a per-attempt value for the narrowing filter's
+/// `SECCOMP_RET_DATA`, unpredictable to the child. The kernel's data field is
+/// sixteen bits, so this is a speed bump rather than a wall — but every wrong
+/// guess a child's own filter makes is itself a visible
+/// `unexpected_trace_stop` gap, so spending them costs the receipt its
+/// evidence one guess at a time, and strict evidence fails on the first.
+fn random_trace_data() -> u16 {
+    use std::hash::{BuildHasher, Hasher as _};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(u64::from(std::process::id()));
+    match (hasher.finish() & 0xffff) as u16 {
+        // Zero would collide with a child filter that sets no data.
+        0 => super::tracer::filter::NARROWING_TRACE_DATA,
+        value => value,
+    }
+}
 /// Descriptor the launcher writes a failed exec's errno to.
 const ERROR_FD: RawFd = 13;
 /// Descriptor a long argument list is handed over.
@@ -595,6 +616,10 @@ struct Boundary {
     /// The §11.4 bounds the observer runs with, decided once; `None` with
     /// observation off.
     observer_plan: Option<super::observed::ObserverPlan>,
+    /// Audit 2026-09-25-2, S14: the narrowing filter's per-attempt
+    /// `SECCOMP_RET_DATA`, shared only with the launcher (through the
+    /// trace-data pipe) and the tracer.
+    trace_data: u16,
     ns_ids: identity::NsIds,
     cgroup: Option<ExecutionCgroup>,
     cgroup_lost: bool,
@@ -910,6 +935,11 @@ impl Boundary {
             .map(|bytes| OsString::from_vec(bytes.clone()))
             .collect();
         // J3-agent begin: the agent launcher mediates and starts the bridge
+        let trace_data = if observe_on {
+            Some(random_trace_data())
+        } else {
+            None
+        };
         bplan.inner = bwrap::inner_launch_command_with(
             RELEASE_FD,
             ERROR_FD,
@@ -922,6 +952,7 @@ impl Boundary {
             // bubblewrap unblocks SIGCHLD in its child: the launcher puts
             // back the mask this supervisor inherited.
             Some(super::launch::blocked_mask()),
+            trace_data.map(|_| TRACE_DATA_FD),
             &target,
         );
         // J3-agent end
@@ -989,6 +1020,31 @@ impl Boundary {
         fds.add(start_r, super::watch::START_FD).map_err(io)?;
         fds.add(release_r, RELEASE_FD).map_err(io)?;
         fds.add(error_w, ERROR_FD).map_err(io)?;
+        // Audit 2026-09-25-2, S14: the narrowing data is already in the pipe
+        // before the spawn, so the launcher's blocking read always completes;
+        // the descriptor closes in the launcher and never reaches the target.
+        if let Some(data) = trace_data {
+            let (trace_r, trace_w) = exec::pipe().map_err(io)?;
+            let bytes = data.to_ne_bytes();
+            // SAFETY: the buffer is two live bytes owned by this frame and
+            // the descriptor is owned; two bytes always fit the pipe's
+            // capacity, so the write succeeds before any reader exists.
+            let mut written = 0usize;
+            while written < bytes.len() {
+                let n = unsafe {
+                    libc::write(
+                        trace_w.as_raw_fd(),
+                        bytes.as_ptr().add(written).cast::<libc::c_void>(),
+                        bytes.len() - written,
+                    )
+                };
+                if n <= 0 && unsafe { *libc::__errno_location() } != libc::EINTR {
+                    return Err(io(std::io::Error::last_os_error()));
+                }
+                written += usize::try_from(n.max(0)).unwrap_or(0);
+            }
+            fds.add(trace_r, TRACE_DATA_FD).map_err(io)?;
+        }
         fds.add(status_w, STATUS_FD).map_err(io)?;
         for (copy, target) in pinned_fds {
             fds.add(copy, target).map_err(io)?;
@@ -1160,6 +1216,9 @@ impl Boundary {
             backend_version: String::new(),
             observe_on,
             observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
+            trace_data: trace_data.unwrap_or(
+                super::tracer::filter::NARROWING_TRACE_DATA,
+            ),
             ns_ids: identity::NsIds::default(),
             cgroup,
             cgroup_lost: false,
@@ -1215,10 +1274,11 @@ impl Boundary {
             // §13.1: gap intervals count from supervisor start on the same
             // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
             // bounds are the plan's, which the receipt records.
-            match Tracer::attach(
-                boundary.launcher.pid,
-                plan.tracer_config(clock::mark_supervisor_start()),
-            ) {
+            let mut config = plan.tracer_config(clock::mark_supervisor_start());
+            // Audit 2026-09-25-2, S14: the tracer expects exactly the data
+            // this attempt's narrowing filter carries.
+            config.trace_data = boundary.trace_data;
+            match Tracer::attach(boundary.launcher.pid, config) {
                 Ok(tracer) => boundary.tracer = Some(tracer),
                 Err(err) => {
                     boundary.teardown();
@@ -1539,7 +1599,16 @@ impl Boundary {
         Applied {
             filesystem: Some(AppliedFilesystem {
                 mechanism: "bubblewrap-binds".to_owned(),
-                protected_coverage: scan_coverage(scan),
+                protected_coverage: if self.snapshot.filesystem.protected_coverage
+                    == ProtectedCoverage::None
+                {
+                    // Audit 2026-09-25-2, S5: nothing was requested or
+                    // scanned, so the walk's vacuous pass must not be
+                    // reported as existing-and-covered.
+                    "none".to_owned()
+                } else {
+                    scan_coverage(scan)
+                },
                 mounts,
             }),
             // J3-agent begin: the agent network and its two stacked filters

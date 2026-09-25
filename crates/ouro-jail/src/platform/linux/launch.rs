@@ -63,13 +63,19 @@ pub struct LaunchArgs {
     pub error_fd: RawFd,
     /// Whether to install the narrowing filter before releasing.
     pub narrow: bool,
+    /// Audit 2026-09-25-2, S14: descriptor holding this attempt's narrowing
+    /// `SECCOMP_RET_DATA` (two bytes, written by the supervisor before the
+    /// spawn). The value travels by pipe because the launcher's whole argv —
+    /// and everything the filter will carry — is readable in `/proc/1/cmdline`
+    /// from inside the sandbox.
+    pub trace_data_fd: Option<RawFd>,
     // J3-agent begin: mediation and bridge (jail-v1 §10)
     /// Install the unix-peer mediation filter with its own listener and open
     /// a `NETLINK_SOCK_DIAG` socket, placing them at these two descriptor
     /// numbers for the supervisor to take before release.
     pub mediate: Option<(RawFd, RawFd)>,
     /// Start the loopback bridge before blocking, and place the read end of
-    /// its report pipe (one byte per client it turned away at capacity) at
+    /// its report socket (one byte per client it turned away at capacity) at
     /// this descriptor number for the supervisor to take before release.
     pub bridge: Option<RawFd>,
     /// The signal mask the supervisor inherited (bit `n - 1` for signal
@@ -121,8 +127,8 @@ impl fmt::Display for LaunchUsage {
 
 impl std::error::Error for LaunchUsage {}
 
-/// Parse `--release-fd N --error-fd M [--narrow] [--mediate L,S] [--bridge R]
-/// [--sigmask HEX] -- PROGRAM ARG...`.
+/// Parse `--release-fd N --error-fd M [--narrow] [--trace-data-fd T]
+/// [--mediate L,S] [--bridge R] [--sigmask HEX] -- PROGRAM ARG...`.
 ///
 /// # Errors
 ///
@@ -131,6 +137,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     let mut release_fd: Option<RawFd> = None;
     let mut error_fd: Option<RawFd> = None;
     let mut narrow = false;
+    let mut trace_data_fd: Option<RawFd> = None;
     let mut mediate: Option<(RawFd, RawFd)> = None;
     let mut bridge: Option<RawFd> = None;
     let mut sigmask: Option<u64> = None;
@@ -156,6 +163,14 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
             "--narrow" => {
                 narrow = true;
                 index += 1;
+            }
+            "--trace-data-fd" => {
+                let fd = fd_value(args.get(index + 1), "--trace-data-fd")?;
+                if fd < 3 {
+                    return Err(LaunchUsage::BadFd("--trace-data-fd"));
+                }
+                trace_data_fd = Some(fd);
+                index += 2;
             }
             // J3-agent begin
             "--mediate" => {
@@ -205,6 +220,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         release_fd: release_fd.ok_or(LaunchUsage::Missing("--release-fd"))?,
         error_fd: error_fd.ok_or(LaunchUsage::Missing("--error-fd"))?,
         narrow,
+        trace_data_fd,
         mediate,
         bridge,
         sigmask,
@@ -315,11 +331,44 @@ pub fn launch_main(args: &[OsString]) -> ! {
     }
     // J3-agent end
 
+    // Audit 2026-09-25-2, S14: read this attempt's narrowing data before the
+    // filter goes in. Two bytes, already in the pipe; the descriptor closes
+    // immediately after, so the value never reaches the target — and neither
+    // does any argument, because the launcher's whole argv is visible in
+    // `/proc/1/cmdline` from inside the sandbox.
+    let mut trace_data = super::tracer::filter::NARROWING_TRACE_DATA;
+    if let Some(fd) = parsed.trace_data_fd {
+        let mut bytes = [0u8; 2];
+        let mut filled = 0usize;
+        while filled < bytes.len() {
+            // SAFETY: the buffer is live and only `filled` past its start is
+            // touched.
+            let n = unsafe {
+                libc::read(
+                    fd,
+                    bytes.as_mut_ptr().add(filled).cast::<libc::c_void>(),
+                    bytes.len() - filled,
+                )
+            };
+            if n <= 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
+            }
+            filled += usize::try_from(n).unwrap_or(0);
+        }
+        // SAFETY: closing a descriptor number this process was given.
+        unsafe { libc::close(fd) };
+        trace_data = u16::from_ne_bytes(bytes);
+        if trace_data == 0 {
+            // Zero would collide with a child filter that sets no data.
+            trace_data = super::tracer::filter::NARROWING_TRACE_DATA;
+        }
+    }
+
     if parsed.narrow {
         // The observer's own filter, so the numbers the launcher narrows to
         // and the numbers the tracer expects to be stopped on are one table.
         // It sets no_new_privs and loads the program without allocating.
-        if let Err(errno) = super::tracer::install_narrowing_filter() {
+        if let Err(errno) = super::tracer::filter::install_narrowing_filter_with(trace_data) {
             report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
         }
     }
@@ -343,13 +392,11 @@ pub fn launch_main(args: &[OsString]) -> ! {
         if n == 0 {
             break false;
         }
-        let errno = errno();
-        if errno == libc::EINTR {
+        if errno() == libc::EINTR {
             continue;
         }
-        report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
+        report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
     };
-
     if !released {
         // SAFETY: _exit takes a scalar and never returns.
         unsafe { libc::_exit(EXIT_NO_RELEASE) };
@@ -391,7 +438,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
 
     // J3-agent begin: the supervisor took these objects before release; the
     // target never holds the listener, the sock_diag socket or the bridge's
-    // report pipe (X06). This close is the only thing that keeps them from
+    // report socket (X06). This close is the only thing that keeps them from
     // it (see `mediate` and `spawn_bridge`).
     if let Some((listener_fd, sockdiag_fd)) = parsed.mediate {
         // SAFETY: closing descriptors this process placed itself.
@@ -597,16 +644,18 @@ fn mediate(listener_fd: RawFd, sockdiag_fd: RawFd) -> Result<(), i32> {
 /// target that waits for every child it has must not find one it did not
 /// start, and Yama's descendant rule keeps the target from attaching to it.
 ///
-/// The bridge gets `/dev/null` as stdin and stdout, the write end of its
-/// report pipe as stderr, no other descriptor, an empty environment and a
-/// session of its own, so no terminal or process-group signal aimed at the
-/// target reaches it. Between each fork and `execve` only async-signal-safe
-/// calls run.
+/// The bridge gets `/dev/null` as stdin and stdout, the report end of a
+/// `SOCK_SEQPACKET` pair as stderr, no other descriptor, an empty
+/// environment and a session of its own, so no terminal or process-group
+/// signal aimed at the target reaches it. Between each fork and `execve`
+/// only async-signal-safe calls run.
 ///
-/// The pipe's read end is placed at `report_fd` for the supervisor to take
+/// The pair's other end is placed at `report_fd` for the supervisor to take
 /// while this process is blocked; like the mediation descriptors it is not
 /// close-on-exec, and the explicit close after release keeps it from the
-/// target. Refuses (`EEXIST`) if `report_fd` is already open.
+/// target. A socket, unlike the pipe it replaced, cannot be reopened by a
+/// same-uid peer through `/proc/<bridge>/fd` (audit 2026-09-25-2, S2).
+/// Refuses (`EEXIST`) if `report_fd` is already open.
 fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
     let path = CString::new(super::bwrap::JAIL_INSIDE_PATH).map_err(|_| libc::EINVAL)?;
     let subcommand = CString::new(super::bridge::SUBCOMMAND).map_err(|_| libc::EINVAL)?;
@@ -618,14 +667,28 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
         return Err(libc::EEXIST);
     }
     let mut report = [-1 as RawFd; 2];
-    // SAFETY: pipe2 fills the two-element array it is given. Nonblocking on
-    // both ends: a bridge whose reader is slow drops a report byte rather
-    // than stall its relays, and the supervisor drains without waiting.
-    if unsafe { libc::pipe2(report.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+    // SAFETY: socketpair fills the two-element array it is given. A
+    // `SOCK_SEQPACKET` pair, not a pipe: a same-uid target in the jail's pid
+    // namespace can open `/proc/<bridge>/fd/2` on a pipe and forge report
+    // bytes into the supervisor's channel (audit 2026-09-25-2, S2), while a
+    // socket cannot be reopened through /proc at all, and this pair has no
+    // name any address could reach. Nonblocking on both ends: a bridge whose
+    // reader is slow drops a report datagram rather than stall its relays,
+    // and the supervisor drains without waiting. One datagram per report,
+    // each a single byte.
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+            report.as_mut_ptr(),
+        )
+    } != 0
+    {
         return Err(errno());
     }
     let close_report = || {
-        // SAFETY: closing the two descriptors pipe2 just created here.
+        // SAFETY: closing the two descriptors socketpair just created here.
         unsafe {
             libc::close(report[0]);
             libc::close(report[1]);

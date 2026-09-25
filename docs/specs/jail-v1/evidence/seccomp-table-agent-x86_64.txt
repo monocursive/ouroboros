@@ -38,6 +38,15 @@ userfaultfd            323    EPERM
 open_by_handle_at      304    EPERM
 name_to_handle_at      303    EPERM
 syslog                 103    EPERM
+pidfd_send_signal      424    EPERM
+pidfd_open             434    EPERM
+pidfd_getfd            438    EPERM
+process_madvise        440    EPERM
+kcmp                   312    EPERM
+move_pages             279    EPERM
+migrate_pages          256    EPERM
+statmount              457    EPERM
+listmount              458    EPERM
 clone3                 435    ENOSYS  (argument struct not inspectable)
 clone                  56     EPERM when args[0] & 0x00800000 != 0 (CLONE_UNTRACED)
 clone                  56     EPERM when args[0] & 0x7e020080 != 0
@@ -53,8 +62,8 @@ socket, socketpair     41,53  ALLOW when args[0] in {1 (AF_UNIX, restricted by t
 
 everything else        ALLOW
 
-instructions: 63
-digest: sha256:6f7b5d4cfbc45831d7737d5ab5ee659523f1c96197e4cd8e10bcab5e76ca3ab9
+instructions: 72
+digest: sha256:8a6c42943555bb66503ab436e5d1dd813a85813b56edeabdab4518133ae85493
 
 mediation filter (installed by the launcher with its own listener)
 connect                42     USER_NOTIF
