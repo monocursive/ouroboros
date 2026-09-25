@@ -540,12 +540,58 @@ fn started_tree(receipt: &Value) -> Tree {
 /// The supervisor the test is about to signal is the real `ouro-jail`
 /// process it spawned, and it catches `signal` (so delivery reaches the
 /// handler, not a default action or an inherited ignore).
-fn assert_real_supervisor_catches(supervisor: i32, signal: libc::c_int) {
-    let exe = std::fs::read_link(format!("/proc/{supervisor}/exe")).expect("the supervisor's exe");
-    let jail = std::fs::canonicalize(harness::jail_path()).expect("the jail binary");
+///
+/// The supervisor makes itself non-dumpable once the target is set up
+/// (X06.4), so `/proc/<pid>/exe` is closed to the test. Identity is read from
+/// what stays readable and is just as strong: the attempt's own jail state
+/// names its owner by boot id, pid and start time, and that is this pid, born
+/// at that tick, in this boot; its argv[0] is the binary the harness launched.
+fn assert_real_supervisor_catches(attempt: &Attempt, signal: libc::c_int) {
+    let supervisor = attempt.pid();
+    let cmdline = std::fs::read(format!("/proc/{supervisor}/cmdline")).expect("the cmdline");
+    let argv0 = cmdline.split(|b| *b == 0).next().unwrap_or_default();
     assert_eq!(
-        exe, jail,
-        "pid {supervisor} is not the ouro-jail supervisor"
+        argv0,
+        harness::jail_path().as_os_str().as_encoded_bytes(),
+        "pid {supervisor} is not the ouro-jail binary the harness launched"
+    );
+    let id = attempt
+        .seen
+        .iter()
+        .find_map(|message| message["attempt_id"].as_str())
+        .expect("a control message named the attempt");
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(
+            attempt
+                .spawned()
+                .root()
+                .join("data/attempts")
+                .join(id)
+                .join("jail-state.json"),
+        )
+        .expect("the attempt's jail state"),
+    )
+    .expect("JSON");
+    let owner = &state["owner"];
+    let stat = std::fs::read_to_string(format!("/proc/{supervisor}/stat")).expect("the stat");
+    let start_ticks: u64 = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .expect("a start time");
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("the boot id");
+    assert_eq!(
+        (
+            owner["pid"].as_i64(),
+            owner["start_time_ticks"].as_u64(),
+            owner["boot_id"].as_str()
+        ),
+        (
+            Some(i64::from(supervisor)),
+            Some(start_ticks),
+            Some(boot.trim())
+        ),
+        "pid {supervisor} is not the owner the attempt's jail state records: {owner}"
     );
     let caught = signal_mask(supervisor, "SigCgt").expect("SigCgt");
     let ignored = signal_mask(supervisor, "SigIgn").expect("SigIgn");
@@ -639,7 +685,7 @@ fn l01_operator_int_term_and_hup_each_end_a_contained_tree() {
             let mut attempt = Attempt::start(jail.target(tree("plain")), false);
             attempt.await_kind("exec_confirmed");
             let tree = started_tree(&attempt.receipt());
-            assert_real_supervisor_catches(attempt.pid(), signal);
+            assert_real_supervisor_catches(&attempt, signal);
             let sent = Instant::now();
             signal_supervisor(&attempt, signal);
             let Some(took) = await_death_by(&tree.launcher, sent, STOP_BOUND) else {
@@ -704,7 +750,7 @@ fn l01_a_sigterm_ignoring_descendant_of_a_contained_run_dies_when_the_operator_s
                     .then_some(())
             },
         );
-        assert_real_supervisor_catches(attempt.pid(), libc::SIGTERM);
+        assert_real_supervisor_catches(&attempt, libc::SIGTERM);
         let sent = Instant::now();
         signal_supervisor(&attempt, libc::SIGTERM);
         let Some(took) = await_death_by(&tree.descendant, sent, STOP_BOUND) else {
@@ -1294,7 +1340,7 @@ fn l01_a_fork_storm_stopped_mid_flight_ends_at_verified_tree_death() {
     let second = poll_until("the storm to keep forking", Duration::from_secs(10), || {
         pids_events_max(&leaf).filter(|count| *count > first)
     });
-    assert_real_supervisor_catches(attempt.pid(), libc::SIGTERM);
+    assert_real_supervisor_catches(&attempt, libc::SIGTERM);
     let sent = Instant::now();
     signal_supervisor(&attempt, libc::SIGTERM);
     let Some(took) = await_death_by(&init, sent, STOP_BOUND) else {
@@ -1340,7 +1386,7 @@ fn l01_operator_int_term_and_hup_each_end_a_none_tree_at_verified_death() {
             );
             attempt.await_kind("exec_confirmed");
             let tree = started_tree(&attempt.receipt());
-            assert_real_supervisor_catches(attempt.pid(), signal);
+            assert_real_supervisor_catches(&attempt, signal);
             let sent = Instant::now();
             signal_supervisor(&attempt, signal);
             if await_death_by(&tree.launcher, sent, STOP_BOUND).is_none() {
