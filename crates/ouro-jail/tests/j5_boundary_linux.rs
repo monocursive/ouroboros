@@ -15,6 +15,8 @@
 //! is a finding against the author, per the J5 contract).
 
 use std::ffi::OsString;
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -539,6 +541,76 @@ print(json.dumps(out))
     settled(&run);
 }
 
+/// S02.6: no cgroup filesystem is mounted or reachable in the child (§15 S02).
+/// Attempted, live, from inside tool/build/agent: read `/proc/self/mountinfo`
+/// for any cgroup/cgroup2 mount, look at `/sys/fs/cgroup`, and try to open a
+/// fresh cgroup2 tree with `open_tree` and `fsopen`. Verdict: no cgroup or
+/// cgroup2 mount appears in the child's mount table, `/sys/fs/cgroup` is not a
+/// cgroup mount (absent, or masked/empty), and `open_tree`/`fsopen("cgroup2")`
+/// fail — so the child has no view of and cannot create a cgroup filesystem.
+/// `none` is uncontained by definition (host view, its own cgroup visible), so
+/// it is not covered here. The absent mount is by construction (the contained
+/// mount plan mounts only the declared roots, `/proc` and `/dev` — pinned by
+/// the milestone freeze and the `bwrap` mount-table tests); `fsopen`/
+/// `open_tree` are additionally denied by the baseline seccomp filter and the
+/// dropped capabilities (creating a mount needs `CAP_SYS_ADMIN`), defence in
+/// depth on top of the empty mount view.
+#[test]
+fn s02_no_cgroup_filesystem_is_reachable_in_the_child() {
+    if !common::live() {
+        return;
+    }
+    const SCRIPT: &str = r#"
+import os, ctypes, errno, json
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+def call(nr, *a):
+    ctypes.set_errno(0)
+    rc = libc.syscall(ctypes.c_long(nr), *a)
+    return 'ok' if rc >= 0 else errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+out = {}
+mi = open('/proc/self/mountinfo').read().splitlines()
+out['cgroup_mounts'] = [l for l in mi if ' cgroup ' in (' ' + l + ' ') or ' cgroup2 ' in (' ' + l + ' ')]
+out['sysfs_cgroup_listing'] = sorted(os.listdir('/sys/fs/cgroup')) if os.path.isdir('/sys/fs/cgroup') else None
+out['open_tree'] = call(428, -100, b'/sys/fs/cgroup\0', 0)   # open_tree(AT_FDCWD, ..., 0)
+out['fsopen'] = call(430, b'cgroup2\0', 0)                   # fsopen("cgroup2", 0)
+print(json.dumps(out))
+"#;
+    for profile in ["tool", "build", "agent"] {
+        let c = case(profile);
+        let jail = if profile == "build" {
+            c.jail.args(["--limit", "mem=64MiB"])
+        } else {
+            c.jail
+        };
+        let run = jail.target(py(SCRIPT)).run().unwrap();
+        assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
+        let out = py_out(&run);
+        assert_eq!(
+            out["cgroup_mounts"],
+            serde_json::json!([]),
+            "{profile}: a cgroup filesystem is mounted in the child: {out}"
+        );
+        // /sys/fs/cgroup is not a populated cgroup tree: absent, or (if the
+        // path exists) not a cgroupfs, so it holds no cgroup control files.
+        if let Some(listing) = out["sysfs_cgroup_listing"].as_array() {
+            assert!(
+                !listing.iter().any(|name| name == "cgroup.procs"),
+                "{profile}: /sys/fs/cgroup is a live cgroup mount: {out}"
+            );
+        }
+        assert_ne!(
+            out["open_tree"], "ok",
+            "{profile}: open_tree succeeded: {out}"
+        );
+        assert_ne!(
+            out["fsopen"], "ok",
+            "{profile}: fsopen(cgroup2) succeeded: {out}"
+        );
+        settled(&run);
+    }
+}
+
 // ===========================================================================
 // S03: the outer boundaries cannot be reversed inside `agent` (§15 S03
 // "Attempts to undo each outer boundary fail"; §9.2)
@@ -796,6 +868,150 @@ print(json.dumps(out))
     let receipt = settled(&run);
     assert_eq!(receipt["child_protection"], "unprotected", "{receipt:#}");
     assert_eq!(receipt["applied"]["syscalls"], Value::Null, "{receipt:#}");
+}
+
+/// A newly set-up io_uring ring, or a skip note when the host refuses one.
+fn io_uring_ring() -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd as _;
+    let mut params = [0u64; 16]; // io_uring_params is 120 bytes; 128 is enough.
+    // SAFETY: the kernel writes at most the 120-byte params struct into `params`.
+    let fd = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
+    assert!(
+        fd >= 0,
+        "the reference host must permit io_uring_setup: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: a successful io_uring_setup returns a fresh owned descriptor.
+    unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }
+}
+
+/// S04.6: an io_uring ring on stdout or stderr refuses before exec (§15 S04;
+/// §8.3 stdio inspection). The existing `review_linux.rs::r3_io_uring_as_stdio_refuses_before_exec`
+/// covers stdin only. Attempted, live: `ouro-jail run` with the ring as the
+/// target's stdout, then as its stderr. Verdict: each refuses before exec
+/// (exit 125), the target never runs, and the refusal names an anonymous
+/// inode / invalid fd. The enforcement point is `validate_stdio`'s
+/// `anon_inode:` refusal over fds 0/1/2 (`platform.rs`): deleting it lets the
+/// ring through as stdout/stderr.
+#[test]
+fn s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec() {
+    if !common::live() {
+        return;
+    }
+    use std::process::{Command, Stdio};
+    for stream in ["stdout", "stderr"] {
+        let jail = Jail::new().unwrap();
+        let workspace = jail.root().join("workspace");
+        private_dir(&workspace);
+        let fixture = workspace.join("ouro-fixture");
+        std::fs::copy(harness::fixture_path(), &fixture).unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ring = io_uring_ring();
+        let mut cmd = Command::new(harness::jail_path());
+        cmd.arg("run")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--")
+            .arg(&fixture)
+            .arg("exit")
+            .arg("0")
+            .env("OURO_DATA_DIR", jail.data_dir())
+            .env("OURO_CONFIG_DIR", jail.config_dir());
+        if stream == "stdout" {
+            cmd.stdout(Stdio::from(ring)).stderr(Stdio::piped());
+        } else {
+            cmd.stderr(Stdio::from(ring)).stdout(Stdio::piped());
+        }
+        let out = cmd.output().expect("run");
+        if stream == "stdout" {
+            // stderr is a real pipe here, so the refusal is emitted: exit 125,
+            // naming stdout and the anonymous inode. The target's stdout is the
+            // ring (uncapturable), so the refusal message + 125 is the proof it
+            // did not exec.
+            assert_eq!(
+                out.status.code(),
+                Some(125),
+                "stdout: an io_uring ring on stdout did not refuse before exec: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains("stdout")
+                    && (stderr.contains("anonymous inode") || stderr.contains("invalid_fd")),
+                "stdout: the refusal does not name stdout / the anonymous inode: {stderr}"
+            );
+        } else {
+            // stderr IS the ring, so `ouro-jail` cannot emit its refusal
+            // diagnostic; it still refuses before exec — the fixture `exit 0`
+            // would print a report to its (piped) stdout, and that stdout is
+            // empty, so the target never ran — but it exits via a panic (101)
+            // rather than the clean 125. That 125-vs-panic gap is a main.rs
+            // robustness finding for J5-D (see B2/requests.md, w4); the
+            // containment guarantee (no exec) holds.
+            assert!(
+                out.stdout.is_empty(),
+                "stderr: the target ran despite the io_uring ring on stderr: {:?}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            assert_ne!(
+                out.status.code(),
+                Some(0),
+                "stderr: the target's clean exit happened, so it ran despite the ring"
+            );
+        }
+    }
+}
+
+/// S04.7: `agent` and `build` inherit no ring (§15 S04; §9.2 "No ring fd may
+/// be inherited"). Attempted, live: an io_uring ring is created in the parent
+/// and its close-on-exec flag cleared, so an ordinary fork/exec would inherit
+/// it, then `ouro-jail run` starts the target. Verdict: the ring never reaches
+/// the target — its `/proc/self/fd` holds no io_uring anonymous inode (the
+/// spec's guarantee is non-inheritance, not a refusal). The enforcement point
+/// is `close_range_cloexec()` in the backend bootstrap's pre-exec
+/// (`exec.rs`), which marks every inherited descriptor except the plumbed
+/// channels close-on-exec before `bwrap` execs: deleting it lets the ring
+/// survive into the target.
+#[test]
+fn s04_agent_and_build_inherit_no_ring() {
+    if !common::live() {
+        return;
+    }
+    const SCRIPT: &str = r#"
+import os, json
+fds = {}
+for name in os.listdir('/proc/self/fd'):
+    try: fds[name] = os.readlink('/proc/self/fd/' + name)
+    except OSError: fds[name] = '?'
+print(json.dumps(fds))
+"#;
+    for profile in ["agent", "build"] {
+        let ring = io_uring_ring();
+        // Clear close-on-exec so an ordinary fork/exec would inherit the ring;
+        // the jail must still keep it from the target.
+        // SAFETY: `ring` is a live owned descriptor; F_SETFD takes a scalar.
+        unsafe {
+            libc::fcntl(ring.as_raw_fd(), libc::F_SETFD, 0);
+        }
+        let c = case(profile);
+        let jail = if profile == "build" {
+            c.jail.args(["--limit", "mem=64MiB"])
+        } else {
+            c.jail
+        };
+        let run = jail.target(py(SCRIPT)).run().unwrap();
+        // Keep the ring open across the run so it is genuinely inheritable.
+        drop(ring);
+        assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
+        let fds = py_out(&run);
+        for (fd, target) in fds.as_object().unwrap() {
+            assert!(
+                !target.as_str().unwrap_or("").contains("io_uring"),
+                "{profile}: the target inherited an io_uring ring at fd {fd}: {target}"
+            );
+        }
+        settled(&run);
+    }
 }
 
 // ===========================================================================
@@ -1082,6 +1298,34 @@ fn r06_a_detected_escaped_descendant_loses_integrity_and_retains_state() {
     assert!(run.control_kind("settled").is_empty());
     // State is retained (not cleaned) for an integrity loss.
     assert_ne!(receipt["state_cleanup"], "complete", "{receipt:#}");
+    // R06.5: the detected escape retains its state — the registered leaf is
+    // kept, and it is the pinned inode (not a look-alike). `none` stages no
+    // vendor state (it refuses `--launch`), so there is no vendor state on
+    // this path; vendor-state retention on an integrity loss is a
+    // contained-profile concern, proved by
+    // `portable_launch::rm11_a_teardown_that_lost_integrity_retains_vendor_state_and_says_why`.
+    // Enforcement: `uncontained.rs` `self.leaf.retain()` on a detected loss;
+    // removing it lets the leaf be cleaned and this assertion reddens.
+    let leaf = &receipt["lifetime"]["native"]["details"]["execution_cgroup"];
+    let leaf_path = PathBuf::from(leaf["path"].as_str().expect("a leaf path"));
+    let leaf_inode = leaf["inode"].as_u64().expect("a leaf inode");
+    let meta = std::fs::metadata(&leaf_path)
+        .unwrap_or_else(|e| panic!("the registered leaf was not retained: {e}: {leaf_path:?}"));
+    assert_eq!(
+        meta.ino(),
+        leaf_inode,
+        "the retained leaf is not the pinned one: {leaf_path:?}"
+    );
+    // Clean up the retained empty leaf this attempt left, by pinned inode only.
+    remove_empty_leaf(&leaf_path, leaf_inode);
+}
+
+/// Remove an empty cgroup this attempt left, only when the directory at
+/// `path` is still the pinned `inode` (never a look-alike another run made).
+fn remove_empty_leaf(path: &Path, inode: u64) {
+    if std::fs::metadata(path).is_ok_and(|m| m.ino() == inode) {
+        let _ = std::fs::remove_dir(path);
+    }
 }
 
 // ===========================================================================
@@ -1180,6 +1424,58 @@ fn r03_a_wall_fires_on_time_under_a_saturated_trace() {
 // `::j4_r03_disconnect_strict_stops`; the "cannot block the wall" property is
 // covered by the mutation-provable saturation test above (a stalled-but-open
 // consumer is the only case that can block a writer).
+
+/// R03.7: a wall that expires while the consumer is saturated but not yet
+/// declared lost is enforced on time (§15 R03). The other wall tests use a 2 s
+/// wall, longer than the 1 s no-progress deadline, so the trace loss is
+/// declared before the wall fires. Here the run is STRICT (a declared loss
+/// would stop the attempt) and the wall is 500 ms — shorter than the 1 s
+/// no-progress deadline — with a `Never` consumer and enough events (well over
+/// the 4 MiB queue) to saturate the pipe and queue deterministically before
+/// the wall. Verdict: the run ends by `wall_expiry` (the target is signalled),
+/// on time (a few seconds, far under its 30 s sleep), NOT by an evidence loss
+/// — the wall is enforced while the trace is saturated but before the loss is
+/// declared. Saturation is guaranteed by the event volume, not timed by a
+/// sleep. The enforcement point is the nonblocking external trace fd
+/// (`trace.rs FdSink::from_raw_fd set_nonblocking`): a blocking fd hangs the
+/// supervision loop on the full pipe and the wall never fires (harness
+/// timeout).
+#[test]
+fn r03_a_wall_expires_before_the_saturation_loss_is_declared() {
+    if !common::live() {
+        return;
+    }
+    // Far more than the 4 MiB external queue, so the pipe and queue are full
+    // well before the 500 ms wall — saturation is by volume, not by timing.
+    let (c, argv) = pressure_case(10_000, 30_000);
+    let started = Instant::now();
+    let run = c
+        .jail
+        .trace_consumer(TraceConsumer::Never)
+        .args(["--evidence", "strict", "--limit", "wall=500ms"])
+        .timeout(Duration::from_secs(90))
+        .target(argv)
+        .run()
+        .unwrap();
+    let elapsed = started.elapsed();
+    let receipt = last_pressure_receipt(&run);
+    // The wall — not the still-undeclared saturation loss — ended the run.
+    assert_eq!(
+        receipt["outcome"]["cause"], "wall_expiry",
+        "under strict, the run ended by something other than the wall (a loss \
+         declared before the wall would have stopped it): {receipt:#}"
+    );
+    assert_eq!(receipt["outcome"]["kind"], "signaled", "{receipt:#}");
+    let wall = wall_row(&receipt);
+    assert_eq!(
+        wall["hit"], true,
+        "the wall is not recorded hit: {receipt:#}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "the wall fired late while the trace was saturated: {elapsed:?}"
+    );
+}
 
 /// The latest receipt of a pressure run, schema- and semantic-checked. Unlike
 /// `settled`, a best-effort trace loss makes the run exit 1, so this does not
