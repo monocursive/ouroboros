@@ -756,10 +756,35 @@ enum Left {
     /// its registered leaf is populated and nothing else ends it (§8.2), so
     /// gc terminates the orphan first.
     PopulatedLeaf,
-    /// A `tool` supervisor aborted right after its enforced receipt: its
-    /// watcher ended the tree, so the leaf is empty, and the managed scratch
-    /// is there.
-    EmptyLeaf,
+    /// A `tool` supervisor aborted at its enforced receipt's temporary file
+    /// (J5-C wave 4, review rev-late F7): its watcher ended the tree, so the
+    /// leaf is empty; the managed scratch is there, and the crash's
+    /// `.jail.json.*.tmp` is gc's to remove and record.
+    EmptyLeafAndTemp,
+}
+
+impl Left {
+    /// The records one uninterrupted pass writes, in order, as §14.2 orders
+    /// them: the kill's intent and result, the removal's intent and result,
+    /// then the scratch, then the temporary files, and `gc_finished` last.
+    fn sequence(self) -> &'static [&'static str] {
+        match self {
+            Left::PopulatedLeaf => &[
+                "gc_terminating_orphan",
+                "gc_terminated_orphan",
+                "gc_removing_cgroup",
+                "gc_removed_cgroup",
+                "gc_finished",
+            ],
+            Left::EmptyLeafAndTemp => &[
+                "gc_removing_cgroup",
+                "gc_removed_cgroup",
+                "gc_removed_scratch",
+                "gc_removed_temp_files",
+                "gc_finished",
+            ],
+        }
+    }
 }
 
 /// A fresh attempt whose supervisor died leaving `left`, and the guard of
@@ -810,20 +835,20 @@ fn dead_supervisor(left: Left) -> Result<(Run, PathBuf, Option<LeafGuard>), Stri
             }
             run
         }
-        Left::EmptyLeaf => {
+        Left::EmptyLeafAndTemp => {
             let jail = aborting_jail();
             let workspace = private_workspace(&jail);
             let run = jail
                 .arg("run")
                 .args(["--profile", "tool", "--workspace"])
                 .arg(&workspace)
-                .env(state::ABORT_AT_SEAM, "enforced_receipt:dir_synced")
+                .env(state::ABORT_AT_SEAM, "enforced_receipt:temp_written")
                 .target(["/bin/sleep", "30"])
                 .run()
                 .expect("the run");
             if run.signal() != Some(libc::SIGABRT) {
                 return Err(format!(
-                    "the supervisor was not aborted after its enforced receipt (exit {:?}): {}",
+                    "the supervisor was not aborted at its enforced receipt (exit {:?}): {}",
                     run.code(),
                     run.stderr_text().trim()
                 ));
@@ -836,15 +861,24 @@ fn dead_supervisor(left: Left) -> Result<(Run, PathBuf, Option<LeafGuard>), Stri
     let Some((leaf, _)) = registered_leaf(&dir) else {
         return Err("jail state registers no leaf".to_owned());
     };
+    let temps = leftover(&run.data_dir, &dir);
     match left {
         Left::PopulatedLeaf => {
-            if !populated(&leaf) {
-                return Err("the dead supervisor's leaf is not populated".to_owned());
+            if !populated(&leaf) || !temps.is_empty() {
+                return Err(format!(
+                    "the dead supervisor's leaf populated {}, temporary files {temps:?}",
+                    populated(&leaf)
+                ));
             }
         }
-        Left::EmptyLeaf => {
+        Left::EmptyLeafAndTemp => {
             if !wait_for("the dead supervisor's leaf to empty", || !populated(&leaf)) {
                 return Err("the dead supervisor's leaf never emptied".to_owned());
+            }
+            if temps.len() != 1 || !temps[0].starts_with(".jail.json.") {
+                return Err(format!(
+                    "the crash left {temps:?}, not one receipt temporary"
+                ));
             }
             std::fs::write(dir.join("scratch").join("left-behind"), b"x")
                 .map_err(|error| format!("the managed scratch: {error}"))?;
@@ -873,69 +907,151 @@ fn actions_of(state: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The records one uninterrupted gc pass writes over what `left` leaves, in
-/// order; that pass must finish everything.
-fn record_sequence(left: Left) -> Result<Vec<String>, String> {
-    let (run, dir, _guard) = dead_supervisor(left)?;
-    let leaf = registered_leaf(&dir).map(|(path, _)| path);
+/// One uninterrupted gc pass over what `left` leaves writes exactly
+/// `left.sequence()`, finishes everything, and names the temporary file it
+/// removed.
+fn uninterrupted(left: Left) -> Vec<String> {
     let mut problems = Vec::new();
-    gc_finishes(&format!("{left:?} sequence"), &run.data_dir, &mut problems);
+    let (run, dir, _guard) = match dead_supervisor(left) {
+        Ok(found) => found,
+        Err(problem) => return vec![format!("{left:?} uninterrupted: {problem}")],
+    };
+    let leaf = registered_leaf(&dir).map(|(path, _)| path);
+    let temps = leftover(&run.data_dir, &dir);
+    gc_finishes(
+        &format!("{left:?} uninterrupted"),
+        &run.data_dir,
+        &mut problems,
+    );
     if leaf.is_some_and(|leaf| leaf.exists()) || dir.join("scratch").exists() {
-        problems.push("the pass left the leaf or the scratch".to_owned());
+        problems.push(format!("{left:?}: one pass left the leaf or the scratch"));
     }
-    if !problems.is_empty() {
-        return Err(problems.join("; "));
+    let actions = gc_actions(&dir);
+    if actions != left.sequence() {
+        problems.push(format!(
+            "{left:?}: one pass records {actions:?}; §14.2 orders {:?}",
+            left.sequence()
+        ));
     }
-    Ok(gc_actions(&dir))
+    let state = read_json(&dir.join("jail-state.json"));
+    let names: Vec<Value> = state["gc_actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|action| action["action"] == "gc_removed_temp_files")
+        .map(|action| action["names"].clone())
+        .collect();
+    let expected: Vec<Value> = if temps.is_empty() {
+        Vec::new()
+    } else {
+        vec![serde_json::json!(temps)]
+    };
+    if names != expected {
+        problems.push(format!(
+            "{left:?}: gc_removed_temp_files names {names:?}, the crash left {temps:?}"
+        ));
+    }
+    eprintln!("{left:?}: one pass records {actions:?}");
+    problems
 }
 
-/// Whether the leaf and the managed scratch are where the records' order
-/// puts them at a crash in the `nth` record (§14.2, S6, G3): nothing killed
-/// before `gc_terminating_orphan` is durable, the leaf seen empty by
-/// `gc_terminated_orphan`, still there at `gc_removing_cgroup` (the intent
-/// precedes the `rmdir`), gone by `gc_removed_cgroup` and after it; the
-/// scratch there until `gc_removed_scratch`, which follows its removal.
-fn order_problem(
-    sequence: &[String],
-    nth: usize,
-    leaf: &Path,
-    pinned: Option<u64>,
-    scratch: &Path,
-) -> Option<String> {
-    let action = sequence[nth - 1].as_str();
-    let before = &sequence[..nth - 1];
-    let there = pinned.is_some_and(|pinned| inode(leaf) == Some(pinned));
-    let full = there && populated(leaf);
-    let leaf_ok = if before.iter().any(|done| done == "gc_removed_cgroup") {
-        !leaf.exists()
-    } else {
-        match action {
-            "gc_terminating_orphan" => full,
-            "gc_terminated_orphan" | "gc_removing_cgroup" => there && !populated(leaf),
-            "gc_removed_cgroup" => !leaf.exists(),
-            _ => true,
-        }
+/// The results among gc's records: each follows what it records (the kill
+/// seen through, the `rmdir`, the removals); every other record is an intent
+/// that precedes its act, or `gc_finished`, which has none.
+fn is_result(action: &str) -> bool {
+    matches!(
+        action,
+        "gc_terminated_orphan"
+            | "gc_removed_cgroup"
+            | "gc_removed_scratch"
+            | "gc_removed_temp_files"
+    )
+}
+
+/// What a crash at `point` of the `nth` record of `left`'s pass leaves, and
+/// what the next uninterrupted pass then records, from §14.2's rules alone:
+///
+/// - the records durable are the ones before the crashed one, and the
+///   crashed one too once it is renamed into place;
+/// - an act is done when its record is a result the crash reached, or any
+///   record before the crashed one;
+/// - the next pass does what is left: a populated leaf is killed and
+///   removed (four records), an empty one removed (two), a gone one that an
+///   earlier record verified empty is settled with no record (G3), a leaf
+///   already recorded removed is left alone; scratch still there is removed
+///   and recorded; any temporary file (the supervisor's, or the one this
+///   crash left) is removed and recorded; `gc_finished` comes last;
+/// - a record gc repeats with the same content is kept once (G5), so an
+///   intent the crashed pass made durable is not listed again, while a
+///   removal of other temporary files is a record of its own.
+struct Expected {
+    durable: Vec<&'static str>,
+    leaf_gone: bool,
+    leaf_populated: bool,
+    scratch_present: bool,
+    receipt_temp: bool,
+    after_next_pass: Vec<&'static str>,
+}
+
+fn expected(left: Left, nth: usize, point: Point) -> Expected {
+    let sequence = left.sequence();
+    let durable: Vec<&'static str> =
+        sequence[..if point.published { nth } else { nth - 1 }].to_vec();
+    let done = |action: &str| {
+        sequence
+            .iter()
+            .position(|recorded| *recorded == action)
+            .is_some_and(|at| at + 1 < nth || (at + 1 == nth && is_result(action)))
     };
-    let has_scratch = sequence.iter().any(|done| done == "gc_removed_scratch");
-    let scratch_gone =
-        action == "gc_removed_scratch" || before.iter().any(|done| done == "gc_removed_scratch");
-    let scratch_ok = !has_scratch || scratch.exists() != scratch_gone;
-    (!leaf_ok || !scratch_ok).then(|| {
-        format!(
-            "at {action}: leaf present {} populated {}, scratch present {}",
-            leaf.exists(),
-            populated(leaf),
-            scratch.exists()
-        )
-    })
+    let has = |action: &str| sequence.contains(&action);
+    let leaf_gone = done("gc_removed_cgroup");
+    let leaf_populated = left == Left::PopulatedLeaf && !done("gc_terminated_orphan");
+    let scratch_present = has("gc_removed_scratch") && !done("gc_removed_scratch");
+    let receipt_temp = has("gc_removed_temp_files") && !done("gc_removed_temp_files");
+    let mut next: Vec<&'static str> = Vec::new();
+    if durable.contains(&"gc_removed_cgroup") || leaf_gone {
+        // Recorded removed, or gone after a durable intent: nothing to record.
+    } else if leaf_populated {
+        next.extend([
+            "gc_terminating_orphan",
+            "gc_terminated_orphan",
+            "gc_removing_cgroup",
+            "gc_removed_cgroup",
+        ]);
+    } else {
+        next.extend(["gc_removing_cgroup", "gc_removed_cgroup"]);
+    }
+    if scratch_present {
+        next.push("gc_removed_scratch");
+    }
+    if receipt_temp || point.temp_left {
+        next.push("gc_removed_temp_files");
+    }
+    next.push("gc_finished");
+    let mut after_next_pass = durable.clone();
+    for record in next {
+        if record == "gc_removed_temp_files" || !durable.contains(&record) {
+            after_next_pass.push(record);
+        }
+    }
+    Expected {
+        durable,
+        leaf_gone,
+        leaf_populated,
+        scratch_present,
+        receipt_temp,
+        after_next_pass,
+    }
 }
 
 /// One crash at `point` of the `nth` record of a pass over what `left`
-/// leaves, whose uninterrupted records are `sequence`.
-fn record_crash(left: Left, sequence: &[String], nth: usize, point: Point) -> Vec<String> {
-    let action = &sequence[nth - 1];
+/// leaves: the records, the leaf, the scratch and the temporary files are
+/// exactly what [`expected`] says, before and after the next pass.
+fn record_crash(left: Left, nth: usize, point: Point) -> Vec<String> {
+    let action = left.sequence()[nth - 1];
     let label = format!("gc_record:{}:{nth}", point.name);
     let described = format!("{left:?} {action} ({label})");
+    let want = expected(left, nth, point);
     let mut problems = Vec::new();
     let (run, dir, _guard) = match dead_supervisor(left) {
         Ok(found) => found,
@@ -952,55 +1068,67 @@ fn record_crash(left: Left, sequence: &[String], nth: usize, point: Point) -> Ve
     }
     records_valid(&described, &dir, &mut problems);
     let durable = gc_actions(&dir);
-    let done = if point.published { nth } else { nth - 1 };
-    if durable != sequence[..done] {
+    if durable != want.durable {
         problems.push(format!(
             "{described}: jail state records {durable:?}; a crash here leaves {:?}",
-            &sequence[..done]
+            want.durable
         ));
     }
-    if let Some(problem) = order_problem(sequence, nth, &leaf, pinned, &dir.join("scratch")) {
-        problems.push(format!("{described}: {problem}"));
+    let there = pinned.is_some_and(|pinned| inode(&leaf) == Some(pinned));
+    let (gone, full) = (!leaf.exists(), there && populated(&leaf));
+    if gone != want.leaf_gone || (!gone && (!there || full != want.leaf_populated)) {
+        problems.push(format!(
+            "{described}: the leaf is gone {gone}, ours {there}, populated {full}; a crash \
+             here leaves gone {}, populated {}",
+            want.leaf_gone, want.leaf_populated
+        ));
+    }
+    let scratch = dir.join("scratch").exists();
+    if left.sequence().contains(&"gc_removed_scratch") && scratch != want.scratch_present {
+        problems.push(format!(
+            "{described}: the scratch is present {scratch}; a crash here leaves {}",
+            want.scratch_present
+        ));
     }
     if std::fs::read(dir.join("jail.json")).ok() != receipt_before {
         problems.push(format!("{described}: gc rewrote the supervisor's receipt"));
     }
     let temps = leftover(&data, &dir);
-    if !temps_match(&temps, "jail-state.json", point) {
+    let count = |prefix: &str| temps.iter().filter(|temp| temp.starts_with(prefix)).count();
+    if count(".jail-state.json.") != usize::from(point.temp_left)
+        || count(".jail.json.") != usize::from(want.receipt_temp)
+        || temps.len() != usize::from(point.temp_left) + usize::from(want.receipt_temp)
+    {
         problems.push(format!(
             "{described}: leftover temporary files {temps:?}; a crash here leaves {} of \
-             `.jail-state.json.*.tmp`",
-            u8::from(point.temp_left)
+             `.jail-state.json.*.tmp` and {} of the supervisor's `.jail.json.*.tmp`",
+            u8::from(point.temp_left),
+            u8::from(want.receipt_temp)
         ));
     }
     // Before the rename, the temporary file holds the whole new state: the
     // record being written, on top of the ones before it.
     if point.temp_left
-        && let Some(temp) = temps.first()
+        && let Some(temp) = temps
+            .iter()
+            .find(|temp| temp.starts_with(".jail-state.json."))
     {
         match parse(&dir.join(temp)) {
-            Ok(Some(new)) if actions_of(&new) == sequence[..nth] => {}
+            Ok(Some(new)) if actions_of(&new) == left.sequence()[..nth] => {}
             other => problems.push(format!(
                 "{described}: the temporary file does not hold {:?}: {other:?}",
-                &sequence[..nth]
+                &left.sequence()[..nth]
             )),
         }
     }
     let before = present(&dir);
     gc_finishes(&described, &data, &mut problems);
     kept(&described, &dir, &before, &mut problems);
-    // The next pass finishes. A crash between the `rmdir` and its record
-    // leaves the intent as the last word on the leaf: the next pass finds
-    // it gone and finishes from the intent (G3) without a
-    // `gc_removed_cgroup` of its own (spec-proposal §2 item 25).
     let after = gc_actions(&dir);
-    if !after.iter().any(|action| action == "gc_finished")
-        || !after
-            .iter()
-            .any(|action| action == "gc_removed_cgroup" || action == "gc_removing_cgroup")
-    {
+    if after != want.after_next_pass {
         problems.push(format!(
-            "{described}: after the next pass, no removal and gc_finished: {after:?}"
+            "{described}: after the next pass jail state records {after:?}; §14.2 leaves {:?}",
+            want.after_next_pass
         ));
     }
     if leaf.exists() || dir.join("scratch").exists() {
@@ -1024,39 +1152,70 @@ fn j5_r02_a_crash_at_each_point_of_each_later_gc_record_leaves_valid_records() {
         return;
     }
     let mut problems = Vec::new();
-    let mut covered = std::collections::BTreeSet::new();
-    for left in [Left::PopulatedLeaf, Left::EmptyLeaf] {
-        let sequence = match record_sequence(left) {
-            Ok(sequence) => sequence,
-            Err(problem) => {
-                problems.push(format!("{left:?}: {problem}"));
-                continue;
-            }
-        };
-        eprintln!("{left:?}: one pass records {sequence:?}");
-        covered.extend(sequence.iter().cloned());
-        for nth in 1..=sequence.len() {
+    for left in [Left::PopulatedLeaf, Left::EmptyLeafAndTemp] {
+        problems.extend(uninterrupted(left));
+        for nth in 1..=left.sequence().len() {
             for point in POINTS {
-                problems.extend(record_crash(left, &sequence, nth, point));
+                problems.extend(record_crash(left, nth, point));
             }
-        }
-    }
-    // Every record the J4 matrix left uncrashed is crashed here.
-    for action in [
-        "gc_terminating_orphan",
-        "gc_terminated_orphan",
-        "gc_removing_cgroup",
-        "gc_removed_cgroup",
-        "gc_removed_scratch",
-        "gc_finished",
-    ] {
-        if !covered.contains(action) {
-            problems.push(format!(
-                "no pass recorded {action}, so it was never crashed"
-            ));
         }
     }
     assert_no_problems(&problems);
+}
+
+/// The expectations [`record_crash`] holds the live runs to, for the cases
+/// where a crash loses a record of an act already done: the next pass
+/// finishes from what is durable and never records that act (§14.2 allows
+/// it; spec-proposal §2 item 25).
+#[test]
+fn j5_r02_a_crash_after_an_act_before_its_record_is_finished_from_what_is_durable() {
+    let temp_written = POINTS[0];
+    let dir_synced = POINTS[3];
+    // The rmdir done, its record lost: the intent is the last word.
+    assert_eq!(
+        expected(Left::EmptyLeafAndTemp, 2, temp_written).after_next_pass,
+        [
+            "gc_removing_cgroup",
+            "gc_removed_scratch",
+            "gc_removed_temp_files",
+            "gc_finished"
+        ]
+    );
+    // The kill done, its result lost: the next pass removes the empty leaf.
+    assert_eq!(
+        expected(Left::PopulatedLeaf, 2, temp_written).after_next_pass,
+        [
+            "gc_terminating_orphan",
+            "gc_removing_cgroup",
+            "gc_removed_cgroup",
+            "gc_removed_temp_files",
+            "gc_finished"
+        ]
+    );
+    // The supervisor's temporary file removed, its record lost: the next
+    // pass records only the one this crash left.
+    let lost = expected(Left::EmptyLeafAndTemp, 4, temp_written);
+    assert!(!lost.receipt_temp);
+    assert_eq!(
+        lost.after_next_pass,
+        [
+            "gc_removing_cgroup",
+            "gc_removed_cgroup",
+            "gc_removed_scratch",
+            "gc_removed_temp_files",
+            "gc_finished"
+        ]
+    );
+    // An intent made durable is kept once when the next pass repeats it.
+    assert_eq!(
+        expected(Left::PopulatedLeaf, 1, dir_synced).after_next_pass,
+        Left::PopulatedLeaf.sequence()
+    );
+    // gc_finished durable: nothing more.
+    assert_eq!(
+        expected(Left::EmptyLeafAndTemp, 5, dir_synced).after_next_pass,
+        Left::EmptyLeafAndTemp.sequence()
+    );
 }
 
 // ===========================================================================
@@ -1095,6 +1254,10 @@ fn eio() -> std::io::Error {
 struct LeafFault {
     site: Site,
     fault: Fault,
+    /// The leaf's path, looked at when the fault fires (J5-C wave 4, review
+    /// rev-late F8): what is there then is the test's own observation of the
+    /// filesystem, independent of anything the product writes.
+    leaf: PathBuf,
     state: Mutex<LeafFaultState>,
 }
 
@@ -1106,6 +1269,8 @@ struct LeafFaultState {
     current: bool,
     fired: bool,
     short_pending: bool,
+    /// The leaf's device and inode when the fault fired (`None`: no leaf).
+    leaf_at_fault: Option<(u64, u64)>,
 }
 
 impl LeafFault {
@@ -1113,6 +1278,9 @@ impl LeafFault {
         let mut state = self.state.lock().unwrap();
         if site == self.site && state.current && !state.fired && self.fault == fault {
             state.fired = true;
+            state.leaf_at_fault = std::fs::metadata(&self.leaf)
+                .ok()
+                .map(|meta| (meta.dev(), meta.ino()));
             return true;
         }
         false
@@ -1244,6 +1412,7 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
     let io = Arc::new(LeafFault {
         site,
         fault,
+        leaf: leaf.clone(),
         state: Mutex::default(),
     });
     let limits = LimitsSnapshot {
@@ -1296,25 +1465,25 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
             return problems;
         }
     };
+    // P15 is written before `mkdir`, P16 after it and before anything is
+    // placed in the leaf: what the fault saw at the leaf's path.
+    let at_fault = io.state.lock().unwrap().leaf_at_fault;
+    match (site, at_fault) {
+        (Site::ExecutionLeaf, None) | (Site::ExecutionLeafIdentity, Some(_)) => {}
+        (_, seen) => problems.push(format!(
+            "{label}: when this write failed the leaf's identity was {seen:?}"
+        )),
+    }
     let renamed = fault == Fault::DirSyncError;
     let expected = match (site, renamed) {
         (Site::ExecutionLeaf, false) => Value::Null,
         (Site::ExecutionLeaf, true) | (_, false) => leaf_record(&leaf, None),
-        (_, true) => state["execution_cgroup"].clone(),
+        // The identity the test saw on the filesystem, not the one written.
+        (_, true) => leaf_record(&leaf, at_fault),
     };
     if state["execution_cgroup"] != expected {
         problems.push(format!(
             "{label}: jail state names {}; a failure here leaves {expected}",
-            state["execution_cgroup"]
-        ));
-    }
-    if site == Site::ExecutionLeafIdentity
-        && renamed
-        && (state["execution_cgroup"]["path"] != leaf.to_str().unwrap()
-            || !state["execution_cgroup"]["inode"].is_u64())
-    {
-        problems.push(format!(
-            "{label}: after the rename jail state identifies no leaf: {}",
             state["execution_cgroup"]
         ));
     }
