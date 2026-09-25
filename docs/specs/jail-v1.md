@@ -10,8 +10,8 @@ manifest (`ouro.jail.doctor/1`), build provenance and the architecture refusal,
 which bubblewrap runs, the frozen wire schemas and milestone-1 inputs, the
 error codes `exec_interpreter_missing` and `exec_unconfirmed`, the test seams
 J5 added, what the observer and `none` do beside a process the supervisor was
-started beside, and the limits the milestone names (§§3.2, 4, 5, 6.1–6.4, 8.3,
-9.3, 11, 13, 14.1, 15, 16, 17); the milestone's evidence, acceptance verdict
+started beside, and the limits the milestone names (§§3.2, 4, 5, 6.1–6.4,
+8.2, 8.3, 9.3, 11, 13, 14.1, 15–18); the milestone's evidence, acceptance verdict
 and named limits are in [J5 authority](jail-v1/j5-authority.md). Revision 18 has `run` and
 `doctor` enter a delegated user scope themselves where the user manager
 lingers, so an attempt gets its execution leaf from a plain login session
@@ -451,8 +451,8 @@ recorded as not evaluated, not as passed.
 
 The observer is a ptrace tracer in the supervisor (D8, revision 19). It was
 measured first, on 2026-09-22, because it needs no provisioning under the
-default Yama scope that Ubuntu, Debian, Fedora and Arch ship, and it passes the
-closed set (O01–O06). No audit daemon, vendor protocol or seccomp-notification
+default Yama scope that Ubuntu, Debian, Fedora and Arch ship, and it observes
+the whole closed set (§11.2), which O01–O06 test. No audit daemon, vendor protocol or seccomp-notification
 service is introduced; `agent`'s `connect` results come from the unix-peer
 mediator the supervisor owns (§11.4).
 
@@ -498,10 +498,11 @@ helper, run the user's command as root, change sysctls, grant file
 capabilities or edit AppArmor, and the supervisor needs no capability for any
 profile. Effective UID 0 execution and mismatched real/effective UIDs refuse in
 v1. Set `no_new_privs` before child exec and prove the child cannot reacquire
-privileges: every contained target starts with empty inheritable, permitted,
-effective, bounding and ambient capability sets and cannot `ptrace` or
-`pidfd_getfd` the supervisor or the observer (X06). User-namespace capabilities
-are separately confined and do not grant host capabilities. `doctor` reports
+privileges (X06): every contained target starts with empty inheritable,
+permitted, effective, bounding and ambient capability sets, and it must not be
+able to trace, or take descriptors from, the supervisor or the observer.
+User-namespace capabilities are separately confined and do not grant host
+capabilities. `doctor` reports
 the operator identity category (§14.1).
 
 No observer attachment means refusal with `--observe on`. An explicit

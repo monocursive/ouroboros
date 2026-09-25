@@ -33,7 +33,9 @@ claimed until they are filled from that run's evidence.
 A read-only gap analysis of `638bb699` mapped every §15 gate to its tests
 clause by clause: 19 gates proved, 6 proved only below the command line or by
 simulation, 24 partial, and I01 missing. No full conformance run passed at that
-revision: three hosted runs had lost their SSH connection mid-suite. The
+revision: three hosted runs had lost their SSH connection mid-suite, and a
+fourth failed on a SIGTERM that the integrator's own session sent on the
+shared host (the failing test binary passes alone). The
 operator took four decisions on 2026-09-24 (the `execution_boundary` rename;
 the performance budgets apply to the jail's own overhead; eBPF withdrawn from
 v1; A01 re-run without a credential, its support claim in the record), and the
@@ -55,8 +57,10 @@ work was split into slices with disjoint files:
 - **J5-T**, the tracer's end and `none`'s children, after the J5-C review
   found `--trace-fd 3 3> >(cat)` refusing every observed run.
 
-Each slice was reviewed adversarially before integration, with mutation
-replay of its enforcement points; a fix wave followed each review. Every
+The slices were reviewed adversarially before integration, with mutation
+replay of their enforcement points, and a fix wave followed each review: J5-A,
+J5-B1, J5-B2, J5-C, J5-D and J5-E by the time of this report; the reviews of
+J5-B3 and J5-T: **TO BE FILLED**. Every
 product fix was written test-first and mutation-checked: the fix committed,
 reverted, its test red, restored. The decisions the fixes forced are in
 [review-resolutions.md](review-resolutions.md), revision 19, and in the
@@ -84,7 +88,7 @@ specification's revision 19.
 | Hosted conformance runs failed when the runner's SSH connection dropped mid-suite (after 4.5, 20 and 10 minutes), while the suite finished on the host | Hosted runs 35883187019, 35884521611, 36033419322 | Build and suite run detached and are polled (`1328c381`) | driver unit tests |
 | The driver started the suite from `setsid nohup sh -c … &`, so INT, QUIT and HUP were ignored and inherited, and the jail (which honours an inherited ignore) could not be tested for an operator INT or HUP | Review of J5-B1 (the L01 INT leg failed under the driver) | `setsid -f` (`91a347ad`); the harness resets the three for every program (`4810c48e`) | a script test reads the step's `SigIgn` (7 before, 0 after) |
 | The suite's PATH was not the tests' PATH: the rustup proxy prepended `~/.cargo/bin`, where a `cargo install`ed ledger would have been invisible to the I01 probe and a `bwrap` there would have been every test's backend | Review of J5-A | The suite runs the pinned toolchain's binaries under the system PATH (`72661260`) | `i01_under_conformance_the_test_process_has_exactly_the_suite_path` |
-| The first acceptance map passed clauses whose tests could not fail on their enforcement point (L01.6, L04.4, O03.2, F04.2, P02.8, proved by mutation), and its merge tool could close a clause with no test or cite an invented document | Review of J5-A | Clauses split or marked untested; a limit must cite a passage of a document under `docs/`; a tag rises only with a new test (`72661260`) | `cargo test -p xtask` |
+| The first acceptance map passed clauses whose tests could not fail on their enforcement point (L01.6, L04.4, O03.2, F04.2 and P02.8, each shown by a mutation or a live probe), and its merge tool could close a clause with no test or cite an invented document | Review of J5-A | Clauses split or marked untested; a limit must cite a passage of a document under `docs/`; a tag rises only with a new test (`72661260`) | `cargo test -p xtask` |
 | A Linux build for aarch64 announced `linux-closed-v1` while its `doctor` reported the closed set unsupported | Review of J5-D | `version` announces a closed set only where the tables cover the architecture (`c35e1437`) | unit test; `j5_arch_refusal_linux.rs` |
 | The freeze missed baseline broadenings: a writable `build` workspace, an added contained environment name, a launch profile's `[environment]`, a `/sys` mount in a plan; a tested run was optional and accepted a zero revision, a debug build and `ready: false` | Review of J5-D | The freeze pins built-in baselines, rendered plans, environments and manifests; `--check` requires a strict tested run (`bed39844`, `640bbfe9`) | `portable_freeze.rs` |
 | A test step whose provenance variables differed from the build step's rebuilt the tested binary under the suite with other claims | Review of J5-D | Identical claims on every cargo step; the driver checks `doctor` confirms them (`8d493560`) | driver tests |
