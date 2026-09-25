@@ -1138,12 +1138,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             &mut journal,
         ));
     }
-    let launch_handoff = match prepare_launch(
-        &attempt_dir,
-        &plan,
-        &mut record,
-        budget.deadline.as_instant(),
-    ) {
+    let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record, budget.deadline) {
         Ok(handoff) => handoff,
         Err(error) => {
             return Ok(refuse(
@@ -1261,6 +1256,21 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // exists, so crash reconciliation and GC can identify resources without
     // parsing a receipt.
     if let Err(error) = register_boundary_in_state(&attempt_dir, &boundary) {
+        let teardown = prepared.abort();
+        record_teardown(&mut record, &teardown);
+        return Ok(refuse(
+            &attempt_dir,
+            &mut record,
+            &error,
+            args,
+            control.as_mut(),
+            &mut journal,
+        ));
+    }
+    // §8.2: the preparation budget covers steps 1 to 5. A budget spent by
+    // now refuses before anything announces `prepared`: an owner must never
+    // be told an attempt is ready after its preparation ran out of time.
+    if let Err(error) = budget.check(ErrorStage::Preparing) {
         let teardown = prepared.abort();
         record_teardown(&mut record, &teardown);
         return Ok(refuse(
@@ -2345,12 +2355,6 @@ impl ContinuousDeadline {
             .saturating_sub(crate::platform::elapsed_since_start_ns());
         Duration::from_nanos(u64::try_from(left).unwrap_or(u64::MAX))
     }
-
-    /// The same moment as an `Instant`, for a callee that waits on one: the
-    /// time left is read now, on the continuous clock.
-    fn as_instant(self) -> Instant {
-        Instant::now() + self.remaining()
-    }
 }
 
 /// A preparation budget with a stage-appropriate refusal (§8.2), on the
@@ -2778,7 +2782,7 @@ fn prepare_launch(
     attempt_dir: &AttemptDir,
     plan: &Plan,
     record: &mut AttemptRecord,
-    deadline: Instant,
+    deadline: ContinuousDeadline,
 ) -> Result<Option<crate::credentials::LaunchHandoff>, JailError> {
     let snapshot = &plan.resolved.snapshot;
     if snapshot.roots.vendor_state.is_none() {
@@ -2810,7 +2814,9 @@ fn prepare_launch(
     // by what is left of it, and no source may lie in a child-writable grant.
     let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
     let mut staged =
-        match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, deadline) {
+        match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, &|| {
+            deadline.remaining()
+        }) {
             Ok(staged) => staged,
             Err(refusal) => {
                 // Both the receipt rows and the private provenance of every

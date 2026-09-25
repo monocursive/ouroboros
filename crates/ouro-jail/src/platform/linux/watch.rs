@@ -97,7 +97,17 @@ impl Watcher {
         let result = (|| {
             let fd = identity::pidfd_open(child.id() as i32)?;
             if !read_release(ready_r.as_raw_fd(), deadline) {
-                return Err(io::Error::other("lifetime watcher did not become ready"));
+                // A wait the deadline ended is a timeout, which the caller
+                // reports as the preparation budget's, not as a host failure.
+                let kind = if deadline.expired() {
+                    io::ErrorKind::TimedOut
+                } else {
+                    io::ErrorKind::Other
+                };
+                return Err(io::Error::new(
+                    kind,
+                    "lifetime watcher did not become ready",
+                ));
             }
             Ok(fd)
         })();

@@ -958,7 +958,16 @@ impl Boundary {
             PINNED_FD_BASE + pinned_fds.len() as RawFd + staged.credentials.len() as RawFd,
         );
         // J3-launch end
+        // §8.2: a wait that the preparation budget ended (the watcher's
+        // readiness, the arguments' write) refuses as the budget's timeout,
+        // with remediation `retry`, not as a host failure of the step that
+        // happened to be waiting.
         let io = |err: std::io::Error| {
+            if err.kind() == std::io::ErrorKind::TimedOut {
+                return prepare_timeout(&format!(
+                    "preparation did not complete within its budget: {err}"
+                ));
+            }
             preparing(
                 ErrorCode::BackendUnavailable,
                 format!("the boundary's channels could not be created: {err}"),
