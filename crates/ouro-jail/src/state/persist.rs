@@ -343,26 +343,72 @@ pub fn with_persist_io<R>(io: SharedIo, body: impl FnOnce() -> R) -> R {
 /// point of the first replacement at that site (S9). Test-only; it can only
 /// end an attempt early, never widen anything, and it is recorded wherever it
 /// is in force. A value that does not name a site and a point is ignored.
+///
+/// J5-C (R02.3): `<site>:<point>:<n>` names the `n`th replacement at that
+/// site (1-based, counted in this process among the replacements that reach
+/// that point) instead of the first, which is how a crash reaches a record
+/// that is never a process's first at its site: gc's later records (P14),
+/// and the jail-state half of gc resuming a cleanup (P12). `<site>:<point>`
+/// is `<site>:<point>:1`. An `n` that is not a plain decimal from 1 to
+/// [`ABORT_AT_MAX_ORDINAL`] makes the whole value ignored, like any other
+/// value that does not name a site and a point.
 pub const ABORT_AT_SEAM: &str = "OURO_JAIL_TEST_ABORT_AT";
 
-fn abort_at() -> Option<(Site, CrashPoint)> {
-    static ONCE: OnceLock<Option<(Site, CrashPoint)>> = OnceLock::new();
-    *ONCE.get_or_init(|| {
-        let raw = std::env::var(ABORT_AT_SEAM).ok()?;
-        let (site, point) = raw.split_once(':')?;
-        Some((Site::parse(site)?, CrashPoint::parse(point)?))
-    })
+// J5-C begin: R02.3, the nth replacement at a site
+/// The largest replacement ordinal [`ABORT_AT_SEAM`] accepts.
+pub const ABORT_AT_MAX_ORDINAL: usize = 10_000;
+
+/// The site, point and 1-based replacement ordinal an [`ABORT_AT_SEAM`] value
+/// names, or `None` when it names none (and is then ignored).
+#[must_use]
+pub fn parse_abort_at(raw: &str) -> Option<(Site, CrashPoint, usize)> {
+    let mut parts = raw.split(':');
+    let site = Site::parse(parts.next()?)?;
+    let point = CrashPoint::parse(parts.next()?)?;
+    let nth = match parts.next() {
+        None => 1,
+        Some(text) => {
+            if text.is_empty()
+                || text.starts_with('0')
+                || !text.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return None;
+            }
+            text.parse::<usize>()
+                .ok()
+                .filter(|nth| (1..=ABORT_AT_MAX_ORDINAL).contains(nth))?
+        }
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((site, point, nth))
 }
 
-/// Aborts the process when [`ABORT_AT_SEAM`] names this point of this site.
+fn abort_at() -> Option<(Site, CrashPoint, usize)> {
+    static ONCE: OnceLock<Option<(Site, CrashPoint, usize)>> = OnceLock::new();
+    *ONCE.get_or_init(|| parse_abort_at(&std::env::var(ABORT_AT_SEAM).ok()?))
+}
+
+/// How many replacements at the seam's site have reached its point so far.
+static REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Aborts the process when [`ABORT_AT_SEAM`] names this point of this site,
+/// and this is the replacement at that site its ordinal names.
 ///
 /// `abort` runs no destructor, so whatever a crash at this point would leave
 /// on disk (a temporary file, an unsynced entry) is left.
 pub fn crash_point(site: Site, point: CrashPoint) {
-    if abort_at() == Some((site, point)) {
+    let Some((seam_site, seam_point, nth)) = abort_at() else {
+        return;
+    };
+    if (seam_site, seam_point) == (site, point)
+        && REACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == nth
+    {
         std::process::abort();
     }
 }
+// J5-C end
 
 /// The prefix of every test seam's environment name (S9).
 pub const TEST_SEAM_PREFIX: &str = "OURO_JAIL_TEST_";
@@ -894,3 +940,51 @@ impl PersistIo for Forward {
         self.call(move |io| io.remove(site, &path))
     }
 }
+
+// J5-C begin: R02.3, the seam's ordinal
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_abort_seam_names_a_site_a_point_and_an_optional_ordinal() {
+        assert_eq!(
+            parse_abort_at("gc_record:renamed"),
+            Some((Site::GcRecord, CrashPoint::Renamed, 1))
+        );
+        assert_eq!(
+            parse_abort_at("gc_record:renamed:1"),
+            Some((Site::GcRecord, CrashPoint::Renamed, 1))
+        );
+        assert_eq!(
+            parse_abort_at("gc_resume:temp_written:2"),
+            Some((Site::GcResume, CrashPoint::TempWritten, 2))
+        );
+        assert_eq!(
+            parse_abort_at("claim:dir_synced:10000"),
+            Some((Site::Claim, CrashPoint::DirSynced, ABORT_AT_MAX_ORDINAL))
+        );
+        // Anything else names nothing, and the whole value is ignored.
+        for raw in [
+            "",
+            "gc_record",
+            "gc_record:",
+            "gc_record:renamed:",
+            "gc_record:renamed:0",
+            "gc_record:renamed:01",
+            "gc_record:renamed:+2",
+            "gc_record:renamed:-1",
+            "gc_record:renamed: 2",
+            "gc_record:renamed:2 ",
+            "gc_record:renamed:10001",
+            "gc_record:renamed:99999999999999999999999",
+            "gc_record:renamed:2:1",
+            "gc_record:moved:2",
+            "unnamed:renamed",
+            "GC_RECORD:renamed",
+        ] {
+            assert_eq!(parse_abort_at(raw), None, "{raw:?}");
+        }
+    }
+}
+// J5-C end

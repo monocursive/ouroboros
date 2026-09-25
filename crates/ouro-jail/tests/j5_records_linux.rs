@@ -779,3 +779,311 @@ fn j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame() 
     // incomplete tail is honest only after a prefix of whole frames.
     assert!(frames >= 64, "only {frames} whole frames were delivered");
 }
+
+// ===========================================================================
+// J5-C, R01.5: the integrity (pending, lost) and unknown-exec settlement
+// tuples, as the real jail writes them
+// ===========================================================================
+//
+// jail-v1 §13.2: "`lifetime.integrity` is `pending` before a boundary is
+// validated, `verified` when its identity and the claimed scope have been
+// checked, or `lost` after detected tampering/escape"; "Lost integrity
+// requires null tree result/time and forbids settlement/cleanup"; "Verified
+// settlement with unknown exec evidence is valid". The corpus (R01.1) shows
+// the schema accepts those tuples; these runs show the real jail writes them,
+// each held to the whole frozen contract.
+
+const PYTHON: &str = "/usr/bin/python3";
+
+fn error_codes(receipt: &Value) -> Vec<String> {
+    receipt["errors"]
+        .as_array()
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|error| error["code"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A private workspace in `jail`'s root.
+fn private_workspace(jail: &Jail) -> PathBuf {
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).unwrap();
+    workspace
+}
+
+/// R01.5, integrity pending: §13.2's "Refusal before boundary creation" row.
+/// stdin is a directory, which a contained run refuses in preparation
+/// (§8.3), before any boundary exists: phase `refused`, containment and
+/// protection `pending`, no exec, boundary `pending` with no native identity,
+/// no scope, no tree result or time, and integrity `pending`.
+#[test]
+fn j5_r01_a_refusal_before_the_boundary_carries_integrity_pending() {
+    if !Profile::Tool.available() {
+        return;
+    }
+    let jail = Jail::with_program("/bin/sh")
+        .expect("a private harness")
+        .args(["-c", "exec \"$0\" \"$@\" </"])
+        .arg(harness::jail_path());
+    let workspace = private_workspace(&jail);
+    let marker = jail.root().join("target-ran");
+    let run = jail
+        .arg("run")
+        .args(["--profile", "tool", "--workspace"])
+        .arg(&workspace)
+        .trace()
+        .control()
+        .receipt()
+        .target(["/bin/sh", "-c", &format!("touch {}", marker.display())])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(run.code(), Some(125), "{}", explain(&run));
+    assert!(!marker.exists(), "the target ran");
+    common::assert_run_records(&run);
+    let receipts = run.receipts();
+    assert!(
+        receipts.len() >= 2,
+        "the canonical receipt and the --receipt copy: {receipts:#?}"
+    );
+    for receipt in &receipts {
+        assert_eq!(receipt["phase"], "refused", "{receipt:#}");
+        assert_eq!(receipt["containment"], "pending", "{receipt:#}");
+        assert_eq!(receipt["child_protection"], "pending", "{receipt:#}");
+        assert_eq!(receipt["exec_observed"], false);
+        assert_eq!(
+            receipt["lifetime"],
+            serde_json::json!({
+                "boundary": "pending",
+                "native": null,
+                "tree_empty": null,
+                "verified_at": null,
+                "verification_scope": null,
+                "integrity": "pending",
+            }),
+            "{receipt:#}"
+        );
+        assert_eq!(receipt["applied"]["network"]["mode"], "pending");
+        assert_eq!(receipt["outcome"]["kind"], "refused");
+        assert_eq!(receipt["outcome"]["error"]["code"], "invalid_fd");
+        assert_eq!(receipt["outcome"]["error"]["stage"], "preparing");
+    }
+    let refused = run.control_kind("refused");
+    assert_eq!(refused.len(), 1, "{:?}", control_kinds(&run));
+    assert_eq!(refused[0]["receipt_phase"], "refused");
+}
+
+/// A cgroup this test creates beside the attempt leaves under the operator's
+/// delegated subtree: the kind of cgroup an uncontained child can create for
+/// itself and move into. Removed with the test; only the attempt's own target
+/// is ever in it.
+struct Destination {
+    path: PathBuf,
+}
+
+impl Destination {
+    fn new(tag: &str) -> Destination {
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let root = ouro_jail::platform::linux::cgroup::delegated_root(unsafe { libc::getuid() })
+            .expect("the delegated subtree exists");
+        let path = root.join(format!("ouro-j5c-{tag}-{}", std::process::id()));
+        std::fs::create_dir(&path).expect("a destination cgroup");
+        Destination { path }
+    }
+}
+
+impl Drop for Destination {
+    fn drop(&mut self) {
+        // Only the attempt's own target can be here: the test made this cgroup.
+        if populated(&self.path) {
+            let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while populated(&self.path) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+fn populated(cgroup: &Path) -> bool {
+    std::fs::read_to_string(cgroup.join("cgroup.events"))
+        .is_ok_and(|events| events.lines().any(|line| line == "populated 1"))
+}
+
+/// The attempt leaf a receipt registered, removed once it is checked to be
+/// that leaf (its pinned inode) and empty: the jail retains it after a loss
+/// (§14.2), so the test that caused the loss removes it.
+fn remove_retained_leaf(receipt: &Value) {
+    use std::os::unix::fs::MetadataExt as _;
+    let leaf = &receipt["lifetime"]["native"]["details"]["execution_cgroup"];
+    let path = PathBuf::from(leaf["path"].as_str().expect("a leaf path"));
+    let inode = leaf["inode"].as_u64().expect("a leaf inode");
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.ino() == inode) && !populated(&path) {
+        std::fs::remove_dir(&path).expect("the empty retained leaf is removed");
+    }
+}
+
+/// The §13.2 lost tuple: no tree result or time, never settled, cleanup never
+/// complete, and the unknown tree reported.
+fn assert_lost_tuple(receipt: &Value) {
+    assert_ne!(receipt["phase"], "settled", "{receipt:#}");
+    assert_eq!(receipt["containment"], "none");
+    assert_eq!(receipt["child_protection"], "unprotected");
+    let lifetime = &receipt["lifetime"];
+    assert_eq!(lifetime["integrity"], "lost", "{receipt:#}");
+    assert_eq!(lifetime["boundary"], "supervisor_cgroup");
+    assert_eq!(lifetime["verification_scope"], "registered_boundary");
+    assert_eq!(lifetime["tree_empty"], Value::Null);
+    assert_eq!(lifetime["verified_at"], Value::Null);
+    assert_ne!(receipt["state_cleanup"], "complete");
+}
+
+/// R01.5, integrity lost: a `none` target moves itself out of its leaf into a
+/// cgroup of its own and stays alive until the test lets it exit 7. The
+/// escape reaches the receipt while it runs (§9.3, P7), and the final receipt
+/// keeps the lost tuple with the target's own exit.
+#[test]
+fn j5_r01_a_detected_escape_carries_integrity_lost() {
+    if !Profile::None.available() {
+        return;
+    }
+    let destination = Destination::new("escape");
+    let jail = Jail::new().expect("a private harness");
+    let workspace = private_workspace(&jail);
+    let moved = jail.root().join("moved");
+    let go = jail.root().join("go");
+    let code = format!(
+        "import os, time\n\
+         open({dest:?}, 'w').write('0')\n\
+         open({moved:?}, 'w').write(str(os.getpid()))\n\
+         for _ in range(3000):\n\
+         \x20   if os.path.exists({go:?}): break\n\
+         \x20   time.sleep(0.01)\n\
+         os._exit(7)\n",
+        dest = destination.path.join("cgroup.procs").to_str().unwrap(),
+        moved = moved.to_str().unwrap(),
+        go = go.to_str().unwrap(),
+    );
+    let spawned = jail
+        .arg("run")
+        .args(["--profile", "none", "--observe", "off", "--workspace"])
+        .arg(&workspace)
+        .trace()
+        .control()
+        .receipt()
+        .target([PYTHON, "-c", &code])
+        .spawn()
+        .expect("the jail starts");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let running = loop {
+        let latest = spawned.receipt_value().unwrap_or(Value::Null);
+        if latest["lifetime"]["integrity"] == "lost" {
+            break latest;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no receipt recorded the escape; the latest: {latest:#}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    // While the target runs, from the receipt written when the loss was seen.
+    let running = common::checked_receipt(running);
+    assert!(moved.exists() && !go.exists());
+    assert_lost_tuple(&running);
+    assert_eq!(running["phase"], "enforced", "{running:#}");
+    assert_eq!(running["outcome"]["kind"], "pending", "{running:#}");
+    std::fs::write(&go, b"").unwrap();
+    let run = spawned.wait().expect("the jail ends");
+    common::assert_run_records(&run);
+    assert_eq!(run.code(), Some(1), "{}", explain(&run));
+    let last = run
+        .receipts()
+        .into_iter()
+        .max_by_key(|receipt| receipt["revision"].as_u64().unwrap_or(0))
+        .expect("a receipt");
+    assert_lost_tuple(&last);
+    assert_eq!(last["phase"], "enforced");
+    assert_eq!(last["exec_observed"], true);
+    assert_eq!(last["outcome"]["kind"], "exited", "{last:#}");
+    assert_eq!(last["outcome"]["code"], 7);
+    assert!(
+        error_codes(&last).iter().any(|code| code == "tree_unknown"),
+        "{last:#}"
+    );
+    assert!(run.control_kind("settled").is_empty());
+    assert_eq!(run.control_kind("unsettled").len(), 1);
+    remove_retained_leaf(&last);
+}
+
+/// R01.5, verified settlement with unknown exec evidence. With observation
+/// off, exec is confirmed only by the target's executable image differing
+/// from the launcher's (§11.2; `check_exec_without_tracer`). The target here
+/// is the jail's own binary as bound into the sandbox for the launcher, so
+/// the image never differs and nothing independent saw the exec: the tree's
+/// end is verified, the attempt settles, `exec_observed` stays false, and the
+/// outcome is the coded unknown (§6.4 `exec_unconfirmed`).
+#[test]
+fn j5_r01_an_exec_the_jail_cannot_confirm_settles_with_exec_unknown() {
+    if !Profile::Tool.available() {
+        return;
+    }
+    let jail = Jail::new().expect("a private harness");
+    let workspace = private_workspace(&jail);
+    let run = jail
+        .arg("run")
+        .args(["--profile", "tool", "--observe", "off", "--workspace"])
+        .arg(&workspace)
+        .trace()
+        .control()
+        .receipt()
+        .target([
+            ouro_jail::platform::linux::bwrap::JAIL_INSIDE_PATH,
+            "version",
+        ])
+        .run()
+        .expect("the jail runs");
+    common::assert_run_records(&run);
+    assert_eq!(run.code(), Some(1), "{}", explain(&run));
+    let receipts = run.receipts();
+    assert!(receipts.len() >= 2, "{receipts:#?}");
+    for settled in &receipts {
+        assert_eq!(settled["phase"], "settled", "{settled:#}");
+        assert_eq!(settled["exec_observed"], false, "{settled:#}");
+        assert_eq!(settled["containment"], "enforced");
+        assert_eq!(settled["child_protection"], "enforced");
+        assert_eq!(settled["outcome"]["kind"], "unknown", "{settled:#}");
+        assert_eq!(settled["outcome"]["code"], Value::Null);
+        assert_eq!(settled["outcome"]["signal"], Value::Null);
+        assert!(
+            error_codes(settled)
+                .iter()
+                .any(|code| code == "exec_unconfirmed"),
+            "{settled:#}"
+        );
+        let lifetime = &settled["lifetime"];
+        assert_eq!(lifetime["boundary"], "pid_namespace");
+        assert_eq!(lifetime["verification_scope"], "attempt_tree");
+        assert_eq!(lifetime["integrity"], "verified");
+        assert_eq!(lifetime["tree_empty"], true);
+        assert!(lifetime["verified_at"].is_string(), "{settled:#}");
+    }
+    let kinds = control_kinds(&run);
+    assert!(
+        kinds.iter().any(|kind| kind == "settled"),
+        "the attempt settled: {kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "exec_confirmed"),
+        "nothing confirmed the exec: {kinds:?}"
+    );
+    assert!(
+        !run.trace_events()
+            .iter()
+            .any(|event| event["fields"]["transition"] == "exec_confirmed"),
+        "the trace confirms no exec"
+    );
+}
