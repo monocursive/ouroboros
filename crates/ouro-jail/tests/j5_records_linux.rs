@@ -581,7 +581,8 @@ fn rfc3339_seconds_matches_known_times() {
     assert_eq!(rfc3339_seconds("2026-09-25T00:15:36Z"), 1_790_295_336);
 }
 
-fn wall_under_partial_writes(pause_ms: u64) -> ouro_fixture::harness::TraceState {
+/// Returns the trace's state and how many whole frames reached the consumer.
+fn wall_under_partial_writes(pause_ms: u64) -> (ouro_fixture::harness::TraceState, usize) {
     const WRITE_MAX: usize = 64;
     let mut c = case_with(Profile::Tool, "best-effort", &["--limit", "wall=2s"]);
     let base = c.base();
@@ -629,6 +630,11 @@ fn wall_under_partial_writes(pause_ms: u64) -> ouro_fixture::harness::TraceState
     // the tree was verified dead soon after the 2 s wall, and the final
     // receipt, written after the terminal drain's one-second budget, soon
     // after that. Whole seconds, so the bounds carry a second of rounding.
+    assert_eq!(
+        last["phase"], "settled",
+        "the wall's stop ended the tree and it was verified dead: {:#}",
+        last["lifetime"]
+    );
     let seconds = |pointer: &str| {
         rfc3339_seconds(
             last.pointer(pointer)
@@ -663,6 +669,26 @@ fn wall_under_partial_writes(pause_ms: u64) -> ouro_fixture::harness::TraceState
         ouro_fixture::harness::TraceState::Complete => {
             common::assert_run_records(&run);
             let events = run.trace_events();
+            let lost = events
+                .iter()
+                .any(|event| event["fields"]["reason"] == "trace_transport_loss");
+            if lost {
+                // A complete stream that records its own loss (the loss note
+                // and the final notes came through; frames in between did
+                // not, and `trace_loss_recorded` held): the receipt says so.
+                assert!(
+                    last["errors"].as_array().is_some_and(|errors| errors
+                        .iter()
+                        .any(|error| error["code"] == "evidence_lost")),
+                    "a recorded trace loss is an evidence_lost error: {:#}",
+                    last["errors"]
+                );
+                eprintln!(
+                    "complete with a recorded loss: {} frames",
+                    readback.frames.len()
+                );
+                return (readback.state, readback.frames.len());
+            }
             let at = |pick: &dyn Fn(&Value) -> bool| -> u128 {
                 events
                     .iter()
@@ -715,7 +741,7 @@ fn wall_under_partial_writes(pause_ms: u64) -> ouro_fixture::harness::TraceState
         }
         other => panic!("the trace is {other:?}"),
     }
-    readback.state
+    (readback.state, readback.frames.len())
 }
 
 /// The consumer keeps up (a 4 KiB read every 20 ms): the backlog is small,
@@ -727,7 +753,7 @@ fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
         return;
     }
     assert_eq!(
-        wall_under_partial_writes(20),
+        wall_under_partial_writes(20).0,
         ouro_fixture::harness::TraceState::Complete,
         "a consumer that keeps up gets every frame"
     );
@@ -737,14 +763,19 @@ fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
 /// one-second no-progress deadline): the pipe stays full, so the writer waits
 /// with a frame partly written while the wall comes due. The wall fires on
 /// time all the same; the backlog cannot be delivered within the terminal
-/// drain's budget, so the trace ends visibly incomplete with the loss in the
-/// receipt. A writer that blocked on its consumer would hold the supervisor
-/// for as long as the consumer stalls (the mutation replay's M4).
+/// drain's budget, so the trace ends visibly incomplete (or complete with its
+/// loss recorded) and the receipt says so, after a prefix of whole frames. A
+/// writer that blocked on its consumer would hold the supervisor for as long
+/// as the consumer stalls (the mutation replay's M4: the wall came 40 s late
+/// and the tree was never verified).
 #[test]
 fn j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame() {
     if !Profile::Tool.available() {
         return;
     }
-    let state = wall_under_partial_writes(700);
+    let (state, frames) = wall_under_partial_writes(700);
     assert_ne!(state, ouro_fixture::harness::TraceState::Corrupt);
+    // At least half a pipe of frames reached the consumer intact: an
+    // incomplete tail is honest only after a prefix of whole frames.
+    assert!(frames >= 64, "only {frames} whole frames were delivered");
 }
