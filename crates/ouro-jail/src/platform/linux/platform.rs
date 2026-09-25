@@ -15,7 +15,7 @@
 //! init and the target tree, while the supervisor/observer/watcher stay outside.
 
 use std::ffi::{OsStr, OsString};
-use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -859,6 +859,15 @@ impl Boundary {
             let destination = resolve_path_ref(reference, &plan.workspace)?;
             bplan.masked.push(PathBuf::from(destination));
         }
+
+        // J5-B1-w3: §9.1 — an operator grant may not expose host /proc, /sys
+        // or cgroupfs. Checked here, before any mount, on the resolved source
+        // by filesystem type and mount topology (never by spelling), so it
+        // refuses before exec. The baseline runtime roots are on the root
+        // filesystem and pass; the child's private /proc and /dev are made by
+        // bubblewrap, not bound from these sources.
+        refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
+        refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")?;
 
         let (scan, pins, pinned_fds, placeholders) = prepare_mounts(
             &mut bplan,
@@ -2474,6 +2483,95 @@ fn mount_swap_rendezvous() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+// J5-B1-w3 begin: §9.1 pseudo-filesystem guard
+/// Refuses any operator grant in `binds` whose resolved source exposes host
+/// `/proc`, `/sys` or cgroupfs (jail-v1 §9.1), keyed by `key`
+/// (`filesystem.read_only` or `filesystem.read_write`). A policy refusal
+/// (`policy_widening`, remediation `configuration`) before any mount.
+fn refuse_pseudo_fs_grants(binds: &[(PathBuf, PathBuf)], key: &str) -> Result<(), JailError> {
+    if binds.is_empty() {
+        return Ok(());
+    }
+    let mounts = pseudo_fs_mount_points();
+    for (source, _destination) in binds {
+        // The check follows symlinks to the real object (`--ro <link>` where
+        // the link resolves onto a pseudo filesystem must refuse); the later
+        // pin opens with RESOLVE_NO_SYMLINKS for race safety.
+        let resolved = std::fs::canonicalize(source).unwrap_or_else(|_| source.clone());
+        let on_pseudo = source_on_pseudo_fs(&resolved);
+        if crate::policy::grant_exposes_pseudo_fs(&resolved, on_pseudo, &mounts) {
+            return Err(error(
+                ErrorCode::PolicyWidening,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                format!(
+                    "the grant {} exposes host /proc, /sys or cgroupfs, which a contained \
+                     profile never binds (jail-v1 §9.1)",
+                    source.display()
+                ),
+            )
+            .with_key_path(key));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the object at `resolved` is on a proc, sysfs or cgroup filesystem,
+/// by `fstatfs` on an `O_PATH` handle. A path that cannot be opened is not
+/// treated as pseudo here; the ancestor check and the later pin catch the
+/// rest.
+fn source_on_pseudo_fs(resolved: &Path) -> bool {
+    let Ok(c) = super::sys::cstring_from_path(resolved) else {
+        return false;
+    };
+    // SAFETY: `c` is a NUL-terminated path that outlives the call; O_PATH
+    // acquires no I/O authority.
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: `fd` was just opened and is owned here.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut buf = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `fd` is live; `buf` is a writable statfs the call fills.
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), buf.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    // SAFETY: fstatfs returned 0, so the struct is initialised.
+    // SAFETY: fstatfs returned 0, so the struct is initialised.
+    let f_type = unsafe { buf.assume_init() }.f_type;
+    crate::policy::is_pseudo_fs_magic(f_type)
+}
+
+/// The mount points of every proc, sysfs or cgroup (v1 or v2) mount, from
+/// `/proc/self/mountinfo` read as bytes. The fstype is the field after the
+/// ` - ` separator.
+fn pseudo_fs_mount_points() -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(raw) = std::fs::read("/proc/self/mountinfo") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in raw.split(|byte| *byte == b'\n') {
+        let Some(separator) = line.windows(3).position(|w| w == b" - ") else {
+            continue;
+        };
+        let fields: Vec<&[u8]> = line.split(|byte| *byte == b' ').collect();
+        let Some(point) = fields.get(4) else { continue };
+        let fstype = line[separator + 3..]
+            .split(|byte| *byte == b' ')
+            .next()
+            .unwrap_or_default();
+        if matches!(fstype, b"proc" | b"sysfs" | b"cgroup" | b"cgroup2") {
+            out.push(PathBuf::from(std::ffi::OsStr::from_bytes(
+                &decode_mountinfo_path(point),
+            )));
+        }
+    }
+    out
+}
+// J5-B1-w3 end
 
 /// Pin every source once, scan the pinned writable roots, then give each bind
 /// its own descriptor. Bubblewrap validates the mounted inode against that fd.
