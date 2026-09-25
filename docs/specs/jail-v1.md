@@ -535,10 +535,10 @@ p95 startup, wall time, peak RSS, event counts and losses.
   trace flush). **Post-start** is work plus teardown; **wall** is startup plus
   post-start.
 - **Median overhead** is the subject's median over the baseline's median,
-  minus one. On the fixed workload it is computed on work and on post-start,
-  and both are budgeted: work isolates the per-call cost while the target
-  runs, and post-start leaves no jail time after the target's entry
-  uncounted, since startup has its own budget. End-to-end wall overhead is
+  minus one. On the fixed workload it is computed on work, on post-start and
+  on end-to-end wall. Post-start carries the budget: startup has its own, and
+  post-start leaves no jail time after the target's entry uncounted. Work
+  isolates the per-call cost while the target runs; work and wall are
   reported. p95 is the nearest-rank 95th percentile.
 - **Peak RSS** reports the supervisor's sampled `VmHWM`, `wait4`'s
   `ru_maxrss`, the execution leaf's sampled `memory.peak` and the target's own
@@ -563,24 +563,47 @@ p95 startup, wall time, peak RSS, event counts and losses.
   verdict. A budget holds for a profile only if every session and workload
   cell passes.
 
-Initial budgets: under 250 ms p95 added warm startup, and under 20% median
-overhead on the fixed workload, on work and on post-start. These are
-engineering decision thresholds, not customer claims; exceeding one requires a
-recorded adjustment before backend freeze. Missing or incorrect evidence
-cannot be waived as a performance tradeoff.
+Initial budgets, as first written: under 250 ms p95 added warm startup, and
+under 20% median overhead on the fixed workload. These are engineering
+decision thresholds, not customer claims; exceeding one requires a recorded
+adjustment before backend freeze. Missing or incorrect evidence cannot be
+waived as a performance tradeoff.
 
-Recorded adjustment (operator decision, 2026-09-24): the budgets apply to the
-jail's own overhead, `--observe off` against direct execution, and the cost of
-observation (`--observe on` against off, and against direct) is reported per
-workload with its median, p95 and valid and excluded counts. Every closed-set
-call costs the observer two ptrace stops, measured in J0 at about 22 µs each
-on the reference host, and nothing in user space removes them: on the fixed
-workload, about 100,000 closed-set calls per second, J0 measured 0.15 s
-untraced against 0.81 s traced. Observation cost therefore scales with the rate
-of closed-set calls: it is highest on syscall-dense file work and small on
-work that mostly computes, reads or writes, which the set does not cover. The
-milestone measurement is
-[backend-evaluation.md §4](jail-v1/backend-evaluation.md#4-performance-52-budgets).
+Recorded adjustment (operator decision, 2026-09-25, on the milestone
+measurement, [backend-evaluation.md §4](jail-v1/backend-evaluation.md#4-performance-52-budgets);
+it supersedes the decision of 2026-09-24, which applied both budgets to the
+jail's own overhead):
+
+- The startup budget stays: under 250 ms p95 added warm startup. It is met in
+  every judged cell, `tool` 92 to 124 ms.
+- The 20% budget on the fixed workload is missed, and is replaced by a
+  measured ceiling on the jail's own overhead: `--observe off` against direct
+  execution, at most 50% median post-start overhead on this syscall-dense
+  worst-case workload, judged on `tool`. `tool` measures 43.4% from a plain
+  session and 38.7% in a scope, which meets the ceiling and misses 20% by about
+  23 and 19 points (the informational profiles: `agent` 39.0% and 38.9%,
+  `none` 6.7% and 6.5%). Its work phase (+30.8%, +28.4%) and end-to-end wall
+  (+103.7%, +92.6%, startup included) are reported, not budgeted. The
+  dominant cost is
+  bubblewrap's containment as the stock distribution confines it: on this
+  workload bubblewrap alone, with the `tool` profile's namespaces under
+  Ubuntu's `unpriv_bwrap` AppArmor confinement, adds 19.0% to the work phase,
+  and the jail with observation off 22.2%, so the jail's filter and supervisor
+  add about 3 points
+  ([attribution](jail-v1/evidence/perf-2026-09-25-attribution-ouro-ci.txt));
+  settlement, tree verification, the receipts and the trace flush add a
+  median 17.5 ms (plain) and 19.2 ms (scope) of teardown.
+- The cost of observation (`--observe on` against off, and against direct) is
+  reported per workload with its median, p95 and valid and excluded counts,
+  and has no budget. Every closed-set call costs the observer two ptrace
+  stops, measured in J0 at about 22 µs each on the reference host, and nothing
+  in user space removes them, so the cost scales with the rate of closed-set
+  calls: on the fixed workload, about 100,000 such calls per second, `tool`
+  with observation on is about +400% on the work phase against direct; it is
+  small on work that mostly computes, reads or writes, which the set does not
+  cover.
+- A representative workload, a build or a test run, joins the §5 set as later
+  work.
 
 ## 6. CLI and configuration
 
@@ -628,6 +651,8 @@ Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
 stdout/stderr byte streams and has no `--json` stdout mode. An error that
 reaches no durable receipt (a terminal receipt that failed to persist, and
 what only it would have recorded) is printed on stderr, one line per error.
+A diagnostic that cannot be written to stderr is dropped: diagnostics never
+change an exit code.
 
 `--control-fd` carries structured control messages instead of textual launch
 diagnostics. `--trace-fd` carries events. Each supplied fd must be open, have the
@@ -1572,7 +1597,9 @@ tracking, PID reuse handling and parent-exits-before-child behavior are O02's
 attributed as user target operations.
 
 The observer's scope is the attempt tree and nothing else the supervisor has.
-It ends when every task it traces has been reaped and the backend the launcher
+It ends when every task it traces has been reaped, every child the supervisor
+gained after the attach (an orphan of the traced tree) has been reaped and
+delivered as an untraced exit, and the backend the launcher
 descends through has exited, never on the absence of any child. A process the
 supervisor was started beside, a child it already had when it began (such as
 a shell's process substitution reading `--trace-fd`), is an unrelated host
@@ -1822,8 +1849,9 @@ allows reservation failure; a quiet ring is not proof that no event occurred.
 
 Read loss counters continuously and once more after tree death and drain.
 A child the observer owed a status for and never reaped is loss
-(`unreaped_children`); only the backend the launcher descends through can be
-one, never another child of the supervisor (§11.1).
+(`unreaped_children`); only the backend the launcher descends through, or an
+orphan of the traced tree gained after the attach, can be one, never a child
+the supervisor was started beside (§11.1).
 Bound the affected interval conservatively from the last known healthy point
 to recovery. Counts/ranges are null when exact loss cannot be established.
 Coalesce repeated losses into bounded interval summaries. Exit,

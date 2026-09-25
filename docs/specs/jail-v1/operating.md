@@ -425,10 +425,19 @@ The observer is a ptrace tracer. Each observed call costs two kernel stops,
 about 22 µs each on the reference host, and nothing in user space removes
 them. The cost therefore scales with the rate of closed-set calls: it is
 highest on syscall-dense file work (creating, renaming and deleting thousands
-of files) and small on work that mostly computes, reads or writes. The
-performance budgets apply to the jail's own overhead (`--observe off` against
-direct execution); the cost of observation is measured per workload in
-[backend-evaluation.md §4](backend-evaluation.md#4-performance-52-budgets).
+of files) and small on work that mostly computes, reads or writes. Measured at
+milestone 1 on the reference host
+([backend-evaluation.md §4](backend-evaluation.md#4-performance-52-budgets)):
+
+- Startup: a jailed launch adds about 85 to 108 ms (median) under `tool`,
+  with a p95 under 125 ms; the budget is 250 ms.
+- The jail's own cost with observation off, on 5,000 create/rename/unlink
+  rounds: `tool` adds about 40% after the command starts (its work plus the
+  jail's teardown), most of it bubblewrap's containment as Ubuntu's AppArmor
+  confines it; `none` adds about 7%. The ceiling is 50%.
+- Observation on the same workload multiplies the command's own run time by
+  about five (+367% to +404%); on 200 fork+exec descendants it adds about 41%
+  to 71%. Observation has no budget; it is reported per workload.
 
 `--observe off` removes the audit source and its cost; the receipt then
 marks every audit class unsupported. It is an explicit choice, never an
