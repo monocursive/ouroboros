@@ -23,7 +23,7 @@ uv run docs/specs/managed-teams-v1/validate_policy.py
 This checks document contracts; live backend conformance runs on the
 reference host through the `conformance` workflow.
 
-J0–J4 of Jail v1 are implemented, on a stock host with no host configuration. J0 measured the reference host (an x86_64
+J0–J5 of Jail v1 are implemented, on a stock host with no host configuration, and milestone 1, the jail, is green ([north star §8](north-star.md#8-milestones)). J0 measured the reference host (an x86_64
 VPS on Ubuntu 26.04 LTS; manifests under `docs/specs/jail-v1/evidence/`) and
 the observer privilege model; D8 selected the native bubblewrap adapter and the
 ptrace observer, and withdrew eBPF from v1

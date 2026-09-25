@@ -1,6 +1,7 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 17.** Written 2026-09-21, revised 2026-09-25. Revision 17
+Status: **specification, revision 18.** Written 2026-09-21, revised 2026-09-25. Revision 18
+declares milestone 1 green (§8). Revision 17
 records D8 and the milestone-1 status (§§2, 8, 11). Revision 16 makes
 the jail require no host configuration (D9, §4.6). Revision 6 cut the
 product to a jail, a ledger, and a fleet around existing agents. Revision 7
@@ -1093,11 +1094,14 @@ Milestone 3 needs milestone 2. Milestone 4's single-worker pilot needs milestone
 The D8 evaluation is recorded before milestone 1 is declared green. No schema
 is frozen before the milestone that ships it.
 
-Status 2026-09-25: J0 to J4 of milestone 1 are implemented on the reference
-host, and J5, the milestone proof, is recorded in
-[J5 authority](docs/specs/jail-v1/j5-authority.md). Milestone 1 is green only
-when that report's acceptance verdict, freeze and A01 record are. D8 is
-recorded (§2).
+Status 2026-09-25: **milestone 1 is green.** J0 to J5 are implemented on the
+stock reference host, merged into `dev` at `6a18b4f4`. The evidence is in
+[J5 authority](docs/specs/jail-v1/j5-authority.md), all at revision
+`027de7d2`: the acceptance verdict (every noncredential gate passes, seven of
+them with named limits), the freeze (`cargo xtask freeze --check` passes), the
+A01 record (OpenCode under `agent`) and the performance report, whose
+fixed-workload budget is the measured ceiling of jail-v1 §5.2. D8 is recorded
+(§2). The profiles stay experimental. Milestone 2 can start.
 
 | Milestone | Deliverable | Exit |
 |---|---|---|
