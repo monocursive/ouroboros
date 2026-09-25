@@ -1,5 +1,5 @@
 manifest_schema: ouro.jail.host-manifest/0 (manual, superseded by doctor --json)
-collected_at: 2026-09-25T02:16:47Z
+collected_at: 2026-09-25T07:18:00Z
 hostname: vps-450b3fe8
 virtualization: kvm
 kernel: 7.0.0-31-generic
@@ -10,7 +10,7 @@ systemd: systemd 259 (259.5-0ubuntu3.4)
 cpus: 4
 mem_total_kib: 3905584
 swap_total_kib: 8388604
-root_fs: 77G total, 13G free
+root_fs: 77G total, 12G free
 operator: uid=1001 ouro-ci
 operator_linger: yes
 operator_sudo: none or password

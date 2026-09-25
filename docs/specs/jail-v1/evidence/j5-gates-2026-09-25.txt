@@ -1,5 +1,5 @@
 ouro.jail.gate-verdict/1: acceptance verdict over the linux and macos log(s), map docs/specs/jail-v1/acceptance-map.toml
-lanes combined: linux (revision 4380241f3195bcc73a5186282400eda3b174ee41, OURO_CONFORMANCE=1) + macos (revision 4380241f3195bcc73a5186282400eda3b174ee41, OURO_CONFORMANCE=1)
+lanes combined: linux (revision 027de7d284b19a8cb7ecc4a1ba496d4408b46627, OURO_CONFORMANCE=1) + macos (revision 027de7d284b19a8cb7ecc4a1ba496d4408b46627, OURO_CONFORMANCE=1)
 evidence: how each gate's clauses are proved (live-cli, live-lib, portable, simulated, recorded-limit, untested); a pass is only as strong as its column
 
 gate  status       clauses   evidence                                     detail
@@ -19,7 +19,7 @@ F02   pass         4/4       live-cli×3 live-lib×1
 F03   pass         3/3       live-cli×3                                   
 F04   pass         3/3       live-cli×2 live-lib×1                        
 S01   pass         3/3       live-cli×3                                   
-S02   pass         6/6       live-cli×6                                   
+S02   pass         7/7       live-cli×7                                   
 S03   pass+limits  5/5       live-cli×4 recorded-limit×1                  S03.2 recorded limit
 S04   pass         7/7       live-cli×7                                   
 N01   pass         2/2       live-cli×2                                   

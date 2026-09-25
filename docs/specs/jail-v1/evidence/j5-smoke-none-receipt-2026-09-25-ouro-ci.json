@@ -1,6 +1,6 @@
 {
   "schema": "ouro.jail.receipt/1",
-  "attempt_id": "att_3ecab98c-37cd-4d27-8634-ddaede99ef20",
+  "attempt_id": "att_093076e6-461d-466d-96ba-6b03d0832168",
   "revision": 3,
   "phase": "settled",
   "platform": {
@@ -16,7 +16,7 @@
   },
   "policy": {
     "name": "none",
-    "digest": "sha256:95bb91ad4973413b324fbe952efd4f9a10191d8b0a2fc235268112ed5cb18c60",
+    "digest": "sha256:524b31f55cebbcbb1c8022949b22f72267f670729b8517dfaa97a4040e39b013",
     "observe": "on",
     "evidence": "strict",
     "requirements": [
@@ -134,13 +134,13 @@
     }
   },
   "process": {
-    "pid": 6372,
+    "pid": 987486,
     "identity": {
       "kind": "linux_boot_start",
       "value": {
         "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
-        "pid": 6372,
-        "start_time_ticks": 25357809
+        "pid": 987486,
+        "start_time_ticks": 27163182
       }
     }
   },
@@ -153,11 +153,11 @@
         "execution_cgroup": {
           "charged_helpers": [],
           "device": 29,
-          "inode": 3779374,
-          "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_3ecab98c-37cd-4d27-8634-ddaede99ef20.leaf",
+          "inode": 4086235,
+          "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_093076e6-461d-466d-96ba-6b03d0832168.leaf",
           "scope": "target_descendants_and_listed_helpers"
         },
-        "launcher_pid": 6372,
+        "launcher_pid": 987486,
         "narrowing_filter_digest": "sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66",
         "observer_plan": {
           "backend": "ptrace",
@@ -172,16 +172,16 @@
           "test_seams": {}
         },
         "supervisor_scope": {
-          "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-6365-4b09e45d14da4a90.scope",
+          "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-987479-25c8a46783e04126.scope",
           "reason": null,
           "reason_code": null,
           "state": "entered",
-          "unit": "ouro-jail-6365-4b09e45d14da4a90.scope"
+          "unit": "ouro-jail-987479-25c8a46783e04126.scope"
         }
       }
     },
     "tree_empty": true,
-    "verified_at": "2026-09-25T01:57:55Z",
+    "verified_at": "2026-09-25T06:58:49Z",
     "verification_scope": "registered_boundary",
     "integrity": "verified"
   },
@@ -194,8 +194,8 @@
   },
   "state_cleanup": "not_needed",
   "cleanup_error": null,
-  "created_at": "2026-09-25T01:57:55Z",
-  "updated_at": "2026-09-25T01:57:55Z",
+  "created_at": "2026-09-25T06:58:49Z",
+  "updated_at": "2026-09-25T06:58:49Z",
   "errors": [],
   "credentials": []
 }

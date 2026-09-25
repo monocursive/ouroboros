@@ -876,12 +876,13 @@
           "id": "X06.4",
           "lane": "linux",
           "limit": null,
-          "note": "From inside tool/build/agent/none the child probes every process it can address (its own /proc and every ancestor up the PPid chain): pidfd_getfd against each of the target's first descriptors and ptrace(PTRACE_SEIZE) both fail. For the contained profiles the child's /proc is its own pid namespace only (bwrap init, and under agent the launcher/bridge), so the supervisor/observer are not addressable; for none the ancestor chain reaches the supervisor (comm ouro-jail) and the calls still fail EPERM. Mutation-provable anchor: the jail's capability drop — the child's CapEff/CapPrm/CapInh/CapAmb are empty; adding CAP_SYS_PTRACE via bwrap --cap-add with the CapEff verify disabled reddens it (verified RED on host). The pidfd_getfd/ptrace denials are kernel-enforced defence in depth (Yama, user-namespace credential mapping, and the baseline seccomp ptrace deny for contained profiles) on top of that empty set. Fixes the B1 test that never called pidfd_getfd and targeted a pid absent from the child's namespace.",
+          "note": "Direct proof (r05_the_supervisors_own_proc): under none — where the supervisor is a reachable same-uid ancestor — the child cannot open the supervisor's /proc/<pid>/environ or /proc/<pid>/fd/<n> (its live trace/control channels), cannot reopen those channels, and cannot ptrace-seize it; all fail EACCES/EPERM. Under tool the supervisor is outside the child's pid namespace and not addressable. Mutation-provable via the PR_SET_DUMPABLE 0 hardening in supervisor.rs run (removed -> the child reads the supervisor's environ/fd and ptraces it, verified RED on host); the lock is the kernel dumpable check, not host Yama (which a peer can waive with PR_SET_PTRACER). The contained test (x06_no_tracing) proves, from inside tool/build/agent, that pidfd_getfd/ptrace against every process the child can address (its own bwrap init, agent launcher/bridge) fail and that the /proc it sees is its pid namespace only; mutation-provable via the capability drop (child CapEff/CapPrm/CapInh/CapAmb empty; adding CAP_SYS_PTRACE with the CapEff verify disabled reddens it). It no longer probes none, which is uncontained (its child is a normal same-uid process that may address and ptrace unrelated same-uid peers — the guarantee that matters there is the supervisor's, above). Fixes the earlier version that never called pidfd_getfd, targeted a pid absent from the child's namespace, and blanket-asserted over unrelated host processes under none.",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
           "tests": [
-            "ouro-jail/tests/j5_boundary_linux.rs::x06_no_tracing_privilege_reaches_the_child"
+            "ouro-jail/tests/j5_boundary_linux.rs::x06_no_tracing_privilege_reaches_the_child",
+            "ouro-jail/tests/j5_boundary_linux.rs::r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer"
           ]
         }
       ],
@@ -911,7 +912,7 @@
           "id": "X07.2",
           "lane": "linux",
           "limit": null,
-          "note": "tool: the target exits with a background descendant (the pid namespace ends it) while the leaf holds one more member, a process of the test's own traced with PTRACE_O_TRACEEXIT, which the supervisor's cgroup.kill reaches and which then waits at its exit stop, still a member of the leaf (measured on kernel 7.0); the run ends `unsettled`, tree_empty null, tree_unknown, exit 1, and the member was killed; released, it dies and gc removes the retained leaf. A stand-in for a member that cannot be verified dead within §9.3's budget. Red under M4 (contained wait_tree claims empty at once) and M4d (it verifies the pid namespace but not the leaf). none: the background descendant is dead before `settled` is announced (the L01.6 test's none legs), red under M4b.",
+          "note": "tool, and none with observation off and on: the target exits with a background descendant while the leaf holds one more member, a process of the test's own traced with PTRACE_O_TRACEEXIT, which the supervisor's cgroup.kill reaches and which then waits at its exit stop, still a member of the leaf (measured on kernel 7.0); the run ends `unsettled`, tree_empty null, tree_unknown, exit 1, and the member was killed; released, it dies and gc removes the retained leaf. A stand-in for a member that cannot be verified dead within §9.3's budget. Red under M4 (contained wait_tree claims empty at once), M4d (it verifies the pid namespace but not the leaf) and RV1 (none takes a killed leaf for empty without reading `populated 0`: the none observation-off leg). The L01.6 test's none legs add that a real background descendant is dead before `settled` is announced (red under M4b).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -1245,7 +1246,7 @@
           "id": "S02.6",
           "lane": "linux",
           "limit": null,
-          "note": "From inside tool/build/agent the child's /proc/self/mountinfo has no cgroup/cgroup2 mount, /sys/fs/cgroup is not a live cgroup tree, and open_tree/fsopen(cgroup2) fail. none is uncontained by definition (host view) and is not covered. Green survivor (defence in depth, verified on host): removing fsopen from the seccomp DENY_EPERM left fsopen EPERM (the dropped capabilities are the second lock; creating a mount needs CAP_SYS_ADMIN), and the mount absence is by construction — the contained mount plan mounts only the declared roots, /proc and /dev, pinned by the milestone freeze and the bwrap mount-table tests. No single deletion reddens the child-view test; the guarantee is proved live.",
+          "note": "From inside tool/build/agent the child's /proc/self/mountinfo has no cgroup/cgroup2 mount, /sys/fs/cgroup is not a live cgroup tree, and open_tree/fsopen(cgroup2) fail. none is uncontained by definition (host view) and is not covered. Wave 5 (review F6): the MOUNT-ABSENCE assertion is mutation-provable — adding --ro-bind /sys /sys to the contained bwrap plan makes /sys/fs/cgroup (cgroup2) appear in the child's mountinfo and reddens the test (verified RED on host). Only the open_tree/fsopen(cgroup2) syscall denials are defence in depth (seccomp DENY_EPERM plus the dropped capabilities: creating a mount needs CAP_SYS_ADMIN, so removing the seccomp deny alone leaves them EPERM).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -1295,6 +1296,22 @@
           "tag": "live-cli",
           "tests": [
             "ouro-jail/tests/review_linux.rs::r1_the_child_cannot_reach_the_supervisors_state"
+          ]
+        },
+        {
+          "checks": [],
+          "clause": "An operator grant whose resolved source is on, or an ancestor of, host proc/sysfs/cgroupfs refuses before exec (jail-v1 §9.1)",
+          "id": "S02.7",
+          "lane": "linux",
+          "limit": null,
+          "note": "rev-late F5: a contained tool/agent run accepted --ro /proc, /sys and /sys/fs/cgroup and settled enforced. Now refused with policy_widening at filesystem.read_only/read_write, by fstatfs magic and mount topology on the resolved source (a symlink onto /proc too), before exec. The portable test covers the pure ancestor rule off Linux. Could also key under F01; S02 (host proc/sys/cgroup unreachable) is the closer §15 row.",
+          "reasons": [],
+          "status": "pass",
+          "tag": "live-cli",
+          "tests": [
+            "ouro-jail/tests/j5_pseudofs_linux.rs::s02_a_contained_grant_of_proc_sys_or_cgroupfs_refuses_before_exec",
+            "ouro-jail/tests/j5_pseudofs_linux.rs::s02_the_pseudo_fs_refusal_follows_the_source_not_the_spelling",
+            "ouro-jail/tests/portable_policy.rs::pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology"
           ]
         }
       ],
@@ -1460,7 +1477,7 @@
           "id": "S04.7",
           "lane": "linux",
           "limit": null,
-          "note": "An io_uring ring created by the parent with close-on-exec cleared does not reach the agent or build target (§9.2 'No ring fd may be inherited'): the target's /proc/self/fd holds no io_uring anonymous inode. Green survivor (defence in depth, verified on host): removing the jail's close_range_cloexec left the ring absent because bwrap's own fd hygiene closes it too. Both locks would need removing to redden; the guarantee is proved live.",
+          "note": "An io_uring ring created by the parent and parked at a HIGH descriptor (200) with close-on-exec cleared does not reach the agent or build target (§9.2 'No ring fd may be inherited'): the target's /proc/self/fd holds no io_uring anonymous inode. Wave 5 (review F1): the earlier version created the ring at fd 3, which the harness overwrites with its trace channel before the jail runs, so the test was vacuous; parking at fd 200 (above every channel target) makes the ring genuinely inheritable. Now single-point mutation-provable: removing close_range_cloexec() from the backend bootstrap pre-exec lets the ring reach the target (verified RED on host — bwrap does NOT close inherited descriptors, so the earlier 'bwrap fd hygiene' note was wrong).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -2416,13 +2433,14 @@
           "id": "L01.1",
           "lane": "linux",
           "limit": null,
-          "note": null,
+          "note": "The j5_lifetime_linux wall test's `single` legs: gated, one sleep under tool with wall=2s, observation on and off; the target dies no earlier than 2 s after the test's own instant taken just before the release frame and within 12 s, and the receipt is verified with cause wall_expiry and the wall hit. Red under RV6 (the wall at release) and RV6b (the wall at 60%); the two older tests assert no lower bound.",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
           "tests": [
             "ouro-jail/tests/conformance_j1.rs::s11_wall_expiry_separate_run",
-            "ouro-jail/tests/review_linux.rs::r4_wall_expiry_records_its_hit_and_verifies_the_tree"
+            "ouro-jail/tests/review_linux.rs::r4_wall_expiry_records_its_hit_and_verifies_the_tree",
+            "ouro-jail/tests/j5_lifetime_linux.rs::l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant"
           ]
         },
         {
@@ -2445,7 +2463,7 @@
           "id": "L01.10",
           "lane": "linux",
           "limit": null,
-          "note": "tool, wall=2s, observation on and off: the target and its descendant both ignore SIGTERM, so only the forced stop ends them; both die after the wall and within wall + 10 s of exec (measured ~4.0 s: wall, grace, kill), the receipt is verified with cause wall_expiry, the wall row hit, and the target SIGKILLed. Red under M2.",
+          "note": "tool, gated, wall=2s; the test takes its own instant just before the release frame (the wall starts after it) and holds the launcher from the prepared receipt. A target and descendant that both ignore SIGTERM (observation on and off) die no earlier than the wall plus the 2 s grace and within wall + 10 s of that instant (measured ~4.00 s), the target SIGKILLed; a plain target dies of the cooperative stop at the wall (~2.00 s). The receipt is verified with cause wall_expiry and the wall row hit. Red under M2 (no forced stop), RV6 (the wall at release: the target is dead 2 ms after it) and RV6b (the wall at 60%: 3.2 s against the 4 s floor).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -2488,7 +2506,7 @@
           "id": "L01.3",
           "lane": "linux",
           "limit": null,
-          "note": "tool, agent and build; INT, TERM and HUP each sent to the spawned ouro-jail supervisor after checking /proc/<pid>/exe is the jail binary and SigCgt holds the signal; the target and its SIGTERM-ignoring descendant (host pids, pidfds) die within 10 s of the signal (measured 1-15 ms), `settled` arrives, the receipt is verified with cause operator_signal and the target signaled 15. Red under M1 (the signal requests no stop).",
+          "note": "tool, agent and build; INT, TERM and HUP each sent to the spawned supervisor after checking that it is the attempt's recorded owner (jail-state boot id, pid and start time match /proc; argv[0] is the jail binary; /proc/<pid>/exe is closed since the supervisor makes itself non-dumpable) and that SigCgt holds the signal; the target and its SIGTERM-ignoring descendant (host pids, pidfds) die within 10 s of the signal, each timed from the signal (measured 1-15 ms), `settled` arrives, the receipt is verified with cause operator_signal and the target signaled 15. Red under M1 (the signal requests no stop).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -2544,7 +2562,7 @@
           "id": "L01.7",
           "lane": "linux",
           "limit": null,
-          "note": "tool: the target forks 120 children that exec /bin/true, reaps them and exits 0 only if all 120 forked and exited 0 (its report is asserted); the trace holds a clean proc.exit for every child and the target; the tree is verified. none (observation on and off): 120 children are left as unreaped zombies and orphaned to the subreaping supervisor at the target's exit; the test is itself a child subreaper for the run, so whatever the supervisor leaves behind at its exit comes back to it, and nothing does. Red under M5 and M5b (J5-B3). At the wave-3 merge the test fails under none --observe on; J5-T's fix is pending, and until it lands this clause fails the verdict.",
+          "note": "tool: the target forks 120 children that exec /bin/true, reaps them and exits 0 only if all 120 forked and exited 0 (its report is asserted); the trace holds a clean proc.exit for every child and the target; the tree is verified. none (observation on and off): 120 children are left as unreaped zombies and orphaned to the subreaping supervisor at the target's exit; the test is itself a child subreaper for the run, so whatever the supervisor leaves behind at its exit comes back to it, and nothing does. Red under M5 and M5b (J5-B3).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -2723,7 +2741,7 @@
           "id": "L02.10",
           "lane": "linux",
           "limit": null,
-          "note": "Killed, the bridge is noted once (bridge_exited), a new connect fails with ECONNREFUSED, the receipt has no error and the proxy source stays active, and the target exits 0 on its own. Red under M9 (no note) (J5-B3). The revision-19 L02 row's bridge sentence (§10).",
+          "note": "Killed, the bridge is noted once (bridge_exited); the target is still alive a full second after the bridge's death (the tree continues) and exits 0 on its own; a new connect fails with ECONNREFUSED; the receipt has no error and no stop cause, and the proxy source stays active. Red under M9 (no note) and RV5 (the bridge's death stops the attempt: 3 of 3 runs). The revision-19 L02 row's bridge sentence (§10).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -2909,13 +2927,16 @@
           "id": "L04.4",
           "lane": "linux",
           "limit": null,
-          "note": "The boot, monotonic and real-time clocks are equal on the reference host (never suspended, never set), so an LD_PRELOAD clock_gettime shim makes them differ inside the real ouro-jail run: advancing only CLOCK_BOOTTIME by 120 s expires the 20 s execution wall and the 60 s gate budget within 8 s of the jump, which a deadline on CLOCK_MONOTONIC or CLOCK_REALTIME would not do. The preparation budget shares the gate's clock code (21ff0362) and has no test of its own: no stock-host fixture holds preparation open.",
+          "note": "The boot, monotonic and real-time clocks are equal on the reference host (never suspended, never set), so an LD_PRELOAD clock_gettime shim makes them differ inside the real ouro-jail run, measured on the test's own unshifted clock. With only CLOCK_BOOTTIME advanced 120 s: the 20 s execution wall expires within 8 s of the jump, tool and none (red under M12, M12b, RV3); the 2 s stop grace after an operator SIGTERM is over at once, the forced stop within 1 s of a jump made when the cooperative SIGTERM reached the target, tool and none (red under RV2 and W2n: 2.0 s); the 30 s preparation budget, the jump triggered by the owner-bound attempt's own leaf path mid-preparation, refuses before `prepared` with prepare_timeout and remediation retry, tool and none (e15db33f; red under W4a, the old mapping to backend_unavailable/host_setup; the supervisor's budget check before `prepared` is a second mechanism for none: before the j5 merge the none leg announced `prepared` 6 of 6 times without it, on the merged tree none's own establish loop catches the expiry and W4b stays green); the 60 s gate wait refuses within 700 ms of a jump made right after `prepared` (measured 267 ms; red under RV4, a re-check only at the old 1 s poll cap: 1.02 s, and RV8, a monotonic gate deadline: 60 s). Credential staging inside preparation waits on the same boot-clock deadline in 250 ms steps (98afcb9e; the portable unit test is red at 30 s when the wait is one step). Waits that are not §6.4 budgets stay monotonic (J5-B3 spec proposal, wave 2 §3).",
           "reasons": [],
           "status": "pass",
           "tag": "simulated",
           "tests": [
             "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump",
-            "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_gate_wait_follows_the_boot_clock"
+            "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_gate_wait_follows_the_boot_clock",
+            "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_stop_grace_follows_the_boot_clock",
+            "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_preparation_budget_follows_the_boot_clock",
+            "ouro-jail/src/lib.rs::credentials::tests::a_wait_ends_when_the_continuous_clock_runs_out_not_the_monotonic_one"
           ]
         },
         {
@@ -2924,7 +2945,7 @@
           "id": "L04.5",
           "lane": "linux",
           "limit": null,
-          "note": "A real clock step needs CAP_SYS_TIME. The real ouro-jail run is started with an LD_PRELOAD clock_gettime shim that, from exec on, steps only CLOCK_REALTIME by +1 h (and, in a second run, -1 h); the 6 s wall still expires between 3 s and 16 s after exec on the test's own unshifted clock, cause wall_expiry, mechanism boottime-deadline. Red under M12b (boottime_ns reads CLOCK_REALTIME). The kernel's own clock-step path is not exercised (j5-authority.md, Known gaps).",
+          "note": "A real clock step needs CAP_SYS_TIME. The real ouro-jail run, tool and none, gated: the shim steps only CLOCK_REALTIME by +1 h (and, in a second run, -1 h) once exec is confirmed; the 6 s wall expires no earlier than 6 s after the test's own instant taken just before the release frame (the wall starts after it) and within 16 s, cause wall_expiry, mechanism boottime-deadline. Red under M12b, W3r (none's wall on CLOCK_REALTIME), RV6 (the wall at release) and RV6b (the wall at 60%). The kernel's own clock-step path is not exercised (j5-authority.md, Known gaps).",
           "reasons": [],
           "status": "pass",
           "tag": "simulated",
@@ -2938,7 +2959,7 @@
           "id": "L04.6",
           "lane": "linux",
           "limit": null,
-          "note": "A real suspend cannot be produced on the shared reference VM. The shim advances only CLOCK_BOOTTIME by 120 s right after exec (a suspend's signature: the boot clock moves, the monotonic clock does not); the 20 s wall expires within 8 s of the jump (measured ~15 ms), cause wall_expiry. Red under M12 (boottime_ns reads CLOCK_MONOTONIC) and M12b. The gate wait follows the boot clock too since 21ff0362 (L04.4). The kernel's own suspend path, timers acted on at resume, is not exercised (j5-authority.md, Known gaps).",
+          "note": "A real suspend cannot be produced on the shared reference VM. The shim advances only CLOCK_BOOTTIME by 120 s right after exec (a suspend's signature: the boot clock moves, the monotonic clock does not); the 20 s wall expires within 8 s of the jump (measured 12-23 ms), cause wall_expiry, for tool and for none. Red under M12, M12b and RV3 (none's wall on CLOCK_MONOTONIC). The gate, preparation and stop-grace budgets follow the boot clock too (L04.4). The kernel's own suspend path, timers acted on at resume, is not exercised (j5-authority.md, Known gaps).",
           "reasons": [],
           "status": "pass",
           "tag": "simulated",
@@ -3196,7 +3217,7 @@
           "id": "R02.3",
           "lane": "linux",
           "limit": null,
-          "note": "The release binary is aborted by OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>] (S9; J5-C added the ordinal n, the nth replacement at the site in one process, so records that are never a process's first at their site are reachable) at all 4 points of: P7 (a live none escape), both P12 writes (the receipt gc completes, then jail state), P13 (a dead agent's proxy directory) and each P14 record of one pass over a dead none supervisor's populated leaf (gc_terminating_orphan, gc_terminated_orphan, gc_removing_cgroup, gc_removed_cgroup, gc_finished) and a dead tool supervisor's empty leaf and scratch (gc_removing_cgroup, gc_removed_cgroup, gc_removed_scratch, gc_finished): 52 crashes. Each: records parse, jail.json passes the frozen contract, the replaced record is the prior one before the rename and the new one after it, the kill/rmdir/removal is on the side of its record the order promises, the temporary files are exactly the crashed replacement's, and the next gc pass finishes keeping every record. The seam only picks the point; the crash is a real abort.",
+          "note": "The release binary is aborted by OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>] (the ordinal n picks the nth replacement at the site in one process) at all 4 points of P7 (a live none escape), both P12 writes (the receipt gc completes, then jail state), P13 (a dead agent's proxy directory) and every P14 record of one pass over a dead none supervisor's populated leaf (gc_terminating_orphan, gc_terminated_orphan, gc_removing_cgroup, gc_removed_cgroup, gc_finished) and over a dead tool supervisor's empty leaf, scratch and crash temporary file (gc_removing_cgroup, gc_removed_cgroup, gc_removed_scratch, gc_removed_temp_files, gc_finished): 56 crashes. Each: records parse and jail.json passes the frozen contract; both uninterrupted passes are exactly §14.2's order; for each crash point, the durable records, the leaf (gone, populated), the scratch, both kinds of temporary file, and the exact record list after the next pass are derived from §14.2's rules alone (an act is done when its record is a result the crash reached; the next pass does what is left; a repeated record is kept once). The seam only picks the point; the crash is a real abort. A crash that loses the record of an act already done leaves the next pass finishing without recording that act (spec-proposal item 25), which the expectations state exactly.",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",
@@ -3228,7 +3249,7 @@
           "id": "R02.4",
           "lane": "linux",
           "limit": null,
-          "note": "Disk-full, short-write, fsync, rename and directory-sync faults injected through the persistence seam (state::with_persist_io) into the real leaf creation (ExecutionCgroup::create_for_attempt) in the test process, against a real attempt the release binary left after its policy and a real delegated cgroup: the creation refuses with state_write_failed, jail state is the prior record before the rename and the new one after it, no temporary file and no leaf are left, and gc keeps every record. Simulated because the faults are injected; the portable matrix (R02.2) cannot reach these sites, which only the Linux platform writes.",
+          "note": "Disk-full, short-write, fsync, rename and directory-sync faults injected through the persistence seam (state::with_persist_io) into the real leaf creation (ExecutionCgroup::create_for_attempt) in the test process, against a real attempt the release binary left after its policy and a real delegated cgroup: the creation refuses with state_write_failed; the fault seam looks at the leaf's path when it fires (no leaf at P15, the leaf at P16); jail state is the prior record before the rename and, after it (the directory-sync fault), the name, or the device and inode the test itself saw at the leaf's path; nothing else in jail state or policy.json changes; no temporary file and no leaf are left; gc keeps every record. Simulated because the faults are injected; only the Linux platform writes these sites.",
           "reasons": [],
           "status": "pass",
           "tag": "simulated",
@@ -3264,7 +3285,7 @@
           "id": "R03.5",
           "lane": "linux",
           "limit": null,
-          "note": "the partial writes are forced by the release-binary test seam OURO_JAIL_TEST_TRACE_FD_WRITE_MAX (recorded in jail state and native details, like every OURO_JAIL_TEST_* seam); the live test runs the real jail with --trace-fd, a 2 s wall and a consumer that is slow but live (every frame reassembled, the target's exit traced) or stalled mid-frame (the stream honestly marked incomplete: evidence_lost, wrapper degraded); both times the wall fires on time by the receipt's own timestamps. The partial writes are not visible on the wire (a pipe reassembles them), so the seam's write size is proved by the unit test and recorded in test_seams",
+          "note": "The partial writes are forced by the release-binary test seam OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=64 (recorded in jail state and native details). The live tests give the real jail a SOCK_SEQPACKET socket as its --trace-fd, which keeps every write(2) as one message: every message is at most 64 bytes and inside one frame, and the frames need at least that many pieces, so a binary that does not apply the seam fails (rev-late F2's M2). A slow but live consumer gets every frame (complete, passing the frozen contract, no loss) and the target ends 2 s after its exec. A stalled consumer stops reading until the socket shows the jail blocked with a frame partly written (queued bytes stable; the queued messages, peeked without consuming them, end mid-frame), holds that 1.5 s with nothing more written, past the 1 s no-progress deadline; the held frame is then finished intact from its offset or is the visibly incomplete end, and evidence_lost is recorded. Both times the wall fires on time by the receipt's own timestamps.",
           "reasons": [],
           "status": "pass",
           "tag": "simulated",
@@ -3492,7 +3513,7 @@
           "id": "R05.3",
           "lane": "linux",
           "limit": null,
-          "note": "A same-uid child overwrites the attempt's receipt (jail.json), trace sink (trace.ndjson) and jail state (jail-state.json) WHILE a none run is live, then exits 0; the run's own outcome is exactly what it would be without the forgery (settles, exits 0, tree verified) and its records still make no protection claim (unprotected), with no error and no note reporting the tampering — none offers no local evidence assurance against a same-uid peer (§9.3). Strengthens conformance_j3_none::r05_same_uid_tampering (which forges only the static policy.json). Mutation-provable anchor: the none unprotected labeling (records.rs Containment::None => ChildProtection::Unprotected); upgrading none to Enforced reddens the unprotected assertion (verified RED on host). R05 is about the absence of assurance, so the test also asserts the product does not falsely claim to have detected the forgery.",
+          "note": "A same-uid child overwrites the attempt's receipt (jail.json), the LOCAL trace sink (trace.ndjson) and jail state (jail-state.json) WHILE a none run is live — each already exists at that moment — then exits 0; the run's own outcome is exactly what it would be without the forgery (settles, exits 0, tree verified) and its records still make no protection claim (unprotected), with no error/note reporting the tampering — none offers no local evidence assurance against a same-uid peer (§9.3). Wave 5 (review F3): the run uses NO external --trace-fd, so the trace goes to the local trace.ndjson sink the run actually keeps (opened at prepare time), and the test asserts each forged file existed first, so the trace forge is not a decoy. Strengthens conformance_j3_none::r05_same_uid_tampering (which forges only the static policy.json). Mutation-provable anchor: the none unprotected labeling (records.rs Containment::None => ChildProtection::Unprotected); upgrading none to Enforced reddens the unprotected assertion (verified RED on host).",
           "reasons": [],
           "status": "pass",
           "tag": "live-cli",

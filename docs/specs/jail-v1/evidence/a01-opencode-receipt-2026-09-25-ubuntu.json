@@ -1,6 +1,6 @@
 {
   "schema": "ouro.jail.receipt/1",
-  "attempt_id": "att_8bcb30e5-ac58-4032-be08-24a81a6371bc",
+  "attempt_id": "att_180752e5-5958-41bf-b83a-83dc27e60819",
   "revision": 4,
   "phase": "settled",
   "platform": {
@@ -246,7 +246,7 @@
       "sources": [
         "audit"
       ],
-      "observed_count": 134,
+      "observed_count": 162,
       "gaps": []
     },
     "fs.write": {
@@ -254,7 +254,7 @@
       "sources": [
         "audit"
       ],
-      "observed_count": 10602,
+      "observed_count": 13091,
       "gaps": []
     },
     "fs.deny": {
@@ -291,13 +291,13 @@
     }
   },
   "process": {
-    "pid": 183075,
+    "pid": 1164015,
     "identity": {
       "kind": "linux_boot_start",
       "value": {
         "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
-        "pid": 183075,
-        "start_time_ticks": 25555886
+        "pid": 1164015,
+        "start_time_ticks": 27340453
       }
     }
   },
@@ -323,26 +323,26 @@
           "proxy_socket": "/run/ouro/proxy/proxy.sock",
           "unix_peer_mediation": "seccomp_user_notification"
         },
-        "bwrap_pid": 183071,
-        "cgroup_namespace": 4026532376,
+        "bwrap_pid": 1164011,
+        "cgroup_namespace": 4026532382,
         "execution_cgroup": {
           "charged_helpers": [
             {
-              "pid": 183071,
+              "pid": 1164011,
               "role": "bubblewrap"
             },
             {
-              "pid": 183074,
+              "pid": 1164014,
               "role": "namespace_init"
             },
             {
-              "pid": 183077,
+              "pid": 1164017,
               "role": "bridge"
             }
           ],
           "device": 29,
-          "inode": 3940574,
-          "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_8bcb30e5-ac58-4032-be08-24a81a6371bc.leaf",
+          "inode": 4246854,
+          "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_180752e5-5958-41bf-b83a-83dc27e60819.leaf",
           "scope": "target_descendants_and_listed_helpers"
         },
         "helpers": [
@@ -351,16 +351,16 @@
             "kind": "bridge",
             "listen": "127.0.0.1:3128",
             "mediated_connects": 31,
-            "pid": 183077,
+            "pid": 1164017,
             "rejected_at_capacity": 0,
             "seccomp_filters": 2
           }
         ],
-        "launcher_pid": 183075,
-        "mnt_namespace": 4026532370,
-        "namespace_init_pid": 183074,
+        "launcher_pid": 1164015,
+        "mnt_namespace": 4026532375,
+        "namespace_init_pid": 1164014,
         "narrowing_filter_digest": "sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66",
-        "net_namespace": 4026532377,
+        "net_namespace": 4026532401,
         "observer_plan": {
           "backend": "ptrace",
           "event_bytes_max": 65536,
@@ -373,24 +373,24 @@
           "queue_result_bytes_max": 4128768,
           "test_seams": {}
         },
-        "pid_namespace": 4026532373,
+        "pid_namespace": 4026532381,
         "seccomp_filters": {
           "expected": 3,
           "observed": 3
         },
         "supervisor_scope": {
-          "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-183040-8e844c74f2c441ab.scope",
+          "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-1163981-052cc5ae94df429e.scope",
           "reason": null,
           "reason_code": null,
           "state": "entered",
-          "unit": "ouro-jail-183040-8e844c74f2c441ab.scope"
+          "unit": "ouro-jail-1163981-052cc5ae94df429e.scope"
         },
-        "user_namespace": 4026532360,
-        "watcher_pid": 183072
+        "user_namespace": 4026532383,
+        "watcher_pid": 1164012
       }
     },
     "tree_empty": true,
-    "verified_at": "2026-09-25T02:31:04Z",
+    "verified_at": "2026-09-25T07:28:33Z",
     "verification_scope": "attempt_tree",
     "integrity": "verified"
   },
@@ -403,8 +403,8 @@
   },
   "state_cleanup": "complete",
   "cleanup_error": null,
-  "created_at": "2026-09-25T02:30:56Z",
-  "updated_at": "2026-09-25T02:31:05Z",
+  "created_at": "2026-09-25T07:28:22Z",
+  "updated_at": "2026-09-25T07:28:34Z",
   "errors": [],
   "credentials": []
 }

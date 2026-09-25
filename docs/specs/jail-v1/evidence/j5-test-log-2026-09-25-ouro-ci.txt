@@ -1,5 +1,5 @@
 ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ouro-suite-revision=4380241f3195bcc73a5186282400eda3b174ee41
+ouro-suite-revision=027de7d284b19a8cb7ecc4a1ba496d4408b46627
 ouro-suite-conformance=1
    Compiling serde_core v1.0.229
    Compiling serde v1.0.229
@@ -10,23 +10,23 @@ ouro-suite-conformance=1
    Compiling bitflags v2.13.2
    Compiling fastrand v2.5.0
    Compiling tempfile v3.27.0
-   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260925T015603Z-4380241f3195/crates/ouro-fixture)
+   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260925T065639Z-027de7d284b1/crates/ouro-fixture)
    Compiling autocfg v1.5.1
    Compiling num-traits v0.2.19
    Compiling allocator-api2 v0.2.21
    Compiling foldhash v0.2.0
    Compiling hashbrown v0.17.1
    Compiling num-integer v0.1.47
-   Compiling getrandom v0.3.4
    Compiling zerocopy v0.8.57
+   Compiling getrandom v0.3.4
    Compiling num-bigint v0.4.8
    Compiling indexmap v2.14.2
    Compiling toml_datetime v0.6.11
    Compiling serde_spanned v0.6.9
    Compiling ahash v0.8.12
-   Compiling regex-syntax v0.8.11
    Compiling ref-cast v1.0.27
    Compiling parking_lot_core v0.9.12
+   Compiling regex-syntax v0.8.11
    Compiling toml_edit v0.22.27
    Compiling num-rational v0.4.2
    Compiling num-iter v0.1.46
@@ -38,23 +38,23 @@ ouro-suite-conformance=1
    Compiling lock_api v0.4.14
    Compiling regex-automata v0.4.18
    Compiling num v0.4.3
-   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260925T015603Z-4380241f3195/crates/ouro-jail)
+   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260925T065639Z-027de7d284b1/crates/ouro-jail)
    Compiling toml v0.8.23
    Compiling syn v2.0.119
    Compiling bit-vec v0.8.0
-   Compiling borrow-or-share v0.2.4
    Compiling unicode-general-category v1.1.0
+   Compiling borrow-or-share v0.2.4
    Compiling fluent-uri v0.4.1
    Compiling bit-set v0.8.0
    Compiling strum_macros v0.28.0
    Compiling fraction v0.17.0
    Compiling parking_lot v0.12.5
-   Compiling percent-encoding v2.3.2
    Compiling bytecount v0.6.9
-   Compiling micromap v0.3.0
+   Compiling percent-encoding v2.3.2
    Compiling num-cmp v0.1.0
-   Compiling outref v0.5.2
    Compiling vsimd v0.8.0
+   Compiling micromap v0.3.0
+   Compiling outref v0.5.2
    Compiling referencing v0.57.0
    Compiling uuid-simd v0.8.0
    Compiling jsonschema-value v0.57.0
@@ -65,8 +65,8 @@ ouro-suite-conformance=1
    Compiling email_address v0.2.9
    Compiling data-encoding v2.11.1
    Compiling jsonschema v0.57.0
-   Compiling xtask v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260925T015603Z-4380241f3195/crates/xtask)
-    Finished `release` profile [optimized] target(s) in 8m 44s
+   Compiling xtask v0.1.0 (/home/ouro-ci/ouro-ci/runs/20260925T065639Z-027de7d284b1/crates/xtask)
+    Finished `release` profile [optimized] target(s) in 9m 33s
      Running unittests src/lib.rs (target/release/deps/ouro_fixture-ed6d030627e7fdf1)
 
 running 109 tests
@@ -180,7 +180,7 @@ test unix::tests::a_message_without_descriptors_yields_none ... ok
 test unix::tests::more_descriptors_than_fit_are_cut_by_the_kernel_not_written_past_the_buffer ... ok
 test unix::tests::the_control_buffer_holds_the_descriptors_it_promises ... ok
 
-test result: ok. 109 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 109 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
 
      Running unittests src/main.rs (target/release/deps/ouro_fixture-f56642b3745e6bbc)
 
@@ -236,7 +236,7 @@ test the_report_can_be_moved_off_stdout_by_descriptor ... ok
 test truncate_sets_the_length_by_path ... ok
 test write_mmap_writes_through_the_descriptor_and_the_mapping ... ok
 
-test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
 
      Running tests/harness_gate.rs (target/release/deps/harness_gate-53ea6beb09f4bb3c)
 
@@ -256,7 +256,7 @@ test the_target_inherits_only_stdio_and_no_channel_descriptor ... ok
 test wait_drains_a_trace_larger_than_pipe_capacity_before_exit ... ok
 test wait_enforces_a_deadline_even_when_the_child_never_exits ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
 
      Running tests/net_modes.rs (target/release/deps/net_modes-5b3f06f8797b73f6)
 
@@ -301,7 +301,7 @@ test spawn_tree_zero_is_the_no_op_workload ... ok
 test the_start_line_precedes_the_work ... ok
 test the_workloads_refuse_an_interior_nul_before_any_work ... ok
 
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
 
      Running tests/sandbox_exec.rs (target/release/deps/sandbox_exec-5ab2cee3282f5660)
 
@@ -328,7 +328,7 @@ test the_node_creation_variants_are_distinct_at_the_kernel ... ok
 test the_socket_modes_reach_the_kernel_as_the_syscalls_their_lines_name ... ok
 test truncate_names_a_path_to_the_kernel_and_ftruncate_names_only_a_descriptor ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
 
      Running tests/unix_modes.rs (target/release/deps/unix_modes-7e511b2d80441b10)
 
@@ -358,7 +358,7 @@ test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
      Running unittests src/lib.rs (target/release/deps/ouro_jail-f4648bf80b51d5a0)
 
-running 459 tests
+running 460 tests
 test canonical::tests::argv_framing_is_length_prefixed_not_delimited ... ok
 test canonical::tests::escapes_the_ecmascript_set_and_leaves_other_characters_literal ... ok
 test canonical::tests::refuses_floats_rather_than_inventing_a_number_form ... ok
@@ -404,6 +404,7 @@ test credentials::tests::a_digest_is_the_prefixed_lowercase_hex_the_receipt_sche
 test credentials::tests::a_read_is_stable_only_when_size_count_object_and_times_all_agree ... ok
 test credentials::tests::a_source_made_shared_writable_between_inspection_and_open_is_refused ... ok
 test credentials::tests::a_source_swapped_between_inspection_and_open_is_refused ... ok
+test credentials::tests::a_wait_ends_when_the_continuous_clock_runs_out_not_the_monotonic_one ... ok
 test credentials::tests::stage_within_stages_inside_its_budget_and_refuses_past_it ... ok
 test credentials::tests::the_copy_budget_is_one_total_per_attempt ... ok
 test credentials::tests::work_past_its_deadline_is_abandoned_and_finishes_harmlessly_later ... ok
@@ -819,7 +820,7 @@ test trace::tests::the_payload_budget_stops_before_the_reserve_and_the_reserve_s
 test trace::tests::the_write_size_seam_accepts_only_a_byte_count ... ok
 test trace::tests::under_the_write_size_seam_every_frame_is_written_in_pieces ... ok
 
-test result: ok. 459 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.86s
+test result: ok. 460 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.13s
 
      Running unittests src/main.rs (target/release/deps/ouro_jail-dcfcd03714b13f32)
 
@@ -856,7 +857,7 @@ test x05_streams ... ok
 test x06_no_private_authority ... ok
 test x07_background_descendant_is_terminated ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.76s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.99s
 
      Running tests/conformance_j2.rs (target/release/deps/conformance_j2-4fb57b753862da55)
 
@@ -877,7 +878,7 @@ test l04_pids_ceiling_is_aggregate_across_forked_children ... ok
 test s04_io_uring_and_compat_abis_cannot_bypass_the_filter ... ok
 test startup_supervisor_helper ... ignored, subprocess helper invoked by l02_startup_parent_death_window_is_closed
 
-test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.75s
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.92s
 
      Running tests/conformance_j3_agent.rs (target/release/deps/conformance_j3_agent-0eb8733b6128608f)
 
@@ -920,7 +921,7 @@ test s03_each_outer_boundary_reversal_fails_and_changes_nothing ... ok
 test s03_the_named_limits_are_what_the_specification_says ... ok
 test x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target ... ok
 
-test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.97s
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 44.76s
 
      Running tests/conformance_j3_credentials.rs (target/release/deps/conformance_j3_credentials-4d28811b3e2d9b49)
 
@@ -947,7 +948,7 @@ test m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem ... ig
 test p04_a_fifo_source_is_refused_without_ever_being_opened_for_io ... ok
 test p04_every_special_or_oversized_source_refuses_at_staging_on_this_host ... ok
 
-test result: ok. 18 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 8.03s
+test result: ok. 18 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 8.36s
 
      Running tests/conformance_j3_none.rs (target/release/deps/conformance_j3_none-c621f75d1e39cbdc)
 
@@ -974,7 +975,7 @@ test r06_a_target_that_leaves_the_leaf_while_live_is_never_settled ... ok
 test the_boundary_itself_refuses_a_restriction_it_would_not_apply ... ok
 test x06_none_reserved_names_and_private_channels_do_not_reach_the_child ... ok
 
-test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.71s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.86s
 
      Running tests/j4_closed_set_linux.rs (target/release/deps/j4_closed_set_linux-435224ae96810cc5)
 
@@ -996,7 +997,7 @@ test j4_o06_racing_pathname_is_only_a_literal_snapshot ... ok
 test j4_o06_renamed_cwd ... ok
 test j4_o06_two_paths_independent ... ok
 
-test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.97s
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.24s
 
      Running tests/j4_gc_linux.rs (target/release/deps/j4_gc_linux-bf4eff09991c9ce3)
 
@@ -1017,7 +1018,7 @@ test j4_w3_g3_a_crash_at_gcs_first_record_never_strands_the_attempt ... ok
 test j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive ... ok
 test j4_w3_zombie_leader_helper ... ignored, a helper process of j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive
 
-test result: ok. 14 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 17.37s
+test result: ok. 14 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 17.58s
 
      Running tests/j4_lifecycle_linux.rs (target/release/deps/j4_lifecycle_linux-a18d03ea21bc286f)
 
@@ -1030,7 +1031,7 @@ test j4_a_supervisor_and_backend_dying_together_still_kill_the_leaf ... ok
 test j4_an_unreleased_watcher_leaves_after_its_grace_when_the_supervisor_lives ... ok
 test j4_supervisor_death_kills_everything_in_the_execution_cgroup ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.18s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.19s
 
      Running tests/j4_loss_linux.rs (target/release/deps/j4_loss_linux-1fc864524b40d791)
 
@@ -1055,7 +1056,7 @@ test j4_r04_ptrace_loss_strict_none ... ok
 test j4_r04_ptrace_loss_strict_tool ... ok
 test j4_w3_a_seam_set_twice_is_recorded_as_applied ... ok
 
-test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.84s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.99s
 
      Running tests/j4_records_linux.rs (target/release/deps/j4_records_linux-e2337e73f00e7339)
 
@@ -1064,7 +1065,7 @@ test j4_r02_a_crash_at_each_point_of_a_gc_record_leaves_valid_records ... ok
 test j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file ... ok
 test j4_w3_p6_control_messages_name_receipts_by_their_canonical_digest ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.88s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.04s
 
      Running tests/j4_scope_linux.rs (target/release/deps/j4_scope_linux-67a7f1be13a910ad)
 
@@ -1078,7 +1079,7 @@ test j4_scope_the_supervisor_enters_its_own_scope_and_its_attempt_gets_a_leaf ..
 test j4_scope_the_uncontained_boundary_records_the_step ... ok
 test j4_scope_without_lingering_the_supervisor_stays_put ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.44s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.55s
 
      Running tests/j4_trace_linux.rs (target/release/deps/j4_trace_linux-e4ae1264d38768f4)
 
@@ -1095,7 +1096,7 @@ test j4_r03_saturation_strict_stops ... ok
 test j4_r03_the_wall_is_enforced_while_the_trace_is_saturated ... ok
 test j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full ... ok
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.49s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.69s
 
      Running tests/j4_tracer_precision_linux.rs (target/release/deps/j4_tracer_precision_linux-8955a71b7d85610d)
 
@@ -1127,7 +1128,7 @@ test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_connec
 test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_open ... ok
 test j4_w3_the_queue_budget_bounds_what_is_held_for_a_consumer_not_reading ... ok
 
-test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.07s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.13s
 
      Running tests/j5_arch_refusal_linux.rs (target/release/deps/j5_arch_refusal_linux-d023d36852363433)
 
@@ -1135,7 +1136,7 @@ running 2 tests
 test j5_an_aarch64_build_is_not_ready_and_refuses_contained_runs_before_exec ... ok
 test j5_the_arch_seam_never_grants ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.16s
 
      Running tests/j5_audit_gaps_linux.rs (target/release/deps/j5_audit_gaps_linux-d08d4a264257e5e2)
 
@@ -1143,11 +1144,11 @@ running 2 tests
 test j5_a_panicked_observer_writes_a_receipt_that_passes_the_frozen_contract ... ok
 test j5_a_poisoned_trace_writes_a_receipt_that_passes_the_frozen_contract ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
      Running tests/j5_boundary_linux.rs (target/release/deps/j5_boundary_linux-e49ada3b1f7e9a2c)
 
-running 22 tests
+running 23 tests
 test f01_a_workspace_symlink_to_a_home_secret_reads_as_absent ... ok
 test f02_mount_replacement_of_a_protected_git_is_denied ... ok
 test f03_a_new_deep_protected_segment_is_outside_existing_and_root_coverage ... ok
@@ -1161,6 +1162,7 @@ test o03_an_unmatched_exit_is_a_gap_not_a_result ... ok
 test r03_a_wall_expires_before_the_saturation_loss_is_declared ... ok
 test r03_a_wall_fires_on_time_under_a_saturated_trace ... ok
 test r05_forging_records_mid_run_is_outside_local_evidence_assurance ... ok
+test r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer ... ok
 test r06_a_detected_escaped_descendant_loses_integrity_and_retains_state ... ok
 test s02_a_host_namespace_fd_cannot_be_opened_or_entered ... ok
 test s02_no_cgroup_filesystem_is_reachable_in_the_child ... ok
@@ -1171,7 +1173,7 @@ test s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec ... ok
 test s04_none_installs_no_io_uring_filter ... ok
 test x06_no_tracing_privilege_reaches_the_child ... ok
 
-test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.53s
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.14s
 
      Running tests/j5_bwrap_resolution_linux.rs (target/release/deps/j5_bwrap_resolution_linux-a0b47a7fdf891109)
 
@@ -1180,11 +1182,11 @@ test j5_empty_and_relative_path_entries_never_resolve_bubblewrap ... ok
 test j5_the_resolved_backend_is_canonical ... ok
 test j5_without_a_resolvable_backend_doctor_is_not_ready_and_run_refuses ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
 
      Running tests/j5_lifetime_linux.rs (target/release/deps/j5_lifetime_linux-75a9053420896035)
 
-running 19 tests
+running 21 tests
 test c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resumes_it ... ok
 test l01_a_fork_burst_is_fully_reaped ... ok
 test l01_a_fork_storm_stopped_mid_flight_ends_at_verified_tree_death ... ok
@@ -1203,9 +1205,11 @@ test l03_a_required_limit_whose_leaf_cannot_be_created_refuses_before_exec ... o
 test l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump ... ok
 test l04_the_execution_wall_ignores_wall_clock_steps ... ok
 test l04_the_gate_wait_follows_the_boot_clock ... ok
+test l04_the_preparation_budget_follows_the_boot_clock ... ok
+test l04_the_stop_grace_follows_the_boot_clock ... ok
 test x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty ... ok
 
-test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.70s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 72.64s
 
      Running tests/j5_process_linux.rs (target/release/deps/j5_process_linux-65b7097dc50fa185)
 
@@ -1240,7 +1244,7 @@ test x04_missing_program_missing_interpreter_permission_and_exit_125_are_distinc
 test x05_under_none_eof_reaches_the_caller_when_the_target_closes_its_stdout ... ok
 test x06_every_contained_profile_hands_the_target_an_empty_capability_set ... ok
 
-test result: ok. 22 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 71.18s
+test result: ok. 22 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 71.25s
 
      Running tests/j5_process_portable.rs (target/release/deps/j5_process_portable-b3c844ebc16c9bba)
 
@@ -1249,16 +1253,25 @@ test an_in_process_run_leaves_the_hosts_stdout_where_it_was ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
+     Running tests/j5_pseudofs_linux.rs (target/release/deps/j5_pseudofs_linux-9447506a36b9d391)
+
+running 2 tests
+test s02_a_contained_grant_of_proc_sys_or_cgroupfs_refuses_before_exec ... ok
+test s02_the_pseudo_fs_refusal_follows_the_source_not_the_spelling ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
      Running tests/j5_records_crash_linux.rs (target/release/deps/j5_records_crash_linux-1d2f642e60fec17e)
 
-running 5 tests
+running 6 tests
+test j5_r02_a_crash_after_an_act_before_its_record_is_finished_from_what_is_durable ... ok
 test j5_r02_a_crash_at_each_point_of_both_gc_resume_writes_leaves_valid_records ... ok
 test j5_r02_a_crash_at_each_point_of_each_later_gc_record_leaves_valid_records ... ok
 test j5_r02_a_crash_at_each_point_of_the_gc_proxy_dir_record_leaves_valid_records ... ok
 test j5_r02_a_crash_at_each_point_of_the_integrity_receipt_leaves_valid_records ... ok
 test j5_r02_every_fault_at_the_execution_leaf_sites_leaves_valid_records ... ok
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 108.24s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 81.61s
 
      Running tests/j5_records_linux.rs (target/release/deps/j5_records_linux-6f37bc61bcde27dc)
 
@@ -1277,7 +1290,7 @@ test j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces ..
 test j5_tool_records_pass_the_frozen_contract ... ok
 test rfc3339_seconds_matches_known_times ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.85s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.74s
 
      Running tests/j5_tracer_foreign_child_linux.rs (target/release/deps/j5_tracer_foreign_child_linux-068976f5bcc25fa5)
 
@@ -1293,7 +1306,7 @@ test j5t_orphans_adopted_while_traced_are_reaped_before_finished ... ok
 test j5t_the_backend_the_launcher_descends_through_is_awaited_and_delivered ... ok
 test j5t_the_tracer_finishes_beside_a_live_child_it_does_not_trace ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.17s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.21s
 
      Running tests/linux_mechanisms.rs (target/release/deps/linux_mechanisms-ae5d524d3c1a990e)
 
@@ -1335,7 +1348,7 @@ test the_walk_finds_nested_and_file_form_protected_segments ... ok
 test this_hosts_backend_version_is_the_pinned_one ... ok
 test this_hosts_runtime_roots_are_merged_usr_symlinks ... ok
 
-test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
 
      Running tests/macos_refusal.rs (target/release/deps/macos_refusal-7e5d91784c204365)
 
@@ -1356,7 +1369,7 @@ test j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap ... ok
 test j4_d2_none_a_foreign_abi_call_degrades_the_receipt ... ok
 test j4_d6_critical_facts_survive_a_full_lifecycle_backlog ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.80s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.72s
 
      Running tests/observer_linux.rs (target/release/deps/observer_linux-9ab75818e77f8581)
 
@@ -1379,7 +1392,7 @@ test perf_the_j0_file_workload_costs_what_the_spike_cost ... ok
 test the_launcher_installs_the_published_filter ... ok
 test the_narrowing_filter_without_a_tracer_fails_closed_with_enosys ... ok
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.52s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.86s
 
      Running tests/observer_regression_linux.rs (target/release/deps/observer_regression_linux-d68d3fc1350d41d7)
 
@@ -1418,7 +1431,7 @@ test r7_a_lying_sockaddr_length_retains_only_the_family_it_names ... ok
 test r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi ... ok
 test r9_open_how_sizes_are_decoded_or_declared_unavailable ... ok
 
-test result: ok. 30 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 13.86s
+test result: ok. 30 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.18s
 
      Running tests/portable_canonical.rs (target/release/deps/portable_canonical-c77139c165efaa23)
 
@@ -1430,7 +1443,7 @@ test p01_non_utf8_paths_and_argv_survive_as_the_base64_object ... ok
 test p01_reordering_sets_and_changing_provenance_preserve_the_hash ... ok
 test p01_semantic_changes_change_the_right_digest ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running tests/portable_doctor.rs (target/release/deps/portable_doctor-df7162b9704c363b)
 
@@ -1445,7 +1458,7 @@ test the_doctor_schema_rejects_what_it_must ... ok
 test this_hosts_doctor_report_is_valid_against_the_schema ... ok
 test version_json_carries_the_build_provenance ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
 
      Running tests/portable_freeze.rs (target/release/deps/portable_freeze-24fa278ce6fe48aa)
 
@@ -1518,7 +1531,7 @@ test w3::j4_w3_g4_an_attempt_with_something_left_is_never_finished ... ok
 test w3::j4_w3_g5_a_repeated_gc_record_is_kept_once_with_a_count ... ok
 test w3::j4_w3_g6_lost_integrity_retains_managed_scratch_in_every_boot ... ok
 
-test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.13s
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.14s
 
      Running tests/portable_j4_records.rs (target/release/deps/portable_j4_records-b4178b1669b4ea9b)
 
@@ -1575,7 +1588,7 @@ test rm16_the_copy_budget_is_cumulative_across_credentials ... ok
 test rm24_rm25_an_oversized_launch_file_or_a_shared_launch_directory_refuses ... ok
 test s6_1_tool_and_build_reject_credentials_and_none_rejects_any_launch ... ok
 
-test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.27s
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.48s
 
      Running tests/portable_lifetime.rs (target/release/deps/portable_lifetime-a72cb412310206d3)
 
@@ -1597,7 +1610,7 @@ test j4_w2s_r1_a_reported_loss_is_not_reported_twice_at_settlement ... ok
 test j4_w2s_r1_full_coverage_at_settlement_is_no_error ... ok
 test j4_w2s_r2_a_loss_after_the_target_ended_is_recorded_not_the_cause ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
 
      Running tests/portable_mutations.rs (target/release/deps/portable_mutations-0e5f725113b3aa18)
 
@@ -1620,7 +1633,7 @@ test the_ownership_predicate_refuses_a_foreign_owner ... ok
 test the_pipe_helper_really_carries_bytes ... ok
 test the_receipt_revision_advances_on_each_successful_replacement ... ok
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
 
      Running tests/portable_network_rules.rs (target/release/deps/portable_network_rules-82076e539a028a58)
 
@@ -1649,7 +1662,7 @@ test n03_the_embedded_address_table_is_the_checked_in_file ... ok
 test n03_uts46_conformance_file_toascii_nontransitional_all_flags ... ok
 test n03_wildcards_match_labels_beneath_never_the_apex ... ok
 
-test result: ok. 22 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 22 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
      Running tests/portable_persistence.rs (target/release/deps/portable_persistence-d4923a90f8d130f1)
 
@@ -1676,11 +1689,11 @@ test j4_w3_p5_an_error_no_receipt_carries_reaches_stderr ... ok
 test j4_w3_p6_control_and_trace_name_a_receipt_by_the_same_digest ... ok
 test seam_child_helper ... ignored, child helper invoked by j4_s9_every_test_seam_in_force_is_recorded
 
-test result: ok. 20 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 31.47s
+test result: ok. 20 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 31.57s
 
      Running tests/portable_policy.rs (target/release/deps/portable_policy-a577a861692f3c80)
 
-running 30 tests
+running 31 tests
 test a_cli_tilde_path_is_cwd_relative_not_home_relative ... ok
 test i02_launch_reads_only_the_operators_configuration ... ok
 test p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_digest ... ok
@@ -1711,8 +1724,9 @@ test p02_weakening_coverage_evidence_or_observation_refuses ... ok
 test p02_widening_the_network_mode_refuses ... ok
 test p02_widening_through_a_launch_profile_refuses_with_its_key_path ... ok
 test project_host_narrowing_replaces_the_base_set_including_empty ... ok
+test pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology ... ok
 
-test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
      Running tests/portable_proxy.rs (target/release/deps/portable_proxy-c7fe8b0759fc2347)
 
@@ -1766,7 +1780,7 @@ test n04_unusable_budgets_refuse_to_start ... ok
 test n04_upstream_death_mid_tunnel_closes_the_client_and_is_reported ... ok
 test proxy_limits_helper ... ignored, child helper invoked by the n04 descriptor tests
 
-test result: ok. 47 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 8.78s
+test result: ok. 47 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 8.81s
 
      Running tests/portable_records.rs (target/release/deps/portable_records-921a340e387c3034)
 
@@ -1789,7 +1803,7 @@ test tuple_refusal_before_boundary_creation ... ok
 test tuple_verified_settlement ... ok
 test x02_the_gate_frame_corpus_gets_the_verdicts_it_expects ... ok
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
 
      Running tests/portable_signals.rs (target/release/deps/portable_signals-5fc230c7a99ea6b0)
 
@@ -1815,7 +1829,7 @@ running 1 test
 running 1 test
 ok
 
-test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
      Running tests/portable_trace.rs (target/release/deps/portable_trace-90e4602329745dfc)
 
@@ -1840,7 +1854,7 @@ test j4_s8_the_last_receipt_note_is_read_only_from_a_complete_trace ... ok
 test j4_s8_the_recogniser_tells_complete_incomplete_and_corrupt_apart ... ok
 test no_progress_within_the_deadline_is_evidence_loss ... ok
 
-test result: ok. 18 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.85s
+test result: ok. 18 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.86s
 
      Running tests/portable_unsettled_phase.rs (target/release/deps/portable_unsettled_phase-2daf790ee18ee835)
 
@@ -1940,7 +1954,7 @@ test r9_all_descendants_coverage_refuses_on_linux ... ok
 test r9_an_explicit_pids_ceiling_runs_only_when_enforced ... ok
 test r9_deny_read_grants_are_enforced_as_masks ... ok
 
-test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.44s
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.50s
 
      Running tests/unix_peer_linux.rs (target/release/deps/unix_peer_linux-abb666e61d7fe5ae)
 
@@ -1961,11 +1975,11 @@ test stop_returns_after_bursts_of_concurrent_connects ... ok
 test the_filter_digest_is_stable ... ok
 test the_parser_finds_only_a_matching_listener ... ok
 
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
 
      Running unittests src/main.rs (target/release/deps/xtask-cd1f9f9fc4f411ee)
 
-running 202 tests
+running 205 tests
 test conformance::tests::a_clean_run_passes_and_the_remote_directory_is_removed ... ok
 test conformance::tests::a_clean_smoke_leg_has_no_problems ... ok
 test conformance::tests::a_detached_command_with_a_single_quote_is_refused - should panic ... ok
@@ -2164,12 +2178,15 @@ test perf::tests::the_user_manager_is_recognised_by_its_unit_component ... ok
 test perf::tests::timings_follow_the_four_readings ... ok
 test perf::tests::validity_is_recomputed_not_trusted_from_the_record ... ok
 test perf::tests::verdicts_fail_at_the_budget_and_need_thirty_on_both_sides ... ok
+test perf::tests::w3::a_rule_change_is_applied_only_on_request_and_named ... ok
+test perf::tests::w3::any_other_error_or_shape_still_excludes ... ok
+test perf::tests::w3::the_coded_exec_limit_is_valid_and_flagged_with_observation_off ... ok
 test stamp::tests::known_instants_convert_exactly ... ok
 test stamp::tests::leap_days_and_year_boundaries_are_right ... ok
 test stamp::tests::now_is_after_this_slice_was_written ... ok
 test stamp::tests::stamps_sort_chronologically_as_strings ... ok
 
-test result: ok. 202 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+test result: ok. 205 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.40s
 
    Doc-tests ouro_fixture
 
@@ -2178,7 +2195,7 @@ test crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail (line 84) ..
 
 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-all doctests ran in 0.14s; merged doctests compilation took 0.14s
+all doctests ran in 0.13s; merged doctests compilation took 0.13s
    Doc-tests ouro_jail
 
 running 1 test
@@ -2186,4 +2203,4 @@ test crates/ouro-jail/src/platform/linux/tracer/mod.rs - platform::linux::tracer
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-all doctests ran in 0.17s; merged doctests compilation took 0.17s
+all doctests ran in 0.18s; merged doctests compilation took 0.17s

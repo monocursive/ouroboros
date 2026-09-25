@@ -1,15 +1,17 @@
 # A01 at the J5 milestone revision: OpenCode under ouro-jail agent, no credential
-# 2026-09-25, reference host (Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap 0.11.1), account ubuntu, plain SSH session (lingering on)
-# ouro-jail revision 4380241f3195bcc73a5186282400eda3b174ee41 (clean, opt-level 3), sha256 90dbd434296f8b3679d56fea1c6413f30bf7d8cfe558abc1e6cb2961eef5e898
+# 2026-09-25 07:28 UTC, reference host (Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap 0.11.1), account ubuntu, plain SSH session (lingering on)
+# ouro-jail revision 027de7d284b19a8cb7ecc4a1ba496d4408b46627 (clean, opt-level 3), sha256 aa2d77aa7efa322fef0afd3e3ae47a3da9ec2776bc91941d2c85ba7773724677
 # OpenCode 1.18.32 (~/.opencode/bin), launch profile = the bundled crates/ouro-jail/profiles/launch/opencode.toml at that revision
 # fresh workspace ~/a01-j5ws (git init, empty commit); OpenCode Zen free model big-pickle; no credential
-$ ouro-jail run --launch opencode --ro ~/.opencode/bin --receipt ~/a01-j5-receipt.json -- ~/.opencode/bin/opencode run "Create a file named greeting.txt containing the single word hello."
-# jail exit 0 after 9 s; greeting.txt = hello
+$ ouro-jail run --launch opencode --ro ~/.opencode/bin --receipt ~/a01-j5-final-receipt.json -- ~/.opencode/bin/opencode run "Create a file named greeting.txt containing the single word hello."
+# jail exit 0 after 12 s; greeting.txt = hello
 
 
 > build · big-pickle
 
+→ Read . [offset=0, limit=2000]
+
 ← Write greeting.txt
 Wrote file successfully.
 
-Created `greeting.txt` with the word `hello`.
+Created `greeting.txt` containing `hello`.

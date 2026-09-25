@@ -1,7 +1,9 @@
 ouro-suite-path=<redacted: the macOS developer's PATH>
-ouro-suite-revision=4380241f3195bcc73a5186282400eda3b174ee41
+ouro-suite-revision=027de7d284b19a8cb7ecc4a1ba496d4408b46627
 ouro-suite-conformance=1
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+   Compiling ouro-jail v0.1.0 (<worktree>/crates/ouro-jail)
+   Compiling xtask v0.1.0 (<worktree>/crates/xtask)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.45s
      Running unittests src/lib.rs (target/debug/deps/ouro_fixture-1bd4dc046fb6e0c6)
 
 running 107 tests
@@ -45,7 +47,7 @@ test harness::tempdir::tests::two_directories_never_collide ... ok
 test harness::tests::a_consumer_that_closes_after_n_bytes_takes_exactly_those_bytes ... ouro-fixture harness: the trace is Incomplete at byte Some(8); only the 1 frame(s) before that point are in `trace_events`
 ok
 test harness::tests::a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit ... 
-thread 'harness::tests::a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit' (36194264) panicked at crates/ouro-fixture/src/harness/mod.rs:1099:13:
+thread 'harness::tests::a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit' (36637267) panicked at crates/ouro-fixture/src/harness/mod.rs:1099:13:
 the trace's last frame is not a `jail.receipt` note, so the 2 frame(s) read are a partial transcript (jail-v1 §13.3): an absence proves nothing here. Inspect `trace_readback` directly if that is what the test means to do.
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 ok
@@ -54,11 +56,11 @@ test harness::tests::a_partial_transcript_refuses_to_answer_questions_about_abse
 test harness::tests::a_pretty_receipt_compacts_to_the_bytes_its_digest_is_over ... ok
 test harness::tests::a_receipt_that_cannot_be_parsed_is_an_error_not_an_empty_list ... ok
 test harness::tests::a_required_binary_that_is_absent_panics_whatever_the_tree_contains ... 
-thread 'harness::tests::a_required_binary_that_is_absent_panics_whatever_the_tree_contains' (36194282) panicked at crates/ouro-fixture/src/harness/mod.rs:233:17:
+thread 'harness::tests::a_required_binary_that_is_absent_panics_whatever_the_tree_contains' (36637285) panicked at crates/ouro-fixture/src/harness/mod.rs:233:17:
 ouro-jail not found: set OURO_JAIL_BIN to an executable path, or run `cargo build -p ouro-jail`
 ok
 test harness::tests::a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise ... 
-thread 'harness::tests::a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise' (36194283) panicked at crates/ouro-fixture/src/harness/mod.rs:1453:23:
+thread 'harness::tests::a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise' (36637286) panicked at crates/ouro-fixture/src/harness/mod.rs:1453:23:
 OURO_CONFORMANCE=1 forbids skipping: x
 ok
 test harness::tests::a_slow_consumer_still_reads_to_eof ... ok
@@ -67,7 +69,7 @@ test harness::tests::an_override_must_point_at_something_executable ... ok
 test harness::tests::conformance_mode_is_exactly_the_value_one ... ok
 test harness::tests::j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run ... ouro-fixture harness: the trace is Incomplete at byte Some(8); only the 1 frame(s) before that point are in `trace_events`
 
-thread 'harness::tests::j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run' (36194300) panicked at crates/ouro-fixture/src/harness/mod.rs:1099:13:
+thread 'harness::tests::j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run' (36637309) panicked at crates/ouro-fixture/src/harness/mod.rs:1099:13:
 the trace is Incomplete at byte Some(8), so the 1 frame(s) read are a partial transcript (jail-v1 §13.3): an absence proves nothing here. Inspect `trace_readback` directly if that is what the test means to do.
 ok
 test harness::tests::live_required_reads_that_rule_from_the_environment ... ok
@@ -127,7 +129,7 @@ test unix::tests::a_descriptor_crosses_a_socket_pair_and_keeps_its_kind ... ok
 test unix::tests::a_message_without_descriptors_yields_none ... ok
 test unix::tests::more_descriptors_than_fit_are_cut_by_the_kernel_not_written_past_the_buffer ... ok
 test unix::tests::the_control_buffer_holds_the_descriptors_it_promises ... 
-thread 'unix::tests::the_control_buffer_holds_the_descriptors_it_promises' (36194665) panicked at crates/ouro-fixture/src/unix.rs:462:5:
+thread 'unix::tests::the_control_buffer_holds_the_descriptors_it_promises' (36637674) panicked at crates/ouro-fixture/src/unix.rs:462:5:
 control buffer too small for 64 descriptors
 ok
 
@@ -187,7 +189,7 @@ test the_report_can_be_moved_off_stdout_by_descriptor ... ok
 test truncate_sets_the_length_by_path ... ok
 test write_mmap_writes_through_the_descriptor_and_the_mapping ... ok
 
-test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
 
      Running tests/harness_gate.rs (target/debug/deps/harness_gate-cdefc5a69f596af4)
 
@@ -207,7 +209,7 @@ test the_target_inherits_only_stdio_and_no_channel_descriptor ... ok
 test wait_drains_a_trace_larger_than_pipe_capacity_before_exit ... ok
 test wait_enforces_a_deadline_even_when_the_child_never_exits ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
 
      Running tests/net_modes.rs (target/debug/deps/net_modes-4efcb8d87317f917)
 
@@ -231,7 +233,7 @@ test udp_sendto_delivers_exactly_the_bytes_it_reports ... ok
 test udp_sendto_over_ipv6_reaches_the_peer ... ok
 test udp_sendto_reports_the_kernels_refusal_and_refuses_names ... ok
 
-test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
 
      Running tests/perf_modes.rs (target/debug/deps/perf_modes-fb2f791da4358837)
 
@@ -251,7 +253,7 @@ test spawn_tree_zero_is_the_no_op_workload ... ok
 test the_start_line_precedes_the_work ... ok
 test the_workloads_refuse_an_interior_nul_before_any_work ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
 
      Running tests/sandbox_exec.rs (target/debug/deps/sandbox_exec-0dd81a2e66a0452b)
 
@@ -291,11 +293,11 @@ test scm_send_to_nothing_stops_at_the_connect ... ok
 test the_abstract_namespace_works_on_linux_and_is_unsupported_elsewhere ... ok
 test the_probe_counts_a_pathname_connect_and_stays_zero_when_untouched ... ok
 
-test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
 
      Running unittests src/lib.rs (target/debug/deps/ouro_jail-2a019fc34010e7ec)
 
-running 218 tests
+running 219 tests
 test canonical::tests::argv_framing_is_length_prefixed_not_delimited ... ok
 test canonical::tests::escapes_the_ecmascript_set_and_leaves_other_characters_literal ... ok
 test canonical::tests::refuses_floats_rather_than_inventing_a_number_form ... ok
@@ -340,6 +342,7 @@ test credentials::tests::a_digest_is_the_prefixed_lowercase_hex_the_receipt_sche
 test credentials::tests::a_read_is_stable_only_when_size_count_object_and_times_all_agree ... ok
 test credentials::tests::a_source_made_shared_writable_between_inspection_and_open_is_refused ... ok
 test credentials::tests::a_source_swapped_between_inspection_and_open_is_refused ... ok
+test credentials::tests::a_wait_ends_when_the_continuous_clock_runs_out_not_the_monotonic_one ... ok
 test credentials::tests::stage_within_stages_inside_its_budget_and_refuses_past_it ... ok
 test credentials::tests::the_copy_budget_is_one_total_per_attempt ... ok
 test credentials::tests::work_past_its_deadline_is_abandoned_and_finishes_harmlessly_later ... ok
@@ -515,7 +518,7 @@ test trace::tests::the_loss_note_names_the_covered_classes_and_keeps_its_start .
 test trace::tests::the_payload_budget_stops_before_the_reserve_and_the_reserve_still_writes ... ok
 test trace::tests::the_write_size_seam_accepts_only_a_byte_count ... ok
 
-test result: ok. 218 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.58s
+test result: ok. 219 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.82s
 
      Running unittests src/main.rs (target/debug/deps/ouro_jail-f288a1190a40e79a)
 
@@ -646,7 +649,13 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 1 test
 test an_in_process_run_leaves_the_hosts_stdout_where_it_was ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/j5_pseudofs_linux.rs (target/debug/deps/j5_pseudofs_linux-f604ecd6f4183cd7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running tests/j5_records_crash_linux.rs (target/debug/deps/j5_records_crash_linux-1f7c3f60e95827c8)
 
@@ -716,7 +725,7 @@ test the_receipt_flag_writes_an_additional_copy ... ok
 test translation_prefixes_are_canonicalized_before_the_digest ... ok
 test usage_errors_exit_two ... ok
 
-test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.46s
 
      Running tests/observer_j4_linux.rs (target/debug/deps/observer_j4_linux-155ddbe8c93dd877)
 
@@ -746,7 +755,7 @@ test p01_non_utf8_paths_and_argv_survive_as_the_base64_object ... ok
 test p01_reordering_sets_and_changing_provenance_preserve_the_hash ... ok
 test p01_semantic_changes_change_the_right_digest ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running tests/portable_doctor.rs (target/debug/deps/portable_doctor-06af0652bebbe4ff)
 
@@ -778,7 +787,7 @@ test the_lock_file_is_the_frozen_one ... ok
 test the_manifests_are_the_frozen_ones ... ok
 test the_toolchain_is_the_frozen_one ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
 
      Running tests/portable_gate.rs (target/debug/deps/portable_gate-ab2174c6303fa0d9)
 
@@ -832,7 +841,7 @@ test w3::j4_w3_g4_an_attempt_with_something_left_is_never_finished ... ok
 test w3::j4_w3_g5_a_repeated_gc_record_is_kept_once_with_a_count ... ok
 test w3::j4_w3_g6_lost_integrity_retains_managed_scratch_in_every_boot ... ok
 
-test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.32s
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.29s
 
      Running tests/portable_j4_records.rs (target/debug/deps/portable_j4_records-1bcb0b91a1916e1f)
 
@@ -847,7 +856,7 @@ test d5::j4_d5_a_later_evidence_loss_does_not_replace_a_wall_expiry ... ok
 test d5::j4_d5_a_later_wall_expiry_does_not_replace_an_evidence_loss ... ok
 test d7::j4_d7_keyed_collections_sort_by_their_canonical_bytes ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
 
      Running tests/portable_launch.rs (target/debug/deps/portable_launch-390d32fad84f924e)
 
@@ -895,7 +904,7 @@ test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 running 1 test
 test l05_unknown_tree_retains_scratch_and_never_settles ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
 
      Running tests/portable_loss.rs (target/debug/deps/portable_loss-1596e5daa81cf466)
 
@@ -910,7 +919,7 @@ test j4_w2s_r1_a_reported_loss_is_not_reported_twice_at_settlement ... ok
 test j4_w2s_r1_full_coverage_at_settlement_is_no_error ... ok
 test j4_w2s_r2_a_loss_after_the_target_ended_is_recorded_not_the_cause ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.99s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.06s
 
      Running tests/portable_mutations.rs (target/debug/deps/portable_mutations-d1b59f07c53e9960)
 
@@ -962,7 +971,7 @@ test n03_the_embedded_address_table_is_the_checked_in_file ... ok
 test n03_uts46_conformance_file_toascii_nontransitional_all_flags ... ok
 test n03_wildcards_match_labels_beneath_never_the_apex ... ok
 
-test result: ok. 22 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 22 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.24s
 
      Running tests/portable_persistence.rs (target/debug/deps/portable_persistence-a7c2f8570743f76b)
 
@@ -989,11 +998,11 @@ test j4_w3_p5_an_error_no_receipt_carries_reaches_stderr ... ok
 test j4_w3_p6_control_and_trace_name_a_receipt_by_the_same_digest ... ok
 test seam_child_helper ... ignored, child helper invoked by j4_s9_every_test_seam_in_force_is_recorded
 
-test result: ok. 20 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 45.53s
+test result: ok. 20 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 45.65s
 
      Running tests/portable_policy.rs (target/debug/deps/portable_policy-d8e9991e82dfa3d2)
 
-running 30 tests
+running 31 tests
 test a_cli_tilde_path_is_cwd_relative_not_home_relative ... ok
 test i02_launch_reads_only_the_operators_configuration ... ok
 test p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_digest ... ok
@@ -1024,8 +1033,9 @@ test p02_weakening_coverage_evidence_or_observation_refuses ... ok
 test p02_widening_the_network_mode_refuses ... ok
 test p02_widening_through_a_launch_profile_refuses_with_its_key_path ... ok
 test project_host_narrowing_replaces_the_base_set_including_empty ... ok
+test pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology ... ok
 
-test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
 
      Running tests/portable_proxy.rs (target/debug/deps/portable_proxy-1bbf96c6d6d67b75)
 
@@ -1050,17 +1060,17 @@ test n03_rebinding_connects_only_to_the_single_checked_answer ... ok
 test n04_a_closed_client_with_a_silent_destination_releases_its_slot ... ok
 test n04_a_drain_cut_short_reports_the_missing_result ... ok
 test n04_a_panicking_handler_settles_answers_and_closes ... 
-thread 'ouro-proxy-conn' (36199070) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+thread 'ouro-proxy-conn' (36642358) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
 a resolver bug
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
-thread 'ouro-proxy-conn' (36199069) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+thread 'ouro-proxy-conn' (36642357) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
 a resolver bug
 
-thread 'ouro-proxy-conn' (36199068) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+thread 'ouro-proxy-conn' (36642359) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
 a resolver bug
 
-thread 'ouro-proxy-conn' (36199071) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+thread 'ouro-proxy-conn' (36642360) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
 a resolver bug
 ok
 test n04_a_result_after_the_seal_is_not_delivered ... ok
@@ -1091,7 +1101,7 @@ test n04_unusable_budgets_refuse_to_start ... ok
 test n04_upstream_death_mid_tunnel_closes_the_client_and_is_reported ... ok
 test proxy_limits_helper ... ignored, child helper invoked by the n04 descriptor tests
 
-test result: ok. 46 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.73s
+test result: ok. 46 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.61s
 
      Running tests/portable_records.rs (target/debug/deps/portable_records-c532060e47cb8944)
 
@@ -1114,7 +1124,7 @@ test tuple_refusal_before_boundary_creation ... ok
 test tuple_verified_settlement ... ok
 test x02_the_gate_frame_corpus_gets_the_verdicts_it_expects ... ok
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
 
      Running tests/portable_signals.rs (target/debug/deps/portable_signals-65e3975151a69307)
 
@@ -1140,7 +1150,7 @@ running 1 test
 running 1 test
 ok
 
-test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.08s
 
      Running tests/portable_trace.rs (target/debug/deps/portable_trace-35a74df4997ab2cd)
 
@@ -1174,7 +1184,7 @@ test an_unsettled_end_after_a_confirmed_exec_stays_enforced ... ok
 test an_unsettled_end_without_a_confirmed_exec_stays_prepared ... ok
 test the_receipt_note_names_the_receipt_by_its_canonical_digest ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
 
      Running tests/portable_version.rs (target/debug/deps/portable_version-433297759ab545dd)
 
@@ -1188,7 +1198,7 @@ test the_announced_schema_identifiers_match_the_checked_in_schema_files ... ok
 test version_announces_the_wire_schemas_are_frozen ... ok
 test version_text_mode_names_every_schema_too ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
 
      Running tests/portable_vocabulary.rs (target/debug/deps/portable_vocabulary-59f33e5aee949fdf)
 
@@ -1196,7 +1206,7 @@ running 2 tests
 test derived_requirement_names_name_no_linux_mechanism ... ok
 test macos_inspection_output_carries_no_linux_vocabulary ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.61s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.58s
 
      Running tests/portable_w2s_trace.rs (target/debug/deps/portable_w2s_trace-8414adcc737f5ac3)
 
@@ -1207,7 +1217,7 @@ test j4_w2s_b_the_enforced_receipt_after_a_trace_loss_records_it_in_coverage ...
 test j4_w3_a_trace_loss_leaves_the_limits_class_alone ... ok
 test j4_w3_p4_a_trace_loss_is_reported_once ... ok
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
 
      Running tests/review_core_regressions.rs (target/debug/deps/review_core_regressions-f40f781a4f7437cf)
 
@@ -1220,7 +1230,7 @@ test equivalent_wall_spellings_compare_equal ... ok
 test the_native_string_codec_is_symmetric ... ok
 test the_policy_digest_is_stable_across_equivalent_workspace_spellings ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running tests/review_linux.rs (target/debug/deps/review_linux-8fb4133e87d86a1c)
 
@@ -1236,11 +1246,11 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
      Running unittests src/main.rs (target/debug/deps/xtask-3a644b0c8ac94f5a)
 
-running 195 tests
+running 198 tests
 test conformance::tests::a_clean_run_passes_and_the_remote_directory_is_removed ... ok
 test conformance::tests::a_clean_smoke_leg_has_no_problems ... ok
 test conformance::tests::a_detached_command_with_a_single_quote_is_refused - should panic ... 
-thread 'conformance::tests::a_detached_command_with_a_single_quote_is_refused' (36199877) panicked at crates/xtask/src/conformance.rs:681:5:
+thread 'conformance::tests::a_detached_command_with_a_single_quote_is_refused' (36643145) panicked at crates/xtask/src/conformance.rs:681:5:
 a detached command cannot contain a single quote: echo 'hi'
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 ok
@@ -1258,7 +1268,7 @@ test conformance::tests::a_manifest_that_did_not_load_fails_the_run ... ok
 test conformance::tests::a_mapped_test_missing_from_the_log_fails_the_run_by_gate_and_clause ... ok
 test conformance::tests::a_missing_host_manifest_or_evidence_write_fails_the_run ... ok
 test conformance::tests::a_revision_that_is_not_a_commit_is_refused - should panic ... 
-thread 'conformance::tests::a_revision_that_is_not_a_commit_is_refused' (36199891) panicked at crates/xtask/src/conformance.rs:328:5:
+thread 'conformance::tests::a_revision_that_is_not_a_commit_is_refused' (36643159) panicked at crates/xtask/src/conformance.rs:328:5:
 the suite's revision must be a 40-hex commit, optionally +dirty: main; rm -rf /
 ok
 test conformance::tests::a_signal_killed_step_is_a_failure_and_says_so ... ok
@@ -1269,7 +1279,7 @@ test conformance::tests::a_step_that_ends_is_done_with_its_own_status ... ok
 test conformance::tests::a_step_that_never_ends_times_out ... ok
 test conformance::tests::a_stop_names_this_run_only ... ok
 test conformance::tests::a_suite_command_with_a_double_quote_is_refused - should panic ... 
-thread 'conformance::tests::a_suite_command_with_a_double_quote_is_refused' (36199899) panicked at crates/xtask/src/conformance.rs:323:5:
+thread 'conformance::tests::a_suite_command_with_a_double_quote_is_refused' (36643167) panicked at crates/xtask/src/conformance.rs:323:5:
 a suite command cannot contain a double quote: echo "hi"
 ok
 test conformance::tests::a_suite_log_without_the_scrubbed_path_fails_i01 ... ok
@@ -1438,12 +1448,15 @@ test perf::tests::the_user_manager_is_recognised_by_its_unit_component ... ok
 test perf::tests::timings_follow_the_four_readings ... ok
 test perf::tests::validity_is_recomputed_not_trusted_from_the_record ... ok
 test perf::tests::verdicts_fail_at_the_budget_and_need_thirty_on_both_sides ... ok
+test perf::tests::w3::a_rule_change_is_applied_only_on_request_and_named ... ok
+test perf::tests::w3::any_other_error_or_shape_still_excludes ... ok
+test perf::tests::w3::the_coded_exec_limit_is_valid_and_flagged_with_observation_off ... ok
 test stamp::tests::known_instants_convert_exactly ... ok
 test stamp::tests::leap_days_and_year_boundaries_are_right ... ok
 test stamp::tests::now_is_after_this_slice_was_written ... ok
 test stamp::tests::stamps_sort_chronologically_as_strings ... ok
 
-test result: ok. 195 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+test result: ok. 198 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
 
    Doc-tests ouro_fixture
 
@@ -1452,7 +1465,7 @@ test crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail (line 84) ..
 
 test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-all doctests ran in 0.36s; merged doctests compilation took 0.15s
+all doctests ran in 0.33s; merged doctests compilation took 0.16s
    Doc-tests ouro_jail
 
 running 0 tests

@@ -1,6 +1,6 @@
 {
   "schema": "ouro.jail.receipt/1",
-  "attempt_id": "att_78f9a8db-6df4-4b41-9cef-a064cbcce50c",
+  "attempt_id": "att_9ff4a4e1-e6c3-41a7-abf0-b4a382698ce3",
   "revision": 3,
   "phase": "settled",
   "platform": {
@@ -16,7 +16,7 @@
   },
   "policy": {
     "name": "tool",
-    "digest": "sha256:64cf41a38f08bc1ac6968df9aa00b70fdfb681a1c8c4747dc674c744336901f4",
+    "digest": "sha256:99ddac403ccbe93b9b11a78962d3cb8acfa5dcc6e9ef433463ed484a4d414f8b",
     "observe": "on",
     "evidence": "strict",
     "requirements": [
@@ -116,7 +116,7 @@
           "mode": "rw"
         },
         {
-          "path": "/home/ouro-ci/ouro-ci/runs/20260925T015603Z-4380241f3195/smoke/ws",
+          "path": "/home/ouro-ci/ouro-ci/runs/20260925T065639Z-027de7d284b1/smoke/ws",
           "mode": "rw"
         },
         {
@@ -128,11 +128,11 @@
           "mode": "ro"
         },
         {
-          "path": "/home/ouro-ci/ouro-ci/runs/20260925T015603Z-4380241f3195/smoke/ws/.git",
+          "path": "/home/ouro-ci/ouro-ci/runs/20260925T065639Z-027de7d284b1/smoke/ws/.git",
           "mode": "ro"
         },
         {
-          "path": "/home/ouro-ci/ouro-ci/runs/20260925T015603Z-4380241f3195/smoke/ws/.ouroboros",
+          "path": "/home/ouro-ci/ouro-ci/runs/20260925T065639Z-027de7d284b1/smoke/ws/.ouroboros",
           "mode": "ro"
         },
         {
@@ -238,13 +238,13 @@
     }
   },
   "process": {
-    "pid": 6362,
+    "pid": 987476,
     "identity": {
       "kind": "linux_boot_start",
       "value": {
         "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
-        "pid": 6362,
-        "start_time_ticks": 25357803
+        "pid": 987476,
+        "start_time_ticks": 27163176
       }
     }
   },
@@ -253,29 +253,29 @@
     "native": {
       "os": "linux",
       "details": {
-        "bwrap_pid": 6359,
-        "cgroup_namespace": 4026532377,
+        "bwrap_pid": 987473,
+        "cgroup_namespace": 4026532382,
         "execution_cgroup": {
           "charged_helpers": [
             {
-              "pid": 6359,
+              "pid": 987473,
               "role": "bubblewrap"
             },
             {
-              "pid": 6361,
+              "pid": 987475,
               "role": "namespace_init"
             }
           ],
           "device": 29,
-          "inode": 3779228,
-          "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_78f9a8db-6df4-4b41-9cef-a064cbcce50c.leaf",
+          "inode": 4086089,
+          "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_9ff4a4e1-e6c3-41a7-abf0-b4a382698ce3.leaf",
           "scope": "target_descendants_and_listed_helpers"
         },
-        "launcher_pid": 6362,
-        "mnt_namespace": 4026532368,
-        "namespace_init_pid": 6361,
+        "launcher_pid": 987476,
+        "mnt_namespace": 4026532375,
+        "namespace_init_pid": 987475,
         "narrowing_filter_digest": "sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66",
-        "net_namespace": 4026532378,
+        "net_namespace": 4026532383,
         "observer_plan": {
           "backend": "ptrace",
           "event_bytes_max": 65536,
@@ -288,24 +288,24 @@
           "queue_result_bytes_max": 4128768,
           "test_seams": {}
         },
-        "pid_namespace": 4026532376,
+        "pid_namespace": 4026532381,
         "seccomp_filters": {
           "expected": 2,
           "observed": 2
         },
         "supervisor_scope": {
-          "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-6337-cf1aa49404b84de3.scope",
+          "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-987451-73669ce5cc4f453e.scope",
           "reason": null,
           "reason_code": null,
           "state": "entered",
-          "unit": "ouro-jail-6337-cf1aa49404b84de3.scope"
+          "unit": "ouro-jail-987451-73669ce5cc4f453e.scope"
         },
         "user_namespace": 4026532360,
-        "watcher_pid": 6360
+        "watcher_pid": 987474
       }
     },
     "tree_empty": true,
-    "verified_at": "2026-09-25T01:57:55Z",
+    "verified_at": "2026-09-25T06:58:49Z",
     "verification_scope": "attempt_tree",
     "integrity": "verified"
   },
@@ -318,8 +318,8 @@
   },
   "state_cleanup": "complete",
   "cleanup_error": null,
-  "created_at": "2026-09-25T01:57:55Z",
-  "updated_at": "2026-09-25T01:57:55Z",
+  "created_at": "2026-09-25T06:58:49Z",
+  "updated_at": "2026-09-25T06:58:49Z",
   "errors": [],
   "credentials": []
 }
