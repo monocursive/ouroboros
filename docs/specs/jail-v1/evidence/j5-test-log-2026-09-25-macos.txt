@@ -1,0 +1,1461 @@
+ouro-suite-path=<redacted: the macOS developer's PATH>
+ouro-suite-revision=4380241f3195bcc73a5186282400eda3b174ee41
+ouro-suite-conformance=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/ouro_fixture-1bd4dc046fb6e0c6)
+
+running 107 tests
+test bounded::tests::a_read_never_writes_past_the_buffer_it_was_given ... ok
+test bounded::tests::a_read_with_nothing_to_read_stops_at_the_deadline ... ok
+test bounded::tests::a_timeout_is_marked_as_the_fixtures_own ... ok
+test bounded::tests::end_of_stream_is_zero_and_a_closed_descriptor_is_an_errno ... ok
+test bounded::tests::the_preview_is_bounded ... ok
+test cli::tests::a_script_step_parses_exactly_like_a_process_argv ... ok
+test cli::tests::an_unknown_expectation_is_a_parse_error ... ok
+test cli::tests::echo_args_keeps_hyphenated_and_metacharacter_arguments ... ok
+test cli::tests::exec_argv_only_comes_after_a_double_dash ... ok
+test cli::tests::mknod_defaults_to_mknodat_and_a_fifo ... ok
+test cli::tests::octal_modes_parse_as_octal ... ok
+test cli::tests::open_defaults_to_openat_and_expects_success ... ok
+test cli::tests::report_fd_and_no_report_are_available_to_every_mode ... ok
+test cli::tests::the_truncation_modes_take_a_signed_length ... ok
+test errno::tests::aliases_resolve_to_the_first_listed_name ... ok
+test errno::tests::round_trips_a_common_errno ... ok
+test errno::tests::the_table_is_not_empty_and_is_sorted_for_messages ... ok
+test errno::tests::unknown_names_and_values_stay_unknown ... ok
+test harness::gate::tests::a_plan_that_binds_nothing_authorises_nothing ... ok
+test harness::gate::tests::a_proposal_prefers_the_receipt_bindings_over_the_control_message ... ok
+test harness::gate::tests::a_valid_frame_matches_the_specification_example ... ok
+test harness::gate::tests::each_fault_variant_really_carries_its_fault ... ok
+test harness::gate::tests::every_binding_mismatch_is_named_and_an_absent_one_is_not_silently_accepted ... ok
+test harness::gate::tests::requirements_are_compared_as_a_set_and_an_absent_list_mismatches ... ok
+test harness::http::tests::a_malformed_head_is_counted_and_answered_400 ... ok
+test harness::http::tests::a_request_is_recorded_before_its_response_arrives ... ok
+test harness::http::tests::request_heads_parse_strictly ... ok
+test harness::http::tests::stopping_is_prompt_and_idempotent_with_drop ... ok
+test harness::pipes::tests::a_drain_that_reaches_eof_is_complete ... ok
+test harness::pipes::tests::a_drain_that_times_out_keeps_every_line_it_already_read ... ok
+test harness::pipes::tests::an_empty_writer_close_reads_as_immediate_eof ... ok
+test harness::pipes::tests::both_ends_of_a_new_pipe_are_close_on_exec ... ok
+test harness::pipes::tests::targets_never_collide_with_a_source_or_with_stdio ... ok
+test harness::pipes::tests::the_line_reader_splits_on_lf_and_reports_eof ... ok
+test harness::pipes::tests::the_reader_times_out_rather_than_hanging ... ok
+test harness::tempdir::tests::it_creates_a_private_directory_and_removes_it_on_drop ... ok
+test harness::tempdir::tests::two_directories_never_collide ... ok
+test harness::tests::a_consumer_that_closes_after_n_bytes_takes_exactly_those_bytes ... ouro-fixture harness: the trace is Incomplete at byte Some(8); only the 1 frame(s) before that point are in `trace_events`
+ok
+test harness::tests::a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit ... 
+thread 'harness::tests::a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit' (36194264) panicked at crates/ouro-fixture/src/harness/mod.rs:1099:13:
+the trace's last frame is not a `jail.receipt` note, so the 2 frame(s) read are a partial transcript (jail-v1 §13.3): an absence proves nothing here. Inspect `trace_readback` directly if that is what the test means to do.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test harness::tests::a_file_size_limit_makes_a_real_short_write_then_efbig ... ok
+test harness::tests::a_partial_transcript_refuses_to_answer_questions_about_absence ... ok
+test harness::tests::a_pretty_receipt_compacts_to_the_bytes_its_digest_is_over ... ok
+test harness::tests::a_receipt_that_cannot_be_parsed_is_an_error_not_an_empty_list ... ok
+test harness::tests::a_required_binary_that_is_absent_panics_whatever_the_tree_contains ... 
+thread 'harness::tests::a_required_binary_that_is_absent_panics_whatever_the_tree_contains' (36194282) panicked at crates/ouro-fixture/src/harness/mod.rs:233:17:
+ouro-jail not found: set OURO_JAIL_BIN to an executable path, or run `cargo build -p ouro-jail`
+ok
+test harness::tests::a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise ... 
+thread 'harness::tests::a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise' (36194283) panicked at crates/ouro-fixture/src/harness/mod.rs:1453:23:
+OURO_CONFORMANCE=1 forbids skipping: x
+ok
+test harness::tests::a_slow_consumer_still_reads_to_eof ... ok
+test harness::tests::a_torn_frame_followed_by_more_frames_still_invalidates_the_run ... ok
+test harness::tests::an_override_must_point_at_something_executable ... ok
+test harness::tests::conformance_mode_is_exactly_the_value_one ... ok
+test harness::tests::j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run ... ouro-fixture harness: the trace is Incomplete at byte Some(8); only the 1 frame(s) before that point are in `trace_events`
+
+thread 'harness::tests::j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run' (36194300) panicked at crates/ouro-fixture/src/harness/mod.rs:1099:13:
+the trace is Incomplete at byte Some(8), so the 1 frame(s) read are a partial transcript (jail-v1 §13.3): an absence proves nothing here. Inspect `trace_readback` directly if that is what the test means to do.
+ok
+test harness::tests::live_required_reads_that_rule_from_the_environment ... ok
+test harness::tests::receipts_read_both_a_single_document_and_ndjson ... ok
+test harness::tests::the_binary_search_never_leaves_the_profile_directory ... ok
+test harness::tests::the_build_lock_is_released_when_dropped ... ok
+test harness::tests::the_builder_gives_each_run_its_own_private_state ... ok
+test harness::tests::the_fixture_binary_is_locatable_and_executable ... ok
+test harness::tests::the_trace_guard_accepts_only_a_trace_ending_on_the_final_receipts_note ... ok
+test harness::tests::two_worktrees_never_share_one_on_demand_build_directory ... ok
+test harness::unix_probe::tests::a_connection_made_just_before_stop_is_never_lost ... ok
+test harness::unix_probe::tests::a_connection_that_is_never_waited_for_is_still_counted ... ok
+test harness::unix_probe::tests::a_path_that_does_not_fit_is_refused_before_any_socket ... ok
+test harness::unix_probe::tests::an_untouched_probe_reports_zero ... ok
+test harness::unix_probe::tests::seqpacket_is_linux_only ... ok
+test net::tests::a_head_parses_status_and_framing ... ok
+test net::tests::a_query_is_encoded_label_by_label ... ok
+test net::tests::a_response_yields_its_header_and_a_records ... ok
+test net::tests::hostile_responses_are_bounded_and_never_read_out_of_range ... ok
+test net::tests::lowercase_wins_and_an_empty_value_is_unset ... ok
+test net::tests::proxy_values_are_interpreted_without_being_echoed ... ok
+test net::tests::urls_and_authorities_parse_strictly ... ok
+test ops::j5e::tests::a_counter_is_one_decimal_value ... ok
+test ops::j5e::tests::the_high_water_mark_is_read_in_kib_from_its_own_line ... ok
+test ops::j5e::tests::the_workload_clock_moves_forward ... ok
+test ops::tests::a_mknod_mode_carries_the_file_type_bits_with_the_permissions ... ok
+test ops::tests::an_image_refuses_an_argument_with_an_interior_nul ... ok
+test ops::tests::an_interior_nul_path_never_reaches_a_syscall ... ok
+test ops::tests::legacy_variants_track_the_architecture ... ok
+test ops::tests::mknodat_is_linux_only_while_truncation_is_portable ... ok
+test ops::tests::signals_parse_by_name_number_and_sig_prefix ... ok
+test ops::tests::the_byte_pattern_covers_every_byte_value ... ok
+test ops::tests::unavailable_names_only_what_this_build_lacks ... ok
+test raw::tests::a_trailing_nul_is_also_an_interior_nul_for_cstring ... ok
+test raw::tests::an_interior_nul_path_is_refused_before_any_syscall ... ok
+test raw::tests::mechanism_names_the_real_path_to_the_kernel ... ok
+test raw::tests::ordinary_and_non_utf8_paths_convert ... ok
+test report::tests::a_report_that_cannot_be_written_is_counted_not_ignored ... ok
+test report::tests::a_success_reports_a_null_errno ... ok
+test report::tests::an_unusable_line_satisfies_nothing_not_even_any ... ok
+test report::tests::expectations_parse_and_reject ... ok
+test report::tests::non_utf8_paths_carry_their_exact_bytes ... ok
+test report::tests::ok_and_errno_expectations_discriminate ... ok
+test report::tests::the_line_has_the_four_contract_keys_in_order ... ok
+test sandbox::tests::a_foreign_architecture_or_an_x32_number_never_reaches_the_table ... ok
+test sandbox::tests::syscall_names_resolve_dedupe_and_refuse ... ok
+test sandbox::tests::the_filter_denies_exactly_the_named_numbers_on_x86_64 ... ok
+test sandbox::tests::the_landlock_attributes_have_the_kernels_layout ... ok
+test sandbox::tests::the_largest_filter_keeps_every_jump_in_range ... ok
+test sockaddr::tests::a_path_that_does_not_fit_is_refused_not_cut ... ok
+test sockaddr::tests::an_abstract_name_is_length_delimited_and_bounded ... ok
+test sockaddr::tests::an_empty_or_nul_bearing_path_is_refused ... ok
+test sockaddr::tests::each_length_variant_passes_what_it_names ... ok
+test sockaddr::tests::inet_addresses_carry_their_own_sizes ... ok
+test sockaddr::tests::the_capacity_is_the_real_sun_path_size ... ok
+test unix::tests::a_descriptor_crosses_a_socket_pair_and_keeps_its_kind ... ok
+test unix::tests::a_message_without_descriptors_yields_none ... ok
+test unix::tests::more_descriptors_than_fit_are_cut_by_the_kernel_not_written_past_the_buffer ... ok
+test unix::tests::the_control_buffer_holds_the_descriptors_it_promises ... 
+thread 'unix::tests::the_control_buffer_holds_the_descriptors_it_promises' (36194665) panicked at crates/ouro-fixture/src/unix.rs:462:5:
+control buffer too small for 64 descriptors
+ok
+
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running unittests src/main.rs (target/debug/deps/ouro_fixture-16a0a0bdd075a29c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/stand-in-jail.rs (target/debug/deps/stand_in_jail-3ba373adb69ad57c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fixture_modes.rs (target/debug/deps/fixture_modes-176c036e82bb50a2)
+
+running 38 tests
+test a_background_descendant_outlives_the_parent_and_the_parent_exits_zero ... ok
+test a_malformed_script_is_a_usage_error ... ok
+test a_missing_executable_is_reported_as_enoent_not_as_a_crash ... ok
+test a_non_utf8_path_and_argument_survive_a_real_process ... ok
+test a_path_with_an_interior_nul_is_refused_before_the_syscall ... ok
+test a_script_accepts_the_node_and_truncation_modes_too ... ok
+test a_script_cannot_report_success_over_an_earlier_failure ... ok
+test a_script_refuses_a_terminating_step_that_is_not_last ... ok
+test a_script_runs_every_step_in_one_process_and_reports_each ... ok
+test a_thread_starts_and_joins ... ok
+test an_expected_errno_succeeds_and_an_unexpected_one_fails ... ok
+test an_unknown_errno_name_is_a_usage_error_before_anything_runs ... ok
+test connect_reports_a_real_result_and_refuses_a_name ... ok
+test echo_args_reproduces_hostile_arguments_byte_for_byte ... ok
+test env_reports_names_only_and_never_a_value ... ok
+test exec_forks_execs_and_reports_both_the_exec_and_the_child_status ... ok
+test exec_hands_the_target_no_private_descriptor_and_does_not_wait_for_descendants ... ok
+test exec_replace_leaves_no_line_on_success_and_one_on_failure ... ok
+test execveat_works_on_linux_and_reports_unsupported_elsewhere ... ok
+test exit_and_raise_produce_the_status_they_report ... ok
+test fds_reports_kinds_without_paths ... ok
+test fds_sees_a_descriptor_far_above_any_probe_bound ... ok
+test fork_storm_forks_and_reaps_exactly_what_it_reports ... ok
+test ftruncate_reports_the_open_that_named_the_path_and_then_a_descriptor_only_call ... ok
+test mkdir_and_rmdir_work_through_their_variants ... ok
+test mknod_creates_the_node_kind_it_names ... ok
+test mknod_reports_the_kernels_refusal_rather_than_pre_judging_it ... ok
+test one_failed_step_fails_the_whole_script_without_stopping_it ... ok
+test open_creates_a_file_through_every_variant_this_platform_has ... ok
+test openat2_works_on_linux_and_reports_unsupported_elsewhere ... ok
+test rename_unlink_link_and_symlink_change_the_filesystem_as_reported ... ok
+test renameat2_works_on_linux_and_reports_unsupported_elsewhere ... ok
+test sleep_spin_and_ignore_term_report_before_they_block ... ok
+test status_reads_proc_on_linux_and_reports_unsupported_elsewhere ... ok
+test the_byte_streams_are_exact_and_carry_no_report_line ... ok
+test the_report_can_be_moved_off_stdout_by_descriptor ... ok
+test truncate_sets_the_length_by_path ... ok
+test write_mmap_writes_through_the_descriptor_and_the_mapping ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+     Running tests/harness_gate.rs (target/debug/deps/harness_gate-cdefc5a69f596af4)
+
+running 14 tests
+test a_descriptor_inherited_from_the_environment_does_not_reach_the_target ... ok
+test a_run_that_fails_to_start_is_an_error_not_a_pass ... ok
+test a_run_without_channels_still_works_and_keeps_its_state_private ... ok
+test a_valid_release_runs_the_target_exactly_once ... ok
+test a_withheld_gate_refuses_and_the_target_never_runs ... ok
+test every_malformed_release_refuses_and_leaves_no_marker ... ok
+test malformed_json_invalidates_control_and_trace_transcripts ... ok
+test the_builder_gives_the_jail_the_environment_and_target_argv_it_was_given ... ok
+test the_harness_closes_a_gate_the_test_forgot_and_says_so ... ok
+test the_owner_withholds_when_a_binding_does_not_match_its_plan ... ok
+test the_run_exposes_the_receipt_the_trace_and_the_private_state ... ok
+test the_target_inherits_only_stdio_and_no_channel_descriptor ... ok
+test wait_drains_a_trace_larger_than_pipe_capacity_before_exit ... ok
+test wait_enforces_a_deadline_even_when_the_child_never_exits ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+     Running tests/net_modes.rs (target/debug/deps/net_modes-4efcb8d87317f917)
+
+running 18 tests
+test a_denied_connect_is_a_response_with_no_tunnel ... ok
+test a_refused_connection_carries_its_errno_to_the_summary ... ok
+test an_unusable_proxy_variable_is_refused_never_bypassed_or_printed ... ok
+test dns_query_reads_the_answer_from_the_named_resolver ... ok
+test dns_query_reports_a_malformed_answer_as_no_result ... ok
+test dns_query_skips_a_forged_id_and_reports_nxdomain ... ok
+test dns_query_without_an_answer_stops_at_its_deadline ... ok
+test hostile_servers_are_bounded ... ok
+test http_connect_opens_a_tunnel_and_carries_a_request_through_it ... ok
+test http_connect_without_a_proxy_variable_refuses ... ok
+test http_get_directly_sends_origin_form_and_counts_the_body ... ok
+test http_get_refuses_what_it_cannot_do_honestly ... ok
+test http_get_through_the_proxy_sends_absolute_form_and_never_resolves_the_name ... ok
+test no_proxy_goes_direct_even_with_a_variable_set ... ok
+test the_lowercase_variable_wins_and_an_empty_one_counts_as_unset ... ok
+test udp_sendto_delivers_exactly_the_bytes_it_reports ... ok
+test udp_sendto_over_ipv6_reaches_the_peer ... ok
+test udp_sendto_reports_the_kernels_refusal_and_refuses_names ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+     Running tests/perf_modes.rs (target/debug/deps/perf_modes-fb2f791da4358837)
+
+running 14 tests
+test fileops_counts_a_failure_and_exits_3 ... ok
+test fileops_performs_every_round_and_leaves_nothing_behind ... ok
+test perf_launch_brackets_the_command_on_the_clock_the_workload_reads ... ok
+test perf_launch_finds_the_leaf_from_the_receipt_and_harvests_the_attempt ... ok
+test perf_launch_reads_the_clock_before_fork_and_again_after_exec ... ok
+test perf_launch_reports_an_exec_failure_as_data ... ok
+test perf_launch_samples_the_launched_process_while_it_runs ... ok
+test perf_launch_says_when_a_trace_does_not_end_on_its_receipt ... ok
+test perf_launch_with_sampling_off_takes_no_sample ... ok
+test spawn_tree_counts_children_that_fail_or_cannot_exec ... ok
+test spawn_tree_runs_every_child_to_completion ... ok
+test spawn_tree_zero_is_the_no_op_workload ... ok
+test the_start_line_precedes_the_work ... ok
+test the_workloads_refuse_an_interior_nul_before_any_work ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/sandbox_exec.rs (target/debug/deps/sandbox_exec-0dd81a2e66a0452b)
+
+running 2 tests
+test an_unknown_syscall_name_is_a_usage_error_before_anything_runs ... ok
+test sandbox_exec_is_unsupported_here_and_runs_nothing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/syscall_identity_linux.rs (target/debug/deps/syscall_identity_linux-059957a01490df37)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/unix_modes.rs (target/debug/deps/unix_modes-6c96171deed31c49)
+
+running 20 tests
+test a_bind_expected_to_fail_stops_there ... ok
+test a_directory_descriptor_crosses_too ... ok
+test a_file_descriptor_crosses_between_two_fixture_processes ... ok
+test a_listener_nobody_calls_stops_at_its_deadline ... ok
+test a_listener_starts_its_client_only_once_it_listens ... ok
+test a_message_without_a_descriptor_fails_scm_recv ... ok
+test a_missing_socket_is_the_kernels_enoent ... ok
+test a_seqpacket_round_trip_works_on_linux_and_is_unsupported_elsewhere ... ok
+test a_spawned_client_inherits_no_socket_of_the_listener ... ok
+test a_spawned_client_that_never_finishes_is_killed_at_the_deadline ... ok
+test a_stream_listener_and_client_round_trip ... ok
+test an_address_that_does_not_fit_is_refused_before_any_socket_exists ... ok
+test an_exchange_with_a_probe_ends_at_eof_not_at_a_hang ... ok
+test an_interior_nul_in_a_script_path_is_refused ... ok
+test datagram_sockets_and_pairs_are_created_outside_any_filter ... ok
+test every_address_length_variant_reaches_the_same_listener ... ok
+test scm_recv_can_start_the_sender_itself ... ok
+test scm_send_to_nothing_stops_at_the_connect ... ok
+test the_abstract_namespace_works_on_linux_and_is_unsupported_elsewhere ... ok
+test the_probe_counts_a_pathname_connect_and_stays_zero_when_untouched ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running unittests src/lib.rs (target/debug/deps/ouro_jail-2a019fc34010e7ec)
+
+running 218 tests
+test canonical::tests::argv_framing_is_length_prefixed_not_delimited ... ok
+test canonical::tests::escapes_the_ecmascript_set_and_leaves_other_characters_literal ... ok
+test canonical::tests::refuses_floats_rather_than_inventing_a_number_form ... ok
+test canonical::tests::sorts_object_keys_by_utf16_code_units ... ok
+test capability::tests::a_restriction_on_none_is_a_requirement_not_a_silent_drop ... ok
+test capability::tests::a_skipped_probe_never_satisfies_a_requirement ... ok
+test capability::tests::none_requires_a_cgroup_but_no_containment ... ok
+test capability::tests::tool_requires_containment_observation_and_a_wall ... ok
+test cleanup::tests::a_bounded_pass_stops_pending_and_a_second_pass_finishes ... ok
+test cleanup::tests::a_registered_identity_is_the_only_directory_removed ... ok
+test cleanup::tests::a_registration_without_a_recorded_identity_is_never_cleaned ... ok
+test cleanup::tests::a_replaced_root_is_never_touched ... ok
+test cleanup::tests::a_tree_deeper_than_the_descriptor_bound_is_hoisted_and_removed ... ok
+test cleanup::tests::an_emptied_directory_replaced_before_its_removal_is_kept ... ok
+test cleanup::tests::an_unsearchable_directory_is_still_removed ... ok
+test cleanup::tests::any_tree_a_same_uid_child_builds_is_removed_within_the_pass_bound ... ok
+test cleanup::tests::cleanup_waits_for_a_proof_that_no_tree_can_use_the_state ... ok
+test cleanup::tests::gcs_verification_of_the_leaf_is_proof_enough_except_after_lost_integrity ... ok
+test cleanup::tests::links_are_removed_themselves_and_their_targets_survive ... ok
+test cleanup::tests::no_mount_is_crossed_and_an_unknown_mount_status_is_not_no ... ok
+test cleanup::tests::read_only_directories_at_beyond_and_below_the_hoist_depth_are_removed ... ok
+test cleanup::tests::removal_is_implemented_and_the_empty_case_is_not_needed ... ok
+test cleanup::tests::the_reviewers_140_deep_read_only_trap_is_removed_in_one_default_pass ... ok
+test cleanup::tests::the_root_of_a_removal_must_be_ours_registered_and_on_the_anchor_device ... ok
+test cli::tests::an_attempt_id_without_a_gate_is_a_usage_error ... ok
+test cli::tests::an_unknown_observation_mode_is_a_usage_error ... ok
+test cli::tests::argv_after_the_separator_is_taken_literally ... ok
+test cli::tests::label_only_rejects_the_gate_and_the_attempt_id ... ok
+test cli::tests::subcommand_help_carries_no_implementation_notes ... ok
+test cli::tests::the_definition_is_internally_consistent ... ok
+test config::tests::a_duplicate_cli_limit_refuses ... ok
+test config::tests::a_duplicate_toml_key_refuses ... ok
+test config::tests::an_unknown_cli_limit_key_refuses ... ok
+test config::tests::an_unknown_toml_key_refuses ... ok
+test config::tests::memory_units_are_binary_and_overflow_refuses ... ok
+test config::tests::the_environment_allow_list_ignores_everything_else ... ok
+test config::tests::translation_prefixes_are_canonicalized_or_refused ... ok
+test config::tests::wall_units_scale_and_a_bare_integer_refuses ... ok
+test credentials::tests::a_bind_ro_digest_needs_a_filesystem_with_no_write_path ... ok
+test credentials::tests::a_bind_ro_source_must_have_exactly_one_link ... ok
+test credentials::tests::a_digest_is_the_prefixed_lowercase_hex_the_receipt_schema_requires ... ok
+test credentials::tests::a_read_is_stable_only_when_size_count_object_and_times_all_agree ... ok
+test credentials::tests::a_source_made_shared_writable_between_inspection_and_open_is_refused ... ok
+test credentials::tests::a_source_swapped_between_inspection_and_open_is_refused ... ok
+test credentials::tests::stage_within_stages_inside_its_budget_and_refuses_past_it ... ok
+test credentials::tests::the_copy_budget_is_one_total_per_attempt ... ok
+test credentials::tests::work_past_its_deadline_is_abandoned_and_finishes_harmlessly_later ... ok
+test environment::tests::a_non_utf8_suffix_is_still_reserved ... ok
+test environment::tests::every_ouro_name_is_reserved_and_nothing_else_is ... ok
+test environment::tests::stripping_keeps_order_and_bytes_and_reports_sorted_names_only ... ok
+test gc::tests::a_leaf_gc_removed_is_never_probed_again ... ok
+test gc::tests::a_leaf_gone_after_gc_saw_it_empty_verifies_the_tree ... ok
+test gc::tests::a_leaf_named_only_is_removed_when_empty_and_never_killed ... ok
+test gc::tests::a_name_only_registration_parses_and_half_an_identity_does_not ... ok
+test gc::tests::a_registration_of_another_attempts_leaf_is_never_probed ... ok
+test gc::tests::a_repeated_record_is_kept_once_with_a_count ... ok
+test gc::tests::an_intent_record_is_a_verification_and_finished_is_read ... ok
+test gc::tests::disagreeing_or_missing_identities_never_reach_the_leaf ... ok
+test gc::tests::lost_integrity_keeps_scratch_in_another_boot_too ... ok
+test gc::tests::nothing_is_probed_before_it_is_needed ... ok
+test gc::tests::only_a_dead_owners_identified_populated_unverified_leaf_is_terminated ... ok
+test gc::tests::state_and_receipt_views_refuse_what_the_supervisor_does_not_write ... ok
+test gc::tests::the_leaf_comes_from_jail_state_and_must_agree_with_the_receipt ... ok
+test gc::tests::the_seam_only_shrinks_the_bound ... ok
+test launch_profile::tests::a_complete_profile_resolves_sources_and_sorts_nothing_it_should_not ... ok
+test launch_profile::tests::destinations_must_be_relative_and_disjoint ... ok
+test launch_profile::tests::every_loader_and_backend_name_refuses ... ok
+test launch_profile::tests::names_follow_their_grammars ... ok
+test launch_profile::tests::the_grammar_refuses_argv_none_unknown_keys_and_commands ... ok
+test launch_profile::tests::tool_and_build_reject_credentials_and_proxy_grants_and_none_rejects_all ... ok
+test launch_profile::tests::unsafe_state_subdirs_and_conflicts_refuse ... ok
+test network::address::tests::numeric_looking_names_are_the_ones_ending_in_a_number ... ok
+test network::address::tests::prefixes_clear_host_bits_and_match_their_family_only ... ok
+test network::address::tests::strict_ipv4_refuses_every_legacy_spelling ... ok
+test network::address::tests::the_embedded_table_loads ... ok
+test network::idna::tests::mapping_is_bounded_before_normalization ... ok
+test network::idna::tests::max_decomposition_is_the_largest_full_canonical_decomposition ... ok
+test network::idna::tests::punycode_decoding_is_inverted_by_encoding ... ok
+test network::idna::tests::punycode_decoding_stops_at_the_label_bound ... ok
+test network::idna::tests::punycode_overflow_and_bad_digits_fail ... ok
+test network::idna::tests::punycode_round_trips_the_rfc_3492_samples ... ok
+test network::idna::tests::the_network_rules_idna_examples ... ok
+test network::tests::a_wildcard_is_labels_not_a_string_suffix ... ok
+test network::tests::an_exact_rule_never_covers_a_wildcard ... ok
+test network::tests::an_omitted_port_expands_to_eighty_and_four_four_three ... ok
+test network::tests::idna_and_numeric_rules_normalize ... ok
+test network::tests::one_terminal_dot_is_removed_and_two_refuse ... ok
+test network::tests::unmappable_and_malformed_hosts_refuse ... ok
+test network::unicode::tests::nfc_composes_decomposes_and_reorders ... ok
+test network::unicode::tests::properties_match_their_source_files ... ok
+test network::unicode::tests::the_idna_runs_cover_every_code_point_once ... ok
+test network::unicode::tests::the_tables_are_the_pinned_versions ... ok
+test observer::tests::a_degraded_class_reports_a_null_count_even_when_one_was_offered ... ok
+test observer::tests::a_denied_connect_counts_only_under_fs_deny ... ok
+test observer::tests::an_unobserved_attempt_has_no_counts_and_no_sources ... ok
+test observer::tests::every_directory_entry_operation_belongs_to_fs_write ... ok
+test platform::linux::bpf::tests::and_masks_in_place_and_falls_through ... ok
+test platform::linux::bpf::tests::backward_jump_is_refused ... ok
+test platform::linux::bpf::tests::bytes_are_the_kernel_layout ... ok
+test platform::linux::bpf::tests::conditional_jump_beyond_a_byte_is_an_error_not_a_wrap ... ok
+test platform::linux::bpf::tests::digest_changes_when_one_immediate_changes ... ok
+test platform::linux::bpf::tests::digest_is_stable_for_a_fixed_program ... ok
+test platform::linux::bpf::tests::disassembly_names_absolute_targets ... ok
+test platform::linux::bpf::tests::duplicate_label_is_an_error ... ok
+test platform::linux::bpf::tests::labels_resolve_to_relative_offsets ... ok
+test platform::linux::bpf::tests::opcodes_match_the_linux_encoding ... ok
+test platform::linux::bpf::tests::program_longer_than_the_kernel_limit_is_refused ... ok
+test platform::linux::bpf::tests::unconditional_jump_carries_its_distance_in_k ... ok
+test platform::linux::bpf::tests::undefined_label_is_an_error ... ok
+test platform::linux::bridge::tests::a_client_beyond_the_budget_is_answered_503_at_once_and_the_rest_are_relayed ... ok
+test platform::linux::bridge::tests::a_full_buffer_that_drains_is_readable_again ... ok
+test platform::linux::bridge::tests::an_unreachable_proxy_closes_the_client_and_nothing_else_happens ... ok
+test platform::linux::bridge::tests::bytes_flow_both_ways_and_half_close_is_forwarded ... ok
+test platform::linux::bridge::tests::the_proxy_environment_is_both_spellings_and_an_empty_no_proxy ... ok
+test platform::linux::freeze::tests::canonical_json_sorts_every_object_and_keeps_arrays ... ok
+test platform::linux::freeze::tests::every_built_in_profile_has_a_baseline ... ok
+test platform::linux::host::tests::a_file_hash_is_its_sha256 ... ok
+test platform::linux::host::tests::identity_categories_follow_the_credentials ... ok
+test platform::linux::host::tests::meminfo_values_are_read_in_kib ... ok
+test platform::linux::host::tests::only_profiles_that_bear_on_the_jail_are_recorded ... ok
+test platform::linux::host::tests::pretty_name_is_unquoted ... ok
+test platform::linux::host::tests::saved_set_uid_privileged_groups_and_user_namespaces_are_named ... ok
+test platform::linux::host::tests::sysctl_names_map_to_procfs ... ok
+test platform::linux::host::tests::the_restriction_state_follows_the_sysctl ... ok
+test platform::linux::host::tests::unpackaged_files_are_those_no_package_lists ... ok
+test platform::linux::scope::tests::a_unit_name_that_is_only_a_prefix_of_the_leaf_is_not_the_move ... ok
+test platform::linux::scope::tests::already_delegated_ignores_lingering ... ok
+test platform::linux::scope::tests::already_delegated_takes_no_action ... ok
+test platform::linux::scope::tests::every_failure_is_unavailable_with_its_reason_never_an_error ... ok
+test platform::linux::scope::tests::only_the_exact_seam_values_apply ... ok
+test platform::linux::scope::tests::outside_asks_for_the_scope_and_records_it_once_the_move_is_seen ... ok
+test platform::linux::scope::tests::somewhere_else_in_the_subtree_is_not_the_move ... ok
+test platform::linux::scope::tests::the_call_gets_the_bus_variables_and_nothing_else ... ok
+test platform::linux::scope::tests::the_call_starts_a_transient_scope_holding_the_pid ... ok
+test platform::linux::scope::tests::the_move_outside_the_subtree_is_not_the_move ... ok
+test platform::linux::scope::tests::the_record_has_the_documented_shape ... ok
+test platform::linux::scope::tests::the_seam_moves_a_process_that_is_already_inside ... ok
+test platform::linux::scope::tests::the_unreachable_bus_seam_reaches_the_request ... ok
+test platform::linux::scope::tests::unit_names_are_valid_distinct_and_name_the_pid ... ok
+test platform::linux::scope::tests::unknown_lingering_is_treated_as_off ... ok
+test platform::linux::scope::tests::without_lingering_no_scope_is_requested ... ok
+test platform::linux::seccomp::tests::architecture_is_checked_before_any_syscall_number ... ok
+test platform::linux::seccomp::tests::both_agent_variants_and_the_mediation_filter_assemble_and_differ ... ok
+test platform::linux::seccomp::tests::every_contained_baseline_admits_only_the_listed_socket_families ... ok
+test platform::linux::seccomp::tests::j4_d1_the_tool_baseline_refuses_a_notification_listener ... ok
+test platform::linux::seccomp::tests::j4_s4_every_contained_baseline_refuses_an_untraced_clone ... ok
+test platform::linux::seccomp::tests::no_syscall_number_appears_twice ... ok
+test platform::linux::seccomp::tests::seccomp_data_offsets_follow_the_struct ... ok
+test platform::linux::seccomp::tests::the_agent_baselines_are_byte_for_byte_the_checked_in_ones ... ok
+test platform::linux::seccomp::tests::the_agent_table_names_every_rule_and_both_digests ... ok
+test platform::linux::seccomp::tests::the_baseline_assembles ... ok
+test platform::linux::seccomp::tests::the_four_verdicts_are_the_last_four_instructions ... ok
+test platform::linux::seccomp::tests::the_mediation_filter_notifies_connect_and_admits_only_stream_af_unix ... ok
+test platform::linux::seccomp::tests::the_namespace_mask_is_the_eight_namespace_flags ... ok
+test platform::linux::seccomp::tests::the_namespace_variant_permits_only_the_namespace_setup ... ok
+test platform::linux::seccomp::tests::the_table_lists_every_rule_the_filter_encodes ... ok
+test platform::linux::seccomp::tests::the_tables_cover_x86_64_and_nothing_else ... ok
+test platform::linux::seccomp::tests::the_tool_baseline_is_byte_for_byte_the_checked_in_one ... ok
+test platform::linux::seccomp::tests::the_unprivileged_agent_baseline_is_tool_without_the_af_unix_rule ... ok
+test platform::macos::tests::every_execution_capability_is_unsupported_and_unmeasured ... ok
+test platform::macos::tests::prepare_refuses_rather_than_returning_a_successful_no_op ... ok
+test policy::tests::denial_wins_and_read_only_overrides_a_writable_parent ... ok
+test policy::tests::normalize_refuses_an_escape_and_resolves_dot_segments ... ok
+test policy::tests::path_containment_compares_components_not_string_prefixes ... ok
+test profiles::tests::macos_claims_no_native_runtime_roots ... ok
+test profiles::tests::none_inherits_the_host_and_claims_no_containment_authority ... ok
+test profiles::tests::the_contained_environment_carries_only_admitted_names ... ok
+test profiles::tests::tool_defaults_match_the_authoritative_table ... ok
+test proxy::http::tests::ambiguous_framing_refuses ... ok
+test proxy::http::tests::connect_and_absolute_form_parse ... ok
+test proxy::http::tests::control_bytes_in_header_values_refuse ... ok
+test proxy::http::tests::host_must_agree_with_the_target ... ok
+test proxy::http::tests::malformed_heads_refuse ... ok
+test proxy::http::tests::non_proxy_requests_are_unsupported ... ok
+test proxy::http::tests::parse_request_checks_line_endings_itself ... ok
+test proxy::http::tests::scan_refuses_bare_line_endings_and_nul ... ok
+test proxy::relay::tests::chunk_extensions_trailers_and_bare_lf_refuse ... ok
+test proxy::relay::tests::chunked_framing_can_arrive_in_pieces ... ok
+test proxy::relay::tests::strict_chunked_framing_ends_exactly_after_the_last_chunk ... ok
+test proxy::sys::tests::poll_reports_readiness_per_descriptor_and_handles_edges ... ok
+test proxy::sys::tests::the_descriptor_limit_is_readable_and_raising_it_is_idempotent ... ok
+test proxy::sys::tests::wait_peer_closed_ignores_a_half_close_and_returns_on_close ... ok
+test proxy::tests::connect_deadline_is_shared_across_answers ... ok
+test proxy::tests::local_exhaustion_is_not_blamed_on_the_destination ... ok
+test state::anchored::tests::a_component_with_a_slash_dot_or_nul_never_reaches_a_syscall ... ok
+test state::anchored::tests::a_directory_the_child_made_unreadable_can_be_reopened_after_chmod_at ... ok
+test state::anchored::tests::a_final_symlink_is_never_followed_by_any_open ... ok
+test state::anchored::tests::an_exclusive_create_refuses_an_existing_regular_file ... ok
+test state::anchored::tests::an_open_checks_it_reached_the_object_that_was_inspected ... ok
+test state::anchored::tests::created_objects_have_exactly_the_requested_mode_whatever_the_umask ... ok
+test state::anchored::tests::names_rewinds_and_skips_the_dot_entries ... ok
+test state::persist::tests::the_abort_seam_names_a_site_a_point_and_an_optional_ordinal ... ok
+test state::tests::a_generated_attempt_id_round_trips_through_the_grammar ... ok
+test state::tests::a_group_writable_ancestor_is_refused_unless_its_group_is_private ... ok
+test state::tests::a_malformed_attempt_id_is_a_usage_error ... ok
+test state::tests::a_replaced_or_populated_proxy_directory_is_retained ... ok
+test state::tests::a_vendor_state_that_already_exists_is_withdrawn_not_registered ... ok
+test state::tests::an_attempt_root_holding_any_jail_owned_artifact_is_not_fresh ... ok
+test state::tests::created_vendor_state_is_registered_with_its_identity ... ok
+test state::tests::gc_retains_a_proxy_directory_whose_identity_was_never_recorded ... ok
+test state::tests::group_write_is_private_only_for_the_owners_own_group ... ok
+test state::tests::only_a_temporary_name_of_a_root_record_is_ours ... ok
+test state::tests::the_proxy_directory_is_registered_before_it_exists ... ok
+test state::tests::the_proxy_directory_is_registered_created_private_and_removed_by_identity ... ok
+test state::tests::world_write_always_counts_and_no_group_write_never_does ... ok
+test supervisor::tests::a_none_profile_receipt_is_unprotected_before_anything_is_applied ... ok
+test supervisor::tests::a_receipt_records_the_trace_loss_with_the_notes_start_and_source ... ok
+test supervisor::tests::journal_detects_a_loss_that_only_appears_during_terminal_drain ... ok
+test supervisor::tests::journal_detects_another_producers_loss_without_a_wrapper_write ... ok
+test supervisor::tests::the_gate_and_preparation_budgets_are_the_ones_the_specification_names ... ok
+test trace::tests::a_failed_write_is_cut_back_to_its_frame_boundary ... ok
+test trace::tests::a_failed_write_that_cannot_be_cut_back_closes_the_sink ... ok
+test trace::tests::an_exhausted_reserve_closes_the_sink ... ok
+test trace::tests::an_oversized_event_is_refused_rather_than_truncated ... ok
+test trace::tests::the_bounds_are_the_ones_the_specification_names ... ok
+test trace::tests::the_loss_note_names_the_covered_classes_and_keeps_its_start ... ok
+test trace::tests::the_payload_budget_stops_before_the_reserve_and_the_reserve_still_writes ... ok
+test trace::tests::the_write_size_seam_accepts_only_a_byte_count ... ok
+
+test result: ok. 218 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.58s
+
+     Running unittests src/main.rs (target/debug/deps/ouro_jail-f288a1190a40e79a)
+
+running 4 tests
+test tests::build_claims_are_a_full_commit_and_a_consistent_flag ... ok
+test tests::gc_names_the_execution_boundary_in_both_renderings ... ok
+test tests::the_closed_set_is_announced_only_where_the_build_can_observe_it ... ok
+test tests::the_inputs_digest_is_the_documented_construction ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance_j1.rs (target/debug/deps/conformance_j1-70d418d4c7a7b27c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance_j2.rs (target/debug/deps/conformance_j2-205fe39f5652a012)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance_j3_agent.rs (target/debug/deps/conformance_j3_agent-3760828d31386c19)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance_j3_credentials.rs (target/debug/deps/conformance_j3_credentials-b0919739f42aaf64)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance_j3_none.rs (target/debug/deps/conformance_j3_none-c30e337e41f78824)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_closed_set_linux.rs (target/debug/deps/j4_closed_set_linux-21da79db3042c9e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_gc_linux.rs (target/debug/deps/j4_gc_linux-a7799168740e677b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_lifecycle_linux.rs (target/debug/deps/j4_lifecycle_linux-f6f89882525689bb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_loss_linux.rs (target/debug/deps/j4_loss_linux-796b12a0ab518916)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_records_linux.rs (target/debug/deps/j4_records_linux-294c051f7ab2160c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_scope_linux.rs (target/debug/deps/j4_scope_linux-d4454cd4fa456e0b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_trace_linux.rs (target/debug/deps/j4_trace_linux-c013076a81256d39)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j4_tracer_precision_linux.rs (target/debug/deps/j4_tracer_precision_linux-7fa40e8edd265e41)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_arch_refusal_linux.rs (target/debug/deps/j5_arch_refusal_linux-1ecfffe92a8e4cbc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_audit_gaps_linux.rs (target/debug/deps/j5_audit_gaps_linux-d0dfb0c11d79b68f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_boundary_linux.rs (target/debug/deps/j5_boundary_linux-906cfcbfc5cf8239)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_bwrap_resolution_linux.rs (target/debug/deps/j5_bwrap_resolution_linux-7ae98a414d256b3d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_lifetime_linux.rs (target/debug/deps/j5_lifetime_linux-4ba1c9dec412d674)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_process_linux.rs (target/debug/deps/j5_process_linux-e52e5288c6f1fa9c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_process_portable.rs (target/debug/deps/j5_process_portable-2d82a57131d3a40d)
+
+running 1 test
+test an_in_process_run_leaves_the_hosts_stdout_where_it_was ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/j5_records_crash_linux.rs (target/debug/deps/j5_records_crash_linux-1f7c3f60e95827c8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_records_linux.rs (target/debug/deps/j5_records_linux-9c254d9bf64937e4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/j5_tracer_foreign_child_linux.rs (target/debug/deps/j5_tracer_foreign_child_linux-cac542669efb84d4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/linux_mechanisms.rs (target/debug/deps/linux_mechanisms-64ad426f1c51ab83)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/macos_refusal.rs (target/debug/deps/macos_refusal-3fc3515216aa50fe)
+
+running 39 tests
+test a2_explicit_operator_grants_reach_the_receipt ... ok
+test a_contained_profile_rejects_a_host_grant ... ok
+test a_control_descriptor_receives_the_refused_message ... ok
+test a_malformed_attempt_id_is_a_usage_error_not_a_path ... ok
+test a_profile_file_narrows_its_base_and_may_not_extend_none ... ok
+test a_profile_selected_in_config_is_resolved_beside_config ... ok
+test a_project_file_may_narrow_but_may_not_select_a_profile ... ok
+test a_trace_descriptor_replaces_the_local_stream_rather_than_duplicating_it ... ok
+test an_accepted_limit_reaches_the_snapshot ... ok
+test an_invalid_channel_descriptor_refuses_before_preparation ... ok
+test an_unknown_or_duplicate_configuration_key_refuses ... ok
+test config_toml_may_not_select_the_none_profile ... ok
+test config_toml_paths_anchor_to_the_config_directory ... ok
+test doctor_takes_no_policy_override_flags ... ok
+test h2_an_unusable_project_file_refuses_instead_of_being_ignored ... ok
+test h3_the_project_file_read_is_bounded_and_never_blocks ... ok
+test h5_a_control_consumer_that_stops_reading_cannot_stall_the_supervisor ... ok
+test h7_a_state_root_inside_a_grant_refuses ... ok
+test h8_the_receipt_copy_path_is_validated ... ok
+test h9_a_signal_during_the_gate_wait_is_handled ... ouro-jail: error unsupported_platform at probing [unsupported]: execution is not implemented for this platform
+ok
+test l2_a_workspace_that_is_not_a_directory_refuses ... ok
+test l5_the_seccomp_table_subcommand_does_not_exist_on_macos ... ok
+test m01_none_also_refuses_and_stays_unprotected ... ok
+test m01_run_refuses_before_exec_and_the_marker_never_appears ... ok
+test m01_the_attempt_directory_holds_the_policy_and_the_claim ... ok
+test m03_doctor_reports_every_requirement_as_unsupported_and_unmeasured ... ok
+test m03_explain_distinguishes_requested_policy_from_unmeasured_capability ... ok
+test m03_inspection_commands_use_the_exit_codes_of_section_six_four ... ok
+test m13_explain_prints_environment_names_only ... ok
+test m2_equivalent_workspace_spellings_have_one_digest ... ok
+test m4_the_local_trace_file_is_created_private ... ok
+test m6_an_unknown_policy_schema_refuses ... ok
+test m7_gc_refuses_a_state_root_that_is_not_private ... ok
+test only_the_documented_environment_variables_are_read ... ok
+test the_build_profile_requires_an_explicit_memory_ceiling ... ok
+test the_local_trace_records_the_wrapper_events_of_a_refusal ... ok
+test the_receipt_flag_writes_an_additional_copy ... ok
+test translation_prefixes_are_canonicalized_before_the_digest ... ok
+test usage_errors_exit_two ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.50s
+
+     Running tests/observer_j4_linux.rs (target/debug/deps/observer_j4_linux-155ddbe8c93dd877)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/observer_linux.rs (target/debug/deps/observer_linux-97aa472d0c4018a7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/observer_regression_linux.rs (target/debug/deps/observer_regression_linux-24ece995f3e759fa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/portable_canonical.rs (target/debug/deps/portable_canonical-ff994337e0d433ed)
+
+running 6 tests
+test p01_both_canonical_inputs_resolve_to_the_golden_snapshot ... ok
+test p01_both_digests_equal_the_checked_in_values ... ok
+test p01_canonical_bytes_equal_the_golden_jcs_file ... ok
+test p01_non_utf8_paths_and_argv_survive_as_the_base64_object ... ok
+test p01_reordering_sets_and_changing_provenance_preserve_the_hash ... ok
+test p01_semantic_changes_change_the_right_digest ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/portable_doctor.rs (target/debug/deps/portable_doctor-06af0652bebbe4ff)
+
+running 8 tests
+test doctor_json_is_a_versioned_record_with_the_same_build ... ok
+test doctor_json_on_macos_records_no_linux_host_or_backend ... ok
+test doctor_json_records_the_jail_binary_it_ran_as ... ok
+test the_checked_in_doctor_examples_are_valid ... ok
+test the_doctor_schema_declares_the_announced_identifier ... ok
+test the_doctor_schema_rejects_what_it_must ... ok
+test this_hosts_doctor_report_is_valid_against_the_schema ... ok
+test version_json_carries_the_build_provenance ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+
+     Running tests/portable_freeze.rs (target/debug/deps/portable_freeze-aff2864e820d1ef3)
+
+running 12 tests
+test a_recorded_tested_run_is_the_milestone_run ... ok
+test the_built_in_baselines_are_the_frozen_ones ... ok
+test the_bundled_launch_profiles_are_the_frozen_ones ... ok
+test the_closed_set_is_the_frozen_one ... ok
+test the_contained_environment_is_the_frozen_one ... ok
+test the_contained_mount_baselines_are_the_frozen_ones ... ok
+test the_filter_digests_are_the_frozen_ones ... ok
+test the_freeze_names_itself ... ok
+test the_frozen_schemas_are_the_frozen_ones ... ok
+test the_lock_file_is_the_frozen_one ... ok
+test the_manifests_are_the_frozen_ones ... ok
+test the_toolchain_is_the_frozen_one ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/portable_gate.rs (target/debug/deps/portable_gate-ab2174c6303fa0d9)
+
+running 8 tests
+test x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever ... ok
+test x02_a_non_utf8_frame_refuses ... ok
+test x02_an_empty_gate_is_a_closed_gate ... ok
+test x02_an_oversized_frame_refuses_rather_than_being_truncated ... ok
+test x02_content_faults_refuse ... ok
+test x02_framing_faults_refuse ... ok
+test x02_json_whitespace_inside_the_single_line_is_accepted ... ok
+test x02_the_single_valid_frame_releases ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/portable_gc.rs (target/debug/deps/portable_gc-cb5ba24a8267b972)
+
+running 34 tests
+test j4_c03_a_foreign_os_or_architecture_is_retained ... ok
+test j4_c03_a_live_lease_is_retained ... ok
+test j4_c03_a_name_that_is_not_an_attempt_id_is_skipped ... ok
+test j4_c03_a_supervisor_taking_its_lease_is_never_refused_by_a_concurrent_gc ... ok
+test j4_c03_a_symlinked_attempts_directory_is_refused ... ok
+test j4_c03_an_unclaimed_root_without_state_is_a_reported_skip_with_exit_0 ... ok
+test j4_c03_corrupt_state_is_retained_and_reported ... ok
+test j4_c03_gc_never_contends_for_the_lease_of_an_unclaimed_root ... ok
+test j4_c03_nothing_outside_the_attempts_directory_is_listed ... ok
+test j4_c03_the_listing_counts_against_the_per_invocation_bound ... ok
+test j4_n7_a_leaf_registered_by_name_only_is_not_corrupt_state ... ok
+test j4_w2s_gc_removes_a_dead_attempts_leftover_temp_files ... ok
+test j4_w2s_gc_reports_leftover_temp_files ... ok
+test j4_w2s_vendor_state_cleanup_is_charged_to_the_per_invocation_bound ... ok
+test scripted::j4_c03_a_different_boot_never_leads_to_any_cgroup_action ... ok
+test scripted::j4_c03_a_populated_orphan_of_this_boot_is_terminated_verified_and_removed ... ok
+test scripted::j4_c03_an_owner_alive_without_the_lease_is_retained ... ok
+test scripted::j4_c03_an_unverified_owner_or_leaf_is_never_acted_on ... ok
+test scripted::j4_c03_an_unverified_termination_deletes_nothing ... ok
+test scripted::j4_c03_the_entry_bound_holds_across_removals_in_one_invocation ... ok
+test scripted::j4_n7_a_leaf_named_only_is_removed_when_empty_and_never_killed ... ok
+test scripted::j4_n7_a_leaf_only_the_receipt_names_is_never_acted_on ... ok
+test scripted::j4_n7_gc_finds_a_leaf_jail_state_registers_without_any_receipt ... ok
+test scripted::j4_n7_state_and_receipt_naming_different_leaves_are_retained ... ok
+test scripted::j4_w2s_a_tree_gc_verified_dead_permits_the_vendor_state_cleanup ... ok
+test scripted::j4_w2s_leftover_temp_files_stay_unless_the_owner_is_dead ... ok
+test scripted::j4_w2s_only_gcs_record_of_the_registered_leaf_permits_the_cleanup ... ok
+test w3::j4_w3_g1_gc_never_rewrites_a_receipt_that_is_not_refused_or_settled ... ok
+test w3::j4_w3_g2_a_registration_of_another_attempts_leaf_is_never_acted_on ... ok
+test w3::j4_w3_g3_a_failed_record_after_rmdir_never_strands_the_attempt ... ok
+test w3::j4_w3_g4_a_finished_attempt_costs_its_name_only ... ok
+test w3::j4_w3_g4_an_attempt_with_something_left_is_never_finished ... ok
+test w3::j4_w3_g5_a_repeated_gc_record_is_kept_once_with_a_count ... ok
+test w3::j4_w3_g6_lost_integrity_retains_managed_scratch_in_every_boot ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.32s
+
+     Running tests/portable_j4_records.rs (target/debug/deps/portable_j4_records-1bcb0b91a1916e1f)
+
+running 9 tests
+test d3::j4_d3_a_pre_created_attempt_root_stays_claimable_after_gc ... ok
+test d3::j4_d3_gc_dry_run_changes_nothing_on_disk ... ok
+test d3::j4_d3_gc_never_creates_a_lock_beside_other_artifacts ... ok
+test d3::j4_d3_gc_retains_an_attempt_whose_lease_is_held ... ok
+test d4::j4_d4_a_failed_receipt_copy_never_reuses_a_revision ... ok
+test d4::j4_d4_no_failed_sync_step_reuses_a_revision ... ok
+test d5::j4_d5_a_later_evidence_loss_does_not_replace_a_wall_expiry ... ok
+test d5::j4_d5_a_later_wall_expiry_does_not_replace_an_evidence_loss ... ok
+test d7::j4_d7_keyed_collections_sort_by_their_canonical_bytes ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running tests/portable_launch.rs (target/debug/deps/portable_launch-390d32fad84f924e)
+
+running 35 tests
+test a_launch_file_must_be_private_single_linked_regular_and_outside_writable_grants ... ok
+test a_project_file_can_shrink_the_launch_hosts_but_not_add_credentials ... ok
+test a_run_that_created_no_managed_scratch_reports_cleanup_not_needed ... ok
+test an_agent_launch_profile_resolves_and_then_refuses_exactly_as_agent_does_today ... ok
+test c01_a_launch_profile_resolves_into_the_snapshot_and_validates_against_the_schema ... ok
+test c01_c02_a_normal_exit_stages_both_modes_records_provenance_and_cleans_vendor_state ... ok
+test c01_equivalent_launch_files_share_a_digest_and_semantic_changes_do_not ... ok
+test c01_every_ld_and_dyld_launch_key_refuses_through_the_file ... ok
+test c01_non_utf8_source_bytes_survive_into_the_snapshot_losslessly ... ok
+test c01_unsafe_state_subdirs_refuse_through_the_file ... ok
+test c02_a_crash_after_the_removal_but_before_the_record_is_finished_by_gc ... ok
+test c02_a_release_failure_after_setup_retains_and_an_exec_error_with_verified_teardown_cleans ... ok
+test c02_a_replaced_vendor_state_directory_is_never_deleted ... ok
+test c02_an_interrupted_cleanup_stays_pending_and_gc_resumes_it ... ok
+test c02_an_unverified_tree_retains_vendor_state_and_gc_will_not_remove_it ... ok
+test doctor_launch_checks_each_credential_without_printing_paths_or_values ... ok
+test doctor_readiness_needs_every_credential_and_reports_support_apart_from_it ... ok
+test explain_prints_credentials_by_id_mode_and_dest_never_by_source ... ok
+test h2_a_preexisting_vendor_state_in_a_managed_attempt_root_refuses_and_survives ... ok
+test h2_a_vendor_state_appearing_after_the_claim_is_withdrawn_not_deleted ... ok
+test i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail ... ok
+test i02_the_runtime_never_embeds_or_discovers_the_bundled_profiles ... ok
+test l1_gc_prints_its_report_even_when_a_cleanup_stays_pending ... ok
+test l3_credentials_staged_before_a_refusal_reach_private_provenance_too ... ok
+test m2_a_bind_ro_source_with_another_link_refuses_and_a_copy_does_not ... ok
+test m2_a_credential_source_inside_a_child_writable_grant_refuses ... ok
+test m3_a_configured_profile_is_kept_or_the_conflict_refuses_never_replaced ... ok
+test m4_names_values_and_ids_outside_their_grammars_refuse_through_the_file ... ok
+test p04_a_source_below_a_directory_others_can_write_refuses ... ok
+test p04_a_source_reached_through_a_symlinked_directory_refuses ... ok
+test p04_credential_special_files_and_oversize_refuse_before_the_platform_prepares ... ok
+test rm11_a_teardown_that_lost_integrity_retains_vendor_state_and_says_why ... ok
+test rm16_the_copy_budget_is_cumulative_across_credentials ... ok
+test rm24_rm25_an_oversized_launch_file_or_a_shared_launch_directory_refuses ... ok
+test s6_1_tool_and_build_reject_credentials_and_none_rejects_any_launch ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.20s
+
+     Running tests/portable_lifetime.rs (target/debug/deps/portable_lifetime-998059acb8d753ed)
+
+running 1 test
+test l05_unknown_tree_retains_scratch_and_never_settles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/portable_loss.rs (target/debug/deps/portable_loss-1596e5daa81cf466)
+
+running 9 tests
+test j4_r04_best_effort_runs_to_the_end_degraded_exits_1 ... ok
+test j4_r04_later_loss_keeps_first_cause ... ok
+test j4_r04_protection_labels_never_change ... ok
+test j4_r04_strict_stops ... ok
+test j4_w2s_r1_a_loss_found_at_settlement_is_an_error_and_exit_1 ... ok
+test j4_w2s_r1_a_proxy_loss_found_at_settlement_is_an_error ... ok
+test j4_w2s_r1_a_reported_loss_is_not_reported_twice_at_settlement ... ok
+test j4_w2s_r1_full_coverage_at_settlement_is_no_error ... ok
+test j4_w2s_r2_a_loss_after_the_target_ended_is_recorded_not_the_cause ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.99s
+
+     Running tests/portable_mutations.rs (target/debug/deps/portable_mutations-d1b59f07c53e9960)
+
+running 17 tests
+test a_control_frame_over_sixty_four_kibibytes_is_refused_not_emitted ... ok
+test a_descriptor_open_for_the_wrong_direction_refuses ... ok
+test a_durable_replacement_syncs_the_file_and_then_the_parent_directory ... ok
+test a_limit_value_with_a_leading_zero_refuses ... ok
+test a_second_claim_of_the_same_attempt_refuses ... ok
+test a_symlinked_state_directory_refuses_for_being_a_symlink ... ok
+test normalization_refuses_a_nul_in_a_path ... ok
+test normalization_refuses_an_escape_rather_than_clamping_it_to_the_root ... ok
+test the_codec_reader_refuses_a_nul_in_either_form ... ok
+test the_codec_reader_refuses_noncanonical_base64 ... ok
+test the_codec_reader_refuses_utf8_bytes_in_the_object_form ... ok
+test the_gate_accepts_exactly_one_line_and_says_which_rule_refused ... ok
+test the_gate_byte_cap_is_enforced_by_the_parser_too ... ok
+test the_gate_byte_cap_is_enforced_by_the_production_reader ... ok
+test the_ownership_predicate_refuses_a_foreign_owner ... ok
+test the_pipe_helper_really_carries_bytes ... ok
+test the_receipt_revision_advances_on_each_successful_replacement ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/portable_network_rules.rs (target/debug/deps/portable_network_rules-50bf14f602351a16)
+
+running 23 tests
+test n03_a_long_a_label_refuses_before_quadratic_decoding ... ok
+test n03_a_long_label_refuses_before_any_quadratic_work ... ok
+test n03_ambiguous_ipv4_spellings_never_become_names ... ok
+test n03_canonical_ipv6_rules_use_rfc_5952 ... ok
+test n03_deprecated_compatible_ipv6_refuses_everywhere ... ok
+test n03_every_forbidden_prefix_is_denied_at_both_ends_and_bounded ... ok
+test n03_every_frozen_address_case_matches_network_cases_json ... ok
+test n03_explicit_numeric_exceptions_are_exact_address_and_port ... ok
+test n03_idna_names_narrow_like_their_a_labels ... ok
+test n03_idna_output_that_is_numeric_takes_the_numeric_path ... ok
+test n03_known_and_configured_translation_prefixes_deny_whole_ranges ... ok
+test n03_mapped_ipv6_normalizes_before_classification_and_grants ... ok
+test n03_mapping_expansion_is_bounded ... ok
+test n03_mixed_answer_sets_refuse_whole ... ok
+test n03_network_rules_md_idna_examples ... ok
+test n03_nfc_normalization_test_17 ... ignored, needs the 2.8 MB NormalizationTest.txt; see the doc comment
+test n03_omitted_ports_mean_80_and_443_and_nondefault_ports_are_exact ... ok
+test n03_request_authorities_refuse_userinfo_escapes_zones_and_unbracketed_ipv6 ... ok
+test n03_syntax_refusals_name_their_reason ... ok
+test n03_the_bounds_keep_every_valid_length ... ok
+test n03_the_embedded_address_table_is_the_checked_in_file ... ok
+test n03_uts46_conformance_file_toascii_nontransitional_all_flags ... ok
+test n03_wildcards_match_labels_beneath_never_the_apex ... ok
+
+test result: ok. 22 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/portable_persistence.rs (target/debug/deps/portable_persistence-a7c2f8570743f76b)
+
+running 21 tests
+test j4_d5_a_later_persistence_failure_does_not_replace_the_reported_error ... ok
+test j4_d5_a_second_evidence_loss_does_not_replace_the_reported_error ... ok
+test j4_n4_a_queued_frame_reaches_a_returning_reader_while_the_run_goes_on ... ok
+test j4_n4_a_queued_terminal_frame_is_delivered_once_the_reader_returns ... ok
+test j4_n6_a_failed_policy_write_refuses_with_a_refused_receipt ... ok
+test j4_r02_a_failed_receipt_copy_never_reuses_a_revision ... ok
+test j4_r02_a_stalled_sync_never_delays_the_wall ... ok
+test j4_r02_every_site_under_every_fault_leaves_valid_records ... ok
+test j4_r02_persistence_that_cannot_finish_in_5s_stops_the_child_unacknowledged ... ok
+test j4_r03_control_backpressure_counts_an_undelivered_terminal_frame ... ok
+test j4_r03_control_backpressure_never_delays_the_wall ... ok
+test j4_s9_every_test_seam_in_force_is_recorded ... ok
+test j4_w3_a_seam_set_twice_is_recorded_with_the_value_getenv_returns ... ok
+test j4_w3_p1a_abandoned_persistence_stops_at_the_next_step ... ok
+test j4_w3_p1b_the_lease_is_kept_while_persistence_is_in_flight ... ok
+test j4_w3_p2_a_failed_proxy_socket_record_writes_a_valid_refused_receipt ... ok
+test j4_w3_p2_every_launch_state_write_under_every_fault_leaves_valid_records ... ok
+test j4_w3_p3_the_tree_is_ended_without_waiting_for_persistence ... ok
+test j4_w3_p5_an_error_no_receipt_carries_reaches_stderr ... ok
+test j4_w3_p6_control_and_trace_name_a_receipt_by_the_same_digest ... ok
+test seam_child_helper ... ignored, child helper invoked by j4_s9_every_test_seam_in_force_is_recorded
+
+test result: ok. 20 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 45.53s
+
+     Running tests/portable_policy.rs (target/debug/deps/portable_policy-d8e9991e82dfa3d2)
+
+running 30 tests
+test a_cli_tilde_path_is_cwd_relative_not_home_relative ... ok
+test i02_launch_reads_only_the_operators_configuration ... ok
+test p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_digest ... ok
+test p02_a_case_variation_is_caught_by_identity_on_a_case_folding_volume ... ok
+test p02_a_credential_in_the_project_file_refuses_with_its_key_path ... ok
+test p02_a_denial_is_never_a_widening_however_it_is_spelled ... ok
+test p02_a_denied_subtree_cannot_be_re_granted_by_any_spelling ... ok
+test p02_a_grant_beneath_a_denied_subtree_refuses_at_any_depth ... ok
+test p02_a_host_the_ruleset_cannot_normalize_refuses_as_an_unknown_subset ... ok
+test p02_a_project_file_cannot_add_credentials_launch_executable_or_backend ... ok
+test p02_a_project_file_may_not_select_a_profile_or_extend_one ... ok
+test p02_a_symlink_component_and_a_case_variation_refuse_with_the_key_path ... ok
+test p02_a_symlink_component_refuses_because_its_target_is_the_childs_choice ... ok
+test p02_a_trusted_layer_is_not_held_to_the_identity_rule ... ok
+test p02_a_trusted_operator_layer_may_still_grant_and_is_recorded ... ok
+test p02_adding_a_host_grant_refuses_and_wildcards_are_label_sets ... ok
+test p02_adding_a_path_grant_refuses_with_its_key_path ... ok
+test p02_an_absent_path_refuses_as_a_grant_and_narrows_as_a_denial ... ok
+test p02_an_object_that_does_not_exist_is_an_unknown_subset ... ok
+test p02_every_narrowing_category_is_allowed ... ok
+test p02_none_cannot_be_selected_through_a_project_or_profile_file ... ok
+test p02_path_prefix_confusion_refuses ... ok
+test p02_raising_a_ceiling_refuses_with_that_limit_key ... ok
+test p02_raising_mem_or_cpu_refuses_with_that_limit_key ... ok
+test p02_raising_mem_or_cpu_through_the_project_file_refuses_with_the_limit_key ... ok
+test p02_the_workspace_root_itself_is_a_real_directory ... ok
+test p02_weakening_coverage_evidence_or_observation_refuses ... ok
+test p02_widening_the_network_mode_refuses ... ok
+test p02_widening_through_a_launch_profile_refuses_with_its_key_path ... ok
+test project_host_narrowing_replaces_the_base_set_including_empty ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/portable_proxy.rs (target/debug/deps/portable_proxy-1bbf96c6d6d67b75)
+
+running 47 tests
+test n02_a_half_closed_tunnel_still_delivers_the_response ... ok
+test n02_a_pipelined_second_request_is_discarded_and_stated ... ok
+test n02_a_resource_failure_event_is_truthful ... ok
+test n02_allowed_connect_tunnel_yields_one_allow_result_at_close ... ok
+test n02_chunked_body_is_forwarded_exactly_and_nothing_after_it ... ok
+test n02_connect_early_data_is_forwarded_in_order_and_counted ... ok
+test n02_denied_request_yields_one_deny_result_before_the_response ... ok
+test n02_plain_http_forwards_exactly_the_framed_request_without_proxy_credentials ... ok
+test n02_results_are_valid_distinct_proxy_source_events ... ok
+test n02_the_proxy_writes_no_log ... ok
+test n03_a_connect_host_without_a_port_means_the_connect_port ... ok
+test n03_host_and_absolute_uri_disagreement_refuses_before_resolution ... ok
+test n03_ipv6_loopback_is_reachable_only_through_its_grant ... ok
+test n03_mixed_answers_refuse_and_nothing_connects ... ok
+test n03_numeric_requests_need_an_exact_grant_and_are_never_resolved ... ok
+test n03_private_addresses_behind_an_allowed_name_are_denied ... ok
+test n03_rebinding_connects_only_to_the_single_checked_answer ... ok
+test n04_a_closed_client_with_a_silent_destination_releases_its_slot ... ok
+test n04_a_drain_cut_short_reports_the_missing_result ... ok
+test n04_a_panicking_handler_settles_answers_and_closes ... 
+thread 'ouro-proxy-conn' (36199070) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+a resolver bug
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'ouro-proxy-conn' (36199069) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+a resolver bug
+
+thread 'ouro-proxy-conn' (36199068) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+a resolver bug
+
+thread 'ouro-proxy-conn' (36199071) panicked at crates/ouro-jail/tests/portable_proxy.rs:2038:9:
+a resolver bug
+ok
+test n04_a_result_after_the_seal_is_not_delivered ... ok
+test n04_a_tunnel_holds_two_descriptors ... ok
+test n04_backpressure_bounds_buffering_of_a_response_the_client_does_not_read ... ok
+test n04_budgets_default_to_section_10 ... ok
+test n04_connect_falls_back_across_approved_answers_only ... ok
+test n04_descriptor_exhaustion_is_reported_truthfully ... ok
+test n04_header_overflow_refuses_at_the_32_kib_budget ... ok
+test n04_hosts_that_cost_quadratic_idna_work_refuse_fast ... ok
+test n04_malformed_and_unsupported_requests_are_refused_without_connecting ... ok
+test n04_no_upstream_connect_after_stop_began ... ok
+test n04_resolver_deadline_bounds_the_request ... ok
+test n04_resolver_overload_is_reported_as_such ... ok
+test n04_saturation_refuses_with_overload_then_recovers ... ok
+test n04_slow_headers_end_at_the_absolute_deadline_even_while_bytes_trickle ... ok
+test n04_start_raises_the_soft_descriptor_limit_to_the_hard_limit ... ok
+test n04_start_refuses_a_descriptor_budget_that_does_not_fit_and_names_it ... ok
+test n04_stop_closes_a_tunnel_to_a_silent_destination ... ok
+test n04_stop_closes_every_connection_and_accounts_for_each ... ok
+test n04_stop_closes_the_listener_after_its_path_was_removed ... ok
+test n04_stop_ends_a_relay_blocked_writing_to_the_destination ... ok
+test n04_stop_with_the_largest_budget_does_not_panic ... ok
+test n04_system_resolver_is_bounded_absolute_and_refuses_what_is_not_a_name ... ok
+test n04_system_resolver_looks_up_the_absolute_name_and_keeps_its_deadline ... ok
+test n04_the_slot_is_free_before_the_result_is_delivered ... ok
+test n04_unusable_budgets_refuse_to_start ... ok
+test n04_upstream_death_mid_tunnel_closes_the_client_and_is_reported ... ok
+test proxy_limits_helper ... ignored, child helper invoked by the n04 descriptor tests
+
+test result: ok. 46 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 9.73s
+
+     Running tests/portable_records.rs (target/debug/deps/portable_records-c532060e47cb8944)
+
+running 17 tests
+test a_receipt_always_announces_the_schema_identifier ... ok
+test m02_the_hypothetical_macos_receipt_validates_without_linux_fields ... ok
+test r01_every_event_kind_has_an_example ... ok
+test r01_every_example_round_trips_through_the_rust_types ... ok
+test r01_every_example_validates_against_its_schema ... ok
+test r01_every_validation_case_gets_the_verdict_the_corpus_expects ... ok
+test r01_the_schema_loader_refuses_two_files_with_one_id ... ok
+test r01_the_semantic_checks_reject_what_the_schema_accepts ... ok
+test r01_the_semantic_corpus_gets_the_verdicts_it_expects ... ok
+test rfc3339_matches_known_epoch_values ... ok
+test rfc3339_output_satisfies_the_schema_date_time_format ... ok
+test tuple_contained_preparation_complete ... ok
+test tuple_none_preparation_complete_is_still_unprotected ... ok
+test tuple_refusal_after_setup_or_proved_exec_error ... ok
+test tuple_refusal_before_boundary_creation ... ok
+test tuple_verified_settlement ... ok
+test x02_the_gate_frame_corpus_gets_the_verdicts_it_expects ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/portable_signals.rs (target/debug/deps/portable_signals-65e3975151a69307)
+
+running 1 test
+test a_termination_signal_wakes_the_supervisor_through_the_self_pipe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/portable_state.rs (target/debug/deps/portable_state-6520930f55d3c3c6)
+
+running 9 tests
+test a_durable_replacement_leaves_the_old_file_when_it_is_abandoned ... ok
+test a_file_where_a_state_directory_belongs_refuses ... ok
+test a_group_or_world_accessible_state_root_refuses ... ok
+test a_symlinked_state_root_refuses ... ok
+test j4_r02_an_exclusive_publication_never_replaces_an_existing_file ... ok
+test j4_w3_p1a_work_given_up_mid_write_starts_no_further_step ... ok
+test lock_probe_child_helper ... ignored, child helper invoked by the_lease_is_exclusive_across_processes
+test the_attempt_directory_has_the_layout_of_section_seven ... ok
+test the_lease_is_exclusive_across_processes ... 
+running 1 test
+
+running 1 test
+ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/portable_trace.rs (target/debug/deps/portable_trace-35a74df4997ab2cd)
+
+running 19 tests
+test a_closed_reader_is_evidence_loss_rather_than_a_signal ... ok
+test a_full_pipe_queues_and_the_queue_bound_is_evidence_loss ... ok
+test frames_reach_a_draining_reader_in_order_and_exactly_once ... ok
+test j4_fsize_helper ... ignored, subprocess helper for j4_r03_a_failed_local_write_never_leaves_a_partial_frame_mid_file
+test j4_r03_a_consumer_past_its_deadline_gets_no_second_one_at_settlement ... ok
+test j4_r03_a_consumer_that_resumes_after_its_deadline_reads_the_gap_note ... ok
+test j4_r03_a_coverage_gap_note_follows_the_prefix_with_reserve_priority ... ok
+test j4_r03_a_drain_that_gives_up_mid_frame_writes_nothing_after_it ... ok
+test j4_r03_a_failed_local_write_never_leaves_a_partial_frame_mid_file ... ok
+test j4_r03_a_loss_under_the_cap_seam_names_the_seam ... ok
+test j4_r03_a_partial_write_resumes_at_its_offset_and_never_repeats_a_frame ... ok
+test j4_r03_a_reader_that_leaves_mid_frame_is_loss_and_the_tail_is_recognizable ... ok
+test j4_r03_after_a_trace_fd_loss_only_reserve_notes_follow ... ok
+test j4_r03_after_local_payload_exhaustion_only_reserve_notes_follow ... ok
+test j4_r03_flush_cost_does_not_grow_with_the_queue ... ok
+test j4_r03_the_trace_cap_seam_can_only_shrink ... ok
+test j4_s8_the_last_receipt_note_is_read_only_from_a_complete_trace ... ok
+test j4_s8_the_recogniser_tells_complete_incomplete_and_corrupt_apart ... ok
+test no_progress_within_the_deadline_is_evidence_loss ... ok
+
+test result: ok. 18 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.92s
+
+     Running tests/portable_unsettled_phase.rs (target/debug/deps/portable_unsettled_phase-32475015e374acdb)
+
+running 3 tests
+test an_unsettled_end_after_a_confirmed_exec_stays_enforced ... ok
+test an_unsettled_end_without_a_confirmed_exec_stays_prepared ... ok
+test the_receipt_note_names_the_receipt_by_its_canonical_digest ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/portable_version.rs (target/debug/deps/portable_version-433297759ab545dd)
+
+running 8 tests
+test a_frozen_artifact_never_changes_under_its_frozen_identifiers ... ok
+test a_frozen_schema_never_changes_under_its_frozen_identifier ... ok
+test every_announced_identifier_is_backed_by_a_frozen_file ... ok
+test every_wire_schema_is_frozen_with_the_identifiers_the_binary_announces ... ok
+test the_announced_closed_set_is_the_one_the_specification_names ... ok
+test the_announced_schema_identifiers_match_the_checked_in_schema_files ... ok
+test version_announces_the_wire_schemas_are_frozen ... ok
+test version_text_mode_names_every_schema_too ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/portable_vocabulary.rs (target/debug/deps/portable_vocabulary-59f33e5aee949fdf)
+
+running 2 tests
+test derived_requirement_names_name_no_linux_mechanism ... ok
+test macos_inspection_output_carries_no_linux_vocabulary ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.61s
+
+     Running tests/portable_w2s_trace.rs (target/debug/deps/portable_w2s_trace-8414adcc737f5ac3)
+
+running 5 tests
+test j4_w2s_a_an_unsettled_attempts_final_receipt_note_uses_the_reserve ... ok
+test j4_w2s_b_a_refusal_after_a_taken_trace_loss_records_it_in_coverage ... ok
+test j4_w2s_b_the_enforced_receipt_after_a_trace_loss_records_it_in_coverage ... ok
+test j4_w3_a_trace_loss_leaves_the_limits_class_alone ... ok
+test j4_w3_p4_a_trace_loss_is_reported_once ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests/review_core_regressions.rs (target/debug/deps/review_core_regressions-f40f781a4f7437cf)
+
+running 7 tests
+test a_native_string_never_carries_a_nul ... ok
+test a_tool_policy_rejects_a_host_grant ... ok
+test a_workspace_symlink_cannot_re_grant_a_denied_subtree ... ok
+test an_execution_cgroup_is_required_by_a_tree_limit_not_by_observation ... ok
+test equivalent_wall_spellings_compare_equal ... ok
+test the_native_string_codec_is_symmetric ... ok
+test the_policy_digest_is_stable_across_equivalent_workspace_spellings ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_linux.rs (target/debug/deps/review_linux-8fb4133e87d86a1c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/unix_peer_linux.rs (target/debug/deps/unix_peer_linux-8dc1fa385307b86a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/xtask-3a644b0c8ac94f5a)
+
+running 195 tests
+test conformance::tests::a_clean_run_passes_and_the_remote_directory_is_removed ... ok
+test conformance::tests::a_clean_smoke_leg_has_no_problems ... ok
+test conformance::tests::a_detached_command_with_a_single_quote_is_refused - should panic ... 
+thread 'conformance::tests::a_detached_command_with_a_single_quote_is_refused' (36199877) panicked at crates/xtask/src/conformance.rs:681:5:
+a detached command cannot contain a single quote: echo 'hi'
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test conformance::tests::a_detached_start_is_idempotent_and_holds_no_session_descriptor ... ok
+test conformance::tests::a_doctor_that_failed_or_produced_no_json_fails_the_run ... ok
+test conformance::tests::a_failed_or_absent_contract_validation_fails_the_run ... ok
+test conformance::tests::a_failed_or_absent_smoke_leg_fails_the_run ... ok
+test conformance::tests::a_failing_suite_exit_code_fails_the_run ... ok
+test conformance::tests::a_failure_in_any_test_binary_counts_not_only_the_last ... ok
+test conformance::tests::a_log_from_another_revision_or_without_conformance_mode_fails_the_run ... ok
+test conformance::tests::a_lost_build_fails_the_run_and_stops_there ... ok
+test conformance::tests::a_lost_suite_fails_the_run_and_says_why_even_with_a_clean_partial_log ... ok
+test conformance::tests::a_manifest_mismatch_fails_the_run_in_both_directions ... ok
+test conformance::tests::a_manifest_that_did_not_load_fails_the_run ... ok
+test conformance::tests::a_mapped_test_missing_from_the_log_fails_the_run_by_gate_and_clause ... ok
+test conformance::tests::a_missing_host_manifest_or_evidence_write_fails_the_run ... ok
+test conformance::tests::a_revision_that_is_not_a_commit_is_refused - should panic ... 
+thread 'conformance::tests::a_revision_that_is_not_a_commit_is_refused' (36199891) panicked at crates/xtask/src/conformance.rs:328:5:
+the suite's revision must be a 40-hex commit, optionally +dirty: main; rm -rf /
+ok
+test conformance::tests::a_signal_killed_step_is_a_failure_and_says_so ... ok
+test conformance::tests::a_skipped_live_test_fails_the_run ... ok
+test conformance::tests::a_smoke_session_already_inside_the_user_manager_proves_nothing ... ok
+test conformance::tests::a_source_path_that_already_ends_in_a_slash_is_not_doubled ... ok
+test conformance::tests::a_step_that_ends_is_done_with_its_own_status ... ok
+test conformance::tests::a_step_that_never_ends_times_out ... ok
+test conformance::tests::a_stop_names_this_run_only ... ok
+test conformance::tests::a_suite_command_with_a_double_quote_is_refused - should panic ... 
+thread 'conformance::tests::a_suite_command_with_a_double_quote_is_refused' (36199899) panicked at crates/xtask/src/conformance.rs:323:5:
+a suite command cannot contain a double quote: echo "hi"
+ok
+test conformance::tests::a_suite_log_without_the_scrubbed_path_fails_i01 ... ok
+test conformance::tests::absent_vanished_and_unreadable_end_the_wait_at_once ... ok
+test conformance::tests::an_acceptance_map_that_did_not_load_fails_the_run ... ok
+test conformance::tests::an_empty_or_unreadable_test_log_fails_the_run ... ok
+test conformance::tests::an_i01_finding_or_a_missing_probe_fails_the_run ... ok
+test conformance::tests::consecutive_failed_checks_lose_contact_and_say_why ... ok
+test conformance::tests::doctors_build_provenance_must_name_the_tested_clean_optimised_build ... ok
+test conformance::tests::dropped_checks_are_retried_and_contact_survives_them ... ok
+test conformance::tests::each_earlier_step_fails_the_run_and_stops_the_later_ones ... ok
+test conformance::tests::every_driver_check_is_derived_from_its_own_step ... ok
+test conformance::tests::every_ending_but_done_is_a_problem ... ok
+test conformance::tests::every_way_a_smoke_step_can_fail_is_named ... ok
+test conformance::tests::i01_a_clean_probe_has_no_problems ... ok
+test conformance::tests::i01_a_silent_partial_or_foreign_probe_is_a_problem_not_a_pass ... ok
+test conformance::tests::i01_anything_found_is_a_problem_that_names_it ... ok
+test conformance::tests::i01_the_probe_also_looks_where_cargo_install_puts_binaries ... ok
+test conformance::tests::i01_the_probe_uses_the_suite_path_and_names_every_candidate ... ok
+test conformance::tests::i01_the_suite_runs_with_only_the_system_directories_on_its_path_and_says_so ... ok
+test conformance::tests::keep_remote_is_honoured_on_a_clean_run_and_never_invents_a_directory ... ok
+test conformance::tests::known_hosts_is_added_only_when_given ... ok
+test conformance::tests::no_local_path_reaches_a_failure_message ... ok
+test conformance::tests::only_a_well_formed_stamp_older_than_the_cutoff_is_pruned ... ok
+test conformance::tests::rsync_excludes_target_and_git_and_ends_the_source_with_a_slash ... ok
+test conformance::tests::rsync_transport_quotes_whitespace_and_both_quote_kinds ... ok
+test conformance::tests::run_directory_names_sort_and_stay_shell_safe ... ok
+test conformance::tests::shell_safety_rejects_what_would_need_quoting ... ok
+test conformance::tests::ssh_options_are_batch_and_strict_and_never_learn_a_host_key ... ok
+test conformance::tests::status_checks_parse_strictly ... ok
+test conformance::tests::the_build_and_test_steps_carry_identical_provenance_claims ... ok
+test conformance::tests::the_contract_validator_is_run_with_uv_from_the_worktree ... ok
+test conformance::tests::the_doctor_command_keeps_its_own_exit_status ... ok
+test conformance::tests::the_i02_scan_gates_the_run ... ok
+test conformance::tests::the_printed_run_path_is_pasteable_and_the_shell_one_expands ... ok
+test conformance::tests::the_remote_commands_use_the_account_cargo_and_two_jobs ... ok
+test conformance::tests::the_remote_scan_runs_before_the_suite_and_uses_the_account_cargo ... ok
+test conformance::tests::the_rsync_excludes_are_anchored_and_cover_the_local_evidence ... ok
+test conformance::tests::the_smoke_leg_runs_in_the_plain_session_and_never_in_a_driver_scope ... ok
+test conformance::tests::the_ssh_argv_ends_with_the_destination_then_the_command ... ok
+test conformance::tests::the_suite_does_not_stop_at_the_first_failing_binary ... ok
+test conformance::tests::the_test_command_forbids_skips_and_names_both_binaries ... ok
+test conformance::tests::the_verdict_the_driver_writes_is_the_one_it_decides_on ... ok
+test freeze::tests::a_revision_outside_heads_history_is_refused ... ok
+test freeze::tests::a_stale_tested_run_is_dropped_and_a_valid_one_kept ... ok
+test freeze::tests::a_tested_run_is_validated_strictly ... ok
+test freeze::tests::a_tested_section_copies_the_host_and_names_what_was_unknown ... ok
+test freeze::tests::const_lists_are_read_as_written ... ok
+test freeze::tests::digests_are_read_in_table_order ... ok
+test freeze::tests::sha256_is_lowercase_hex ... ok
+test freeze::tests::the_tree_generates_a_parseable_freeze ... ok
+test freeze::tests::with_git_the_revision_is_checked_against_its_own_tree ... ok
+test gates::tests::a_clause_in_a_lane_that_was_not_evaluated_is_elsewhere_not_passed ... ok
+test gates::tests::a_clause_with_no_evidence_fails_unless_it_is_a_recorded_limit ... ok
+test gates::tests::a_clause_without_an_id_merges_by_its_exact_text_or_is_new ... ok
+test gates::tests::a_clean_run_of_the_mini_map_passes_and_the_credential_gate_is_not_evaluated ... ok
+test gates::tests::a_credential_clause_belongs_only_to_a_credential_gate ... ok
+test gates::tests::a_driver_check_proves_only_the_clauses_it_measures ... ok
+test gates::tests::a_gate_the_map_lacks_fails ... ok
+test gates::tests::a_limit_must_cite_a_passage_of_an_existing_document_section ... ok
+test gates::tests::a_limit_passage_matches_across_line_breaks ... ok
+test gates::tests::a_log_is_clean_only_with_a_summary_per_binary_and_no_anomaly ... ok
+test gates::tests::a_malformed_map_is_refused_with_every_problem ... ok
+test gates::tests::a_map_that_drifts_from_the_spec_is_named ... ok
+test gates::tests::a_mapped_test_that_is_absent_failed_or_ignored_fails_its_gate ... ok
+test gates::tests::a_merge_cannot_raise_a_tag_or_leave_a_limit_without_a_new_test ... ok
+test gates::tests::a_merge_that_cites_a_made_up_record_is_refused ... ok
+test gates::tests::a_merge_that_closes_a_clause_with_a_check_it_cannot_prove_is_refused ... ok
+test gates::tests::a_merge_that_names_nothing_real_or_breaks_the_map_is_refused ... ok
+test gates::tests::a_new_clause_is_numbered_after_its_gate_and_placed_with_it ... ok
+test gates::tests::a_rendered_map_parses_back_to_the_same_map ... ok
+test gates::tests::a_result_outside_any_binary_is_a_failure ... ok
+test gates::tests::a_result_printed_after_interleaved_output_belongs_to_the_pending_test ... ok
+test gates::tests::a_skip_line_makes_the_log_unclean ... ok
+test gates::tests::an_untested_clause_fails_whatever_its_lane ... ok
+test gates::tests::bare_test_file_names_are_resolved_to_the_one_crate_that_has_them ... ok
+test gates::tests::checks_count_as_evidence_and_an_absent_check_fails ... ok
+test gates::tests::every_mapped_test_exists_in_the_source_tree ... ok
+test gates::tests::failed_ignored_duplicated_and_unresolved_results_are_kept_apart ... ok
+test gates::tests::gates_txt_names_its_map_its_lanes_and_each_gates_evidence_level ... ok
+test gates::tests::hostile_h1_a_childs_ok_line_does_not_hide_the_tests_failure ... ok
+test gates::tests::hostile_h2_a_crashed_binary_fails_its_tests_the_suite_and_the_run ... ok
+test gates::tests::hostile_h3_a_phantom_result_makes_its_whole_binary_untrusted ... ok
+test gates::tests::hostile_h4_a_failure_glued_to_child_output_is_still_a_failure ... ok
+test gates::tests::hostile_h5_a_log_with_binary_bytes_is_read_not_refused ... ok
+test gates::tests::hostile_h6_two_ignored_doc_blocks_on_one_item_are_one_pinned_test ... ok
+test gates::tests::hostile_h7_a_helpers_own_libtest_run_does_not_take_the_parents_result ... ok
+test gates::tests::hostile_h8_long_lines_unicode_and_a_late_panic_parse ... ok
+test gates::tests::logs_are_judged_together_only_at_one_revision_and_in_conformance_mode ... ok
+test gates::tests::merged_ignored_pins_are_added_once ... ok
+test gates::tests::merging_never_weakens_a_tag_and_a_proved_limit_drops_its_limit ... ok
+test gates::tests::merging_tests_into_an_untested_clause_takes_the_contributors_tag ... ok
+test gates::tests::merging_the_same_new_clause_twice_adds_it_once ... ok
+test gates::tests::test_ids_are_crate_source_and_name ... ok
+test gates::tests::the_base_run_attributes_every_result_and_fails_only_what_it_could_not_prove ... ok
+test gates::tests::the_checked_in_map_is_in_canonical_form ... ok
+test gates::tests::the_checked_in_map_is_well_formed_and_agrees_with_section_fifteen ... ok
+test gates::tests::the_execution_core_dependencies_are_the_reviewed_set ... ok
+test gates::tests::the_ignored_set_is_pinned_in_both_directions ... ok
+test gates::tests::the_j4_ignored_set_is_the_thirteen_the_j4_report_counts ... ok
+test gates::tests::the_j4_log_attributes_every_result_libtest_counted ... ok
+test gates::tests::the_j4_log_under_the_checked_in_map_fails_only_what_it_could_not_prove ... ok
+test gates::tests::the_log_parser_names_tests_by_crate_source_and_libtest_name ... ok
+test gates::tests::the_spec_rows_are_read_from_section_fifteen_only ... ok
+test gates::tests::the_suite_markers_are_read_from_the_log ... ok
+test i02::tests::a_directory_symlink_is_named_and_not_followed ... ok
+test i02::tests::a_planted_hit_in_a_temp_tree_is_reported_and_a_clean_tree_is_not ... ok
+test i02::tests::a_token_inside_an_identifier_still_counts ... ok
+test i02::tests::a_vendor_named_dependency_and_a_build_script_are_caught ... ok
+test i02::tests::an_absent_root_is_reported_as_absent_not_as_clean ... ok
+test i02::tests::clean_content_and_non_utf8_bytes_produce_nothing ... ok
+test i02::tests::every_forbidden_token_is_found_in_any_case ... ok
+test i02::tests::line_numbers_are_one_based_and_exact ... ok
+test manifest::tests::a_capability_that_improved_is_still_a_deviation ... ok
+test manifest::tests::a_manifest_with_an_unknown_status_is_refused ... ok
+test manifest::tests::a_matching_report_passes_every_row ... ok
+test manifest::tests::a_missing_capability_fails_rather_than_being_ignored ... ok
+test manifest::tests::a_skipped_probe_never_satisfies_a_required_capability ... ok
+test manifest::tests::all_four_doctor_shapes_are_understood ... ok
+test manifest::tests::an_empty_doctor_report_fails_everything ... ok
+test manifest::tests::an_unrecognised_shape_yields_nothing_rather_than_a_guess ... ok
+test manifest::tests::the_checked_in_manifest_loads_and_is_not_empty ... ok
+test manifest::tests::unlisted_capabilities_are_surfaced_but_not_failures ... ok
+test perf::tests::a_budget_is_strict_and_short_samples_are_insufficient ... ok
+test perf::tests::a_distribution_sorts_its_input_and_drops_non_finite_values ... ok
+test perf::tests::a_flagged_launch_counts_and_is_shown_as_flagged ... ok
+test perf::tests::a_jailed_launch_needs_one_settled_receipt_of_its_own_arm ... ok
+test perf::tests::a_launch_that_did_not_run_or_report_is_excluded ... ok
+test perf::tests::a_missing_baseline_yields_no_numbers_and_an_insufficient_verdict ... ok
+test perf::tests::a_record_round_trips_through_its_line ... ok
+test perf::tests::a_trace_that_is_not_a_complete_transcript_excludes ... ok
+test perf::tests::added_startup_and_overhead_are_against_the_baseline_median ... ok
+test perf::tests::an_excluded_launch_is_counted_and_never_averaged ... ok
+test perf::tests::complete_launches_are_valid ... ok
+test perf::tests::cpu_pressure_is_read_from_the_some_line ... ok
+test perf::tests::direct_execution_must_exit_zero ... ok
+test perf::tests::errors_gaps_and_degradation_exclude ... ok
+test perf::tests::every_arm_runs_once_per_round_in_a_seeded_order ... ok
+test perf::tests::gaps_and_their_losses_are_summed ... ok
+test perf::tests::observation_on_needs_an_attached_observer_and_the_whole_closed_set ... ok
+test perf::tests::only_the_fixed_workload_against_direct_has_an_overhead_verdict ... ok
+test perf::tests::p95_is_the_nearest_rank ... ok
+test perf::tests::review_e::a_foreign_record_schema_is_refused ... ok
+test perf::tests::review_e::a_run_refuses_a_non_empty_out ... ok
+test perf::tests::review_e::a_seeded_order_varies_each_arms_predecessor ... ok
+test perf::tests::review_e::a_silent_undercount_is_excluded ... ok
+test perf::tests::review_e::a_verdict_needs_every_counted_launch_on_a_quiet_host ... ok
+test perf::tests::review_e::an_excluded_launch_keeps_its_attempt ... ok
+test perf::tests::review_e::counts_must_match_the_workload_and_the_trace ... ok
+test perf::tests::review_e::duplicated_records_never_reach_a_verdict ... ok
+test perf::tests::review_e::survivors_of_an_exclusion_get_no_verdict ... ok
+test perf::tests::review_e::teardown_is_in_the_post_start_figure ... ok
+test perf::tests::review_e::the_raw_file_is_checked_before_any_verdict ... ok
+test perf::tests::review_e::the_unconfirmed_flag_accepts_only_exit_1 ... ok
+test perf::tests::startup_needs_one_clock_and_ordered_readings ... ok
+test perf::tests::the_checked_in_receipt_example_reads_as_facts ... ok
+test perf::tests::the_defaults_are_the_spec_s_workloads ... ok
+test perf::tests::the_median_is_the_middle_or_the_mean_of_the_two_middles ... ok
+test perf::tests::the_observe_off_exec_limit_is_flagged_not_hidden_and_only_off ... ok
+test perf::tests::the_outcome_must_be_exit_zero_and_the_jail_must_agree ... ok
+test perf::tests::the_report_states_both_comparisons_and_the_decision ... ok
+test perf::tests::the_scope_pass_is_re_executed_with_the_same_parameters ... ok
+test perf::tests::the_session_must_be_the_one_measured ... ok
+test perf::tests::the_target_lines_are_read_by_op ... ok
+test perf::tests::the_user_manager_is_recognised_by_its_unit_component ... ok
+test perf::tests::timings_follow_the_four_readings ... ok
+test perf::tests::validity_is_recomputed_not_trusted_from_the_record ... ok
+test perf::tests::verdicts_fail_at_the_budget_and_need_thirty_on_both_sides ... ok
+test stamp::tests::known_instants_convert_exactly ... ok
+test stamp::tests::leap_days_and_year_boundaries_are_right ... ok
+test stamp::tests::now_is_after_this_slice_was_written ... ok
+test stamp::tests::stamps_sort_chronologically_as_strings ... ok
+
+test result: ok. 195 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+   Doc-tests ouro_fixture
+
+running 1 test
+test crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail (line 84) ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.36s; merged doctests compilation took 0.15s
+   Doc-tests ouro_jail
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

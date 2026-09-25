@@ -1,0 +1,59 @@
+ouro.jail.gate-verdict/1: acceptance verdict over the linux and macos log(s), map docs/specs/jail-v1/acceptance-map.toml
+lanes combined: linux (revision 4380241f3195bcc73a5186282400eda3b174ee41, OURO_CONFORMANCE=1) + macos (revision 4380241f3195bcc73a5186282400eda3b174ee41, OURO_CONFORMANCE=1)
+evidence: how each gate's clauses are proved (live-cli, live-lib, portable, simulated, recorded-limit, untested); a pass is only as strong as its column
+
+gate  status       clauses   evidence                                     detail
+P01   pass         8/8       live-cli×2 portable×6                        
+P02   pass         13/13     live-cli×1 portable×12                       
+P03   pass         2/2       live-cli×2                                   
+P04   pass         9/9       live-cli×6 live-lib×1 portable×2             
+X01   pass         1/1       live-cli×1                                   
+X02   pass         9/9       live-cli×8 portable×1                        
+X03   pass         3/3       live-cli×3                                   
+X04   pass         3/3       live-cli×3                                   
+X05   pass+limits  4/4       live-cli×3 recorded-limit×1                  X05.4 recorded limit
+X06   pass         4/4       live-cli×4                                   
+X07   pass         2/2       live-cli×2                                   
+F01   pass         4/4       live-cli×3 live-lib×1                        
+F02   pass         4/4       live-cli×3 live-lib×1                        
+F03   pass         3/3       live-cli×3                                   
+F04   pass         3/3       live-cli×2 live-lib×1                        
+S01   pass         3/3       live-cli×3                                   
+S02   pass         6/6       live-cli×6                                   
+S03   pass+limits  5/5       live-cli×4 recorded-limit×1                  S03.2 recorded limit
+S04   pass         7/7       live-cli×7                                   
+N01   pass         2/2       live-cli×2                                   
+N02   pass         2/2       live-cli×2                                   
+N03   pass         9/9       live-cli×1 portable×8                        
+N04   pass         5/5       live-cli×5                                   
+N05   pass         8/8       live-cli×8                                   
+O01   pass         2/2       live-cli×2                                   
+O02   pass         10/10     live-cli×4 live-lib×4 simulated×2            
+O03   pass         6/6       live-cli×1 live-lib×1 simulated×4            
+O04   pass         3/3       live-cli×3                                   
+O05   pass         5/5       live-cli×4 simulated×1                       
+O06   pass         5/5       live-cli×5                                   
+L01   pass         12/12     live-cli×12                                  
+L02   pass+limits  11/11     live-cli×8 live-lib×2 recorded-limit×1       L02.6 recorded limit
+L03   pass+limits  7/7       live-cli×3 live-lib×2 portable×1 recorded-limit×1 L03.6 recorded limit
+L04   pass         6/6       live-cli×3 simulated×3                       
+L05   pass         2/2       simulated×2                                  
+R01   pass         11/11     live-cli×3 portable×7 simulated×1            
+R02   pass         4/4       live-cli×2 simulated×2                       
+R03   pass+limits  8/8       live-cli×4 portable×1 simulated×2 recorded-limit×1 R03.6 recorded limit
+R04   pass         5/5       live-cli×3 simulated×2                       
+R05   pass         3/3       live-cli×3                                   
+R06   pass+limits  6/6       live-cli×5 recorded-limit×1                  R06.3 recorded limit
+C01   pass+limits  6/6       live-cli×2 portable×3 recorded-limit×1       C01.6 recorded limit
+C02   pass         5/5       live-cli×5                                   
+C03   pass         7/7       live-cli×3 portable×1 simulated×3            
+M01   pass         3/3       live-cli×2 portable×1                        
+M02   pass         4/4       portable×4                                   
+M03   pass         5/5       live-cli×3 portable×2                        
+I01   pass         3/3       live-cli×3                                   
+I02   pass         4/4       portable×4                                   
+I03   pass         4/4       live-cli×4                                   
+A01   credential   0/1       credential×1                                 A01.1 needs a real agent
+
+gates: 1 credential, 43 pass, 7 pass+limits
+every noncredential gate passes in these lanes: yes

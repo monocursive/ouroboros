@@ -1,0 +1,4 @@
+smoke cgroup 0::/user.slice/user-1001.slice/session-8798.scope
+smoke tool 0
+smoke none 0
+smoke doctor 0
