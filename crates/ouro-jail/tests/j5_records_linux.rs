@@ -581,11 +581,307 @@ fn rfc3339_seconds_matches_known_times() {
     assert_eq!(rfc3339_seconds("2026-09-25T00:15:36Z"), 1_790_295_336);
 }
 
-/// Returns the trace's state and how many whole frames reached the consumer.
-fn wall_under_partial_writes(pause_ms: u64) -> (ouro_fixture::harness::TraceState, usize) {
-    const WRITE_MAX: usize = 64;
-    let mut c = case_with(Profile::Tool, "best-effort", &["--limit", "wall=2s"]);
-    let base = c.base();
+// J5-C wave 4 (review rev-late F2): the trace fd is a SOCK_SEQPACKET socket,
+// which keeps every write(2) the jail makes as one message, so the write size
+// the release binary uses is visible to the consumer. A pipe reassembles the
+// pieces, which is how the wave-3 version of these tests passed with the seam
+// dropped by the supervisor (the review's M2).
+
+/// The seam's cap in these runs.
+const WRITE_MAX: usize = 64;
+
+/// The descriptor number the wrapper gives the jail's end of the socket.
+const TRACE_FD: i32 = 63;
+
+/// Connects a SOCK_SEQPACKET socket to `argv[1]`, puts it on fd 63 and execs
+/// `argv[2..]` (the jail): `--trace-fd 63` is then the test's socket.
+const SEQPACKET_WRAPPER: &str = "import os, socket, sys\n\
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)\n\
+    s.connect(sys.argv[1])\n\
+    os.dup2(s.fileno(), 63)\n\
+    os.execv(sys.argv[2], sys.argv[2:])\n";
+
+fn seqpacket_listener(path: &Path) -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: plain socket calls on a zeroed address this function owns.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0);
+        assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+        let owned = std::os::fd::OwnedFd::from_raw_fd(fd);
+        let mut address: libc::sockaddr_un = std::mem::zeroed();
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        assert!(bytes.len() < address.sun_path.len(), "{}", path.display());
+        for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as libc::c_char;
+        }
+        let length =
+            libc::socklen_t::try_from(std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1)
+                .unwrap();
+        assert_eq!(
+            libc::bind(fd, (&raw const address).cast(), length),
+            0,
+            "bind: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(libc::listen(fd, 1), 0, "listen");
+        owned
+    }
+}
+
+/// Waits up to `millis` for `fd` to be readable.
+fn readable_within(fd: i32, millis: i32) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one live pollfd.
+    unsafe { libc::poll(&raw mut pollfd, 1, millis) == 1 }
+}
+
+/// Bytes queued on the socket's receive side (SIOCINQ sums every queued
+/// message of a SOCK_SEQPACKET socket).
+fn queued_bytes(fd: i32) -> usize {
+    let mut queued: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one int.
+    let status = unsafe { libc::ioctl(fd, libc::FIONREAD, &raw mut queued) };
+    assert_eq!(status, 0, "FIONREAD: {}", std::io::Error::last_os_error());
+    usize::try_from(queued).unwrap()
+}
+
+/// One message, consumed (`peek` false) or peeked at the socket's peek
+/// offset; `None` when nothing is queued (`MSG_DONTWAIT`) or at end of file.
+fn receive(fd: i32, buffer: &mut [u8], peek: bool, wait: bool) -> Option<Vec<u8>> {
+    let mut flags = libc::MSG_TRUNC;
+    if peek {
+        flags |= libc::MSG_PEEK;
+    }
+    if !wait {
+        flags |= libc::MSG_DONTWAIT;
+    }
+    loop {
+        // SAFETY: `buffer` is live and writable for its length.
+        let received = unsafe { libc::recv(fd, buffer.as_mut_ptr().cast(), buffer.len(), flags) };
+        if received < 0 {
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => return None,
+                _ => panic!("recv: {error}"),
+            }
+        }
+        let length = usize::try_from(received).unwrap();
+        assert!(
+            length <= buffer.len(),
+            "a {length}-byte message was truncated"
+        );
+        return (length > 0).then(|| buffer[..length].to_vec());
+    }
+}
+
+fn set_peek_offset(fd: i32, offset: libc::c_int) {
+    // SAFETY: one int option.
+    let status = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEEK_OFF,
+            (&raw const offset).cast(),
+            libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap(),
+        )
+    };
+    assert_eq!(
+        status,
+        0,
+        "SO_PEEK_OFF: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// How the consumer reads.
+#[derive(Clone, Copy, Debug)]
+enum Pace {
+    /// Slow but live: a 20 ms pause after every 64 messages.
+    Live,
+    /// Live, until it has `after` messages; then it stops reading until the
+    /// jail is blocked with a frame partly written (see [`Held`]), keeps that
+    /// stall for `hold`, and reads live again.
+    HoldMidFrame {
+        after: usize,
+        hold: std::time::Duration,
+    },
+}
+
+/// A frame the jail held partly written while the consumer stalled.
+#[derive(Clone, Debug)]
+struct Held {
+    /// Where the jail's writes stopped: every byte before this offset was
+    /// written (read or queued), and none after it, for the whole stall.
+    offset: usize,
+    /// How much of the unfinished frame was written by then.
+    written: usize,
+    /// How long the stall was held once the jail was seen blocked there.
+    held_for: std::time::Duration,
+}
+
+/// Everything the consumer received: one entry per `write(2)` of the jail.
+struct Received {
+    messages: Vec<Vec<u8>>,
+    held: Option<Held>,
+}
+
+impl Received {
+    fn stream(&self) -> Vec<u8> {
+        self.messages.concat()
+    }
+}
+
+/// The bytes after the last LF of `stream`: an unfinished frame.
+fn unfinished(stream: &[u8]) -> usize {
+    stream.len()
+        - stream
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |at| at + 1)
+}
+
+/// Accepts the jail's connection and reads until end of file at `pace`.
+fn consume(listener: &std::os::fd::OwnedFd, pace: Pace) -> Received {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    assert!(
+        readable_within(listener.as_raw_fd(), 30_000),
+        "the jail never connected its trace fd"
+    );
+    // SAFETY: accept on a listening socket this test owns.
+    let connection = unsafe {
+        let fd = libc::accept4(
+            listener.as_raw_fd(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_CLOEXEC,
+        );
+        assert!(fd >= 0, "accept: {}", std::io::Error::last_os_error());
+        std::os::fd::OwnedFd::from_raw_fd(fd)
+    };
+    let fd = connection.as_raw_fd();
+    let mut buffer = vec![0u8; 128 * 1024];
+    let mut received = Received {
+        messages: Vec::new(),
+        held: None,
+    };
+    let mut hold = match pace {
+        Pace::Live => None,
+        Pace::HoldMidFrame { after, hold } => Some((after, hold)),
+    };
+    loop {
+        if let Some((after, duration)) = hold
+            && received.messages.len() >= after
+        {
+            received.held = Some(hold_mid_frame(fd, &mut buffer, &mut received, duration));
+            hold = None;
+        }
+        assert!(
+            readable_within(fd, 60_000),
+            "the trace fd was silent for a minute"
+        );
+        let Some(message) = receive(fd, &mut buffer, false, true) else {
+            break;
+        };
+        received.messages.push(message);
+        if received.messages.len().is_multiple_of(64) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    received
+}
+
+/// Stops reading until the jail is blocked with a frame partly written, then
+/// holds the stall for `duration`.
+///
+/// The writer flushes whole queued frames in capped pieces until a write
+/// would block, so it stops mid-frame only when the socket is full. The
+/// consumer waits until the queued byte count stops changing, then peeks
+/// (without consuming) at every queued message: if they end mid-frame, the
+/// jail is holding that frame's rest. If they end on a frame boundary (the
+/// block fell between frames, or the target was between batches), one
+/// message is consumed, which frees room for about one more piece, and the
+/// check repeats. Once held, the stall lasts `duration`, and the queued
+/// count must not have moved: the jail wrote nothing more of that frame.
+fn hold_mid_frame(
+    fd: i32,
+    buffer: &mut [u8],
+    received: &mut Received,
+    duration: std::time::Duration,
+) -> Held {
+    let started = std::time::Instant::now();
+    loop {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the jail was never seen blocked with a frame partly written"
+        );
+        // Stable: unchanged over 100 ms.
+        let mut queued = queued_bytes(fd);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let now = queued_bytes(fd);
+            if now == queued {
+                break;
+            }
+            queued = now;
+        }
+        let mut stream = received.stream();
+        if queued > 0 {
+            set_peek_offset(fd, 0);
+            let mut peeked = 0;
+            while peeked < queued {
+                let message = receive(fd, buffer, true, false).expect("a queued message");
+                peeked += message.len();
+                stream.extend_from_slice(&message);
+            }
+            set_peek_offset(fd, -1);
+            assert_eq!(peeked, queued, "the peeked messages are the queued bytes");
+        }
+        let written = unfinished(&stream);
+        if written > 0 && queued > 0 {
+            std::thread::sleep(duration);
+            assert_eq!(
+                queued_bytes(fd),
+                queued,
+                "the jail wrote more while it was supposed to be blocked"
+            );
+            return Held {
+                offset: stream.len(),
+                written,
+                held_for: duration,
+            };
+        }
+        match receive(fd, buffer, false, false) {
+            Some(message) => received.messages.push(message),
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
+
+/// One `tool` attempt with a 2 s wall whose fixture opens files in batches
+/// for longer than the wall, traced into a SOCK_SEQPACKET socket under the
+/// write-size seam; the consumer reads at `pace`. Returns the run, what the
+/// consumer received and the final receipt, once the wall is shown to have
+/// fired on time and every message to be one capped piece of one frame.
+fn wall_under_partial_writes(pace: Pace) -> (Run, Received, Value) {
+    let jail = Jail::with_program(PYTHON)
+        .expect("a private harness")
+        .args(["-c", SEQPACKET_WRAPPER]);
+    let socket = jail.root().join("trace.sock");
+    let listener = seqpacket_listener(&socket);
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = workspace.join("ouro-fixture");
+    std::fs::copy(harness::fixture_path(), &fixture).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let base = workspace.to_str().unwrap().to_owned();
     let mut steps: Vec<Value> = Vec::new();
     for batch in 0..40 {
         for index in 0..30 {
@@ -599,24 +895,43 @@ fn wall_under_partial_writes(pause_ms: u64) -> (ouro_fixture::harness::TraceStat
         steps.push(serde_json::json!(["sleep", "100"]));
     }
     steps.push(serde_json::json!(["sleep", "30000"]));
-    c.jail = c
-        .jail
+    let script = workspace.join("j5c.json");
+    std::fs::write(&script, serde_json::to_vec(&Value::from(steps)).unwrap()).unwrap();
+    let consumer = std::thread::spawn(move || consume(&listener, pace));
+    let run = jail
+        .arg(&socket)
+        .arg(harness::jail_path())
+        .arg("run")
+        .args([
+            "--profile",
+            "tool",
+            "--evidence",
+            "best-effort",
+            "--limit",
+            "wall=2s",
+            "--workspace",
+        ])
+        .arg(&workspace)
+        .args(["--trace-fd", &TRACE_FD.to_string()])
         .env(ouro_jail::trace::TRACE_FD_WRITE_SEAM, WRITE_MAX.to_string())
-        .trace_consumer(TraceConsumer::Slow {
-            chunk: 4096,
-            pause: std::time::Duration::from_millis(pause_ms),
-        });
-    let run = c.run(&Value::from(steps), &Release::Valid);
-    let receipts = run.receipts();
-    for receipt in &receipts {
-        common::check_receipt(receipt).unwrap_or_else(|error| panic!("{error}\n{receipt:#}"));
-    }
-    let last = receipts.last().expect("a receipt");
-    assert_eq!(
-        last["outcome"]["cause"], "wall_expiry",
-        "{:#}",
-        last["outcome"]
-    );
+        .control()
+        .receipt()
+        .target([
+            fixture.into_os_string(),
+            OsString::from("script"),
+            script.into_os_string(),
+        ])
+        .run()
+        .expect("the jail runs");
+    let received = consumer.join().expect("the consumer");
+    // Receipts and the control transcript: the whole contract.
+    common::assert_run_records(&run);
+    let last = run
+        .receipts()
+        .into_iter()
+        .max_by_key(|receipt| receipt["revision"].as_u64().unwrap_or(0))
+        .expect("a receipt");
+    assert_eq!(last["outcome"]["cause"], "wall_expiry", "{}", explain(&run));
     let wall = last["applied"]["limits"]
         .as_array()
         .and_then(|limits| limits.iter().find(|limit| limit["key"] == "wall"))
@@ -625,11 +940,10 @@ fn wall_under_partial_writes(pause_ms: u64) -> (ouro_fixture::harness::TraceStat
         wall["hit"], true,
         "the receipt records the wall's hit: {wall}"
     );
-    // On the product's own clock (the harness's elapsed time also counts its
-    // slow consumer reading what the pipe still holds after the jail exits):
-    // the tree was verified dead soon after the 2 s wall, and the final
-    // receipt, written after the terminal drain's one-second budget, soon
-    // after that. Whole seconds, so the bounds carry a second of rounding.
+    // On the product's own clock: the tree was verified dead soon after the
+    // 2 s wall, and the final receipt, written after the terminal drain's
+    // one-second budget, soon after that. Whole seconds, so the bounds carry
+    // a second of rounding.
     assert_eq!(
         last["phase"], "settled",
         "the wall's stop ended the tree and it was verified dead: {:#}",
@@ -658,126 +972,201 @@ fn wall_under_partial_writes(pause_ms: u64) -> (ouro_fixture::harness::TraceStat
         WRITE_MAX.to_string(),
         "the seam is recorded in the receipt"
     );
-    let readback = run.trace_readback.as_ref().expect("a trace fd was used");
-    // Every frame the consumer got was longer than one write: each was
-    // reassembled from its pieces at their offsets.
-    for frame in &readback.frames {
-        let length = serde_json::to_vec(frame).expect("serializes").len();
-        assert!(length > WRITE_MAX, "a {length}-byte frame fits one write");
+    // The seam as the release binary applied it: every write(2) was at most
+    // the cap, and lay inside one frame (the writer moves one frame at a
+    // time, resuming it at its offset).
+    assert!(!received.messages.is_empty(), "nothing was traced");
+    for (index, message) in received.messages.iter().enumerate() {
+        assert!(
+            message.len() <= WRITE_MAX,
+            "write {index} was {} bytes: the seam's cap of {WRITE_MAX} was not applied",
+            message.len()
+        );
+        assert!(
+            !message[..message.len() - 1].contains(&b'\n'),
+            "write {index} spans two frames"
+        );
     }
-    match readback.state {
-        ouro_fixture::harness::TraceState::Complete => {
-            common::assert_run_records(&run);
-            let events = run.trace_events();
-            let lost = events
-                .iter()
-                .any(|event| event["fields"]["reason"] == "trace_transport_loss");
-            if lost {
-                // A complete stream that records its own loss (the loss note
-                // and the final notes came through; frames in between did
-                // not, and `trace_loss_recorded` held): the receipt says so.
-                assert!(
-                    last["errors"].as_array().is_some_and(|errors| errors
-                        .iter()
-                        .any(|error| error["code"] == "evidence_lost")),
-                    "a recorded trace loss is an evidence_lost error: {:#}",
-                    last["errors"]
-                );
-                eprintln!(
-                    "complete with a recorded loss: {} frames",
-                    readback.frames.len()
-                );
-                return (readback.state, readback.frames.len());
-            }
-            let at = |pick: &dyn Fn(&Value) -> bool| -> u128 {
-                events
-                    .iter()
-                    .find(|event| pick(event))
-                    .and_then(|event| event["monotonic_ns"].as_str())
-                    .and_then(|ns| ns.parse().ok())
-                    .unwrap_or_else(|| panic!("the event is missing from the trace"))
-            };
-            let target = last["process"]["pid"].as_i64().expect("the target's pid");
-            let exec = at(&|event| event["fields"]["transition"] == "exec_confirmed");
-            let exit = at(&|event| {
-                event["operation"] == "proc.exit" && event["fields"]["pid"].as_i64() == Some(target)
-            });
-            assert!(
-                exit.saturating_sub(exec) < 3_500_000_000,
-                "the target ended {} ms after its exec: the wall was late",
-                exit.saturating_sub(exec) / 1_000_000
-            );
-            eprintln!(
-                "complete: {} frames, target lifetime {} ms",
-                readback.frames.len(),
-                exit.saturating_sub(exec) / 1_000_000
-            );
-        }
-        ouro_fixture::harness::TraceState::Incomplete => {
-            // Honestly marked: a visibly incomplete tail, and the loss in the
-            // receipt, never a silent one.
-            assert!(
-                last["errors"].as_array().is_some_and(|errors| errors
-                    .iter()
-                    .any(|error| error["code"] == "evidence_lost")),
-                "an incomplete trace is an evidence_lost error: {:#}",
-                last["errors"]
-            );
-            assert_eq!(last["observer"]["sources"]["wrapper"], "degraded");
-            for frame in &readback.frames {
-                let errors: Vec<String> = common::validators()["jail-event"]
-                    .iter_errors(frame)
-                    .map(|error| error.to_string())
-                    .collect();
-                assert!(
-                    errors.is_empty(),
-                    "a delivered frame is a valid event: {errors:?}"
-                );
-            }
-            eprintln!(
-                "incomplete (the drain budget ran out): {} frames delivered",
-                readback.frames.len()
-            );
-        }
-        other => panic!("the trace is {other:?}"),
+    // Every complete line is a valid event; only the last, unterminated one
+    // may be partial: a torn frame anywhere else would join the next one on
+    // its line and fail to parse.
+    let stream = received.stream();
+    let complete = stream.len() - unfinished(&stream);
+    let lines: Vec<&[u8]> = stream[..complete]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut pieces = 0;
+    for (index, line) in lines.iter().enumerate() {
+        assert!(
+            line.len() + 1 > WRITE_MAX,
+            "frame {index} fits one write, so it proves nothing about pieces"
+        );
+        pieces += (line.len() + 1).div_ceil(WRITE_MAX);
+        let event: Value = serde_json::from_slice(line).unwrap_or_else(|error| {
+            panic!(
+                "frame {index} is torn or corrupt ({error}): {}",
+                String::from_utf8_lossy(line)
+            )
+        });
+        let errors: Vec<String> = common::validators()["jail-event"]
+            .iter_errors(&event)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(errors.is_empty(), "frame {index}: {errors:?}");
     }
-    (readback.state, readback.frames.len())
+    assert!(
+        received.messages.len() >= pieces,
+        "{} writes for frames that need at least {pieces} capped pieces",
+        received.messages.len()
+    );
+    eprintln!(
+        "{} frames in {} writes of at most {WRITE_MAX} bytes, {} unfinished bytes at the end",
+        lines.len(),
+        received.messages.len(),
+        stream.len() - complete
+    );
+    (run, received, last)
 }
 
-/// The consumer keeps up (a 4 KiB read every 20 ms): the backlog is small,
-/// the terminal drain delivers it, and the trace is every frame reassembled
-/// from its pieces, with the target's own end 2 s after its exec.
+/// The events of every complete line of `stream`.
+fn events_of(stream: &[u8]) -> Vec<Value> {
+    let complete = stream.len() - unfinished(stream);
+    stream[..complete]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("a parsed frame"))
+        .collect()
+}
+
+fn has_error(receipt: &Value, code: &str) -> bool {
+    receipt["errors"]
+        .as_array()
+        .is_some_and(|errors| errors.iter().any(|error| error["code"] == code))
+}
+
+/// The consumer keeps up (a 20 ms pause every 64 messages): every frame
+/// reaches it, written in pieces of at most the seam's cap, the stream is
+/// complete and passes the frozen contract, and the target's own end comes
+/// 2 s after its exec.
 #[test]
 fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
-    if !Profile::Tool.available() {
+    if !Profile::Tool.available() || !Path::new(PYTHON).is_file() {
         return;
     }
+    let (_run, received, last) = wall_under_partial_writes(Pace::Live);
+    let stream = received.stream();
     assert_eq!(
-        wall_under_partial_writes(20).0,
-        ouro_fixture::harness::TraceState::Complete,
+        unfinished(&stream),
+        0,
         "a consumer that keeps up gets every frame"
+    );
+    let events = events_of(&stream);
+    common::check_trace(&events, Some(&last))
+        .unwrap_or_else(|error| panic!("the trace fails its contract: {error}"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["fields"]["reason"] == "trace_transport_loss"),
+        "a consumer that keeps up loses nothing"
+    );
+    assert!(!has_error(&last, "evidence_lost"), "{:#}", last["errors"]);
+    let at = |pick: &dyn Fn(&Value) -> bool| -> u128 {
+        events
+            .iter()
+            .find(|event| pick(event))
+            .and_then(|event| event["monotonic_ns"].as_str())
+            .and_then(|ns| ns.parse().ok())
+            .unwrap_or_else(|| panic!("the event is missing from the trace"))
+    };
+    let target = last["process"]["pid"].as_i64().expect("the target's pid");
+    let exec = at(&|event| event["fields"]["transition"] == "exec_confirmed");
+    let exit = at(&|event| {
+        event["operation"] == "proc.exit" && event["fields"]["pid"].as_i64() == Some(target)
+    });
+    assert!(
+        exit.saturating_sub(exec) < 3_500_000_000,
+        "the target ended {} ms after its exec: the wall was late",
+        exit.saturating_sub(exec) / 1_000_000
     );
 }
 
-/// The consumer stalls but stays live (a 4 KiB read every 700 ms, inside the
-/// one-second no-progress deadline): the pipe stays full, so the writer waits
-/// with a frame partly written while the wall comes due. The wall fires on
-/// time all the same; the backlog cannot be delivered within the terminal
-/// drain's budget, so the trace ends visibly incomplete (or complete with its
-/// loss recorded) and the receipt says so, after a prefix of whole frames. A
-/// writer that blocked on its consumer would hold the supervisor for as long
-/// as the consumer stalls (the mutation replay's M4: the wall came 40 s late
-/// and the tree was never verified).
+/// The consumer stops reading while the jail is writing, waits until the
+/// jail is blocked with a frame partly written (proved from the socket
+/// itself, see `hold_mid_frame`), and holds that stall for 1.5 s, past the
+/// one-second no-progress deadline, before reading live again. The wall
+/// fires on time all the same, the receipt records the loss, and the frame
+/// the jail held is either finished intact from its offset (the stream then
+/// records its own loss, or ends visibly incomplete later) or is the visibly
+/// incomplete last line; never a torn frame followed by more bytes. A writer
+/// that blocked on its consumer would hold the supervisor for as long as the
+/// consumer stalls (wave 3's M4: the wall came 40 s late).
 #[test]
 fn j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame() {
-    if !Profile::Tool.available() {
+    if !Profile::Tool.available() || !Path::new(PYTHON).is_file() {
         return;
     }
-    let (state, frames) = wall_under_partial_writes(700);
-    assert_ne!(state, ouro_fixture::harness::TraceState::Corrupt);
-    // At least half a pipe of frames reached the consumer intact: an
-    // incomplete tail is honest only after a prefix of whole frames.
-    assert!(frames >= 64, "only {frames} whole frames were delivered");
+    let (_run, received, last) = wall_under_partial_writes(Pace::HoldMidFrame {
+        after: 64,
+        hold: std::time::Duration::from_millis(1500),
+    });
+    let held = received
+        .held
+        .clone()
+        .expect("the consumer held its stall on a partly written frame");
+    assert!(held.written > 0 && held.written < held.offset, "{held:?}");
+    assert!(
+        held.held_for > std::time::Duration::from_secs(1),
+        "the stall outlasts the one-second no-progress deadline"
+    );
+    eprintln!("held: {held:?}");
+    // Blocked for longer than the deadline with frames queued: a loss.
+    assert!(
+        has_error(&last, "evidence_lost"),
+        "a writer held past its deadline is an evidence loss: {:#}",
+        last["errors"]
+    );
+    let stream = received.stream();
+    let frame_start = held.offset - held.written;
+    let frame_end = stream[frame_start..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|at| frame_start + at);
+    let events = events_of(&stream);
+    match frame_end {
+        Some(end) => {
+            // The held frame was finished from its offset: it is one whole,
+            // valid event (every complete line was validated above).
+            assert!(
+                serde_json::from_slice::<Value>(&stream[frame_start..end]).is_ok(),
+                "the held frame, finished, is one event"
+            );
+            eprintln!(
+                "the held frame ({} bytes, {} written before the stall) was finished",
+                end - frame_start,
+                held.written
+            );
+            if unfinished(&stream) == 0 {
+                // A complete stream records its own loss.
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| event["fields"]["reason"] == "trace_transport_loss"),
+                    "a complete stream after a loss carries the loss note"
+                );
+                common::check_trace(&events, Some(&last))
+                    .unwrap_or_else(|error| panic!("the trace fails its contract: {error}"));
+            } else {
+                assert_eq!(last["observer"]["sources"]["wrapper"], "degraded");
+            }
+        }
+        None => {
+            // Never finished: the held frame is the visibly incomplete end.
+            assert_eq!(unfinished(&stream), stream.len() - frame_start);
+            assert_eq!(last["observer"]["sources"]["wrapper"], "degraded");
+            eprintln!("the held frame is the incomplete end of the stream");
+        }
+    }
 }
 
 // ===========================================================================
