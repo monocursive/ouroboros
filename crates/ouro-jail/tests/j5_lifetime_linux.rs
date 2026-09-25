@@ -1998,3 +1998,47 @@ fn c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resum
     assert_eq!(read("jail-state.json")["state_cleanup"], "complete");
     eprintln!("C02.5: {left} of {FILL_SIZE} entries were left when the supervisor died");
 }
+
+/// L04.4 (the gate budget): §6.4 puts the preparation and gate budgets on
+/// CLOCK_BOOTTIME too. A gated `tool` run is never released; right after
+/// `prepared` the shim advances only CLOCK_BOOTTIME by two minutes, past the
+/// 60-second gate budget. The run refuses with `prepare_timeout` at once
+/// (within 8 s of the jump on the test's own clock), which a gate wait on
+/// CLOCK_MONOTONIC would not do for 60 s.
+#[test]
+fn l04_the_gate_wait_follows_the_boot_clock() {
+    if !common::live() {
+        return;
+    }
+    let (jail, _) = case("tool");
+    let library = build_shim(jail.root());
+    let trigger = jail.root().join("clock-trigger");
+    let jail = jail
+        .timeout(Duration::from_secs(120))
+        .env("LD_PRELOAD", &library)
+        .env("OURO_B3_CLOCK_TRIGGER", &trigger)
+        .env("OURO_B3_CLOCK_ID", libc::CLOCK_BOOTTIME.to_string())
+        .env(
+            "OURO_B3_CLOCK_OFFSET_NS",
+            (2 * 60_000_000_000_i64).to_string(),
+        )
+        .target(["/bin/true"]);
+    let mut attempt = Attempt::start(jail, true);
+    attempt.await_kind("prepared");
+    let jumped = Instant::now();
+    std::fs::write(&trigger, b"").expect("the trigger");
+    let terminal = attempt.await_terminal();
+    let took = jumped.elapsed();
+    let (run, _) = attempt.finish();
+    assert_eq!(terminal["kind"], "refused", "{terminal}");
+    assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+    let receipt = final_receipt(&run);
+    assert_eq!(
+        receipt["outcome"]["error"]["code"], "prepare_timeout",
+        "{receipt:#}"
+    );
+    assert!(
+        took < Duration::from_secs(8),
+        "the gate wait ignored a two-minute CLOCK_BOOTTIME advance: it expired {took:?} after it"
+    );
+}

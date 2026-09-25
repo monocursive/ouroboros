@@ -1138,7 +1138,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             &mut journal,
         ));
     }
-    let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record, budget.deadline) {
+    let launch_handoff = match prepare_launch(
+        &attempt_dir,
+        &plan,
+        &mut record,
+        budget.deadline.as_instant(),
+    ) {
         Ok(handoff) => handoff,
         Err(error) => {
             return Ok(refuse(
@@ -2299,16 +2304,51 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
     Ok(())
 }
 
-/// A monotonic budget with a stage-appropriate refusal (§8.2).
+/// The longest single wait for the gate between deadline checks.
+const GATE_POLL_STEP: Duration = Duration::from_millis(250);
+
+/// A deadline on the platform's continuous clock: `CLOCK_BOOTTIME` on Linux,
+/// so suspend counts and a wall-clock step does not (§6.4: "Linux measures
+/// execution wall, preparation/gate/stop budgets ... using CLOCK_BOOTTIME").
+/// `Instant` is `CLOCK_MONOTONIC`, which stops during suspend.
+#[derive(Clone, Copy, Debug)]
+struct ContinuousDeadline {
+    end_ns: u128,
+}
+
+impl ContinuousDeadline {
+    fn after(budget: Duration) -> Self {
+        ContinuousDeadline {
+            end_ns: crate::platform::elapsed_since_start_ns().saturating_add(budget.as_nanos()),
+        }
+    }
+
+    /// Time left, zero once expired.
+    fn remaining(self) -> Duration {
+        let left = self
+            .end_ns
+            .saturating_sub(crate::platform::elapsed_since_start_ns());
+        Duration::from_nanos(u64::try_from(left).unwrap_or(u64::MAX))
+    }
+
+    /// The same moment as an `Instant`, for a callee that waits on one: the
+    /// time left is read now, on the continuous clock.
+    fn as_instant(self) -> Instant {
+        Instant::now() + self.remaining()
+    }
+}
+
+/// A preparation budget with a stage-appropriate refusal (§8.2), on the
+/// continuous clock (§6.4).
 struct Budget {
-    deadline: Instant,
+    deadline: ContinuousDeadline,
     total: Duration,
 }
 
 impl Budget {
     fn new(total: Duration) -> Self {
         Budget {
-            deadline: Instant::now() + total,
+            deadline: ContinuousDeadline::after(total),
             total,
         }
     }
@@ -2318,7 +2358,7 @@ impl Budget {
     /// # Errors
     /// Returns [`ErrorCode::PrepareTimeout`].
     fn check(&self, stage: ErrorStage) -> Result<(), JailError> {
-        if Instant::now() < self.deadline {
+        if !self.deadline.remaining().is_zero() {
             return Ok(());
         }
         Err(JailError::new(
@@ -3764,7 +3804,7 @@ pub fn await_release(
     // invocation, and `validate_channels` established that it is open for
     // reading and distinct from every other channel.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let deadline = Instant::now() + budget;
+    let deadline = ContinuousDeadline::after(budget);
     // One byte past the maximum, so an oversized frame is detected rather than
     // silently truncated into something that parses.
     let cap = crate::records::GATE_FRAME_MAX + 1;
@@ -3776,7 +3816,7 @@ pub fn await_release(
         {
             return Err(stopped_by_signal(ErrorStage::Prepared));
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.remaining();
         if remaining.is_zero() {
             return Err(JailError::new(
                 ErrorCode::PrepareTimeout,
@@ -3789,7 +3829,10 @@ pub fn await_release(
             ));
         }
         let signal_fd = signals.map(signals::SignalPipe::as_raw_fd);
-        if !poll_readable(fd, signal_fd, remaining)? {
+        // A poll timeout runs on CLOCK_MONOTONIC, which stops during suspend:
+        // bounded steps let an expiry be acted on soon after execution
+        // resumes (§6.4).
+        if !poll_readable(fd, signal_fd, remaining.min(GATE_POLL_STEP))? {
             continue;
         }
         let mut chunk = [0u8; 256];
