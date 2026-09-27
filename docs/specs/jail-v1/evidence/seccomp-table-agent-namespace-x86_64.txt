@@ -47,6 +47,8 @@ move_pages             279    EPERM
 migrate_pages          256    EPERM
 statmount              457    EPERM
 listmount              458    EPERM
+quotactl               179    EPERM
+quotactl_fd            443    EPERM
 clone3                 435    ENOSYS  (argument struct not inspectable)
 clone                  56     EPERM when args[0] & 0x00800000 != 0 (CLONE_UNTRACED)
 clone                  56     ALLOW   otherwise (namespace flags permitted)
@@ -62,8 +64,8 @@ socket, socketpair     41,53  ALLOW when args[0] in {1 (AF_UNIX, restricted by t
 
 everything else        ALLOW
 
-instructions: 66
-digest: sha256:b563cd1425077db87e8eceedb50ca53b6dc32cac0a93302103e458df8e2df11b
+instructions: 68
+digest: sha256:3a866f3488d5d07e89b42e0d9b0256be5f363871bdf805e7d8d9010de6597acd
 
 mediation filter (installed by the launcher with its own listener)
 connect                42     USER_NOTIF

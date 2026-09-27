@@ -19,16 +19,16 @@ packages = 125
 # The seccomp programs' digests, from docs/specs/jail-v1/evidence/seccomp-table-*.txt
 [filters]
 arch = "x86_64"
-tool = "sha256:fbee5a625305bea03353b9a014f42c18e47364cd6949487787337de8e337b483"
-agent = "sha256:8a6c42943555bb66503ab436e5d1dd813a85813b56edeabdab4518133ae85493"
-agent_namespace = "sha256:b563cd1425077db87e8eceedb50ca53b6dc32cac0a93302103e458df8e2df11b"
+tool = "sha256:3619e295e5f9428b69cd52d0ec993986782334c5127d18ea5f9e0f5ba4bced85"
+agent = "sha256:8f12a643ee5408e71a8e03f4b2e4d64934030d302dfbbad9a8b7a3626b1f6051"
+agent_namespace = "sha256:3a866f3488d5d07e89b42e0d9b0256be5f363871bdf805e7d8d9010de6597acd"
 agent_mediation = "sha256:28c98e72b91a22c212d5dfdddfcc1f1ca153c5a8e89c15833c26724b263ebeff"
 
 # The evidence tables themselves, byte for byte
 [filters.table_sha256]
-"seccomp-table-tool-x86_64.txt" = "afcb29e768520e5a7de1c779dd480bbed4d2d6cfd052837e5e4228ccf64d29c2"
-"seccomp-table-agent-x86_64.txt" = "d1a9e3aa2200f540316bac0f2ff2299d9143eab0138b9808e65db22cc486acac"
-"seccomp-table-agent-namespace-x86_64.txt" = "88b1bfabe72e2d6a183931dc003fc1ffb19538df94467d31c76fc9857fd3e821"
+"seccomp-table-tool-x86_64.txt" = "6246db047097ba21be8f4e5e47edaeff3bc1b42adb1d81743841547d8bfb5b86"
+"seccomp-table-agent-x86_64.txt" = "330a17bfd058fab4dd8c75834847d3a6912e29cf20f359e808c313dfd23f873e"
+"seccomp-table-agent-namespace-x86_64.txt" = "10efbed7f8632739d405954eb702d1a3e8800a563572c717d6d930d1da851621"
 
 # The observer's closed set, from docs/specs/jail-v1/evidence/closed-set-x86_64.txt
 [closed_set]
@@ -930,14 +930,14 @@ sha256 = "bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9"
 [tested]
 debug_assertions = false
 dirty = false
-inputs = "sha256:0494d0e1da38b6314f79b9eea07e17365917ea7d336725b6440385122d0d3bf0"
+inputs = "sha256:9029b9f9f87633ce96042f183f1ec24dd0a36d6349ec6f87c9f70264ddbe946b"
 opt_level = "3"
-ouro_jail_sha256 = "85f2ee2dfac99d4394bfabb001ffbaf4bdbf3bbb9d2bca16a5d34976fbb8fd65"
+ouro_jail_sha256 = "94209fc7954ef2d40526cc2953f9703613f7acb77b904bf76ef3df4a942c907a"
 platform_arch = "x86_64"
 platform_kernel = "Linux 7.0.0-31-generic"
 platform_os = "linux"
 ready = true
-revision = "dd194ac05617dbc11a5d26ab49eb94ab7ae6a3b7"
+revision = "17960a9fe93b94a59ea9ef5441f971ade4dd7b8a"
 rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
 target = "x86_64-unknown-linux-gnu"
 unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code"]
@@ -985,6 +985,6 @@ swap_total_kib = 8388604
 "user.max_user_namespaces" = "11829"
 
 [tested.supervisor_scope]
-cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-1620842-9709f33609f94c91.scope"
+cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-1938456-d4c676b2e40b49e4.scope"
 state = "entered"
-unit = "ouro-jail-1620842-9709f33609f94c91.scope"
+unit = "ouro-jail-1938456-d4c676b2e40b49e4.scope"
