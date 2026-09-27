@@ -66,12 +66,17 @@ const RELEASE_FD: RawFd = 12;
 /// pinned-mount range (20 up) and every named channel (10-19, 15).
 const TRACE_DATA_FD: RawFd = 9;
 
-/// Audit 2026-09-25-2, S14: a per-attempt value for the narrowing filter's
-/// `SECCOMP_RET_DATA`, unpredictable to the child. The kernel's data field is
-/// sixteen bits, so this is a speed bump rather than a wall — but every wrong
-/// guess a child's own filter makes is itself a visible
-/// `unexpected_trace_stop` gap, so spending them costs the receipt its
-/// evidence one guess at a time, and strict evidence fails on the first.
+/// Audit 2026-09-25-2, S14; reworded by audit 3 (A5): a per-attempt value for
+/// the narrowing filter's `SECCOMP_RET_DATA`, unpredictable to the child. The
+/// kernel's data field is sixteen bits, so this is a speed bump rather than a
+/// wall. What a guess costs: a stop carrying this attempt's data on a number
+/// the narrowing filter does not trace is a visible `unexpected_trace_stop`
+/// gap, so forging our verdict costs the receipt its evidence one gap at a
+/// time, and strict evidence fails on the first — while a stop carrying other
+/// data is another filter's own request, continued and counted in
+/// `requested_by_other_filters`, which the receipt's
+/// `lifetime.native.details` carries. Guessing is therefore never silent:
+/// every stop lands in the receipt as a gap or as a count.
 fn random_trace_data() -> u16 {
     use std::hash::{BuildHasher, Hasher as _};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
@@ -1860,6 +1865,13 @@ impl Boundary {
                 .as_ref()
                 .map(|summary| summary.unreaped_children.clone())
                 .unwrap_or_default(),
+            // Security 2026-09-27 (audit 3 A5): carried for the receipt; never a
+            // verdict input, because the stop was continued and nothing was
+            // lost.
+            requested_by_other_filters: self
+                .tracer_summary
+                .as_ref()
+                .map_or(0, |summary| summary.requested_by_other_filters),
             backend_pid: self.bwrap_pid,
             watcher_pid: i32::try_from(self.watcher.pid()).unwrap_or(-1),
         });
@@ -2571,9 +2583,10 @@ fn mount_swap_rendezvous() {
 
 // J5-B1-w3 begin: §9.1 pseudo-filesystem guard
 /// Refuses any operator grant in `binds` whose resolved source exposes host
-/// `/proc`, `/sys` or cgroupfs (jail-v1 §9.1), keyed by `key`
-/// (`filesystem.read_only` or `filesystem.read_write`). A policy refusal
-/// (`policy_widening`, remediation `configuration`) before any mount.
+/// `/proc`, `/sys`, cgroupfs, devtmpfs or the `/run` runtime tree (jail-v1
+/// §9.1), keyed by `key` (`filesystem.read_only` or `filesystem.read_write`).
+/// A policy refusal (`policy_widening`, remediation `configuration`) before
+/// any mount.
 fn refuse_pseudo_fs_grants(binds: &[(PathBuf, PathBuf)], key: &str) -> Result<(), JailError> {
     if binds.is_empty() {
         return Ok(());
@@ -2591,8 +2604,8 @@ fn refuse_pseudo_fs_grants(binds: &[(PathBuf, PathBuf)], key: &str) -> Result<()
                 ErrorStage::Preparing,
                 Remediation::Configuration,
                 format!(
-                    "the grant {} exposes host /proc, /sys or cgroupfs, which a contained \
-                     profile never binds (jail-v1 §9.1)",
+                    "the grant {} exposes host /proc, /sys, cgroupfs, devtmpfs or the /run \
+                     runtime tree, which a contained profile never binds (jail-v1 §9.1)",
                     source.display()
                 ),
             )
@@ -2602,10 +2615,10 @@ fn refuse_pseudo_fs_grants(binds: &[(PathBuf, PathBuf)], key: &str) -> Result<()
     Ok(())
 }
 
-/// Whether the object at `resolved` is on a proc, sysfs or cgroup filesystem,
-/// by `fstatfs` on an `O_PATH` handle. A path that cannot be opened is not
-/// treated as pseudo here; the ancestor check and the later pin catch the
-/// rest.
+/// Whether the object at `resolved` is on a proc, sysfs, cgroup or devtmpfs
+/// filesystem, by `fstatfs` on an `O_PATH` handle. A path that cannot be
+/// opened is not treated as pseudo here; the ancestor check and the later pin
+/// catch the rest.
 fn source_on_pseudo_fs(resolved: &Path) -> bool {
     let Ok(c) = super::sys::cstring_from_path(resolved) else {
         return false;
@@ -2629,7 +2642,10 @@ fn source_on_pseudo_fs(resolved: &Path) -> bool {
     crate::policy::is_pseudo_fs_magic(f_type)
 }
 
-/// The mount points of every proc, sysfs or cgroup (v1 or v2) mount, from
+/// Security 2026-09-27 (audit 3 A3): the mount points of every proc, sysfs or
+/// cgroup (v1 or v2) mount, every devtmpfs mount, and every tmpfs mounted at
+/// or beneath `/run` (the operator's runtime tree — `/run` alone, nowhere
+/// else, so a tmpfs-backed `/tmp` or scratch stays grantable), from
 /// `/proc/self/mountinfo` read as bytes. The fstype is the field after the
 /// ` - ` separator.
 fn pseudo_fs_mount_points() -> Vec<PathBuf> {
@@ -2648,10 +2664,16 @@ fn pseudo_fs_mount_points() -> Vec<PathBuf> {
             .split(|byte| *byte == b' ')
             .next()
             .unwrap_or_default();
-        if matches!(fstype, b"proc" | b"sysfs" | b"cgroup" | b"cgroup2") {
-            out.push(PathBuf::from(std::ffi::OsStr::from_bytes(
-                &decode_mountinfo_path(point),
-            )));
+        let point = decode_mountinfo_path(point);
+        let matches = match fstype {
+            b"proc" | b"sysfs" | b"cgroup" | b"cgroup2" | b"devtmpfs" => true,
+            // `/run` and its submounts only: a tmpfs anywhere else is an
+            // ordinary place for a grant (tests use /tmp tempdirs).
+            b"tmpfs" => point == b"/run" || point.starts_with(b"/run/"),
+            _ => false,
+        };
+        if matches {
+            out.push(PathBuf::from(std::ffi::OsStr::from_bytes(&point)));
         }
     }
     out
@@ -3397,6 +3419,14 @@ impl RunningExecution for LinuxRunning {
                 .tracer_summary
                 .as_ref()
                 .is_some_and(|summary| summary.thread_panicked),
+            // Security 2026-09-27 (audit 3 A5): carried for the receipt; never a
+            // verdict input, because the stop was continued and nothing was
+            // lost.
+            requested_by_other_filters: self
+                .boundary
+                .tracer_summary
+                .as_ref()
+                .map_or(0, |summary| summary.requested_by_other_filters),
         });
         if !self.boundary.cgroup_empty() {
             tree.tree_empty = None;
@@ -3432,6 +3462,13 @@ impl RunningExecution for LinuxRunning {
         if let Some(agent) = self.boundary.agent.as_ref() {
             details.insert("helpers".to_owned(), agent.details().1);
         }
+        // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are counted
+        // in the receipt, so a child probing the trace-data space shows up in
+        // `lifetime.native.details` instead of continuing silently.
+        details.insert(
+            "requested_by_other_filters".to_owned(),
+            wrong_guess_stops_detail(self.boundary.tracer_summary.as_ref()),
+        );
         details
     }
     // J3-agent end
@@ -3502,6 +3539,11 @@ pub struct TreeInputs {
     pub abandoned_tracees: u64,
     /// Direct children whose exit status no longer has a route here.
     pub unreaped_children: usize,
+    /// Stops another filter asked for — a child's own `SECCOMP_RET_TRACE`
+    /// with its own trace data, on a call outside the closed set. Surfaced
+    /// for the receipt (audit 3 A5); never a verdict input,
+    /// because the stop was continued and nothing was lost.
+    pub requested_by_other_filters: u64,
     /// The observer's thread panicked, so its counters mean nothing.
     pub observer_panicked: bool,
 }
@@ -3559,6 +3601,10 @@ pub struct AbortInputs {
     pub observer_panicked: bool,
     /// This process's children the observer left unreaped when it stopped.
     pub unreaped_children: Vec<libc::pid_t>,
+    /// Stops another filter asked for, continued unobserved. Surfaced for the
+    /// receipt (audit 3 A5); never a verdict input, because
+    /// the stop was continued and nothing was lost.
+    pub requested_by_other_filters: u64,
     /// The backend's pid.
     pub backend_pid: libc::pid_t,
     /// The watcher's pid.
@@ -3588,6 +3634,19 @@ pub fn abort_verdict(inputs: &AbortInputs) -> bool {
         && children_accounted
 }
 // J3-launch end
+
+/// Security 2026-09-27 (audit 3 A5): the receipt's account of stops another
+/// filter asked for — a child's own `SECCOMP_RET_TRACE` on a call outside the
+/// closed set, carrying its own trace data, not this attempt's. Each is
+/// continued unobserved: not a result, not a loss, never a
+/// `unexpected_trace_stop` gap. The count is what makes the guessing visible,
+/// so it is carried in `lifetime.native.details`; null when no observer ran,
+/// because a detail must not claim a count nothing read.
+fn wrong_guess_stops_detail(summary: Option<&TracerSummary>) -> Value {
+    summary.map_or(Value::Null, |summary| {
+        Value::from(summary.requested_by_other_filters)
+    })
+}
 
 fn init_alive(init: libc::pid_t) -> bool {
     init > 0 && Path::new(&format!("/proc/{init}")).exists()
@@ -4134,6 +4193,24 @@ mod tests {
     }
 
     #[test]
+    fn wrong_guess_trace_stops_are_counted_in_the_receipts_native_details() {
+        // Security 2026-09-27 (audit 3 A5): the receipt carries the counter, or
+        // null when no observer ran, so a detail never claims a count nothing
+        // read.
+        assert_eq!(super::wrong_guess_stops_detail(None), Value::Null);
+        let mut summary = TracerSummary::default();
+        assert_eq!(
+            super::wrong_guess_stops_detail(Some(&summary)),
+            serde_json::json!(0)
+        );
+        summary.requested_by_other_filters = 10;
+        assert_eq!(
+            super::wrong_guess_stops_detail(Some(&summary)),
+            serde_json::json!(10)
+        );
+    }
+
+    #[test]
     fn a_tree_is_only_empty_when_every_fact_says_its_end_was_seen() {
         let seen = TreeInputs {
             init_alive: false,
@@ -4142,12 +4219,27 @@ mod tests {
             natural_end: true,
             abandoned_tracees: 0,
             unreaped_children: 0,
+            requested_by_other_filters: 0,
             observer_panicked: false,
         };
         let verified = verdict(&seen);
         assert_eq!(verified.tree_empty, Some(true));
         assert_eq!(verified.integrity, "verified");
         assert!(verified.verified_at.is_some());
+
+        // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are carried
+        // for the receipt, and because each was continued they are not loss:
+        // they never unverify the tree.
+        let guessed = TreeInputs {
+            requested_by_other_filters: 15,
+            ..seen
+        };
+        assert_eq!(guessed.requested_by_other_filters, 15);
+        assert_eq!(
+            verdict(&guessed).tree_empty,
+            Some(true),
+            "a continued wrong-guess stop is not an unobserved death"
+        );
 
         // Each fact on its own is enough to withhold the claim, and none of
         // them turns it into a claim that the tree is NOT empty: unknown is
@@ -4418,6 +4510,7 @@ mod tests {
             abandoned_tracees: 0,
             observer_panicked: false,
             unreaped_children: vec![10, 11],
+            requested_by_other_filters: 0,
             backend_pid: 10,
             watcher_pid: 11,
         };
@@ -4426,6 +4519,18 @@ mod tests {
             unreaped_children: Vec::new(),
             ..good.clone()
         }));
+        // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops ride in the
+        // inputs for the receipt and never unverify the abort, because each
+        // was continued and nothing was lost.
+        let guessed = AbortInputs {
+            requested_by_other_filters: 10,
+            ..good.clone()
+        };
+        assert_eq!(guessed.requested_by_other_filters, 10);
+        assert!(
+            abort_verdict(&guessed),
+            "a continued wrong-guess stop is not an unobserved death"
+        );
         for broken in [
             AbortInputs {
                 backend_reaped: false,

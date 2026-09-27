@@ -1213,6 +1213,43 @@ fn p04_a_scratch_root_overlapping_the_state_directory_refuses() {
     );
 }
 
+/// Security 2026-09-27 (audit 3 A2): a workspace that contains the launch
+/// directory refuses on every run, `--launch` or not. The contained party
+/// holding that grant could otherwise plant `<config>/launch/<name>.toml` —
+/// operator-owned, 0600, one link — and a later `--launch` run would stage
+/// its `[credentials]`.
+#[test]
+fn p04_a_workspace_containing_the_launch_directory_refuses() {
+    if !common::live() {
+        return;
+    }
+    let c = case("tool");
+    std::fs::create_dir_all(c.workspace.join("config").join("launch")).unwrap();
+    let marker = c.workspace.join("target-ran");
+    let run = c
+        .jail
+        // The config directory hangs off the workspace, so the launch
+        // directory is child-visible.
+        .env("OURO_CONFIG_DIR", c.workspace.join("config"))
+        .target([
+            c.fixture.as_os_str(),
+            OsStr::new("open"),
+            marker.as_os_str(),
+            OsStr::new("--create"),
+            OsStr::new("--write"),
+        ])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+    assert!(!marker.exists(), "the target ran before the refusal");
+    assert!(
+        run.stderr_text().contains("unsafe_config_path")
+            && run.stderr_text().contains("(key: OURO_CONFIG_DIR)"),
+        "the refusal is not the launch-directory one: {}",
+        run.stderr_text()
+    );
+}
+
 // ===========================================================================
 // §6.4: an exec that observation-off cannot confirm is a coded tool error
 // ===========================================================================

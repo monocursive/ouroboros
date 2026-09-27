@@ -117,7 +117,12 @@ pub struct TracerConfig {
     /// a closed-set stop must show to be ours (audit 2026-09-25-2, S14: the
     /// constant is public, so a child filter echoing it could forge
     /// `unexpected_trace_stop` gaps; a per-attempt value makes the echo a
-    /// 1-in-65536 guess whose every miss is itself a visible gap).
+    /// 1-in-65536 guess). What a guess costs, audit 3 (A5): a stop carrying
+    /// this attempt's data on a number the narrowing filter does not trace is
+    /// a visible `unexpected_trace_stop` gap, and strict evidence fails on
+    /// the first; a stop carrying other data is the child's own request,
+    /// continued and counted in `requested_by_other_filters`, which the
+    /// receipt carries — so probing is never silent, only cheap.
     pub trace_data: u16,
 }
 
@@ -140,7 +145,14 @@ fn event_bytes(event: &TracerEvent) -> usize {
             args.path.as_ref().map_or(0, |p| p.bytes.len())
                 + args.path2.as_ref().map_or(0, |p| p.bytes.len())
         }
-        TracerEvent::Exec { path, .. } => path.as_ref().map_or(0, |p| p.bytes.len()),
+        TracerEvent::Exec {
+            path,
+            kernel_image,
+            ..
+        } => {
+            path.as_ref().map_or(0, |p| p.bytes.len())
+                + kernel_image.as_ref().map_or(0, |k| k.len())
+        }
         _ => 0,
     };
     EVENT_FIXED_BYTES + snapshots
@@ -387,6 +399,22 @@ pub enum GapReason {
     /// it is this gap, naming the call's classes. Register arguments cannot
     /// drift this way; only memory the kernel re-reads after the stop can.
     ArgumentSnapshotUnstable,
+    /// A memory-sourced `openat2` read stably as read-only at both the
+    /// entry and the exit stops. Security 2026-09-27 (audit 3 A1): a thread
+    /// of the tracee can flip `open_how.flags` for the kernel's own copy
+    /// and restore them before the exit re-read (an A-B-A rewrite), so
+    /// agreement between the two reads proves nothing about what the kernel
+    /// applied. Such a call can never be certified as outside the covered
+    /// set: it is this gap of its own classes, never a silent filter.
+    /// Register-sourced flags are immune (the kernel consumes the saved
+    /// `pt_regs`) and keep their entry-time read-only skip.
+    MemoryFlagsUnverified,
+    /// An exec whose entry pathname matched an image the observer treats as
+    /// the target, while the image the kernel actually loaded
+    /// (`/proc/<tid>/exe` at the exec event) matched none: the snapshot was
+    /// rewritten for the kernel's copy (audit 3 A1), so the confirmation
+    /// the snapshot would have granted is refused and named here.
+    ExecImageMismatch,
 }
 
 impl GapReason {
@@ -415,6 +443,8 @@ impl GapReason {
             GapReason::UntracedDescendant => "untraced_descendant",
             GapReason::RestartUnresolved => "restart_unresolved",
             GapReason::ArgumentSnapshotUnstable => "argument_snapshot_unstable",
+            GapReason::MemoryFlagsUnverified => "memory_flags_unverified",
+            GapReason::ExecImageMismatch => "exec_image_mismatch",
         }
     }
 
@@ -488,6 +518,15 @@ pub enum TracerEvent {
         /// require a path, or attach only after the launcher has said it is
         /// past its own exec.
         path: Option<PathSnapshot>,
+        /// The image the kernel actually loaded, as `/proc/<tid>/exe`
+        /// resolves at this stop. Security 2026-09-27 (audit 3 A1): the
+        /// entry pathname above is a snapshot the tracee can rewrite for
+        /// the kernel's own copy (an A-B-A race), so the kernel's link is
+        /// read once here, while the tracee is stopped at its exec event,
+        /// and carried beside the snapshot. `None` when the link could not
+        /// be read; a consumer confirming an exec from the snapshot alone
+        /// must treat that as the weaker claim it was before.
+        kernel_image: Option<Vec<u8>>,
         /// The directory fd the pathname was resolved against, when the
         /// witnessed entry was an `execveat` with one. §11.3: `dirfd` is
         /// accounted, never silently replaced by a cwd. `None` for a plain
@@ -655,6 +694,11 @@ pub struct LossCounters {
     /// because the tracee can rewrite memory the kernel re-reads after the
     /// entry stop, which would falsify the snapshot's classification.
     pub argument_snapshot_unstable: u64,
+    /// Memory-sourced `openat2` flags that read identically at the entry
+    /// and the exit but can still have been flipped for the kernel's own
+    /// copy (audit 3 A1): each became a `memory_flags_unverified` gap of
+    /// its call's classes instead of a silent read-only filter.
+    pub memory_flags_unverified: u64,
 }
 
 impl LossCounters {
@@ -683,6 +727,7 @@ impl LossCounters {
             + self.untraced_descendants
             + self.restart_unresolved
             + self.argument_snapshot_unstable
+            + self.memory_flags_unverified
     }
 }
 
@@ -758,7 +803,9 @@ pub struct TracerSummary {
     /// Stops another filter asked for — a child's own `SECCOMP_RET_TRACE`,
     /// recognised by trace data that is not
     /// [`NARROWING_TRACE_DATA`] — on calls outside the closed set. Continued
-    /// untouched: not a result and not loss.
+    /// untouched: not a result and not loss. Audit 3 (A5): the counter is
+    /// surfaced in the receipt's `lifetime.native.details`, so probing the
+    /// trace-data space is visible in aggregate.
     pub requested_by_other_filters: u64,
     /// Notification-listener requests the kernel refused (`EBUSY` under the
     /// `agent` mediation listener, for one): no listener, nothing hidden.

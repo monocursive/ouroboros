@@ -611,6 +611,76 @@ fn rfc3339_output_satisfies_the_schema_date_time_format() {
 }
 
 // ---------------------------------------------------------------------------
+// §6.1: the error line, with untrusted text escaped (audit 3 A6)
+// ---------------------------------------------------------------------------
+
+fn invalid_config(message: &str) -> JailError {
+    JailError::new(
+        ErrorCode::InvalidConfig,
+        ErrorStage::Resolving,
+        Remediation::Configuration,
+        message.to_owned(),
+    )
+}
+
+#[test]
+fn an_osc52_payload_in_an_error_is_rendered_without_raw_esc_or_bel() {
+    let error = invalid_config("\u{1b}]52;c;aGVsbG8=\u{7}").with_key_path("jail.limits.wall");
+    let line = error.to_string();
+    assert!(
+        line.contains(
+            "ouro-jail: error invalid_config at resolving [configuration]: \
+             <U+001B>]52;c;aGVsbG8=<U+0007>"
+        ),
+        "{line}"
+    );
+    assert!(!line.contains('\u{1b}'), "a raw ESC reached stderr: {line}");
+    assert!(!line.contains('\u{7}'), "a raw BEL reached stderr: {line}");
+    // The key path is escaped with the message.
+    let with_key = invalid_config("x").with_key_path("jail.limits.\u{1b}]52;c;YQ==\u{7}");
+    let line = with_key.to_string();
+    assert!(
+        line.ends_with("(key: jail.limits.<U+001B>]52;c;YQ==<U+0007>)"),
+        "{line}"
+    );
+    assert!(!line.contains('\u{1b}'), "{line}");
+}
+
+#[test]
+fn plain_and_multibyte_error_text_passes_through_unchanged() {
+    // Accents, emoji and other valid multibyte UTF-8 are chars, not bytes:
+    // none of them is a control character, so none is rewritten.
+    let plain = "limits.wall must be a duration (café — 😀, 工作温度)";
+    let expected =
+        format!("ouro-jail: error invalid_config at resolving [configuration]: {plain}");
+    assert_eq!(invalid_config(plain).to_string(), expected);
+    // The rest of the escaped table: DEL and the C1 range.
+    let line = invalid_config("stop \u{7f} and \u{85} and \u{9f}").to_string();
+    assert!(
+        line.contains("stop <U+007F> and <U+0085> and <U+009F>"),
+        "{line}"
+    );
+}
+
+#[test]
+fn embedded_line_breaks_cannot_forge_a_second_error_line() {
+    let forged = "innocent\nouro-jail: error forged at running [host_setup]: owned\rfile";
+    let line = invalid_config(forged).to_string();
+    assert!(
+        !line.contains('\n') && !line.contains('\r'),
+        "the message broke the one-line contract: {line}"
+    );
+    assert!(
+        line.contains(
+            "innocent<U+000A>ouro-jail: error forged at running [host_setup]: \
+             owned<U+000D>file"
+        ),
+        "{line}"
+    );
+    assert_eq!(line.lines().count(), 1, "{line}");
+}
+
+// ---------------------------------------------------------------------------
 // The §13.2 phase tuples
 // ---------------------------------------------------------------------------
 

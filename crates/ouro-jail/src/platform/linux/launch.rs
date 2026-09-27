@@ -757,7 +757,16 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
 }
 // J3-agent end
 
-/// The same list as [`exec_candidates`], as raw bytes.
+/// The same list as [`exec_candidates`], as raw bytes, each spelling followed
+/// by its symlink-resolved form when it exists on this host.
+///
+/// Security 2026-09-27 (audit 3 A1): the exec confirmation now also compares
+/// the kernel's own image (`/proc/<tid>/exe`, every symlink followed) against
+/// this list, so a candidate's canonical form must be here too: on a
+/// merged-`/usr` host the operator's `/bin/true` spelling resolves to
+/// `/usr/bin/true`, which is what the kernel link names. Only spellings of
+/// the program the operator named are added — `canonicalize` resolves to the
+/// same file `execve` would run.
 ///
 /// # Errors
 ///
@@ -767,10 +776,26 @@ pub fn exec_candidate_bytes(
     path: Option<&OsStr>,
 ) -> Result<Vec<Vec<u8>>, PathError> {
     let program = cstring_from_os(program)?;
-    Ok(exec_candidates(&program, path)
-        .into_iter()
-        .map(|candidate| candidate.into_bytes())
-        .collect())
+    let mut out = Vec::new();
+    for candidate in exec_candidates(&program, path) {
+        // Resolve first, while the candidate is still borrowed: the kernel's
+        // `/proc/<tid>/exe` link names the resolved form (audit 3 A1).
+        if let Ok(resolved) = std::fs::canonicalize({
+            use std::os::unix::ffi::OsStrExt as _;
+            std::ffi::OsStr::from_bytes(candidate.as_bytes())
+        }) {
+            use std::os::unix::ffi::OsStrExt as _;
+            let resolved = resolved.as_os_str().as_bytes().to_vec();
+            if !out.contains(&resolved) {
+                out.push(resolved);
+            }
+        }
+        let bytes = candidate.into_bytes();
+        if !out.contains(&bytes) {
+            out.push(bytes);
+        }
+    }
+    Ok(out)
 }
 
 /// This process's environment, for `execve`.

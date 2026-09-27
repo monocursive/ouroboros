@@ -303,6 +303,10 @@ pub enum ErrorCode {
     PolicyWidening,
     /// The runtime state root failed its ownership/mode/symlink checks (§6.2).
     UnsafeStatePath,
+    /// Security 2026-09-27 (audit 3 A2): a configuration location failed its
+    /// isolation checks — the launch directory overlaps a child-visible root
+    /// (§9.1).
+    UnsafeConfigPath,
     /// Execution is not implemented for this platform (§3.2).
     UnsupportedPlatform,
     /// A capability the resolved policy requires is not available (§3.1).
@@ -356,6 +360,7 @@ impl ErrorCode {
             ErrorCode::InvalidConfig => "invalid_config",
             ErrorCode::PolicyWidening => "policy_widening",
             ErrorCode::UnsafeStatePath => "unsafe_state_path",
+            ErrorCode::UnsafeConfigPath => "unsafe_config_path",
             ErrorCode::UnsupportedPlatform => "unsupported_platform",
             ErrorCode::MissingCapability => "missing_capability",
             ErrorCode::BackendUnavailable => "backend_unavailable",
@@ -571,6 +576,32 @@ impl fmt::Display for ErrorObject {
 }
 // J4 W3 end
 
+/// Replaces every control character with a visible spelling.
+///
+/// Security 2026-09-27 (audit 3 A6): untrusted strings — project-config values
+/// among them — reach the operator's stderr verbatim, and a terminal acts on
+/// what it is shown: `ESC` starts an escape sequence (OSC 52 rewrites the
+/// clipboard), `BEL` closes one, and `CR`/`LF` can forge a diagnostic line.
+/// Every character in C0 (U+0000–U+001F), DEL (U+007F) and C1
+/// (U+0080–U+009F) becomes its `<U+XXXX>` form, uppercase hexadecimal. The
+/// function operates on `char`s, so valid multibyte UTF-8 passes through
+/// unchanged, and the spelling itself contains no control character, so
+/// escaping is idempotent.
+#[must_use]
+pub(crate) fn escape_control(text: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            // Writing to a `String` cannot fail, so the result is ignored.
+            let _ = write!(out, "<U+{:04X}>", u32::from(character));
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
 /// §6.1: one line per error on stderr.
 fn write_error_line(
     f: &mut fmt::Formatter<'_>,
@@ -580,13 +611,18 @@ fn write_error_line(
     message: &str,
     key_path: Option<&str>,
 ) -> fmt::Result {
+    // Security 2026-09-27 (audit 3 A6): the message and key path carry untrusted
+    // text (project-config values name both); the code and stage are this
+    // crate's own spellings. Escaped, the text cannot address the terminal or
+    // forge a second `ouro-jail:` line.
+    let message = escape_control(message);
     write!(
         f,
         "ouro-jail: error {code} at {stage} [{}]: {message}",
         remediation_str(remediation),
     )?;
     if let Some(path) = key_path {
-        write!(f, " (key: {path})")?;
+        write!(f, " (key: {})", escape_control(path))?;
     }
     Ok(())
 }
@@ -614,6 +650,7 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
         ErrorCode::InvalidConfig => 2,
         ErrorCode::PolicyWidening
         | ErrorCode::UnsafeStatePath
+        | ErrorCode::UnsafeConfigPath
         | ErrorCode::UnsupportedPlatform
         | ErrorCode::MissingCapability
         | ErrorCode::BackendUnavailable

@@ -144,6 +144,16 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     // accident.
     ("statmount", 457),
     ("listmount", 458),
+    // Security 2026-09-27 (audit 3 A7a, the S7/S10 drift class): the quota
+    // interfaces. `quotactl` names a mounted filesystem by path and
+    // `quotactl_fd` by fd, and both set, clear and read per-filesystem
+    // accounting: inside the jail they reach its own mounts only, but §9.2's
+    // claim is "every mount interface old and new", and a default-allow
+    // table must not ship new kernel surface by accident — `quotactl_fd`'s
+    // fds come only from denied syscalls today, which is unreachability, not
+    // a deny.
+    ("quotactl", 179),
+    ("quotactl_fd", 443),
 ];
 
 /// `clone3`. Denied with `ENOSYS` because seccomp cannot safely dereference

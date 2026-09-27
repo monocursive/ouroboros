@@ -65,6 +65,27 @@ pub fn tracer_pid(pid: pid_t) -> Option<pid_t> {
     if raw == 0 { None } else { Some(raw) }
 }
 
+/// The image the kernel loaded for `tid`, as `/proc/<tid>/exe` resolves it:
+/// an absolute path with every symlink followed. Read while the tracee is
+/// stopped at its exec event (audit 3 A1), so the tracee cannot change what
+/// the link names between the read and the kernel's decision — the kernel
+/// has already made it. A kernel that appends ` (deleted)` to the link of an
+/// unlinked image keeps the path itself. `None` when the link cannot be
+/// read; the caller then has no corroboration, not a negative answer.
+#[must_use]
+pub fn kernel_exe(tid: pid_t) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let link = fs::read_link(proc_path(tid, "exe")).ok()?;
+    let mut bytes = link.as_os_str().as_bytes().to_vec();
+    // `/proc/<pid>/exe` of an image the new program has already unlinked
+    // resolves as "<path> (deleted)". The path is still the truth about
+    // which image ran; only the marker is the kernel's annotation.
+    if bytes.ends_with(b" (deleted)") {
+        bytes.truncate(bytes.len() - b" (deleted)".len());
+    }
+    Some(bytes)
+}
+
 /// The `NSpid` line: this task's id in each pid namespace from ours inward.
 ///
 /// One entry means the task shares our namespace. Two or more mean it lives

@@ -2442,29 +2442,17 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
         .find_map(|line| line.strip_prefix("Seccomp_filters:"))
         .map(str::trim);
     assert_eq!(filters, Some("2"), "{status}");
-    let bridge_fds = readlinks(bridge);
-    for fd in 0..2 {
-        assert_eq!(
-            bridge_fds.get(&fd).map(String::as_str),
-            Some("/dev/null"),
-            "{bridge_fds:?}"
-        );
-    }
-    // Audit 2026-09-25-2, S2: the two ends of a SOCK_SEQPACKET pair carry
-    // distinct inodes (a pipe's ends share one), so the ends are identified
-    // by kind here; the pairing itself is what `take_mediation` verifies by
-    // descriptor identity before release.
+    // Security 2026-09-27 (audit 3 A4): the bridge is sealed non-dumpable by
+    // the supervisor before release, so a same-uid peer can no longer
+    // enumerate its descriptors — this test included. What its descriptor
+    // table holds was verified by the supervisor's own takeover (the report
+    // socket's kind and identity, audit 2026-09-25-2 S2) and the filters
+    // readback above; the same-uid /proc view refusing is the fix working.
+    let sealed = std::fs::read_dir(format!("/proc/{bridge}/fd"));
     assert!(
-        bridge_fds.get(&2).is_some_and(|l| l.starts_with("socket:")),
-        "stderr is the report socket: {bridge_fds:?}"
+        sealed.is_err(),
+        "a same-uid peer must not enumerate the sealed bridge's descriptors"
     );
-    let others: Vec<&String> = bridge_fds
-        .iter()
-        .filter(|(fd, _)| **fd > 2)
-        .map(|(_, link)| link)
-        .collect();
-    assert_eq!(others.len(), 1, "only the listening socket: {bridge_fds:?}");
-    assert!(others[0].starts_with("socket:"));
     let helpers = &native["execution_cgroup"]["charged_helpers"];
     assert!(
         helpers
@@ -3439,8 +3427,14 @@ fn review_x06_holds_with_observation_off() {
     assert!(launcher.get(&19).is_some_and(|l| l.starts_with("socket:")));
     // Audit 2026-09-25-2, S2: the report channel is a SOCK_SEQPACKET pair.
     assert!(launcher.get(&20).is_some_and(|l| l.starts_with("socket:")));
-    let bridge = readlinks(native["helpers"][0]["pid"].as_i64().unwrap());
-    assert_eq!(bridge.len(), 4, "{bridge:?}");
+    // Security 2026-09-27 (audit 3 A4): the sealed bridge is non-dumpable, so
+    // same-uid enumeration of its descriptors must refuse (its four
+    // descriptors are the supervisor's takeover's to verify, not /proc's).
+    let bridge_pid = native["helpers"][0]["pid"].as_i64().unwrap();
+    assert!(
+        std::fs::read_dir(format!("/proc/{bridge_pid}/fd")).is_err(),
+        "the sealed bridge must be unreachable through /proc"
+    );
     assert_eq!(native["helpers"][0]["seccomp_filters"], 2);
     release(&mut spawned, &message, &receipt);
     let run = spawned.wait().unwrap();

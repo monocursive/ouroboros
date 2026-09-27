@@ -958,6 +958,8 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
 
     validate_channels(args)?;
     check_state_isolation(&plan)?;
+    // Security 2026-09-27 (audit 3 A2): every run, not only a `--launch` one.
+    check_launch_isolation(&plan)?;
     validate_receipt_path(args, &plan)?;
 
     if args.label_only {
@@ -2228,6 +2230,43 @@ fn check_state_isolation(plan: &Plan) -> Result<(), JailError> {
                 ),
             )
             .with_key_path("OURO_DATA_DIR"));
+        }
+    }
+    Ok(())
+}
+
+/// Security 2026-09-27 (audit 3 A2): refuses a launch directory the child can
+/// reach (§9.1).
+///
+/// `--launch NAME` stages operator environment and credentials from
+/// `<config-dir>/launch/<name>.toml`, and [`check_outside_writable`] only
+/// runs when a profile is actually loaded, over that profile's own file
+/// chain. A run with no `--launch` had no guard at all: a contained party
+/// holding a grant that covers the launch directory could plant a
+/// `<name>.toml` that passes every load check (operator uid, mode 0600, one
+/// link) and stage its `[credentials]` on a later `--launch` run. Like the
+/// state root in [`check_state_isolation`], the launch directory therefore
+/// never overlaps a child-visible root, on every run.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeConfigPath`] when the launch directory overlaps
+/// the workspace, the scratch root or any host grant.
+fn check_launch_isolation(plan: &Plan) -> Result<(), JailError> {
+    let launch_dir = canonical_existing_prefix(&launch_profile::launch_directory(&plan.config_dir));
+    for root in child_visible_roots(plan) {
+        let root = canonical_existing_prefix(&root);
+        if overlaps(&launch_dir, &root) {
+            return Err(JailError::new(
+                ErrorCode::UnsafeConfigPath,
+                ErrorStage::Resolving,
+                Remediation::Configuration,
+                format!(
+                    "the launch directory {} overlaps the child-visible root {}",
+                    launch_dir.display(),
+                    root.display()
+                ),
+            )
+            .with_key_path("OURO_CONFIG_DIR"));
         }
     }
     Ok(())
@@ -4293,6 +4332,36 @@ mod tests {
         assert_eq!(applied.network.mode, "host");
         assert!(applied.filesystem.is_none());
         assert!(applied.syscalls.is_none());
+    }
+
+    // Security 2026-09-27 (audit 3 A2): the launch directory is operator
+    // authority to isolate, on every run.
+    #[test]
+    fn check_launch_isolation_refuses_a_workspace_over_the_launch_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        let launch = launch_profile::launch_directory(&config_dir);
+        std::fs::create_dir_all(&launch).unwrap();
+        let plan = |workspace: PathBuf| Plan {
+            resolved: minimal_resolved(ProfileName::Tool),
+            profile: ProfileName::Tool,
+            workspace,
+            config_dir: config_dir.clone(),
+            data_dir: root.path().join("data"),
+        };
+        // A workspace that covers the launch directory refuses, naming the
+        // config directory the launch directory hangs off.
+        let error = check_launch_isolation(&plan(root.path().to_path_buf())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsafeConfigPath);
+        assert_eq!(error.key_path.as_deref(), Some("OURO_CONFIG_DIR"));
+        assert!(
+            error.message.contains("launch directory"),
+            "the refusal names the launch directory: {}",
+            error.message
+        );
+        // A disjoint workspace passes.
+        check_launch_isolation(&plan(root.path().join("elsewhere")))
+            .expect("a disjoint workspace passes");
     }
 
     fn minimal_resolved(profile: ProfileName) -> Resolved {

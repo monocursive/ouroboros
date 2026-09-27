@@ -11,7 +11,11 @@
 //! The launcher starts it before the target is released, with a double fork,
 //! `/dev/null` as stdin and stdout, the report end of a `SOCK_SEQPACKET`
 //! pair as stderr (the supervisor holds the other end), no other descriptor,
-//! an empty environment and a session of its own. It runs under the same
+//! an empty environment and a session of its own. Security 2026-09-27
+//! (audit 3 A4): once the supervisor has discovered and verified the bridge,
+//! it seals it over that pair and the bridge makes itself non-dumpable
+//! before it serves its first client, so a same-uid target cannot reach its
+//! `/proc` entries on any host. It runs under the same
 //! seccomp filters as the child,
 //! so its `connect` to the proxy socket is mediated: the supervisor allows
 //! exactly the pinned proxy socket identity, whatever the path now names.
@@ -30,6 +34,7 @@ use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 /// The hidden subcommand token.
 pub const SUBCOMMAND: &str = "__bridge";
@@ -55,8 +60,20 @@ Content-Length: 16\r\nX-Ouro-Proxy-Reason: bridge_overload\r\nConnection: close\
 /// Bytes buffered per relay direction.
 pub const BUFFER: usize = 16 * 1024;
 
+/// How long a poll round waits after `accept` failed for fd or memory
+/// exhaustion (Security 2026-09-27, audit 3 A7b: `EMFILE`, `ENFILE`, `ENOMEM`,
+/// `ENOBUFS`). The refusal leaves the listener readable, so without the wait
+/// the loop would poll, accept-fail and poll again as fast as it could,
+/// burning a core for the attempt's remaining life. The queue that produced
+/// the ceiling does not drain by spinning on it.
+pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
 /// Exit status when the bridge cannot bind its address.
 pub const EXIT_BIND_FAILED: i32 = 126;
+/// Exit status when the supervisor's seal never arrived: the bridge makes
+/// itself un-dumpable only on the supervisor's word (see [`await_seal`]),
+/// and an unsealed bridge never serves.
+pub const EXIT_UNSEALED: i32 = 124;
 /// Exit status for arguments the bridge does not take.
 pub const EXIT_USAGE: i32 = 125;
 
@@ -88,6 +105,24 @@ pub fn bridge_main(args: &[OsString]) -> ! {
     if listener.set_nonblocking(true).is_err() {
         std::process::exit(EXIT_BIND_FAILED);
     }
+    // Security 2026-09-27 (audit 3 A4): the supervisor discovers and reads
+    // back this bridge while it is still dumpable, then seals it — one
+    // datagram on the report pair — and only then is the target released.
+    // The seal is the bridge's own signal to drop out of `/proc` reach of a
+    // same-uid peer: until it lands, the bridge parks here and serves no
+    // one. A peer that closes the pair (the supervisor dying) fails the
+    // wait rather than parking the bridge forever.
+    if !await_seal() {
+        std::process::exit(EXIT_UNSEALED);
+    }
+    // SAFETY: `prctl(PR_SET_DUMPABLE, 0, ...)` takes scalars only and cannot
+    // fail. From here `/proc/<bridge>` belongs to root: a same-uid target
+    // gets `EACCES` on its `mem`, `environ` and `fd` at every Yama scope,
+    // including `ptrace_scope=0` hosts.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
     serve(
         &listener,
         &|| UnixStream::connect(PROXY_PATH),
@@ -98,9 +133,34 @@ pub fn bridge_main(args: &[OsString]) -> ! {
     std::process::exit(0);
 }
 
-/// One byte on stderr, which the launcher made the write end of a
-/// nonblocking pipe the supervisor drains: the supervisor counts the bridge's
-/// rejections from it. A full pipe drops the byte rather than stall a relay.
+/// Waits for the supervisor's seal on the report pair (fd 2, the same
+/// descriptor rejections are later written to). The pair is a
+/// `SOCK_SEQPACKET` socket, so one datagram is one seal; `poll` reports the
+/// peer's death as `POLLHUP`, which fails the wait rather than parking the
+/// bridge forever.
+fn await_seal() -> bool {
+    let mut fds = [libc::pollfd {
+        fd: libc::STDERR_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    // SAFETY: `fds` is a writable poll array of one entry; the infinite
+    // timeout is fine because the peer's death wakes the poll.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
+    if ready != 1 || fds[0].revents & libc::POLLIN == 0 {
+        return false;
+    }
+    let mut byte = [0u8; 1];
+    // SAFETY: the descriptor is a socket this process owns; `byte` is
+    // writable and its length matches the count.
+    let received =
+        unsafe { libc::recv(libc::STDERR_FILENO, byte.as_mut_ptr().cast(), 1, 0) };
+    received == 1
+}
+
+/// One byte on stderr, the report `SOCK_SEQPACKET` socket the supervisor
+/// holds the other end of: the supervisor counts the bridge's rejections
+/// from it. A full socket drops the byte rather than stall a relay.
 fn report_rejection() {
     use std::io::Write as _;
     let _ = std::io::stderr().write(b"o");
@@ -206,7 +266,11 @@ impl Relay {
 /// passes [`PROXY_PATH`], tests pass their own socket. `rejected` is called
 /// once for each client turned away at capacity.
 ///
-/// Returns only when `poll` fails for a reason other than `EINTR`.
+/// Returns only when `poll` fails for a reason other than `EINTR`. An accept
+/// that fails for fd or memory exhaustion (audit 3 A7b) leaves the
+/// listener readable, so the round that discovers it sleeps before the next
+/// poll instead of spinning; every other accept error is answered as before,
+/// with no wait.
 pub fn serve(
     listener: &TcpListener,
     connect: &dyn Fn() -> io::Result<UnixStream>,
@@ -280,8 +344,13 @@ pub fn serve(
         }
         relays.retain(|relay| !relay.finished());
 
-        if fds[0].revents != 0 {
-            accept_all(listener, connect, rejected, &mut relays);
+        if fds[0].revents != 0
+            && accept_all(listener, connect, rejected, &mut relays)
+        {
+            // Security 2026-09-27 (audit 3 A7b): the accept failed on
+            // process-wide resource exhaustion while the listener stayed
+            // readable; poll once less often rather than spin a core.
+            std::thread::sleep(ACCEPT_BACKOFF);
         }
     }
 }
@@ -310,16 +379,26 @@ fn step(relay: &mut Relay, client: libc::c_short, upstream: libc::c_short) -> io
     Ok(())
 }
 
+/// Accepts every client waiting now. Returns whether an accept failed for fd
+/// or memory exhaustion, which leaves the listener readable and asks [`serve`]
+/// for one [`ACCEPT_BACKOFF`] before the next poll round (audit 3 A7b). Any
+/// other accept error — a reset connection, a race with a client that went
+/// away — is answered as before, with no wait.
 fn accept_all(
     listener: &TcpListener,
     connect: &dyn Fn() -> io::Result<UnixStream>,
     rejected: &dyn Fn(),
     relays: &mut Vec<Relay>,
-) {
+) -> bool {
     loop {
         let client = match listener.accept() {
             Ok((client, _)) => client,
-            Err(_) => return,
+            Err(error) => {
+                return matches!(
+                    error.raw_os_error(),
+                    Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS),
+                );
+            }
         };
         if relays.len() >= MAX_CONNECTIONS {
             // A nonblocking best effort: the response is far smaller than a

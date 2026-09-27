@@ -512,6 +512,14 @@ fn unsafe_launch(message: impl Into<String>) -> JailError {
     invalid("--launch", message)
 }
 
+/// The directory `--launch NAME` loads profiles from: `<config-dir>/launch`
+/// (§6.1). One spelling for the loader and the isolation check, so they can
+/// never disagree about what the launch directory is.
+#[must_use]
+pub fn launch_directory(config_dir: &Path) -> std::path::PathBuf {
+    config_dir.join("launch")
+}
+
 /// Loads `<config-dir>/launch/<name>.toml` (§6.2, §12).
 ///
 /// The launch directory is an operator location, so its own spelling is
@@ -536,7 +544,7 @@ pub fn load(
             "`{name}` is not a launch profile name ([a-z][a-z0-9_-]{{0,63}})"
         )));
     }
-    let directory = config_dir.join("launch");
+    let directory = launch_directory(config_dir);
     let directory = std::fs::canonicalize(&directory).map_err(|error| {
         unsafe_launch(format!(
             "the launch profile directory {} cannot be resolved: {error}",

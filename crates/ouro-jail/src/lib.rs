@@ -13,10 +13,21 @@
 /// whatever the operator passed, including a descriptor that rejects writes
 /// (an io_uring, which the run then refuses): a diagnostic that cannot be
 /// written is dropped, and the exit code stands.
+///
+/// The rendered line is escaped through
+/// [`escape_control`](crate::records::escape_control) (Security 2026-09-27,
+/// audit 3 A6): untrusted text reaches diagnostics through messages and
+/// interpolated config values, so no raw `ESC`, `BEL`, `CR` or `LF` can
+/// address the terminal or forge a second line. The trailing newline is
+/// written after the escaped text, so the line stays one line.
 pub fn diagnostic(args: std::fmt::Arguments<'_>) {
     use std::io::Write as _;
     let mut stderr = std::io::stderr().lock();
-    let _ = stderr.write_fmt(args);
+    let _ = write!(
+        stderr,
+        "{}",
+        crate::records::escape_control(&args.to_string())
+    );
     let _ = stderr.write_all(b"\n");
 }
 

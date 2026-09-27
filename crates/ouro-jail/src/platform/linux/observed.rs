@@ -184,17 +184,32 @@ pub enum Fact {
     Finished,
 }
 
-/// Whether an observed exec transition is the launcher executing the program
-/// the operator named.
+/// Whether an exec event establishes that one of `images` — the resolved
+/// absolute paths the platform prepared as the target's — actually ran.
 ///
 /// A transition with no pathname is one whose entry the observer did not
 /// witness, which is what seizing a process already inside its own `execve`
 /// produces; the launcher is seized while blocked in `read(2)`, so its target
 /// exec is witnessed and carries a path. A pathname that is not one the
 /// launcher would have tried is some other image. Neither confirms the
-/// target ran.
+/// target ran on its own.
+///
+/// Security 2026-09-27 (audit 3 A1): `kernel_image`, read from
+/// `/proc/<tid>/exe` at the exec-event stop, is what the kernel itself
+/// loaded and outranks the pathname snapshot, which a thread of the tracee
+/// can rewrite for the kernel's copy. When it is present it decides, and it
+/// can confirm an image even against a snapshot that was raced into naming
+/// something else; when it is absent the snapshot stands as before, the
+/// weaker claim §11.3 documents.
 #[must_use]
-pub fn is_target_image(images: &[Vec<u8>], path: Option<&PathSnapshot>) -> bool {
+pub fn is_target_image(
+    images: &[Vec<u8>],
+    path: Option<&PathSnapshot>,
+    kernel_image: Option<&[u8]>,
+) -> bool {
+    if let Some(kernel) = kernel_image {
+        return images.iter().any(|candidate| candidate.as_slice() == kernel);
+    }
     path.is_some_and(|path| {
         path.complete
             && images
@@ -212,12 +227,43 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             start_ticks,
             syscall,
             path,
+            kernel_image,
             dirfd,
             ..
         } => {
             audit.record_exec(*pid, *start_ticks, *syscall, path.as_ref(), *dirfd);
             // J4-O end
-            if *pid == target.launcher && is_target_image(target.images, path.as_ref()) {
+            if *pid != target.launcher {
+                return Fact::Nothing;
+            }
+            // Security 2026-09-27 (audit 3 A1): the kernel's own image, when
+            // it was read, decides the confirmation. A snapshot that names a
+            // target image while the kernel loaded another is an A-B-A
+            // rewrite of the pathname: the confirmation is refused and the
+            // contradiction is a gap of the exec class, so no receipt can
+            // certify a spoofed confirmation.
+            if let Some(kernel) = kernel_image.as_deref() {
+                let kernel_confirms = target
+                    .images
+                    .iter()
+                    .any(|candidate| candidate.as_slice() == kernel);
+                if kernel_confirms {
+                    return Fact::TargetExec;
+                }
+                if is_target_image(target.images, path.as_ref(), None) {
+                    let now = super::clock::boottime_ns();
+                    audit.record_gap(
+                        super::tracer::GapReason::ExecImageMismatch,
+                        super::tracer::OpSet::of(super::tracer::ClosedOp::Exec),
+                        now,
+                        now,
+                        Some(1),
+                    );
+                    return Fact::CoverageLost(super::tracer::GapReason::ExecImageMismatch);
+                }
+                return Fact::Nothing;
+            }
+            if is_target_image(target.images, path.as_ref(), None) {
                 Fact::TargetExec
             } else {
                 Fact::Nothing
@@ -376,6 +422,14 @@ mod tests {
     }
 
     fn exec(pid: pid_t, path: Option<PathSnapshot>) -> TracerEvent {
+        exec_with_kernel(pid, path, None)
+    }
+
+    fn exec_with_kernel(
+        pid: pid_t,
+        path: Option<PathSnapshot>,
+        kernel_image: Option<Vec<u8>>,
+    ) -> TracerEvent {
         TracerEvent::Exec {
             pid,
             // J4-O begin
@@ -383,6 +437,7 @@ mod tests {
             syscall: None,
             // J4-O end
             path,
+            kernel_image,
             dirfd: None,
             monotonic_ns: 1,
         }
@@ -416,6 +471,75 @@ mod tests {
         }
         // Every exec was recorded, confirming or not.
         assert_eq!(audit.count(CoverageClass::Exec), 5);
+    }
+
+    /// Security 2026-09-27 (audit 3 A1): the kernel's own image decides the
+    /// confirmation. It confirms a target image even against a snapshot that
+    /// was raced into naming another path, it refuses a snapshot that names
+    /// the target while the kernel loaded something else — recording an
+    /// `exec_image_mismatch` gap so no receipt certifies the spoof — and a
+    /// kernel image naming a non-target refuses without any gap.
+    #[test]
+    fn the_kernel_image_decides_the_exec_confirmation() {
+        let images = images();
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
+        // Kernel and snapshot agree on the target.
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(
+                    LAUNCHER,
+                    snapshot(b"/usr/bin/target", true),
+                    Some(b"/usr/bin/target".to_vec()),
+                ),
+            ),
+            Fact::TargetExec
+        );
+        // The snapshot was raced onto another name; the kernel still loaded
+        // the target: the kernel decides, and confirms.
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(
+                    LAUNCHER,
+                    snapshot(b"/usr/bin/impostor", true),
+                    Some(b"/usr/bin/target".to_vec()),
+                ),
+            ),
+            Fact::TargetExec
+        );
+        // The snapshot names the target, the kernel loaded another image:
+        // no confirmation, and the contradiction is a gap of the exec class.
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(
+                    LAUNCHER,
+                    snapshot(b"/usr/bin/target", true),
+                    Some(b"/usr/bin/impostor".to_vec()),
+                ),
+            ),
+            Fact::CoverageLost(GapReason::ExecImageMismatch)
+        );
+        assert!(audit.has_gaps());
+        // A kernel image naming a non-target is an ordinary inner exec.
+        let mut quiet = AuditWriter::new("att_y", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut quiet,
+                &target,
+                &exec_with_kernel(LAUNCHER, None, Some(b"/bin/false".to_vec())),
+            ),
+            Fact::Nothing
+        );
+        assert!(!quiet.has_gaps(), "a non-target image is not a mismatch");
     }
 
     #[test]

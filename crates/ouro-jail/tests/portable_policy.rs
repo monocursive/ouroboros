@@ -1270,10 +1270,10 @@ fn p02_a_symlink_component_and_a_case_variation_refuse_with_the_key_path() {
 
 // J5-B1-w3 begin: §9.1 pseudo-filesystem grant rule (S02)
 /// The pure resolution rule `grant_exposes_pseudo_fs`: a grant whose source
-/// is on a proc/sysfs/cgroup filesystem is forbidden, and so is one that is
-/// an ancestor of (or equal to) such a mount point; an ordinary path with no
-/// such mount beneath it is allowed. Path spelling never decides it — the
-/// magic mapping and the mount list do.
+/// is on a proc/sysfs/cgroup/devtmpfs filesystem is forbidden, and so is one
+/// that is an ancestor of (or equal to) such a mount point; an ordinary path
+/// with no such mount beneath it is allowed. Path spelling never decides it —
+/// the magic mapping and the mount list do.
 #[test]
 fn pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology() {
     use ouro_jail::policy::{grant_exposes_pseudo_fs, is_pseudo_fs_magic};
@@ -1284,13 +1284,21 @@ fn pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology() {
     assert!(is_pseudo_fs_magic(0x6265_6572)); // sysfs
     assert!(is_pseudo_fs_magic(0x0027_e0eb)); // cgroup v1
     assert!(is_pseudo_fs_magic(0x6367_7270)); // cgroup v2
+    assert!(is_pseudo_fs_magic(0x0000_137d)); // devtmpfs (audit 3 A3)
     assert!(!is_pseudo_fs_magic(0x0000_0001)); // not a pseudo fs
     assert!(!is_pseudo_fs_magic(0x5846_5342)); // xfs
 
+    // What the Linux platform collects: proc/sysfs/cgroup, devtmpfs anywhere,
+    // and tmpfs only at or beneath `/run` — a systemd host mounts
+    // `/run/user/<uid>` as its own tmpfs submount, and a tmpfs elsewhere
+    // (such as a `/tmp` tempdir) never enters the list.
     let mounts = [
         PathBuf::from("/proc"),
         PathBuf::from("/sys"),
         PathBuf::from("/sys/fs/cgroup"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/run"),
+        PathBuf::from("/run/user/1000"),
     ];
 
     // Source on a pseudo fs (the fstatfs verdict), whatever its path.
@@ -1303,6 +1311,30 @@ fn pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology() {
         false,
         &mounts
     ));
+
+    // Security 2026-09-27 (audit 3 A3): devtmpfs and the /run runtime tree.
+    assert!(grant_exposes_pseudo_fs(Path::new("/dev"), false, &mounts));
+    assert!(grant_exposes_pseudo_fs(
+        Path::new("/dev/shm"),
+        false,
+        &mounts
+    ));
+    assert!(grant_exposes_pseudo_fs(Path::new("/run"), false, &mounts));
+    assert!(grant_exposes_pseudo_fs(
+        Path::new("/run/user/1000"),
+        false,
+        &mounts
+    ));
+    // A tmpfs mount at /tmp is not collected, so a grant of it — or of a
+    // private tempdir, however the host backs it — is not a refusal.
+    assert!(!grant_exposes_pseudo_fs(
+        Path::new("/tmp"),
+        false,
+        &mounts
+    ));
+    let scratch = tempfile::tempdir().unwrap();
+    assert!(!grant_exposes_pseudo_fs(scratch.path(), false, &mounts));
+
     // An ordinary directory with no pseudo mount at or beneath it: allowed.
     assert!(!grant_exposes_pseudo_fs(
         Path::new("/home/work"),
@@ -1312,6 +1344,11 @@ fn pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology() {
     // A sibling whose name only shares a prefix is not an ancestor.
     assert!(!grant_exposes_pseudo_fs(
         Path::new("/sysroot"),
+        false,
+        &mounts
+    ));
+    assert!(!grant_exposes_pseudo_fs(
+        Path::new("/runtime"),
         false,
         &mounts
     ));

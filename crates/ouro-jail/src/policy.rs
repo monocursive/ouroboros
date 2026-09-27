@@ -1603,9 +1603,10 @@ fn build_snapshot(
 }
 
 // J5-B1-w3 begin: §9.1 — an operator grant may not expose a pseudo filesystem
-/// Whether a filesystem `f_type` magic is `proc`, `sysfs` or cgroup (v1 or v2).
-/// The Linux platform reads it with `fstatfs` on the resolved, pinned source;
-/// keeping the set here lets the resolution rule and its test stay portable.
+/// Whether a filesystem `f_type` magic is `proc`, `sysfs`, cgroup (v1 or v2)
+/// or devtmpfs. The Linux platform reads it with `fstatfs` on the resolved,
+/// pinned source; keeping the set here lets the resolution rule and its test
+/// stay portable.
 #[must_use]
 pub fn is_pseudo_fs_magic(f_type: i64) -> bool {
     // proc, sysfs, cgroup v1, cgroup v2 (statfs magic numbers, uapi/magic.h).
@@ -1613,18 +1614,30 @@ pub fn is_pseudo_fs_magic(f_type: i64) -> bool {
     const SYSFS: i64 = 0x6265_6572;
     const CGROUP: i64 = 0x0027_e0eb;
     const CGROUP2: i64 = 0x6367_7270;
-    matches!(f_type, PROC | SYSFS | CGROUP | CGROUP2)
+    // Security 2026-09-27 (audit 3 A3): devtmpfs. There is no DEV_SUPER_MAGIC
+    // in uapi/magic.h and none in libc: a mainline devtmpfs superblock
+    // reports TMPFS_MAGIC or RAMFS_MAGIC, so on a real host a `/dev` grant is
+    // caught by the mount-topology branch (fstype `devtmpfs` in the Linux
+    // platform's mount list), not here. This literal pins the magic for a
+    // kernel that reports one; it matches no current filesystem's `f_type`.
+    const DEVTMPFS: i64 = 0x0000_137d;
+    matches!(f_type, PROC | SYSFS | CGROUP | CGROUP2 | DEVTMPFS)
 }
 
-/// Whether an operator grant of `resolved` would expose host `/proc`, `/sys`
-/// or cgroupfs (jail-v1 §9.1: "Do not expose host `/proc`, `/sys`, cgroupfs").
+/// Whether an operator grant of `resolved` would expose host `/proc`, `/sys`,
+/// cgroupfs, devtmpfs or the `/run` runtime tree (jail-v1 §9.1: "Do not
+/// expose host `/proc`, `/sys`, cgroupfs" — audit 3 A3 adds devtmpfs and the
+/// `/run` tree).
 ///
 /// `source_on_pseudo_fs` is the platform's `fstatfs` verdict on the resolved
 /// source itself: true catches a grant whose source is on such a filesystem
 /// (a direct `--ro /proc`, a `--ro /proc/1`, a symlink resolving onto one).
-/// `pseudo_mounts` are the mount points of every proc/sysfs/cgroup mount;
-/// a grant that is an ancestor of, or equal to, any of them exposes it too
-/// (`--ro /` reaches `/proc` and `/sys`). The decision is on filesystem
+/// `pseudo_mounts` are the mount points of every proc/sysfs/cgroup/devtmpfs
+/// mount and of every tmpfs mounted at or beneath `/run`; a grant that is an
+/// ancestor of, equal to, or **beneath** any of them exposes or enters it
+/// (`--ro /` reaches `/proc` and `/sys`; `--rw /run/user/1000` and
+/// `--rw /dev/shm` enter the runtime trees even though tmpfs is not
+/// distinguishable by `fstatfs` alone). The decision is on filesystem
 /// identity and mount topology, never on how the grant was spelled.
 #[must_use]
 pub fn grant_exposes_pseudo_fs(
@@ -1637,7 +1650,7 @@ pub fn grant_exposes_pseudo_fs(
     }
     pseudo_mounts
         .iter()
-        .any(|mount| mount == resolved || mount.starts_with(resolved))
+        .any(|mount| mount.starts_with(resolved) || resolved.starts_with(mount))
 }
 // J5-B1-w3 end
 

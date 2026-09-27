@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 //! S02 (jail-v1 §9.1): an operator grant may not expose host `/proc`, `/sys`
-//! or cgroupfs. The late-wave review (rev-late F5) showed a contained `tool`
+//! or cgroupfs — and, since audit 3 A3, devtmpfs or the `/run` runtime tree.
+//! The late-wave review (rev-late F5) showed a contained `tool`
 //! run accepting `--ro /proc`, `--ro /sys` and `--ro /sys/fs/cgroup` and
 //! settling enforced/enforced. Each grant, and a symlink spelling of one,
 //! must refuse before exec, by the resolved source's filesystem type, not by
@@ -64,6 +65,71 @@ fn ro_grant_run(profile: &str, grant: &Path) -> (Option<i32>, String, bool) {
         .run()
         .expect("the jail runs");
     (run.code(), run.stderr_text(), marker.exists())
+}
+
+/// One `--rw GRANT` run of the same shape as [`ro_grant_run`].
+fn rw_grant_run(profile: &str, grant: &Path) -> (Option<i32>, String, bool) {
+    let c = case(profile);
+    let marker = c.workspace.join("target-ran");
+    let run: Run = c
+        .jail
+        .arg("--rw")
+        .arg(grant)
+        .target([
+            c.fixture.as_os_str(),
+            OsStr::new("open"),
+            marker.as_os_str(),
+            OsStr::new("--create"),
+            OsStr::new("--write"),
+        ])
+        .run()
+        .expect("the jail runs");
+    (run.code(), run.stderr_text(), marker.exists())
+}
+
+/// Security 2026-09-27 (audit 3 A3): the guard also covers devtmpfs and the
+/// `/run` runtime tree. `--ro /dev` used to mount the host device tree over
+/// the sandbox `/dev` and `--rw /run/...` the operator's runtime tmpfs into
+/// the jail. Both refuse in the policy layer, before any mount, still as the
+/// plain user. devtmpfs is caught by its fstype at any mount point; `/run` by
+/// a tmpfs at or beneath `/run` (a tmpfs anywhere else — a `/tmp` tempdir —
+/// stays grantable, which the portable rule test covers).
+#[test]
+fn s02_a_grant_of_dev_or_run_refuses_before_exec() {
+    if !common::live() {
+        return;
+    }
+    for profile in ["tool", "agent"] {
+        for grant in ["/dev", "/run"] {
+            if !Path::new(grant).exists() {
+                continue;
+            }
+            let (code, stderr, ran) = ro_grant_run(profile, Path::new(grant));
+            assert_eq!(code, Some(125), "{profile} --ro {grant}: {stderr}");
+            assert!(!ran, "{profile} --ro {grant}: the target ran");
+            assert!(
+                stderr.contains("policy_widening")
+                    && stderr.contains("(key: filesystem.read_only)")
+                    && stderr.contains("devtmpfs or the /run runtime tree"),
+                "{profile} --ro {grant}: {stderr}"
+            );
+        }
+    }
+    // The audit's live shape, writable: the operator's own logind runtime
+    // submount. Skipped where that mount does not exist, like the grants
+    // above.
+    let runtime = Path::new("/run/user").join(format!("{}", unsafe { libc::geteuid() }));
+    if runtime.is_dir() {
+        let (code, stderr, ran) = rw_grant_run("tool", &runtime);
+        assert_eq!(code, Some(125), "--rw {}: {stderr}", runtime.display());
+        assert!(!ran, "--rw {}: the target ran", runtime.display());
+        assert!(
+            stderr.contains("policy_widening")
+                && stderr.contains("(key: filesystem.read_write)"),
+            "--rw {}: {stderr}",
+            runtime.display()
+        );
+    }
 }
 
 /// §9.1: a contained profile refuses an operator grant that exposes host

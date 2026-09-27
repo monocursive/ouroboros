@@ -42,9 +42,11 @@ use crate::platform::linux::tracer::sys;
 /// The `SECCOMP_RET_DATA` this filter's trace carries, which the tracer reads
 /// back at a stop (`PTRACE_GETEVENTMSG`). A stop for a number this filter
 /// does not trace, carrying other data, is one another filter asked for — a
-/// child's own `SECCOMP_RET_TRACE` — and is continued, not mislabelled; one
-/// carrying this value for such a number means the installed program is not
-/// this one, and is a gap.
+/// child's own `SECCOMP_RET_TRACE` — and is continued, counted in
+/// `requested_by_other_filters` (audit 3 A5: the receipt carries the count,
+/// so it is not silent), never mislabelled; one carrying this value for such
+/// a number means the installed program is not this one, and is a visible
+/// `unexpected_trace_stop` gap.
 pub const NARROWING_TRACE_DATA: u16 = 0x4f4a;
 
 /// `seccomp(2)` on x86_64: a stop when its flags ask for a listener.

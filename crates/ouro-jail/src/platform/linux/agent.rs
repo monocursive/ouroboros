@@ -503,6 +503,29 @@ impl AgentNet {
         if let Some(mediator) = &self.mediator {
             mediator.restrict_authorized_connector(Some((pid, start_ticks)));
         }
+        // Security 2026-09-27 (audit 3 A4): seal the bridge. Every `/proc`
+        // read-back above is done; one datagram on the report pair tells the
+        // bridge to make itself non-dumpable before the target is released,
+        // so a same-uid peer cannot reach its memory or descriptors on any
+        // host, `ptrace_scope=0` included. A bridge that cannot be sealed
+        // never serves: the run refuses here rather than release beside an
+        // unprotected helper.
+        let sealed = self.bridge_report.as_ref().map(|report| {
+            // SAFETY: `report` is a live socket descriptor this process
+            // owns; the byte buffer outlives the call.
+            unsafe {
+                libc::send(
+                    report.as_raw_fd(),
+                    b"s".as_ptr().cast(),
+                    1,
+                    libc::MSG_NOSIGNAL,
+                )
+            }
+        });
+        match sealed {
+            Some(1) => {}
+            _ => return Err(refusal("bridge", "it could not be sealed")),
+        }
         Ok(pid)
     }
 
@@ -963,17 +986,34 @@ fn bind_pinned(
 }
 
 /// Whether `pid` holds a TCP socket listening on `127.0.0.1:3128`, read from
-/// its own network namespace's `/proc/<pid>/net/tcp` and matched to one of
-/// its descriptors.
+/// its own network namespace's `/proc/<pid>/net/tcp` and `/proc/<pid>/net/tcp6`
+/// tables (audit 3 A7c: the bridge binds the v4 loopback
+/// only, but the read-back must not depend on which table the kernel listed
+/// the listener in) and matched to one of its descriptors. True when either
+/// table shows the `LISTEN` row and one of `pid`'s fds is that socket.
 fn listening_socket(pid: libc::pid_t) -> io::Result<bool> {
     let table = std::fs::read_to_string(format!("/proc/{pid}/net/tcp"))?;
-    let Some(inode) = listening_inode(&table) else {
+    let mut inodes = Vec::new();
+    if let Some(inode) = listening_inode(&table) {
+        inodes.push(inode);
+    }
+    // A namespace without an ipv6 table has no v6 row to find; that absence
+    // is not a failure of the check, so only the v4 read's error propagates.
+    if let Ok(v6) = std::fs::read_to_string(format!("/proc/{pid}/net/tcp6")) {
+        inodes.extend(listening_inode6(&v6));
+    }
+    if inodes.is_empty() {
         return Ok(false);
-    };
-    let wanted = format!("socket:[{inode}]");
+    }
+    let wanted: Vec<String> = inodes
+        .iter()
+        .map(|inode| format!("socket:[{inode}]"))
+        .collect();
     for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
         let Ok(entry) = entry else { continue };
-        if std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == wanted.as_str()) {
+        if wanted.iter().any(|name| {
+            std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == name.as_str())
+        }) {
             return Ok(true);
         }
     }
@@ -985,13 +1025,35 @@ fn listening_socket(pid: libc::pid_t) -> io::Result<bool> {
 #[must_use]
 pub fn listening_inode(table: &str) -> Option<u64> {
     // Little-endian hex of 127.0.0.1, then the port in hex; state 0A is LISTEN.
-    const LOCAL: &str = "0100007F:0C38";
+    listening_inode_on(table, &["0100007F:0C38"])
+}
+
+/// The same match in a `/proc/net/tcp6` table (audit 3 A7c): a v6 local
+/// address is thirty-two hex digits, and the forms that name
+/// the bridge's local end are `::1` (the v6 loopback) and `::` (a dual-stack
+/// listener, which also serves the v4 loopback), each on the bridge's port.
+#[must_use]
+fn listening_inode6(table: &str) -> Option<u64> {
+    listening_inode_on(
+        table,
+        &[
+            "00000000000000000000000001000000:0C38",
+            "00000000000000000000000000000000:0C38",
+        ],
+    )
+}
+
+/// The inode of the `LISTEN` row (`0A`) whose local address is one of
+/// `local`, each already carrying the bridge's port in hex (`:0C38`), if
+/// there is one.
+fn listening_inode_on(table: &str, local: &[&str]) -> Option<u64> {
     const LISTEN: &str = "0A";
     table.lines().skip(1).find_map(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        (fields.get(1) == Some(&LOCAL) && fields.get(3) == Some(&LISTEN))
-            .then(|| fields.get(9)?.parse().ok())
-            .flatten()
+        (fields.get(1).is_some_and(|found| local.contains(found))
+            && fields.get(3) == Some(&LISTEN))
+        .then(|| fields.get(9)?.parse().ok())
+        .flatten()
     })
 }
 
@@ -1060,6 +1122,39 @@ mod tests {
             "an established flow, another port and 0.0.0.0 are not the bridge"
         );
         assert_eq!(listening_inode(header), None);
+    }
+
+    #[test]
+    fn the_listening_row_is_found_in_the_v6_table_too() {
+        // Security 2026-09-27 (audit 3 A7c): the read-back parses tcp6 as well
+        // as tcp. A v6 address is thirty-two hex digits, and `::1` and `::`
+        // name the bridge's local end there; another address, another port,
+        // an established flow and a v4-mapped form do not.
+        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+        let row = |local: &str, st: &str, inode: u64| {
+            format!(
+                "   0: {local} 00000000000000000000000000000000:0000 {st} \
+                 00000000:00000000 00:00000000 00000000  1001        0 \
+                 {inode} 1 0000000000000000 100 0 0 10 0\n"
+            )
+        };
+        let loopback = row("00000000000000000000000001000000:0C38", "0A", 5252);
+        let dual_stack = row("00000000000000000000000000000000:0C38", "0A", 5353);
+        let v4_mapped = row("00000000000000000000FFFF0100007F:0C38", "0A", 5454);
+        let established = row("00000000000000000000000001000000:0C38", "01", 5555);
+        let other_port = row("00000000000000000000000001000000:0C39", "0A", 5656);
+        assert_eq!(listening_inode6(&format!("{header}{loopback}")), Some(5252));
+        assert_eq!(
+            listening_inode6(&format!("{header}{dual_stack}")),
+            Some(5353),
+            "a dual-stack listener also serves the v4 loopback"
+        );
+        assert_eq!(
+            listening_inode6(&format!("{header}{established}{other_port}{v4_mapped}")),
+            None,
+            "an established flow, another port and a v4-mapped form are not the bridge"
+        );
+        assert_eq!(listening_inode6(header), None);
     }
 
     #[test]

@@ -1,7 +1,19 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 21, 2026-09-25. No implementation
-or backend conformance is claimed by this document. Revision 21 records the
+Status: implementation specification, revision 22, 2026-09-27. No implementation
+or backend conformance is claimed by this document. Revision 22 records the
+third security audit's fixes (docs/security-audit-2026-09-26.md): a stable
+read-only verdict on memory-resident `openat2` flags is a
+`memory_flags_unverified` gap, never a silent filter, and a confirmed exec is
+corroborated against the kernel's own image (§11.3); operator grants of
+devtmpfs and the `/run` runtime tree refuse like `/proc` and cgroupfs, and
+the launch directory is isolated from child-visible roots on every run
+(§9.1); the bridge is sealed non-dumpable by the supervisor before release,
+so the boundary no longer depends on Yama for its own helper (§10);
+wrong-guess narrowing trace stops are counted in the receipt (§11.2);
+operator-facing errors escape control characters (§6.4); the `quotactl`
+family joins the denied set (§9.2); the storage ceiling and the same-uid
+namespace init remain named limits (§2). Revision 21 records the
 second security audit's fixes (docs/security-audit-2026-09-25-2.md): every
 `openat2` is followed to its exit so the entry-time read-only skip can no
 longer silently drop a raced mutation (§11.3), the ptrace-class and
@@ -153,7 +165,10 @@ its local invocation, so the jail alone cannot enforce company-wide usage.
 | I11 | A child-visible policy edit cannot widen a running attempt. |
 | I12 | GC acts only on registered, identity-checked attempt resources and never follows child-created links out of them. |
 
-Named limits from the north star remain limits. Writable workspaces can contain
+Named limits from the north star remain limits. Writable workspaces and
+managed scratch have no storage ceiling: the limits of §6.4 are pids, memory,
+cpu and wall, so a contained child can fill the host filesystem, including
+the jail's own state store. Writable workspaces can contain
 shared inodes or Git alternates. The jail does not turn them into private
 repositories. `none` cannot protect same-UID evidence or guarantee cleanup after
 its supervisor dies. Removing vendor state unlinks managed files; it neither
@@ -670,6 +685,10 @@ Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
 stdout/stderr byte streams and has no `--json` stdout mode. An error that
 reaches no durable receipt (a terminal receipt that failed to persist, and
 what only it would have recorded) is printed on stderr, one line per error.
+Every byte of an error or diagnostic that comes from untrusted input — a
+project-config value, a path a child chose — has its control characters
+escaped at the write, so no value can forge a second line or drive the
+operator's terminal (security audit 2026-09-26, A6).
 A diagnostic that cannot be written to stderr is dropped: diagnostics never
 change an exit code.
 
@@ -1198,12 +1217,19 @@ isolation belongs to managed MT04–MT05, not to a successful workspace mount.
 Mount a private `/proc` for the child PID namespace and a minimal `/dev`.
 Do not expose host `/proc`, `/sys`, cgroupfs, host namespace handles, Docker or
 SSH-agent sockets. An operator grant (`--ro`, `--rw`, an operator profile or a
-launch profile) whose resolved source is on a `proc`, `sysfs` or cgroup (v1 or
-v2) filesystem, or that is an ancestor of such a mount, refuses before exec
-with `policy_widening`, remediation `configuration`, naming the grant's key
-path. The decision is by the pinned source's filesystem type (`statfs`) and the
+launch profile) whose resolved source is on a `proc`, `sysfs`, cgroup (v1 or
+v2) or `devtmpfs` filesystem, or on a `tmpfs` mounted at or beneath `/run` —
+the host's runtime tree, which a plain user's logind mounts there — or that is
+an ancestor of such a mount, refuses before exec with `policy_widening`,
+remediation `configuration`, naming the grant's key path (security audit
+2026-09-26, A3: a `tmpfs` outside `/run`, such as a `/tmp` scratch, is not a
+refusal). The decision is by the pinned source's filesystem type (`statfs`) and the
 mount topology, never by path spelling, so a symlink onto `/proc` refuses too;
 `--ro /` is refused earlier by the state-isolation rule (§§6.2, 7). The
+launch directory `--launch` loads profiles from (`<config-dir>/launch`) is
+operator authority like the state root, so the same isolation rule applies on
+every run, with or without a loaded profile: a child-visible root that
+overlaps the launch directory refuses (security audit 2026-09-26, A2). The
 built-in runtime roots are on the root filesystem, and the child's private
 `/proc` and `/dev` are made by the backend, not bound from a grant. Denied subtrees within visible parents are absent or masked
 by the backend. `/etc/resolv.conf` is never the host's file: a sanitized
@@ -1613,7 +1639,14 @@ proxy socket directly is refused (`proxy_bridge_only`), so the bridge's
 accounting and its fail-closed connection budget cannot be skipped. At capacity the bridge answers
 `503 bridge_overload` and closes. A target that signals every process it can
 reach can kill its own bridge; the attempt then loses its own network, which
-fails closed and is recorded.
+fails closed and is recorded. Security audit 2026-09-26, A4: after the
+supervisor has discovered and verified the bridge, it seals it — one datagram
+on the report pair — and the bridge makes itself non-dumpable before it
+serves its first client, so no same-uid peer can reach `/proc/<bridge>`'s
+`mem`, `environ`, `fd` or `oom_score_adj` at any Yama scope, including
+`ptrace_scope=0` hosts (the namespace init, which the jail does not own,
+remains same-uid reachable, a named limit). An unsealed bridge never serves;
+a supervisor that dies before sealing takes the attempt with it.
 
 Initial budgets per attempt: 128 active connections, 32 KiB request headers,
 10-second DNS/connect/header deadline, 1 MiB total bounded relay buffers.
@@ -1762,7 +1795,15 @@ observation is claimed; `ftruncate` is an fd-based mutation of the same class
 as `write` and is named here so its absence from the set is deliberate. Async operations issued through other interfaces are outside this
 set even if they cause similar effects. A field named `fs.write` always carries
 its precise action, such as `opened_for_mutation`, to prevent consumers from
-presenting it as a content diff.
+presenting it as a content diff. Metadata mutations — the `chmod`/`chown`
+family and the xattr interfaces — are outside `linux-closed-v1` by design: the
+set claims no metadata event, so a child can change mode bits, ownership or
+extended attributes within its containment without producing one (security
+audit 2026-09-26, A8). A child's own stacked `SECCOMP_RET_ERRNO` filter is not
+a way out of the set either: its verdict short-circuits the call, so it can
+hide only a covered call that ends in a failure, and every call that actually
+takes effect — successful mutations included — passes the child's filter and
+is stopped and recorded by the observer's.
 
 ### 11.3 Paths, arguments and identities
 
@@ -1880,7 +1921,19 @@ and records one `argument_snapshot_unstable` gap of that call's own classes.
 A falsified classification (a mutation recorded as a read, or a path that
 was never used) can therefore never be presented as an observed fact.
 Register arguments need no re-read: the kernel consumes the saved registers
-this stop pair already saw.
+this stop pair already saw. Security audit 2026-09-26, A1, closes the two
+residuals of that rule. First, an `openat2` whose flags live in memory can
+satisfy both reads and still have been rewritten for the kernel's own copy
+(an A-B-A rewrite: flip for the kernel, restore for the exit re-read), so a
+stable read-only verdict on memory flags is never a certification: the call
+is one `memory_flags_unverified` gap of its own classes and a counter, never
+a silent filter. Register-flags opens keep their entry-time read-only skip.
+Second, a confirmed exec's pathname is an entry-only claim the same race can
+falsify, so the exec event also carries what `/proc/<tid>/exe` resolves to at
+the exec stop — the kernel's own image, which no tracee rewrite reaches —
+and the target-exec confirmation follows the kernel's image: an entry
+snapshot that names a target image while the kernel loaded another records
+an `exec_image_mismatch` gap and confirms nothing.
 
 Only a call the observer must follow takes an in-flight slot: a call outside
 the closed set is classified at its entry and is never `inflight_exhausted`. A

@@ -1368,12 +1368,20 @@ impl Session {
                 syscall = Some(pending.entry.name);
             }
         }
+        // Security 2026-09-27 (audit 3 A1): the kernel has already installed
+        // the new image at this stop, so `/proc/<tid>/exe` names what actually
+        // runs, whatever the tracee did to the pathname between the entry
+        // snapshot and the kernel's own copy. A read that fails keeps the
+        // event (the snapshot's claim stands, as before) without the
+        // corroboration.
+        let kernel_image = proc::kernel_exe(tid);
         let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Exec {
             pid: tgid,
             start_ticks,
             syscall,
             path,
+            kernel_image,
             dirfd,
             monotonic_ns: clock::boottime_ns(),
         });
@@ -1806,12 +1814,20 @@ impl Session {
             && let Some(flags) = pending.args.flags
             && !closed_set::open_is_covered(flags)
         {
-            // A memory-sourced read-only `openat2` followed for
-            // verification (audit 2026-09-25-2, S1): the exit re-read above
-            // agreed with the entry snapshot, so the kernel applied exactly
-            // these read-only flags and the call stayed outside
-            // `linux-closed-v1` — no event, no loss, only the counter.
+            // A memory-sourced read-only `openat2` followed for verification
+            // (audit 2026-09-25-2, S1). Security 2026-09-27 (audit 3 A1):
+            // the exit re-read agreeing with the entry snapshot does NOT
+            // prove the kernel applied these flags — a thread of the tracee
+            // can flip `open_how.flags` for the kernel's own copy and
+            // restore them before this stop (an A-B-A rewrite), which this
+            // observer cannot tell apart. The verdict is therefore not
+            // certifiable: the call is counted, but it is also a gap of its
+            // own classes, never a silent filter. Register-sourced flags
+            // are immune (the kernel consumes the saved `pt_regs`) and keep
+            // their entry-time read-only skip.
             self.summary.filtered_readonly_opens += 1;
+            self.summary.loss.memory_flags_unverified += 1;
+            self.gap(GapReason::MemoryFlagsUnverified, OpSet::of(op), Some(1));
             return;
         }
         self.summary.ops.bump(op);
@@ -2612,10 +2628,11 @@ mod tests {
 
     /// Security 2026-09-25-2 (audit S1): an `openat2` classified read-only
     /// at its entry is followed to its exit, where the flags are re-read.
-    /// Stable read-only flags stay outside the closed set (a counter, no
-    /// event); flags rewritten between the two kernel reads become an
-    /// `argument_snapshot_unstable` gap, never a silently suppressed
-    /// mutation.
+    /// Security 2026-09-27 (audit 3 A1): even stable read-only flags cannot
+    /// be certified — an A-B-A rewrite satisfies both reads — so the call is
+    /// counted AND recorded as a `memory_flags_unverified` gap of its
+    /// classes, never a silent filter; flags rewritten between the two
+    /// kernel reads remain an `argument_snapshot_unstable` gap.
     #[test]
     fn a_readonly_openat2_is_reverified_at_its_exit() {
         let (mut session, rx) = stalled_session();
@@ -2657,9 +2674,19 @@ mod tests {
         session.handle_exit(self_pid, 3);
         assert_eq!(
             session.summary.filtered_readonly_opens, 1,
-            "stable read-only flags are counted, not recorded"
+            "stable read-only flags are counted"
         );
-        assert!(rx.try_recv().is_err(), "no event is emitted");
+        assert_eq!(
+            session.summary.loss.memory_flags_unverified, 1,
+            "a stable verdict on memory flags is still uncertifiable"
+        );
+        match rx.try_recv() {
+            Ok(TracerEvent::Gap {
+                reason: GapReason::MemoryFlagsUnverified,
+                ..
+            }) => {}
+            other => panic!("expected a memory_flags_unverified gap, got {other:?}"),
+        }
         how = libc::O_WRONLY as u64 | libc::O_CREAT as u64;
         assert_ne!(how, 0, "the raced value is what the kernel will apply");
         session.tasks.get_mut(&self_pid).unwrap().pending = Some(InFlight::Closed(pending));
