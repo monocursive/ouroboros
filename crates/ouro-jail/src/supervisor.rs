@@ -4586,6 +4586,7 @@ mod tests {
         // A symlink is refused, not followed.
         let real = root.path().join("real.toml");
         std::fs::write(&real, b"[jail]\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
         let link = root.path().join("config.toml");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let error = read_operator_file(&link, key).unwrap_err();
@@ -4609,6 +4610,7 @@ mod tests {
         // A second hard link is refused.
         let single = root.path().join("single.toml");
         std::fs::write(&single, b"[jail]\n").unwrap();
+        std::fs::set_permissions(&single, std::fs::Permissions::from_mode(0o600)).unwrap();
         let twin = root.path().join("twin.toml");
         std::fs::hard_link(&single, &twin).unwrap();
         let error = read_operator_file(&twin, key).unwrap_err();

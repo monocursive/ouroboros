@@ -295,3 +295,72 @@ family, `open_by_handle_at`, `fanotify_init`, `setns`, `mount`,
 6. B8, B9 — deny-list the capability-gated stragglers; digest the
    installed filter bytes; surface `filtered_readonly_opens`; note the
    bridge accounting truncations.
+
+## Remediation (2026-09-27)
+
+Every finding was fixed at `a9e0a138` and verified live on the reference
+host with this audit's own PoCs. The spec is revision 23.
+
+- **B1** — `check_config_isolation` refuses any child-visible root
+  overlapping the config directory on every run (`unsafe_config_path`,
+  `OURO_CONFIG_DIR`), and `read_operator_file` now reads `config.toml`
+  no-follow, regular-file-only, operator-uid, no group/world write, single
+  link, capped at 256 KiB — the project file's hardening, applied to the
+  trusted layer. Verified live: the planting grant (`--rw
+  ~/.config/ouro/config.toml`) refuses before exec; a group-writable
+  planted config refuses to load; an honest 0600 config loads.
+- **B2** — `Session::compat_special` recognizes the i386 (`int 0x80`) and
+  x32 spellings of `seccomp(NEW_LISTENER)` and `clone(CLONE_UNTRACED)` at
+  the entry stop and routes them to the open-ended `Listener`/`Untraced`
+  classifications before the bounded `Foreign` return. Verified live: the
+  audit's i386 listener PoC under `none`, which aborted `evidence_lost
+  foreign_abi` before, now runs `settled` with no `foreign_abi` gap (the
+  call exits refused; a successful listener would record
+  `child_notification_listener`, which has no end).
+- **B3** — `kernel_exe` returns the raw link bytes with the image's own
+  `(dev, ino)`; confirmation follows the inode first (a prepared spelling
+  that resolves to the image's inode confirms, through symlinks and after
+  an unlink), then the raw bytes, and the ` (deleted)`-stripped form only
+  when no live file under the stripped name is a different image — the
+  decoy case records `exec_image_mismatch`. Verified by unit tests
+  (decoy, unlinked target, symlink) and live: a workspace-symlinked exec
+  still confirms; `race9` still degrades honestly; A01 stays clean.
+- **B4** — `state::mount_alias::alias_conflict` reads mountinfo and the
+  three isolation guards (state, launch, config) plus the receipt-path
+  validation refuse a bind alias of a guarded tree beneath a
+  child-visible root, naming the alias. Verified live: `sudo mount
+  --bind ~/.local/share/ouro <workspace>/state-alias` now refuses
+  `unsafe_state_path` naming the alias, and the run is clean again after
+  unmounting.
+- **B5** — `Lease::acquire` opens `jail.lock` with `O_NOFOLLOW` and
+  re-verifies the descriptor is a regular file, closing the
+  check-then-open window `probe_existing` already closed.
+- **B6** — `clock::wall_deadline` parses the wall ceiling once; both
+  release paths use it and an unparseable value refuses the release
+  (`InternalError`) instead of silently dropping the deadline the
+  receipt's limit row claims.
+- **B7** — `pseudo_fs_mount_points` includes `/run` by path
+  unconditionally, so a host whose `/run` is not tmpfs refuses its
+  runtime tree too. Verified live: `--ro /run` still refuses
+  `policy_widening`.
+- **B8** — `adjtimex` (159), `clock_settime` (227) and `clock_adjtime`
+  (305) joined `DENY_EPERM`; the pinned evidence tables were regenerated
+  (`bless_the_pinned_seccomp_tables`, the new deliberate-write test
+  mirroring the closed-set one). Verified live: all three return `EPERM`
+  inside `agent`.
+- **B9** — receipts now record
+  `narrowing_filter_digest_installed` beside the canonical
+  `narrowing_filter_digest` (the per-attempt trace data changes exactly
+  one immediate — unit-tested), `filtered_readonly_opens` reaches
+  `lifetime.native.details`, and the mediator refuses an AF_UNIX address
+  longer than `sockaddr_un` with `EINVAL` (`addr_overlong`) instead of
+  classifying truncated bytes. Verified live: a plain run's receipt
+  carries both digests (they differ) and the counter.
+
+Post-fix verification: the full Linux suite on the reference host, the A01
+opencode regression (`settled`, every coverage class active, no gaps —
+see above), `race9` at both gap classes, and the third-audit regressions
+re-run (grant refusals, bridge seal at `ptrace_scope=0` restored and
+re-verified, control-character escaping). The evidence tables and
+`milestone-1-freeze.toml` were regenerated from the fixed tree
+(`cargo xtask freeze`).

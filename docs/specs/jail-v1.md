@@ -1,9 +1,27 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 22, 2026-09-27. No implementation
-or backend conformance is claimed by this document. Revision 22 records the
-third security audit's fixes (docs/security-audit-2026-09-26.md): a stable
-read-only verdict on memory-resident `openat2` flags is a
+Status: implementation specification, revision 23, 2026-09-27. No implementation
+or backend conformance is claimed by this document. Revision 23 records the
+fourth security audit's fixes (docs/security-audit-2026-09-27.md): the whole
+config directory — whose `config.toml` is a trusted, widening layer read on
+every run — is isolated from child-visible roots on every run and read
+no-follow, bounded and identity-checked (§6.2, §9.1); the isolation guards
+consult mountinfo, so a bind alias of the state, launch or config trees
+beneath a child-visible root refuses (§9.1); a compat-ABI `seccomp` asking
+for its own listener, or a compat-ABI `clone` with `CLONE_UNTRACED`, is the
+open-ended gap of its kind, not a bounded `foreign_abi` interval (§11.2);
+an exec's kernel image is corroborated by inode against the raw
+`/proc/<tid>/exe` link, so a decoy named `tool (deleted)` cannot confirm
+against an unlinked `tool` (§11.3); the attempt lease opens `O_NOFOLLOW`
+and re-verifies the descriptor (§7); the wall ceiling is parsed once and an
+unparseable value refuses the release instead of silently dropping
+enforcement (§6.4); `/run` is refused by its path as well as its fstype
+(§9.1); the `adjtimex`/`clock_settime`/`clock_adjtime` family joins the
+denied set (§9.2); receipts carry the digest of the narrowing filter bytes
+the attempt installed beside the canonical one, and the
+`filtered_readonly_opens` counter (§13.3); the mediator refuses an AF_UNIX
+address longer than `sockaddr_un` (§10). Revision 22 records the third
+security audit's fixes (docs/security-audit-2026-09-26.md): a
 `memory_flags_unverified` gap, never a silent filter, and a confirmed exec is
 corroborated against the kernel's own image (§11.3); operator grants of
 devtmpfs and the `/run` runtime tree refuse like `/proc` and cgroupfs, and
@@ -731,6 +749,13 @@ counts as others unless the group is the owner's private group (the owner's
 primary group, listing no other member, and no other account's primary
 group), as stock Debian and Ubuntu create with a umask of 002.
 
+`config.toml` itself is operator authority, and authority is read like it:
+no-follow, a regular file, the operator's own uid, no group/world write,
+a single link and a bounded read, with every other failure refusing rather
+than continuing without the operator's defaults (security audit
+2026-09-27, B1 — the file is a widening layer, so a planted or grown copy
+must never load silently).
+
 Apply configuration in this order:
 
 1. Built-in profile and operator config/selected operator profile.
@@ -1020,6 +1045,11 @@ is never visible incomplete. A prior jail claim, live or dead, refuses
 `attempt_exists`; the caller
 reconciles it rather than spawning again. Test concurrent claims and crashes
 after claim creation. The child cannot inherit the lock.
+
+The lease's own open is no-follow and re-verifies the descriptor's shape,
+so a path swapped between the checks and the open cannot have a foreign
+inode locked or an attacker-chosen file created through a dangling link
+(security audit 2026-09-27, B5).
 Register resource ownership before populating credentials
 or launching helpers. The execution cgroup is registered in jail state by name
 before it is created (P15) and by device and inode right after, before anything
@@ -1087,7 +1117,9 @@ Preparation steps, in order:
    policy digest. No target instruction has run.
 6. Wait for a valid external release if `--gate-fd` was supplied; otherwise
    release locally. Start the wall deadline, on the continuous clock of §6.4, at
-   release.
+   release; the ceiling is parsed once, in one place, and a value that does
+   not parse refuses the release rather than dropping enforcement the
+   receipt's limit row claims (security audit 2026-09-27, B6).
 7. Execute the exact target argv through the blocked launcher. Use a dedicated
    close-on-exec error channel plus backend/observer evidence to distinguish
    success from exec failure. EOF alone is insufficient if launcher death could
@@ -1223,13 +1255,23 @@ the host's runtime tree, which a plain user's logind mounts there — or that is
 an ancestor of such a mount, refuses before exec with `policy_widening`,
 remediation `configuration`, naming the grant's key path (security audit
 2026-09-26, A3: a `tmpfs` outside `/run`, such as a `/tmp` scratch, is not a
-refusal). The decision is by the pinned source's filesystem type (`statfs`) and the
+refusal; security audit 2026-09-27, B7: `/run` is in the refused set by its
+path as well, so a host whose `/run` is not `tmpfs` refuses too). The
+decision is by the pinned source's filesystem type (`statfs`) and the
 mount topology, never by path spelling, so a symlink onto `/proc` refuses too;
 `--ro /` is refused earlier by the state-isolation rule (§§6.2, 7). The
-launch directory `--launch` loads profiles from (`<config-dir>/launch`) is
-operator authority like the state root, so the same isolation rule applies on
-every run, with or without a loaded profile: a child-visible root that
-overlaps the launch directory refuses (security audit 2026-09-26, A2). The
+launch directory `--launch` loads profiles from (`<config-dir>/launch`) and
+the config directory itself — whose `config.toml` is a trusted, widening
+layer read on every run (§6.2), so a planted file would rewrite the
+operator's defaults for every later invocation (security audit 2026-09-27,
+B1) — are operator authority like the state root, so the same isolation
+rule applies on every run, with or without a loaded profile: a
+child-visible root that overlaps either refuses (security audit
+2026-09-26, A2; 2026-09-27, B1), and each guard also consults
+`/proc/self/mountinfo`, so a bind alias of the state, launch or config
+trees mounted beneath a child-visible root refuses with the alias named,
+which the canonicalized-path comparison alone cannot see (security audit
+2026-09-27, B4). The
 built-in runtime roots are on the root filesystem, and the child's private
 `/proc` and `/dev` are made by the backend, not bound from a grant. Denied subtrees within visible parents are absent or masked
 by the backend. `/etc/resolv.conf` is never the host's file: a sanitized
@@ -1281,7 +1323,11 @@ filter is versioned, architecture-aware and recorded by digest. Set
 
 Common baseline denies host tracing/inspection (`ptrace`, `process_vm_*`,
 `bpf`, `perf_event_open`), kernel replacement/module interfaces, keyring grants
-listed by the north star, and terminal injection. Validate syscall architecture
+listed by the north star, and terminal injection. The global clock-adjustment
+family — `adjtimex`, `clock_settime`, `clock_adjtime` — is denied with EPERM
+rather than left to the absent `CAP_SYS_TIME`, which is unreachability, not
+a refusal (security audit 2026-09-27, B8, the S10 drift class; reading any
+clock stays allowed). Validate syscall architecture
 before syscall numbers; handle x86 compat/x32 explicitly by denial unless
 tested. Native aarch64 uses its own verified table. A syscall's absence on one
 architecture is not a missing-probe success.
@@ -1579,7 +1625,11 @@ credentials name the supervisor for a mediated pathname connect. A listener
 bound inside a network namespace nested within the attempt is not in the
 attempt's diagnostic view and is refused. An inner sandbox cannot install its
 own seccomp notification listener while the outer one holds one. A connect
-mediated this way is not a ptrace stop; the mediator emits its evidence. When
+mediated this way is not a ptrace stop; the mediator emits its evidence. An
+address longer than `sockaddr_un` is refused with `EINVAL` before
+classification — the kernel would refuse it at `connect`, and mediating the
+truncated bytes would inspect an address that cannot exist (security audit
+2026-09-27, B9). When
 the kernel offers a native, composable restriction of pathname Unix peers,
 prefer it and drop the mediation.
 
@@ -1711,9 +1761,15 @@ identified as absent; equivalent variants that exist must be tested. The
 x86_64 table is published as
 [`evidence/closed-set-x86_64.txt`](jail-v1/evidence/closed-set-x86_64.txt),
 generated from the observer's rows and by running the installed narrowing
-filter; it names the narrowing-filter digest that receipts record in
-`lifetime.native.details.narrowing_filter_digest`, and conformance compares
-the table with the build and the digest with a live receipt. A successful
+filter; it names the canonical narrowing-filter digest that receipts record
+in `lifetime.native.details.narrowing_filter_digest`, and conformance
+compares the table with the build and the digest with a live receipt.
+Security audit 2026-09-27, B9: the launcher installs the filter carrying a
+per-attempt trace-data value, so a receipt also records
+`lifetime.native.details.narrowing_filter_digest_installed` — the digest of
+the bytes that attempt actually installed — beside the canonical one, and
+`filtered_readonly_opens`, the honest count of read-only open verdicts the
+observer certified. A successful
 exec's `proc.exec` names its call in `fields.syscall`, unless the observer did
 not follow that exec's entry (the in-flight bound refused it, or the process
 was taken on inside its own `execve`): then the result names no call and its
@@ -1721,7 +1777,13 @@ path is `{unavailable, argument_not_read}`. A call
 under another ABI (a non-native architecture, or the x32 bit) is never decoded
 from the native table. Contained baselines refuse those ABIs; in `none` the
 observer stops on each, and one the kernel did not reject as nonexistent
-(ENOSYS) is a `foreign_abi` gap in every audit class.
+(ENOSYS) is a `foreign_abi` gap in every audit class — except the two calls
+whose native forms carry their own classification: a compat-ABI `seccomp`
+asking for its own notification listener (i386 354, x32 `317|bit`, flags in
+the same register) is the open-ended `child_notification_listener` gap, and
+a compat-ABI `clone` with `CLONE_UNTRACED` (i386 120, x32 `56|bit`) is the
+open-ended `untraced_descendant` gap, because both hide everything after
+them whatever ABI created them (security audit 2026-09-27, B2).
 
 | Operation | Native evidence | Meaning of a result |
 |---|---|---|
@@ -1934,6 +1996,16 @@ the exec stop — the kernel's own image, which no tracee rewrite reaches —
 and the target-exec confirmation follows the kernel's image: an entry
 snapshot that names a target image while the kernel loaded another records
 an `exec_image_mismatch` gap and confirms nothing.
+
+Security audit 2026-09-27, B3: the kernel record is the link's **raw**
+bytes with the image's own `(dev, ino)`. A link that matches a prepared
+spelling only after stripping the kernel's ` (deleted)` annotation is
+ambiguous — the image may be a legitimately unlinked target, or a decoy
+genuinely *named* `tool (deleted)` — so the inode decides: a spelling that
+resolves to the image's inode confirms (through symlinks, and after the
+image was unlinked, when the link still resolves), the stripped form
+confirms only when no live file under the stripped name is a different
+image, and a live different file there is the mismatch gap.
 
 Only a call the observer must follow takes an in-flight slot: a call outside
 the closed set is classified at its entry and is never `inflight_exhausted`. A
