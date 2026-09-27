@@ -363,7 +363,15 @@ the reference host with this audit's own PoCs. The spec is revision 22.
   in the v6 path was caught and fixed in passing); the storage ceiling
   and metadata-mutation scope are documented as named limits (§2, §11.2).
 
-Post-fix verification: full Linux suite on the reference host (see below),
-clippy clean, portable suites green, the A01 opencode regression re-run, the
-evidence tables and `milestone-1-freeze.toml` regenerated from the fixed
-binary (`cargo xtask freeze`).
+Post-fix verification: the full Linux suite on the reference host passes
+every binary except the three pre-existing plain-session baseline failures
+both earlier audits also showed (`conformance_j1::s11_wall_expiry`,
+`review_linux::r9_explicit_pids`, `j5_lifetime::x07` — cgroup-delegation
+and leaf checks that need the lingering `ouro-ci` lane) and the
+parallel-load-sensitive lifetime tests, which pass serially; clippy clean
+and the macOS lane green including the byte-for-byte seccomp-table tests;
+the A01 opencode regression re-run (`settled`, every coverage class active,
+no gaps — the fix costs honest runs nothing, since no runtime in the
+sandbox issues read-only `openat2`); the evidence tables and
+`milestone-1-freeze.toml` regenerated from the fixed binary
+(`cargo xtask freeze`).
