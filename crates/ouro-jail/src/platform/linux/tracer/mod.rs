@@ -79,7 +79,7 @@ pub use closed_set::ClosedOp;
 pub use filter::{
     CLONE_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA,
     SECCOMP_FILTER_FLAG_NEW_LISTENER, install_narrowing_filter, narrowing_filter,
-    narrowing_filter_bytes, narrowing_filter_digest,
+    narrowing_filter_bytes, narrowing_filter_digest, narrowing_filter_digest_with,
 };
 pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
 pub use table::closed_set_table;
@@ -146,12 +146,10 @@ fn event_bytes(event: &TracerEvent) -> usize {
                 + args.path2.as_ref().map_or(0, |p| p.bytes.len())
         }
         TracerEvent::Exec {
-            path,
-            kernel_image,
-            ..
+            path, kernel_image, ..
         } => {
             path.as_ref().map_or(0, |p| p.bytes.len())
-                + kernel_image.as_ref().map_or(0, |k| k.len())
+                + kernel_image.as_ref().map_or(0, |k| k.path.len())
         }
         _ => 0,
     };
@@ -460,6 +458,18 @@ impl GapReason {
     }
 }
 
+/// The kernel's own record of the image an exec loaded (audit 4 B3): the
+/// raw `/proc/<tid>/exe` link bytes, plus the image inode's `(dev, ino)`
+/// when the link could be statted (it still can after the image was
+/// unlinked; the link holds the orphan).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KernelImage {
+    /// The raw link bytes, ` (deleted)` annotation included.
+    pub path: Vec<u8>,
+    /// The image inode, when it could be read.
+    pub identity: Option<(u64, u64)>,
+}
+
 /// What the observer saw. Pids are host pids, in the supervisor's namespace;
 /// a process inside a pid namespace sees a different number for itself, and
 /// [`nspid`] is how the two are related (§11.3).
@@ -523,10 +533,16 @@ pub enum TracerEvent {
         /// entry pathname above is a snapshot the tracee can rewrite for
         /// the kernel's own copy (an A-B-A race), so the kernel's link is
         /// read once here, while the tracee is stopped at its exec event,
-        /// and carried beside the snapshot. `None` when the link could not
-        /// be read; a consumer confirming an exec from the snapshot alone
-        /// must treat that as the weaker claim it was before.
-        kernel_image: Option<Vec<u8>>,
+        /// and carried beside the snapshot. Security 2026-09-27 (audit 4
+        /// B3): the bytes are the link's **raw** form (the kernel's
+        /// ` (deleted)` annotation is not stripped) and travel with the
+        /// image's own `(dev, ino)` — a decoy genuinely named
+        /// `tool (deleted)` produces the same stripped link as an unlinked
+        /// `tool`, and only the inode tells them apart. `None` when the
+        /// link could not be read; a consumer confirming an exec from the
+        /// snapshot alone must treat that as the weaker claim it was
+        /// before.
+        kernel_image: Option<KernelImage>,
         /// The directory fd the pathname was resolved against, when the
         /// witnessed entry was an `execveat` with one. §11.3: `dirfd` is
         /// accounted, never silently replaced by a cwd. `None` for a plain

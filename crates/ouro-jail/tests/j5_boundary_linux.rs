@@ -1167,7 +1167,10 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
     let connects = ops(&lines, "connect");
     assert_eq!(connects.len(), 2, "{lines:#?}");
     assert_eq!(connects[0]["errno"], "EACCES", "{}", connects[0]);
-    assert_eq!(connects[1]["errno"], "EACCES", "the proxy socket is bridge-only");
+    assert_eq!(
+        connects[1]["errno"], "EACCES",
+        "the proxy socket is bridge-only"
+    );
     settled(&run);
 }
 

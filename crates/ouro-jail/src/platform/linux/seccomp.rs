@@ -154,6 +154,15 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     // a deny.
     ("quotactl", 179),
     ("quotactl_fd", 443),
+    // Security 2026-09-27 (audit 4 B8, the S10 drift class): the global
+    // clock-adjustment interfaces. Inside the jail they are stopped by the
+    // absent CAP_SYS_TIME rather than by a deny — unreachability, not a
+    // refusal, which is exactly the "new kernel surface ships allowed"
+    // shape §9.2's rationale names. `adjtimex`, `clock_adjtime` and
+    // `clock_settime` join the table; reading the clock stays allowed.
+    ("adjtimex", 159),
+    ("clock_settime", 227),
+    ("clock_adjtime", 305),
 ];
 
 /// `clone3`. Denied with `ENOSYS` because seccomp cannot safely dereference
@@ -1005,6 +1014,33 @@ mod tests {
     /// Non-native ABIs the reference host accepts or could: i386, aarch64,
     /// 32-bit arm, garbage.
     const FOREIGN: [u32; 5] = [0x4000_0003, 0xc000_00b7, 0x4000_0028, 0, 0xffff_ffff];
+
+    /// Regenerates the pinned evidence tables after a deliberate change to
+    /// the deny set (audit 4 B8 used it for the time-family additions). Run
+    /// deliberately; the byte-for-byte tests above then pin the new tables.
+    #[test]
+    #[ignore = "writes the evidence files; run deliberately"]
+    fn bless_the_pinned_seccomp_tables() {
+        let base = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/specs/jail-v1/evidence/"
+        );
+        std::fs::write(
+            format!("{}seccomp-table-tool-x86_64.txt", base),
+            tool_baseline_table(),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}seccomp-table-agent-x86_64.txt", base),
+            agent_baseline_table(AgentVariant::UnprivilegedInner),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}seccomp-table-agent-namespace-x86_64.txt", base),
+            agent_baseline_table(AgentVariant::NamespaceInner),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn the_tool_baseline_is_byte_for_byte_the_checked_in_one() {

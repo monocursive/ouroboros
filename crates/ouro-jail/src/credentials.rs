@@ -110,7 +110,6 @@ impl StagingRefusal {
             staged: Vec::new(),
         }
     }
-
 }
 
 fn refusal(id: &str, remediation: Remediation, message: impl std::fmt::Display) -> JailError {

@@ -1538,13 +1538,20 @@ impl PreparedExecution for Prepared {
         // Closing it here only makes the single release visible at a glance
         // (an equivalent mutant; nothing can test it).
         drop(release);
-        boundary.wall = boundary
-            .snapshot
-            .limits
-            .wall
-            .as_ref()
-            .and_then(|ceiling| ceiling.value.parse::<u64>().ok())
-            .map(|ms| clock::Deadline::after(Duration::from_millis(ms)));
+        // Security 2026-09-27 (audit 4 B6): parsed once, and an unparseable
+        // ceiling refuses the release instead of silently dropping the
+        // deadline the receipt's limit row claims.
+        let wall = match clock::wall_deadline(&boundary.snapshot.limits) {
+            Ok(wall) => wall,
+            Err(what) => {
+                let failure = boundary.fail_release(host_setup(
+                    ErrorCode::InternalError,
+                    format!("the wall limit cannot be enforced: {what}"),
+                ));
+                return Err(failure);
+            }
+        };
+        boundary.wall = wall;
         Ok(Box::new(boundary))
     }
 

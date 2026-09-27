@@ -153,8 +153,7 @@ fn await_seal() -> bool {
     let mut byte = [0u8; 1];
     // SAFETY: the descriptor is a socket this process owns; `byte` is
     // writable and its length matches the count.
-    let received =
-        unsafe { libc::recv(libc::STDERR_FILENO, byte.as_mut_ptr().cast(), 1, 0) };
+    let received = unsafe { libc::recv(libc::STDERR_FILENO, byte.as_mut_ptr().cast(), 1, 0) };
     received == 1
 }
 
@@ -344,9 +343,7 @@ pub fn serve(
         }
         relays.retain(|relay| !relay.finished());
 
-        if fds[0].revents != 0
-            && accept_all(listener, connect, rejected, &mut relays)
-        {
+        if fds[0].revents != 0 && accept_all(listener, connect, rejected, &mut relays) {
             // Security 2026-09-27 (audit 3 A7b): the accept failed on
             // process-wide resource exhaustion while the listener stayed
             // readable; poll once less often rather than spin a core.

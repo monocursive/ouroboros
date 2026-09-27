@@ -126,6 +126,29 @@ impl Deadline {
     }
 }
 
+/// Security 2026-09-27 (audit 4 B6): the wall deadline from the snapshot's
+/// single wall ceiling, parsed in exactly one place.
+///
+/// Both release paths used to parse the ceiling independently with
+/// `.parse().ok()`, so an unparseable value would have silently dropped
+/// enforcement while the receipt's limit row still claimed
+/// `mechanism: boottime-deadline`. Resolution validates the grammar, so an
+/// unparseable ceiling here is an internal inconsistency, and the honest
+/// answer is a refusal, not a missing deadline.
+///
+/// # Errors
+/// Returns the ceiling that did not parse, for the caller's error.
+pub fn wall_deadline(limits: &crate::policy::LimitsSnapshot) -> Result<Option<Deadline>, String> {
+    match &limits.wall {
+        None => Ok(None),
+        Some(ceiling) => ceiling
+            .value
+            .parse::<u64>()
+            .map(|ms| Some(Deadline::after(Duration::from_millis(ms))))
+            .map_err(|error| format!("wall ceiling {:?} does not parse: {error}", ceiling.value)),
+    }
+}
+
 fn nanos_of(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
@@ -133,6 +156,40 @@ fn nanos_of(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Security 2026-09-27 (audit 4 B6): the single parse of the wall
+    /// ceiling — present, absent and unparseable.
+    #[test]
+    fn audit4_wall_deadline_parses_once_and_refuses_the_unparseable() {
+        let none = crate::policy::LimitsSnapshot {
+            wall: None,
+            pids: None,
+            mem: None,
+            cpu: None,
+        };
+        assert!(wall_deadline(&none).unwrap().is_none());
+        let wall = crate::policy::LimitsSnapshot {
+            wall: Some(crate::policy::LimitCeiling {
+                value: "30000".to_owned(),
+                required: true,
+            }),
+            ..none.clone()
+        };
+        let deadline = wall_deadline(&wall).unwrap().unwrap();
+        assert!(deadline.remaining() <= Duration::from_millis(30_000));
+        let bogus = crate::policy::LimitsSnapshot {
+            wall: Some(crate::policy::LimitCeiling {
+                value: "30m".to_owned(),
+                required: true,
+            }),
+            ..none
+        };
+
+        assert!(
+            wall_deadline(&bogus).is_err(),
+            "refuses, never silently drops"
+        );
+    }
 
     #[test]
     fn boottime_does_not_go_backwards() {

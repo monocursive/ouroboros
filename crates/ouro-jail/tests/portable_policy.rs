@@ -1327,11 +1327,7 @@ fn pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology() {
     ));
     // A tmpfs mount at /tmp is not collected, so a grant of it — or of a
     // private tempdir, however the host backs it — is not a refusal.
-    assert!(!grant_exposes_pseudo_fs(
-        Path::new("/tmp"),
-        false,
-        &mounts
-    ));
+    assert!(!grant_exposes_pseudo_fs(Path::new("/tmp"), false, &mounts));
     let scratch = tempfile::tempdir().unwrap();
     assert!(!grant_exposes_pseudo_fs(scratch.path(), false, &mounts));
 

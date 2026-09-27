@@ -124,8 +124,7 @@ fn s02_a_grant_of_dev_or_run_refuses_before_exec() {
         assert_eq!(code, Some(125), "--rw {}: {stderr}", runtime.display());
         assert!(!ran, "--rw {}: the target ran", runtime.display());
         assert!(
-            stderr.contains("policy_widening")
-                && stderr.contains("(key: filesystem.read_write)"),
+            stderr.contains("policy_widening") && stderr.contains("(key: filesystem.read_write)"),
             "--rw {}: {stderr}",
             runtime.display()
         );

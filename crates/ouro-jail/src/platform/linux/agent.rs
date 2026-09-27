@@ -1050,10 +1050,9 @@ fn listening_inode_on(table: &str, local: &[&str]) -> Option<u64> {
     const LISTEN: &str = "0A";
     table.lines().skip(1).find_map(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        (fields.get(1).is_some_and(|found| local.contains(found))
-            && fields.get(3) == Some(&LISTEN))
-        .then(|| fields.get(9)?.parse().ok())
-        .flatten()
+        (fields.get(1).is_some_and(|found| local.contains(found)) && fields.get(3) == Some(&LISTEN))
+            .then(|| fields.get(9)?.parse().ok())
+            .flatten()
     })
 }
 

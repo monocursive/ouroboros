@@ -2362,7 +2362,10 @@ print(json.dumps(out))
         auth["digest"].is_null(),
         "no verifier of secret bytes reaches the receipt: {auth:?}"
     );
-    assert_eq!(auth["digest_unavailable_reason"], "receipt_verifier_withheld");
+    assert_eq!(
+        auth["digest_unavailable_reason"],
+        "receipt_verifier_withheld"
+    );
     assert_eq!(config["mode"], "bind_ro");
     assert!(
         config["digest"].is_null(),

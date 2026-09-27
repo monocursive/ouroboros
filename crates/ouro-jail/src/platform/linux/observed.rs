@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 
 use super::audit::AuditWriter;
 use super::tracer::{
-    GapReason, OpSet, PathSnapshot, Tracer, TracerConfig, TracerEvent, TracerSummary,
+    GapReason, KernelImage, OpSet, PathSnapshot, Tracer, TracerConfig, TracerEvent, TracerSummary,
 };
 
 /// Test seam (J4 decision S9): a smaller in-flight bound, so a live test can
@@ -201,14 +201,22 @@ pub enum Fact {
 /// can confirm an image even against a snapshot that was raced into naming
 /// something else; when it is absent the snapshot stands as before, the
 /// weaker claim §11.3 documents.
+///
+/// Security 2026-09-27 (audit 4 B3): the kernel bytes are the link's raw
+/// form and travel with the image's own inode. A link that matches a
+/// candidate only after stripping the kernel's ` (deleted)` annotation is
+/// ambiguous — the image may be a legitimately unlinked target (audit 3
+/// confirmed those), or a decoy genuinely *named* `tool (deleted)`. The
+/// inode separates them: a candidate that still exists and is **not** the
+/// image contradicts the match, and identity agreement confirms outright.
 #[must_use]
 pub fn is_target_image(
     images: &[Vec<u8>],
     path: Option<&PathSnapshot>,
-    kernel_image: Option<&[u8]>,
+    kernel_image: Option<&KernelImage>,
 ) -> bool {
     if let Some(kernel) = kernel_image {
-        return images.iter().any(|candidate| candidate.as_slice() == kernel);
+        return kernel_confirms(images, kernel);
     }
     path.is_some_and(|path| {
         path.complete
@@ -216,6 +224,59 @@ pub fn is_target_image(
                 .iter()
                 .any(|candidate| candidate.as_slice() == path.bytes.as_slice())
     })
+}
+
+/// Whether the kernel's own image record confirms one of `images` (audit 4
+/// B3). Confirmation needs either the inode's agreement or raw bytes no live
+/// file contradicts; the deleted-suffix form only confirms when nothing
+/// living under the stripped name is a *different* file.
+fn kernel_confirms(images: &[Vec<u8>], kernel: &KernelImage) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let stat_of = |candidate: &[u8]| -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(std::ffi::OsStr::from_bytes(candidate))
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()))
+    };
+    // The inode decides first: a prepared spelling that resolves to the
+    // image's own inode is the image, whatever the link's bytes say.
+    if let Some(identity) = kernel.identity {
+        for candidate in images {
+            if stat_of(candidate) == Some(identity) {
+                return true;
+            }
+        }
+    }
+    // Raw bytes: exact, and not contradicted by a live different file at
+    // that spelling (the tracee is stopped, but a sibling thread may have
+    // replaced the name's file before the stop).
+    for candidate in images {
+        if candidate.as_slice() == kernel.path.as_slice()
+            && !kernel
+                .identity
+                .is_some_and(|identity| stat_of(candidate).is_some_and(|found| found != identity))
+        {
+            return true;
+        }
+    }
+    // The deleted-suffix form: the kernel's annotation for an unlinked
+    // image. Audit 3 confirmed the stripped match; audit 4 B3 keeps that
+    // for images whose candidates are gone or agree, and refuses it when a
+    // live file under the stripped name is a different file than the image
+    // — the decoy named `tool (deleted)` beside the real `tool`.
+    if kernel.path.ends_with(b" (deleted)") {
+        let stripped = &kernel.path[..kernel.path.len() - b" (deleted)".len()];
+        for candidate in images {
+            if candidate.as_slice() == stripped
+                && !kernel.identity.is_some_and(|identity| {
+                    stat_of(candidate).is_some_and(|found| found != identity)
+                })
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Records `event` in `audit` and returns the fact it establishes.
@@ -241,13 +302,11 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             // target image while the kernel loaded another is an A-B-A
             // rewrite of the pathname: the confirmation is refused and the
             // contradiction is a gap of the exec class, so no receipt can
-            // certify a spoofed confirmation.
-            if let Some(kernel) = kernel_image.as_deref() {
-                let kernel_confirms = target
-                    .images
-                    .iter()
-                    .any(|candidate| candidate.as_slice() == kernel);
-                if kernel_confirms {
+            // certify a spoofed confirmation. Audit 4 B3: the decision is
+            // [`kernel_confirms`]'s — inode first, raw bytes second, the
+            // deleted-suffix form only when no live candidate contradicts.
+            if let Some(kernel) = kernel_image.as_ref() {
+                if kernel_confirms(target.images, kernel) {
                     return Fact::TargetExec;
                 }
                 if is_target_image(target.images, path.as_ref(), None) {
@@ -428,7 +487,7 @@ mod tests {
     fn exec_with_kernel(
         pid: pid_t,
         path: Option<PathSnapshot>,
-        kernel_image: Option<Vec<u8>>,
+        kernel_image: Option<KernelImage>,
     ) -> TracerEvent {
         TracerEvent::Exec {
             pid,
@@ -441,6 +500,20 @@ mod tests {
             dirfd: None,
             monotonic_ns: 1,
         }
+    }
+
+    fn kernel_with(path: &[u8], identity: Option<(u64, u64)>) -> Option<KernelImage> {
+        Some(KernelImage {
+            path: path.to_vec(),
+            identity,
+        })
+    }
+
+    fn kernel(path: &[u8]) -> Option<KernelImage> {
+        Some(KernelImage {
+            path: path.to_vec(),
+            identity: None,
+        })
     }
 
     #[test]
@@ -495,7 +568,7 @@ mod tests {
                 &exec_with_kernel(
                     LAUNCHER,
                     snapshot(b"/usr/bin/target", true),
-                    Some(b"/usr/bin/target".to_vec()),
+                    kernel(b"/usr/bin/target"),
                 ),
             ),
             Fact::TargetExec
@@ -509,7 +582,7 @@ mod tests {
                 &exec_with_kernel(
                     LAUNCHER,
                     snapshot(b"/usr/bin/impostor", true),
-                    Some(b"/usr/bin/target".to_vec()),
+                    kernel(b"/usr/bin/target"),
                 ),
             ),
             Fact::TargetExec
@@ -523,7 +596,7 @@ mod tests {
                 &exec_with_kernel(
                     LAUNCHER,
                     snapshot(b"/usr/bin/target", true),
-                    Some(b"/usr/bin/impostor".to_vec()),
+                    kernel(b"/usr/bin/impostor"),
                 ),
             ),
             Fact::CoverageLost(GapReason::ExecImageMismatch)
@@ -535,13 +608,97 @@ mod tests {
             record(
                 &mut quiet,
                 &target,
-                &exec_with_kernel(LAUNCHER, None, Some(b"/bin/false".to_vec())),
+                &exec_with_kernel(LAUNCHER, None, kernel(b"/bin/false")),
             ),
             Fact::Nothing
         );
         assert!(!quiet.has_gaps(), "a non-target image is not a mismatch");
     }
 
+    /// Security 2026-09-27 (audit 4 B3): the raw link plus the image inode
+    /// separate an unlinked target (confirm) from a decoy genuinely named
+    /// `tool (deleted)` (refuse, and contradict a snapshot that names the
+    /// target), and a spelling that resolves to the image's own inode
+    /// confirms through a symlink.
+    #[test]
+    fn the_inode_separates_an_unlinked_target_from_a_deleted_named_decoy() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let target_path = dir.path().join("tool");
+        let decoy_path = dir.path().join("tool (deleted)");
+        std::fs::write(&target_path, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&decoy_path, b"#!/bin/sh\n").unwrap();
+        let symlink_path = dir.path().join("spell");
+        std::os::unix::fs::symlink(&target_path, &symlink_path).unwrap();
+        let identity_of = |path: &std::path::Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let images = vec![
+            target_path.as_os_str().as_bytes().to_vec(),
+            symlink_path.as_os_str().as_bytes().to_vec(),
+        ];
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let raw = |path: &std::path::Path| {
+            use std::os::unix::ffi::OsStrExt as _;
+            path.as_os_str().as_bytes().to_vec()
+        };
+        // A spelling that resolves to the image's own inode confirms, even
+        // through a symlink and even when the link's bytes name the decoy.
+        let mut audit = AuditWriter::new("att_i", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(
+                    LAUNCHER,
+                    None,
+                    kernel_with(&raw(&decoy_path), Some(identity_of(&target_path))),
+                ),
+            ),
+            Fact::TargetExec
+        );
+        // An image whose kernel link carries the deleted annotation for the
+        // target, with the target's own inode: the audit-3 rule keeps
+        // confirming it (the file is gone; only the name matched).
+        let deleted_link = [raw(&target_path), b" (deleted)".to_vec()].concat();
+        let mut audit = AuditWriter::new("att_u", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(
+                    LAUNCHER,
+                    snapshot(&raw(&target_path), true),
+                    kernel_with(&deleted_link, Some(identity_of(&target_path))),
+                ),
+            ),
+            Fact::TargetExec
+        );
+        // The decoy: the kernel link names `tool (deleted)` and the image's
+        // inode is the decoy's, while the live `tool` is another file. The
+        // stripped match confirms nothing, and a snapshot naming the target
+        // is contradicted with an `exec_image_mismatch` gap.
+        let decoy_link = raw(&decoy_path);
+        let mut audit = AuditWriter::new("att_d", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(
+                    LAUNCHER,
+                    snapshot(&raw(&target_path), true),
+                    kernel_with(&decoy_link, Some(identity_of(&decoy_path))),
+                ),
+            ),
+            Fact::CoverageLost(GapReason::ExecImageMismatch)
+        );
+        assert!(audit.has_gaps());
+    }
     #[test]
     fn exits_gaps_and_the_end_are_facts_and_bookkeeping_is_not_a_loss() {
         let images = images();

@@ -61,6 +61,18 @@ pub const CLONE_UNTRACED: u32 = 0x0080_0000;
 /// memory the filter cannot read.
 pub const CLONE3_SYSCALL: (&str, u32) = ("clone3", 435);
 
+/// Security 2026-09-27 (audit 4 B2): the i386 (`int 0x80`) numbers of the
+/// two calls whose *native* forms get their own classification. A compat-ABI
+/// entry carrying them must reach the same open-ended gaps, not the bounded
+/// `foreign_abi` interval the plain foreign classification records — the
+/// reference host does accept `int 0x80`, and under `none` a listener created
+/// through it can pass any syscall with `SECCOMP_USER_NOTIF_FLAG_CONTINUE`
+/// and no trace stop at all. The flags live in `args[1]` (seccomp) and
+/// `args[0]` (clone) in that ABI too: the register positions are identical.
+pub const I386_LISTENER_SYSCALL: u32 = 354;
+/// i386 `clone`: same `CLONE_UNTRACED` flag semantics as the native number.
+pub const I386_CLONE_SYSCALL: u32 = 120;
+
 /// Instruction count: architecture check (2), x32 check (2), one comparison
 /// per closed-set number, the listener check (3), the untraced-clone check
 /// (3), the `clone3` check (1) and the three returns.
@@ -190,7 +202,7 @@ pub fn narrowing_filter_with(data: u16) -> Vec<libc::sock_filter> {
 #[must_use]
 pub fn narrowing_filter_bytes() -> Vec<u8> {
     let mut out = Vec::with_capacity(FILTER_LEN * 8);
-    for insn in narrowing_filter() {
+    for insn in narrowing_filter_with(NARROWING_TRACE_DATA) {
         out.extend_from_slice(&insn.code.to_le_bytes());
         out.push(insn.jt);
         out.push(insn.jf);
@@ -203,6 +215,30 @@ pub fn narrowing_filter_bytes() -> Vec<u8> {
 #[must_use]
 pub fn narrowing_filter_digest() -> String {
     format!("sha256:{}", sha256_hex(&narrowing_filter_bytes()))
+}
+
+/// Security 2026-09-27 (audit 4 B9): the bytes of the filter carrying
+/// `data` — the same layout with that one immediate differing. The receipt
+/// must name the bytes the launcher **installed**, and since audit
+/// 2026-09-25-2 (S14) those carry a per-attempt value, so the canonical
+/// digest alone no longer identifies the installed program.
+#[must_use]
+pub fn narrowing_filter_bytes_with(data: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FILTER_LEN * 8);
+    for insn in narrowing_filter_with(data) {
+        out.extend_from_slice(&insn.code.to_le_bytes());
+        out.push(insn.jt);
+        out.push(insn.jf);
+        out.extend_from_slice(&insn.k.to_le_bytes());
+    }
+    out
+}
+
+/// `sha256:<hex>` over [`narrowing_filter_bytes_with`]: the digest of the
+/// program an attempt actually installed (audit 4 B9).
+#[must_use]
+pub fn narrowing_filter_digest_with(data: u16) -> String {
+    format!("sha256:{}", sha256_hex(&narrowing_filter_bytes_with(data)))
 }
 
 /// Install the narrowing filter on the calling thread group.
@@ -269,6 +305,35 @@ pub fn install_narrowing_filter_with(data: u16) -> Result<(), i32> {
 mod tests {
     use super::*;
     use crate::platform::linux::tracer::closed_set::lookup;
+
+    /// Security 2026-09-27 (audit 4 B9): the installed-bytes digest names
+    /// the program an attempt ran, which is the canonical program only when
+    /// the attempt drew the canonical trace data.
+    #[test]
+    fn audit4_installed_digest_differs_with_the_trace_data() {
+        assert_eq!(
+            narrowing_filter_digest_with(NARROWING_TRACE_DATA),
+            narrowing_filter_digest(),
+            "the canonical data digests the canonical program"
+        );
+        let other = NARROWING_TRACE_DATA ^ 0xa5a5;
+        assert_ne!(
+            narrowing_filter_digest_with(other),
+            narrowing_filter_digest(),
+            "a per-attempt value changes the installed bytes"
+        );
+        // Exactly one immediate differs between the two byte images.
+        let canonical = narrowing_filter_bytes();
+        let installed = narrowing_filter_bytes_with(other);
+        assert_eq!(canonical.len(), installed.len());
+        let mut words = 0usize;
+        for (left, right) in canonical.chunks(8).zip(installed.chunks(8)) {
+            if left != right {
+                words += 1;
+            }
+        }
+        assert_eq!(words, 1, "only the RET_TRACE data word differs");
+    }
 
     /// Run the program the way the kernel would, so the test checks the
     /// jump arithmetic rather than restating it. `arg0` and `arg1` are the

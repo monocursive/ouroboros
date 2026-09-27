@@ -56,6 +56,11 @@ pub const TREE_BUDGET: Duration = Duration::from_secs(5);
 /// The file is written by the contained party, so it has a bound. A policy
 /// file that needs more than this is not a policy file.
 pub const PROJECT_FILE_MAX: u64 = 256 * 1024;
+/// Maximum size of the operator's `config.toml` (audit 4 B1).
+///
+/// A trusted layer is read with a bound like any other: a grown or planted
+/// file must refuse, never wedges the supervisor in memory.
+pub const OPERATOR_FILE_MAX: u64 = 256 * 1024;
 
 /// Everything the supervisor needs from its process environment.
 pub struct Context {
@@ -678,16 +683,65 @@ fn canonical_root(cwd: &Path, path: Option<&Path>, key: &str) -> Result<PathBuf,
 ///
 /// `Ok(None)` means the file is absent. Every other failure is reported:
 /// silently continuing without a file the operator wrote is how a tightening
-/// disappears.
+/// disappears. Security 2026-09-27 (audit 4 B1): the operator's `config.toml`
+/// is a trusted widening layer, so the read is no-follow, bounded and
+/// identity-checked on the open descriptor (operator uid, no group/world
+/// write, one link), mirroring the project file's hardening.
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for any failure other than absence.
 fn read_operator_file(path: &Path, key: &str) -> Result<Option<String>, JailError> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(usage(key, format!("{}: {error}", path.display()))),
+    // Security 2026-09-27 (audit 4 B1): the operator config is a trusted,
+    // widening layer (§6.2), so the read is as strict as the project file's:
+    // no-follow, regular file, bounded. Identity is checked on the open
+    // descriptor, so a file swapped in after any path check is refused: the
+    // operator's own uid, no group/world write, and a single link (a
+    // hardlink planted from a writable copy would otherwise carry the
+    // operator's uid and mode by construction).
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(usage(key, format!("{}: {error}", path.display()))),
+    };
+    let refused = |what: String| usage(key, format!("{} {what}", path.display()));
+    let metadata = file
+        .metadata()
+        .map_err(|error| refused(format!("cannot be inspected: {error}")))?;
+    if !metadata.is_file() {
+        return Err(refused("is not a regular file".to_owned()));
     }
+    if metadata.len() > OPERATOR_FILE_MAX {
+        return Err(refused(format!(
+            "is {} bytes; the maximum is {OPERATOR_FILE_MAX}",
+            metadata.len()
+        )));
+    }
+    use std::os::unix::fs::MetadataExt as _;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(refused("is not owned by this operator".to_owned()));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(refused(
+            "is writable by group or others; chmod it 0600 or 0644".to_owned(),
+        ));
+    }
+    if metadata.nlink() != 1 {
+        return Err(refused("has more than one hard link".to_owned()));
+    }
+    let mut bytes = Vec::new();
+    let mut capped = std::io::Read::take(&mut file, OPERATOR_FILE_MAX + 1);
+    std::io::Read::read_to_end(&mut capped, &mut bytes)
+        .map_err(|error| refused(format!("cannot be read: {error}")))?;
+    if bytes.len() as u64 > OPERATOR_FILE_MAX {
+        return Err(refused("grew past the cap while being read".to_owned()));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| refused("is not UTF-8".to_owned()))
 }
 
 // J5-B1 begin: P02.9
@@ -960,6 +1014,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     check_state_isolation(&plan)?;
     // Security 2026-09-27 (audit 3 A2): every run, not only a `--launch` one.
     check_launch_isolation(&plan)?;
+    // Security 2026-09-27 (audit 4 B1): the config directory holds the
+    // trusted, widening `config.toml`, read on every run.
+    check_config_isolation(&plan)?;
     validate_receipt_path(args, &plan)?;
 
     if args.label_only {
@@ -2213,12 +2270,16 @@ fn release_own_stdout() {
 ///
 /// # Errors
 /// Returns [`ErrorCode::UnsafeStatePath`] when the state root overlaps the
-/// workspace, the scratch root or any host grant.
+/// workspace, the scratch root or any host grant, or reaches it through a
+/// bind alias (audit 4 B4).
 fn check_state_isolation(plan: &Plan) -> Result<(), JailError> {
     let state_root = canonical_existing_prefix(&plan.data_dir);
-    for root in child_visible_roots(plan) {
-        let root = canonical_existing_prefix(&root);
-        if overlaps(&state_root, &root) {
+    let roots: Vec<PathBuf> = child_visible_roots(plan)
+        .iter()
+        .map(|root| canonical_existing_prefix(root))
+        .collect();
+    for root in &roots {
+        if overlaps(&state_root, root) {
             return Err(JailError::new(
                 ErrorCode::UnsafeStatePath,
                 ErrorStage::Resolving,
@@ -2231,6 +2292,22 @@ fn check_state_isolation(plan: &Plan) -> Result<(), JailError> {
             )
             .with_key_path("OURO_DATA_DIR"));
         }
+    }
+    // Security 2026-09-27 (audit 4 B4): the comparison above is lexical, so a
+    // bind of the state root (or of an ancestor of it) mounted beneath a
+    // child-visible root is invisible to it. Mountinfo is not.
+    if let Some(alias) = alias_conflict(&roots, &state_root, "OURO_DATA_DIR")? {
+        return Err(JailError::new(
+            ErrorCode::UnsafeStatePath,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            format!(
+                "a mount beneath a child-visible root reaches the state root \
+                 through the bind alias {}",
+                alias.display()
+            ),
+        )
+        .with_key_path("OURO_DATA_DIR"));
     }
     Ok(())
 }
@@ -2250,12 +2327,16 @@ fn check_state_isolation(plan: &Plan) -> Result<(), JailError> {
 ///
 /// # Errors
 /// Returns [`ErrorCode::UnsafeConfigPath`] when the launch directory overlaps
-/// the workspace, the scratch root or any host grant.
+/// the workspace, the scratch root or any host grant, or reaches it through
+/// a bind alias (audit 4 B4).
 fn check_launch_isolation(plan: &Plan) -> Result<(), JailError> {
     let launch_dir = canonical_existing_prefix(&launch_profile::launch_directory(&plan.config_dir));
-    for root in child_visible_roots(plan) {
-        let root = canonical_existing_prefix(&root);
-        if overlaps(&launch_dir, &root) {
+    let roots: Vec<PathBuf> = child_visible_roots(plan)
+        .iter()
+        .map(|root| canonical_existing_prefix(root))
+        .collect();
+    for root in &roots {
+        if overlaps(&launch_dir, root) {
             return Err(JailError::new(
                 ErrorCode::UnsafeConfigPath,
                 ErrorStage::Resolving,
@@ -2269,7 +2350,91 @@ fn check_launch_isolation(plan: &Plan) -> Result<(), JailError> {
             .with_key_path("OURO_CONFIG_DIR"));
         }
     }
+    // Security 2026-09-27 (audit 4 B4): as the state root above, but for the
+    // launch directory.
+    if let Some(alias) = alias_conflict(&roots, &launch_dir, "OURO_CONFIG_DIR")? {
+        return Err(JailError::new(
+            ErrorCode::UnsafeConfigPath,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            format!(
+                "a mount beneath a child-visible root reaches the launch directory \
+                 through the bind alias {}",
+                alias.display()
+            ),
+        )
+        .with_key_path("OURO_CONFIG_DIR"));
+    }
     Ok(())
+}
+
+/// Security 2026-09-27 (audit 4 B1): refuses a config directory the child can
+/// reach, on every run.
+///
+/// The audit 3 A2 guard covers `<config>/launch` only, but
+/// `<config>/config.toml` is read on every run (§6.2) and is a trusted,
+/// **widening** layer: `[jail.filesystem]` grants, `[jail.network] allow`
+/// and `[jail.observation] mode = "off"` from a planted file all take
+/// effect for every later invocation — a strictly larger effect than the
+/// launch-profile plant A2 closed, from the same one pointed file grant
+/// (`--rw <config>/config.toml` passes the launch-directory guard by
+/// construction). The whole config directory is therefore isolated like
+/// the state root and the launch directory: lexical overlap and bind
+/// aliases both refuse.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeConfigPath`] when the config directory overlaps
+/// the workspace, the scratch root or any host grant, or reaches it through
+/// a bind alias.
+fn check_config_isolation(plan: &Plan) -> Result<(), JailError> {
+    let config_dir = canonical_existing_prefix(&plan.config_dir);
+    let roots: Vec<PathBuf> = child_visible_roots(plan)
+        .iter()
+        .map(|root| canonical_existing_prefix(root))
+        .collect();
+    for root in &roots {
+        if overlaps(&config_dir, root) {
+            return Err(JailError::new(
+                ErrorCode::UnsafeConfigPath,
+                ErrorStage::Resolving,
+                Remediation::Configuration,
+                format!(
+                    "the config directory {} overlaps the child-visible root {}",
+                    config_dir.display(),
+                    root.display()
+                ),
+            )
+            .with_key_path("OURO_CONFIG_DIR"));
+        }
+    }
+    if let Some(alias) = alias_conflict(&roots, &config_dir, "OURO_CONFIG_DIR")? {
+        return Err(JailError::new(
+            ErrorCode::UnsafeConfigPath,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            format!(
+                "a mount beneath a child-visible root reaches the config directory \
+                 through the bind alias {}",
+                alias.display()
+            ),
+        )
+        .with_key_path("OURO_CONFIG_DIR"));
+    }
+    Ok(())
+}
+
+/// Security 2026-09-27 (audit 4 B4): mountinfo's bind-alias verdict for one
+/// guarded tree, with the guard's own key naming an inspection failure.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] when the alias table cannot be read.
+fn alias_conflict(
+    roots: &[PathBuf],
+    guarded: &Path,
+    key: &'static str,
+) -> Result<Option<PathBuf>, JailError> {
+    state::mount_alias::alias_conflict(roots, guarded)
+        .map_err(|error| usage(key, format!("the mounts cannot be inspected: {error}")))
 }
 
 /// The canonical form of the deepest existing ancestor, plus the rest.
@@ -2352,15 +2517,36 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
             ),
         ));
     }
-    for root in child_visible_roots(plan) {
-        let root = canonical_existing_prefix(&root);
-        if parent.starts_with(&root) {
+    let roots: Vec<PathBuf> = child_visible_roots(plan)
+        .iter()
+        .map(|root| canonical_existing_prefix(root))
+        .collect();
+    for root in &roots {
+        if parent.starts_with(root) {
             return Err(usage(
                 key,
                 format!(
                     "{} is inside the child-visible root {}",
                     parent.display(),
                     root.display()
+                ),
+            ));
+        }
+    }
+    // Security 2026-09-27 (audit 4 B4): a parent that is not lexically inside
+    // a child-visible root can still be a bind alias of one (or of the state
+    // root), which the comparisons above cannot see. The copy must not land
+    // where the child, or the state store, reaches it through a mount.
+    for guarded in std::iter::once(&state_root).chain(roots.iter()) {
+        if let Some(alias) = alias_conflict(std::slice::from_ref(&parent), guarded, "--receipt")? {
+            return Err(usage(
+                key,
+                format!(
+                    "{} reaches {} through the bind alias {}; the receipt copy \
+                     must not land inside anything the child can see",
+                    parent.display(),
+                    guarded.display(),
+                    alias.display()
                 ),
             ));
         }
@@ -4362,6 +4548,89 @@ mod tests {
         // A disjoint workspace passes.
         check_launch_isolation(&plan(root.path().join("elsewhere")))
             .expect("a disjoint workspace passes");
+    }
+
+    // Security 2026-09-27 (audit 4 B1): the config directory is operator
+    // authority to isolate, on every run, and the operator config it holds
+    // is read no-follow, bounded and identity-checked.
+    #[test]
+    fn audit4_check_config_isolation_refuses_a_workspace_over_the_config_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let plan = |workspace: PathBuf| Plan {
+            resolved: minimal_resolved(ProfileName::Tool),
+            profile: ProfileName::Tool,
+            workspace,
+            config_dir: config_dir.clone(),
+            data_dir: root.path().join("data"),
+        };
+        // A workspace that covers the config directory refuses.
+        let error = check_config_isolation(&plan(root.path().to_path_buf())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsafeConfigPath);
+        assert_eq!(error.key_path.as_deref(), Some("OURO_CONFIG_DIR"));
+        assert!(
+            error.message.contains("config directory"),
+            "the refusal names the config directory: {}",
+            error.message
+        );
+        // A disjoint workspace passes.
+        check_config_isolation(&plan(root.path().join("elsewhere")))
+            .expect("a disjoint workspace passes");
+    }
+
+    #[test]
+    fn audit4_the_operator_config_read_refuses_planted_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        let key = "config";
+        // A symlink is refused, not followed.
+        let real = root.path().join("real.toml");
+        std::fs::write(&real, b"[jail]\n").unwrap();
+        let link = root.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let error = read_operator_file(&link, key).unwrap_err();
+        assert!(
+            error.message.contains("Too many levels of symbolic links")
+                || error.message.contains("symlink"),
+            "a symlink refuses: {}",
+            error.message
+        );
+        // Group-writable is refused.
+        use std::os::unix::fs::PermissionsExt as _;
+        let wide = root.path().join("wide.toml");
+        std::fs::write(&wide, b"[jail]\n").unwrap();
+        std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let error = read_operator_file(&wide, key).unwrap_err();
+        assert!(
+            error.message.contains("writable by group or others"),
+            "group-writable refuses: {}",
+            error.message
+        );
+        // A second hard link is refused.
+        let single = root.path().join("single.toml");
+        std::fs::write(&single, b"[jail]\n").unwrap();
+        let twin = root.path().join("twin.toml");
+        std::fs::hard_link(&single, &twin).unwrap();
+        let error = read_operator_file(&twin, key).unwrap_err();
+        assert!(
+            error.message.contains("more than one hard link"),
+            "a hard link refuses: {}",
+            error.message
+        );
+        // An honest private file reads.
+        let honest = root.path().join("honest.toml");
+        std::fs::write(&honest, b"[jail]\n").unwrap();
+        std::fs::set_permissions(&honest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_operator_file(&honest, key).unwrap().as_deref(),
+            Some("[jail]\n")
+        );
+        // Absence stays absence.
+        assert!(
+            read_operator_file(&root.path().join("absent.toml"), key)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn minimal_resolved(profile: ProfileName) -> Resolved {

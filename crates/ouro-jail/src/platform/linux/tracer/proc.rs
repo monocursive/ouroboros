@@ -65,25 +65,30 @@ pub fn tracer_pid(pid: pid_t) -> Option<pid_t> {
     if raw == 0 { None } else { Some(raw) }
 }
 
-/// The image the kernel loaded for `tid`, as `/proc/<tid>/exe` resolves it:
-/// an absolute path with every symlink followed. Read while the tracee is
-/// stopped at its exec event (audit 3 A1), so the tracee cannot change what
-/// the link names between the read and the kernel's decision — the kernel
-/// has already made it. A kernel that appends ` (deleted)` to the link of an
-/// unlinked image keeps the path itself. `None` when the link cannot be
-/// read; the caller then has no corroboration, not a negative answer.
+/// The image the kernel loaded for `tid`: the raw `/proc/<tid>/exe` link
+/// bytes and the image's own `(dev, ino)`, read while the tracee is stopped
+/// at its exec event (audit 3 A1), so the tracee cannot change either
+/// between the read and the kernel's decision — the kernel has already made
+/// it. The bytes are **not** stripped of the kernel's ` (deleted)`
+/// annotation: security 2026-09-27 (audit 4 B3) — a decoy genuinely *named*
+/// `tool (deleted)` produces the same link as an unlinked `tool`, and only
+/// the inode can tell them apart, so the raw bytes plus identity travel
+/// together and the confirmation logic decides. `None` when the link cannot
+/// be read; the caller then has no corroboration, not a negative answer.
 #[must_use]
-pub fn kernel_exe(tid: pid_t) -> Option<Vec<u8>> {
+pub fn kernel_exe(tid: pid_t) -> Option<super::KernelImage> {
     use std::os::unix::ffi::OsStrExt as _;
     let link = fs::read_link(proc_path(tid, "exe")).ok()?;
-    let mut bytes = link.as_os_str().as_bytes().to_vec();
-    // `/proc/<pid>/exe` of an image the new program has already unlinked
-    // resolves as "<path> (deleted)". The path is still the truth about
-    // which image ran; only the marker is the kernel's annotation.
-    if bytes.ends_with(b" (deleted)") {
-        bytes.truncate(bytes.len() - b" (deleted)".len());
-    }
-    Some(bytes)
+    let path = link.as_os_str().as_bytes().to_vec();
+    // The identity follows the same magic link to the image inode, which
+    // still resolves when the image was unlinked after the exec (the link
+    // holds the orphan). A failed stat leaves the bytes without identity;
+    // the caller decides with the weaker fact.
+    use std::os::unix::fs::MetadataExt as _;
+    let identity = std::fs::metadata(proc_path(tid, "exe"))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    Some(super::KernelImage { path, identity })
 }
 
 /// The `NSpid` line: this task's id in each pid namespace from ours inward.

@@ -131,6 +131,9 @@ pub const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
 pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 /// x86_64 marks an x32 syscall by this bit in `nr`.
 pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+/// The 32-bit x86 audit architecture: `int 0x80` entries carry this arch and
+/// numbers from the i386 table (audit 4 B2).
+pub const AUDIT_ARCH_I386: u32 = 0x4000_0003;
 
 pub const BPF_LD_W_ABS: u16 = 0x20;
 pub const BPF_JEQ_K: u16 = 0x15;

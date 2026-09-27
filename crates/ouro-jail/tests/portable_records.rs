@@ -651,8 +651,7 @@ fn plain_and_multibyte_error_text_passes_through_unchanged() {
     // Accents, emoji and other valid multibyte UTF-8 are chars, not bytes:
     // none of them is a control character, so none is rewritten.
     let plain = "limits.wall must be a duration (café — 😀, 工作温度)";
-    let expected =
-        format!("ouro-jail: error invalid_config at resolving [configuration]: {plain}");
+    let expected = format!("ouro-jail: error invalid_config at resolving [configuration]: {plain}");
     assert_eq!(invalid_config(plain).to_string(), expected);
     // The rest of the escaped table: DEL and the C1 range.
     let line = invalid_config("stop \u{7f} and \u{85} and \u{9f}").to_string();

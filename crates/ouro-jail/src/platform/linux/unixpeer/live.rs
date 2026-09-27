@@ -543,6 +543,14 @@ fn decide(
             "non_unix",
         );
     }
+    // Security 2026-09-27 (audit 4 B9): an address longer than the
+    // `sockaddr_un` layout is one the kernel itself would refuse at
+    // `connect`; classifying its bytes (a pathname truncated into whatever
+    // follows) would mediate an address that cannot exist. Refuse it with
+    // the kernel's own answer, `EINVAL`.
+    if ualen > std::mem::size_of::<libc::sockaddr_un>() {
+        return (Err(libc::EINVAL), "addr_overlong");
+    }
     match classify(sockaddr) {
         PeerAddr::Abstract(_) | PeerAddr::Unnamed => {
             // Abstract names are netns-scoped; connect the duplicate directly.

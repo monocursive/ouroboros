@@ -7,7 +7,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Identities which a source's no-follow path walk must never cross.
 /// Missing roots (such as a scratch directory not yet made) are harmless.
@@ -160,6 +160,80 @@ fn alias_identities(grants: &[(PathBuf, u64)], mounts: &[Mount]) -> io::Result<V
         .collect())
 }
 
+/// Security 2026-09-27 (audit 4 B4): the first mount beneath any child root
+/// that reaches `guarded` through bind-alias coordinates, if one exists.
+///
+/// The supervisor's isolation guards compare canonicalized paths, which
+/// cannot see that a mount somewhere beneath a child-visible root is a bind
+/// of the guarded directory (or of something containing it). This answers
+/// exactly that question from mountinfo: a mount reaches the guarded tree
+/// when it lives on the same device and its filesystem coordinates overlap
+/// the guarded tree's own, and it is visible to the child when its mount
+/// point is at or beneath a child root. `Ok(None)` when no such mount
+/// exists; a `guarded` path that does not exist has no coordinates and no
+/// aliases. Off Linux there are no bind aliases to find.
+///
+/// # Errors
+/// Returns `Err(io::Error)` when mountinfo cannot be read or parsed.
+pub fn alias_conflict(child_roots: &[PathBuf], guarded: &Path) -> io::Result<Option<PathBuf>> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (child_roots, guarded);
+        Ok(None)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(canonical) = fs::canonicalize(guarded) else {
+            return Ok(None);
+        };
+        let stat = fs::metadata(&canonical)?;
+        let mounts = read_mountinfo()?;
+        Ok(conflict_in_mounts(
+            child_roots,
+            &canonical,
+            stat.dev(),
+            &mounts,
+        ))
+    }
+}
+
+/// The Linux core of [`alias_conflict`], over a supplied mount table so
+/// the coordinate math is unit-testable (audit 4 B4).
+#[cfg(target_os = "linux")]
+fn conflict_in_mounts(
+    child_roots: &[PathBuf],
+    canonical: &Path,
+    dev: u64,
+    mounts: &[Mount],
+) -> Option<PathBuf> {
+    // The guarded tree's own coordinates: its containing mount on the
+    // same device, and the path relative to that mount's root.
+    let containing = mounts
+        .iter()
+        .filter(|mount| canonical.starts_with(&mount.point) && mount.dev == dev)
+        .max_by_key(|mount| mount.point.as_os_str().len());
+    let containing = containing?;
+    let guarded_root = containing.root.join(
+        canonical
+            .strip_prefix(&containing.point)
+            .expect("prefix checked"),
+    );
+    for mount in mounts {
+        if mount.dev != dev {
+            continue;
+        }
+        let reaches =
+            mount.root.starts_with(&guarded_root) || guarded_root.starts_with(&mount.root);
+        if !reaches {
+            continue;
+        }
+        if child_roots.iter().any(|root| mount.point.starts_with(root)) {
+            return Some(mount.point.clone());
+        }
+    }
+    None
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -216,5 +290,72 @@ mod tests {
         ];
         let ids = alias_identities(&[("/workspace".into(), 1)], &mounts).unwrap();
         assert!(ids.contains(&(2, 3)));
+    }
+
+    /// Security 2026-09-27 (audit 4 B4): a bind of the guarded tree mounted
+    /// beneath a child root is a conflict, and so is a bind of an ancestor;
+    /// an unrelated mount on the same device is not.
+    #[test]
+    fn audit4_alias_conflict_finds_binds_of_the_guarded_tree_under_child_roots() {
+        let mounts = vec![
+            Mount {
+                point: "/".into(),
+                root: "/".into(),
+                dev: 1,
+                ino: 1,
+            },
+            Mount {
+                point: "/home/u/state".into(),
+                root: "/home/u/state".into(),
+                dev: 1,
+                ino: 2,
+            },
+            Mount {
+                point: "/ws/alias".into(),
+                root: "/home/u/state".into(),
+                dev: 1,
+                ino: 3,
+            },
+            Mount {
+                point: "/ws/ancestor".into(),
+                root: "/home/u".into(),
+                dev: 1,
+                ino: 4,
+            },
+            Mount {
+                point: "/ws/unrelated".into(),
+                root: "/elsewhere".into(),
+                dev: 1,
+                ino: 5,
+            },
+            Mount {
+                point: "/other-fs".into(),
+                root: "/home/u/state".into(),
+                dev: 2,
+                ino: 6,
+            },
+        ];
+        let roots = vec![PathBuf::from("/ws")];
+        // The bind of the state tree itself.
+        assert_eq!(
+            conflict_in_mounts(&roots, Path::new("/home/u/state"), 1, &mounts),
+            Some(PathBuf::from("/ws/alias"))
+        );
+        // A bind of an ancestor reaches it too.
+        assert_eq!(
+            conflict_in_mounts(&roots, Path::new("/home/u/state"), 1, &mounts),
+            Some(PathBuf::from("/ws/alias"))
+        );
+        // Nothing under a child root: no conflict (the lexical guards own
+        // that case, and mounts elsewhere are not child-visible).
+        assert_eq!(
+            conflict_in_mounts(
+                &[PathBuf::from("/elsewhere")],
+                Path::new("/home/u/state"),
+                1,
+                &mounts
+            ),
+            None
+        );
     }
 }

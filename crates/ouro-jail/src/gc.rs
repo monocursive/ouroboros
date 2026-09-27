@@ -2338,7 +2338,6 @@ mod tests {
         );
     }
 
-
     const BOOT: &str = "boot-a";
 
     fn host() -> HostIdentity {

@@ -963,14 +963,26 @@ impl Lease {
         // A lock file left with a wider mode, or replaced by a symlink, is not
         // this operator's private state any more (§6.2).
         check_state_file(path)?;
+        // Security 2026-09-27 (audit 4 B5): the open does not follow a
+        // symlink and the descriptor's own metadata is re-checked, so a
+        // same-uid racer that swaps the path between the check above and
+        // this open cannot have the lease taken on a foreign inode or have
+        // an attacker-chosen file created through a dangling link — the
+        // same re-verify [`Lease::probe_existing`] below already does.
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .mode(FILE_MODE)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path)
             .map_err(|error| write_failed(path, &error))?;
+        match file.metadata() {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(unsafe_path(path, "is not a regular file")),
+            Err(error) => return Err(write_failed(path, &error)),
+        }
         Self::lock(file, path)
     }
 

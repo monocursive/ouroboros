@@ -1221,9 +1221,7 @@ impl Boundary {
             backend_version: String::new(),
             observe_on,
             observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
-            trace_data: trace_data.unwrap_or(
-                super::tracer::filter::NARROWING_TRACE_DATA,
-            ),
+            trace_data: trace_data.unwrap_or(super::tracer::filter::NARROWING_TRACE_DATA),
             ns_ids: identity::NsIds::default(),
             cgroup,
             cgroup_lost: false,
@@ -1951,11 +1949,25 @@ impl Boundary {
         // Two filters are in force and they are not the same program: the
         // baseline bubblewrap loads, recorded in `applied.syscalls`, and the
         // observer's narrowing filter the launcher installs. The receipt names
-        // both, by the digest each of them reports for itself.
+        // both, by the digest each of them reports for itself. Security
+        // 2026-09-27 (audit 4 B9): `narrowing_filter_digest` names the
+        // canonical program the published table freezes, and
+        // `narrowing_filter_digest_installed` names the bytes this attempt
+        // **installed** — the launcher installs the filter carrying the
+        // per-attempt trace data (audit 2026-09-25-2, S14), so the canonical
+        // digest alone no longer identifies the running program.
         details.insert(
             "narrowing_filter_digest".to_owned(),
             if self.observe_on {
                 Value::from(super::tracer::narrowing_filter_digest())
+            } else {
+                Value::Null
+            },
+        );
+        details.insert(
+            "narrowing_filter_digest_installed".to_owned(),
+            if self.observe_on {
+                Value::from(super::tracer::narrowing_filter_digest_with(self.trace_data))
             } else {
                 Value::Null
             },
@@ -2676,6 +2688,14 @@ fn pseudo_fs_mount_points() -> Vec<PathBuf> {
             out.push(PathBuf::from(std::ffi::OsStr::from_bytes(&point)));
         }
     }
+    // Security 2026-09-27 (audit 4 B7): the runtime tree is refused by its
+    // path as well, not only by the tmpfs fstype — a host whose `/run` (or a
+    // subtree of it) is not tmpfs would otherwise slip the fstype branch
+    // above, and `grant_exposes_pseudo_fs` refuses an entry however the
+    // overlap runs (ancestor, equal or beneath).
+    if !out.iter().any(|point| point == Path::new("/run")) {
+        out.push(PathBuf::from("/run"));
+    }
     out
 }
 // J5-B1-w3 end
@@ -2953,13 +2973,20 @@ impl PreparedExecution for LinuxPrepared {
         // J3-launch end
         // Closing it makes a second release impossible (X03).
         drop(release);
-        let wall = boundary
-            .snapshot
-            .limits
-            .wall
-            .as_ref()
-            .and_then(|ceiling| ceiling.value.parse::<u64>().ok())
-            .map(|ms| clock::Deadline::after(Duration::from_millis(ms)));
+        // Security 2026-09-27 (audit 4 B6): parsed once, and an unparseable
+        // ceiling refuses the release instead of silently dropping the
+        // deadline the receipt's limit row claims.
+        let wall = clock::wall_deadline(&boundary.snapshot.limits).map_err(|what| {
+            Box::new(crate::platform::ReleaseFailure {
+                error: preparing(
+                    ErrorCode::InternalError,
+                    format!("the wall limit cannot be enforced: {what}"),
+                ),
+                teardown: Some(Teardown {
+                    tree: Some(boundary.verified_teardown()),
+                }),
+            })
+        })?;
         Ok(Box::new(LinuxRunning {
             boundary,
             wall,
@@ -3462,6 +3489,20 @@ impl RunningExecution for LinuxRunning {
         if let Some(agent) = self.boundary.agent.as_ref() {
             details.insert("helpers".to_owned(), agent.details().1);
         }
+        // Security 2026-09-27 (audit 4 B9): the honest count of read-only
+        // open verdicts the observer certified (register-sourced flags, and
+        // the memory-sourced ones every `memory_flags_unverified` gap
+        // already names). Audit 3 A1 asked for it to be surfaced; a count
+        // that never leaves the tracer is unauditable.
+        details.insert(
+            "filtered_readonly_opens".to_owned(),
+            self.boundary
+                .tracer_summary
+                .as_ref()
+                .map_or(Value::Null, |summary| {
+                    Value::from(summary.filtered_readonly_opens)
+                }),
+        );
         // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are counted
         // in the receipt, so a child probing the trace-data space shows up in
         // `lifetime.native.details` instead of continuing silently.
@@ -3769,6 +3810,20 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Security 2026-09-27 (audit 4 B7): the runtime tree is in the refused
+    /// set by its path, whatever fstype carries it — a host whose `/run` is
+    /// not tmpfs would otherwise slip the fstype branch.
+    #[test]
+    fn audit4_run_is_refused_by_path_whatever_its_fstype() {
+        let mounts = super::pseudo_fs_mount_points();
+        assert!(
+            mounts
+                .iter()
+                .any(|point| point == std::path::Path::new("/run")),
+            "the /run entry is unconditional: {mounts:?}"
+        );
     }
 
     #[test]

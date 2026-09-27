@@ -49,6 +49,9 @@ statmount              457    EPERM
 listmount              458    EPERM
 quotactl               179    EPERM
 quotactl_fd            443    EPERM
+adjtimex               159    EPERM
+clock_settime          227    EPERM
+clock_adjtime          305    EPERM
 clone3                 435    ENOSYS  (argument struct not inspectable)
 clone                  56     EPERM when args[0] & 0x00800000 != 0 (CLONE_UNTRACED)
 clone                  56     ALLOW   otherwise (namespace flags permitted)
@@ -64,8 +67,8 @@ socket, socketpair     41,53  ALLOW when args[0] in {1 (AF_UNIX, restricted by t
 
 everything else        ALLOW
 
-instructions: 68
-digest: sha256:3a866f3488d5d07e89b42e0d9b0256be5f363871bdf805e7d8d9010de6597acd
+instructions: 71
+digest: sha256:3256f8b57c657c3fe2ae53b7b0e5e5a73ade813fb54fd63a2b66b3acc08a8a1c
 
 mediation filter (installed by the launcher with its own listener)
 connect                42     USER_NOTIF
