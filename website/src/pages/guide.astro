@@ -1,0 +1,7 @@
+---
+import Documentation from '../layouts/Documentation.astro';
+import { Content, getHeadings } from '../../../docs/guide.md';
+---
+<Documentation title="Get started with Ouroboros Jail — Guide" description="Build the jail, run your first command, choose permissions, and inspect the result. Practical examples for developers, agents, and scripts." label="Guide" markdown="/guide.md" headings={await getHeadings()}>
+  <Content />
+</Documentation>

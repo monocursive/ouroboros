@@ -1,0 +1,7 @@
+---
+import Documentation from '../layouts/Documentation.astro';
+import { Content, getHeadings } from '../../../docs/roadmap.md';
+---
+<Documentation title="Where we're taking Ouroboros — Roadmap" description="What's available today, what needs to happen before release, and where macOS support, shared records, and team workers fit." label="Roadmap · September 2026" markdown="/roadmap.md" headings={await getHeadings()}>
+  <Content />
+</Documentation>

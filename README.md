@@ -1,55 +1,72 @@
-# Ouroboros
+# Ouroboros Jail
 
-Tooling for people running existing agents. The previous implementation is on the `legacy` branch.
+Give an AI agent only the access it needs. Ouroboros Jail is a Linux sandbox
+that restricts file access, network destinations, and runtime for a command
+and its children. Each run leaves a receipt of the policy applied, the result,
+and any gaps in observation.
 
-The product direction is in [north-star.md](north-star.md). The repository
-layout and crate split rules are in [Jail v1 §4](docs/specs/jail-v1.md#4-source-layout-and-ownership).
+The executable is `ouro-jail`. Use it to let a coding agent edit a checkout,
+run an unfamiliar test suite without network access, or build from read-only
+inputs. Your existing agent keeps its own models and workflow.
 
-The first implementation is specified in [Jail v1](docs/specs/jail-v1.md):
-a standalone Rust jail on Linux, with shared contracts designed for Linux and macOS.
+**Pre-release.** Execution is validated on Linux x86_64. macOS builds provide
+inspection commands and currently refuse sandboxed execution. Public release
+artifacts and a Homebrew tap are not configured yet.
 
-[Managed teams v1](docs/specs/managed-teams-v1.md) specifies company-controlled
-agent execution: organization/project policies, approved services, isolated
-inputs, reviewable artifacts and project-scoped evidence. The first team pilot
-uses a managed Linux worker with Linux/macOS clients; fleet adds multiple workers.
+## Start here
 
-Validate the specification's schemas, examples and golden fixtures with:
+- [User guide](docs/guide.md): build, check your host, run a command or agent,
+  inspect the receipt, and review learned permissions.
+- [Roadmap](docs/roadmap.md): installation, compatibility, macOS research,
+  and the longer-term managed-worker plan.
+- [For agents and scripts](docs/guide.md#for-agents-and-scripts): JSON output,
+  per-run receipts, failure handling, and the website's plain-text docs.
+- [Operator reference](docs/specs/jail-v1/operating.md): detailed configuration,
+  host requirements, errors, and cleanup.
+
+With Rust 1.98.1 and your distribution's bubblewrap installed:
+
+```sh
+cargo +1.98.1 build --release -p ouro-jail
+target/release/ouro-jail doctor --profile tool
+```
+
+Follow the guide to install the binary outside the workspace you intend to
+make writable. The jail refuses a writable grant that exposes its own executable.
+
+## What works today
+
+- Filesystem policies, wall deadlines, and host-dependent PID/memory/CPU limits.
+- HTTP and SOCKS5 TCP proxying with explicit destination grants.
+- Optional HTTP(S) credential vaulting, with placeholders in the child.
+- Receipts and an event journal, with coverage and uncertainty recorded.
+- `tail` for recorded or live events; `learn` for reviewable permission proposals.
+- Fourteen bundled agent starter profiles. Compatibility is recorded per build
+  and vendor version, not implied by the presence of a profile.
+
+See the [validation record](docs/benchmarks/jail/README.md) and
+[agent compatibility table](docs/specs/jail-v1/agent-compatibility.md) for
+measured results and remaining gaps. An agent can still modify writable files
+and communicate with services you allow; grants need review.
+
+## Development
+
+[Jail v1](docs/specs/jail-v1.md) defines the core contracts.
+[Jail v2](docs/specs/jail-v2.md) defines the current additions and remaining
+acceptance gates. [The north star](north-star.md) and
+[managed teams](docs/specs/managed-teams-v1.md) describe planned ledger and
+worker tooling; they are not implemented features of this jail.
 
 ```sh
 uv run docs/specs/jail-v1/validate_contract.py
 uv run docs/specs/managed-teams-v1/validate_policy.py
+cargo +1.98.1 test --workspace
 ```
 
-This checks document contracts; live backend conformance runs on the
-reference host through the `conformance` workflow.
+Contract validators check documents and schemas. Live Linux conformance is
+separate and runs on the reference host through the `conformance` workflow.
+The other CI workflows are `contracts` and `rust`.
 
-J0–J5 of Jail v1 are implemented, on a stock host with no host configuration, and milestone 1, the jail, is green ([north star §8](north-star.md#8-milestones)). J0 measured the reference host (an x86_64
-VPS on Ubuntu 26.04 LTS; manifests under `docs/specs/jail-v1/evidence/`) and
-the observer privilege model; D8 selected the native bubblewrap adapter and the
-ptrace observer, and withdrew eBPF from v1
-([backend evaluation](docs/specs/jail-v1/backend-evaluation.md)). J1 ships
-the first execution slice — policy resolution, capability probes, the
-bubblewrap containment boundary with source-pinned protected binds, the
-ptrace closed-set observer, the managed gate, wall limits,
-prepared/enforced/settled receipts, and the macOS refusal lane. J2 adds
-cgroup-backed PID/memory/CPU ceilings, isolated build inputs, an outside
-parent-death watcher, and measured controller/observer doctor probes.
-[J2's acceptance map and operator setup](docs/specs/jail-v1/j2-authority.md)
-describe the named Linux lane. J3 adds the `agent` profile (an outside HTTP
-proxy as the only network path, host Unix sockets unreachable, unprivileged
-inner sandboxes), data-only launch profiles with credential staging and
-cleanup, and the explicit uncontained `none` profile
-([J3's acceptance map](docs/specs/jail-v1/j3-authority.md)). OpenCode 1.18.32
-runs under `agent` on the stock reference host
-([agent compatibility](docs/specs/jail-v1/agent-compatibility.md)). J4 adds
-the complete closed set, loss handling, the bounded trace, atomic records and
-`gc` reconciliation ([J4's acceptance map](docs/specs/jail-v1/j4-authority.md)).
-J5, the milestone proof, is recorded in
-[J5 authority](docs/specs/jail-v1/j5-authority.md): the per-gate acceptance
-verdict, the frozen schemas and inputs, the performance report, A01 and the
-named limits. Operators start with
-[Operating ouro-jail](docs/specs/jail-v1/operating.md). CI is three
-workflows, `contracts`, `rust` and `conformance`
-([Jail v1 §16](docs/specs/jail-v1.md#16-implementation-order-and-exit-criteria)).
-The specifications link to the previous implementation at commit `f3b2dbfd`,
-reachable from branch `legacy` and tag `thesis-4-preserved` on the remote.
+The [Astro website](website/README.md) renders the user guide and roadmap from
+these same Markdown files. The previous agent runtime remains on `legacy`,
+also preserved by tag `thesis-4-preserved`; its releases are not jail releases.

@@ -1,0 +1,67 @@
+---
+import Site from './Site.astro';
+
+interface Props {
+  title: string;
+  description: string;
+  label: string;
+  markdown: string;
+  headings: { depth: number; slug: string; text: string }[];
+}
+const { title, description, label, markdown, headings } = Astro.props;
+const sections = headings.filter(({ depth }) => depth === 2);
+---
+<Site title={title} description={description} markdown={markdown}>
+  <div class="container documentation">
+    <div class="doc-tools">
+      <p class="eyebrow">{label} · Pre-release</p>
+      <div class="doc-formats">
+        <a href={markdown}>Read Markdown <span aria-hidden="true">↗</span></a>
+        <button class="doc-copy" data-markdown={markdown} hidden>Copy Markdown link</button>
+        <span class="copy-status" role="status"></span>
+      </div>
+    </div>
+    <details class="mobile-toc">
+      <summary>On this page</summary>
+      <nav aria-label="Page sections on mobile">
+        {sections.map(({ slug, text }) => <a href={`#${slug}`}>{text}</a>)}
+      </nav>
+    </details>
+    <div class="doc-grid">
+      <aside class="doc-sidebar">
+        <nav aria-label="On this page">
+          <p class="eyebrow">On this page</p>
+          {sections.map(({ slug, text }) => <a href={`#${slug}`}>{text}</a>)}
+        </nav>
+        <div class="agent-entry">
+          <p>Reading with an agent?</p>
+          <a href="/llms.txt">Documentation index ↗</a>
+          <a href="/llms-full.txt">All docs in one file ↗</a>
+        </div>
+      </aside>
+      <article class="prose doc-content">
+        <slot />
+        <footer class="doc-footer">
+          <p>For agents: <a href="/llms.txt">start with the index</a>, or read <a href="/llms-full.txt">both pages as plain text</a>. The Markdown and website use the same source.</p>
+          <div><a href="/guide/">Guide</a><a href="/roadmap/">Roadmap</a></div>
+        </footer>
+      </article>
+    </div>
+  </div>
+</Site>
+
+<script>
+  const button = document.querySelector<HTMLButtonElement>('.doc-copy');
+  const status = document.querySelector<HTMLElement>('.copy-status');
+  if (button && status && navigator.clipboard) {
+    button.hidden = false;
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(new URL(button.dataset.markdown!, location.href).href);
+        status.textContent = 'Link copied';
+      } catch {
+        status.textContent = 'Could not copy. Use the Markdown link.';
+      }
+    });
+  }
+</script>
