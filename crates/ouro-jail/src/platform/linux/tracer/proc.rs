@@ -117,9 +117,7 @@ pub fn cmdline_bytes(tid: pid_t) -> Option<Vec<u8>> {
 ///
 /// Every argument ends in one NUL, so only that final terminator is
 /// stripped: an empty argument is an argument, and dropping it would shift
-/// every later position the command rules match on. ([`cmdline`] drops
-/// trailing empty arguments, which is right for recognising a process by
-/// its argv and wrong for judging one.) An `execve` with an
+/// every later position the command rules match on. An `execve` with an
 /// empty argv reads as one empty argument, because the kernel inserts one
 /// (Linux 5.18, "exec: Force single empty string when argv is empty").
 /// `None` for an empty or unterminated area, which no image stopped at its
@@ -168,8 +166,8 @@ pub fn start_ticks(pid: pid_t) -> Option<u64> {
 ///
 /// Three answers, and they are not the same:
 ///
-/// * `None` — there is no such task. It was never there, or it has been
-///   reaped.
+/// * `None` — the file cannot be read or has no final terminator. The task
+///   may have disappeared, or its argument area may have been rewritten.
 /// * `Some(&[])` — the task is there and has no argv *at this instant*. The
 ///   kernel serves this file from the task's memory map, so a task that is
 ///   inside `execve` (its old image gone and its new argv not yet installed)
@@ -184,12 +182,12 @@ pub fn start_ticks(pid: pid_t) -> Option<u64> {
 /// "not yet" and look again, not as "not the one".
 #[must_use]
 pub fn cmdline(pid: pid_t) -> Option<Vec<Vec<u8>>> {
-    let raw = fs::read(proc_path(pid, "cmdline")).ok()?;
-    let mut out: Vec<Vec<u8>> = raw.split(|b| *b == 0).map(<[u8]>::to_vec).collect();
-    while out.last().is_some_and(Vec::is_empty) {
-        out.pop();
+    let raw = cmdline_bytes(pid)?;
+    if raw.is_empty() {
+        Some(Vec::new())
+    } else {
+        parse_cmdline(&raw)
     }
-    Some(out)
 }
 
 /// The direct children of every thread of `pid`.
@@ -317,7 +315,7 @@ mod tests {
     #[test]
     fn a_spawned_child_is_a_descendant_with_its_cmdline() {
         let mut child = std::process::Command::new("/bin/sh")
-            .args(["-c", "read x; exit 0"])
+            .args(["-c", "read x; exit 0", "", ""])
             .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("/bin/sh must exist on the reference host");
@@ -366,7 +364,11 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         };
-        assert_eq!(argv[0], b"/bin/sh".to_vec());
+        assert_eq!(
+            argv,
+            ["/bin/sh", "-c", "read x; exit 0", "", ""].map(|arg| arg.as_bytes().to_vec()),
+            "launcher discovery must preserve trailing empty arguments"
+        );
         assert_eq!(tgid(pid), Some(pid));
         assert_eq!(ppid(pid), Some(me), "and it was ours throughout");
         drop(child.stdin.take());
@@ -450,7 +452,10 @@ mod tests {
             parse_cmdline(b"git\0push\0\0"),
             Some(argv(&["git", "push", ""]))
         );
-        assert_eq!(parse_cmdline(b"tool\0\0x\0"), Some(argv(&["tool", "", "x"])));
+        assert_eq!(
+            parse_cmdline(b"tool\0\0x\0"),
+            Some(argv(&["tool", "", "x"]))
+        );
         assert_eq!(parse_cmdline(b"\0"), Some(argv(&[""])));
         assert_eq!(parse_cmdline(b""), None);
         assert_eq!(parse_cmdline(b"unterminated"), None);
@@ -459,6 +464,9 @@ mod tests {
         let own: Vec<Vec<u8>> = std::env::args_os()
             .map(|arg| std::os::unix::ffi::OsStrExt::as_bytes(arg.as_os_str()).to_vec())
             .collect();
-        assert_eq!(cmdline_bytes(me).as_deref().and_then(parse_cmdline), Some(own));
+        assert_eq!(
+            cmdline_bytes(me).as_deref().and_then(parse_cmdline),
+            Some(own)
+        );
     }
 }

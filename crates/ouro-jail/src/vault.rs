@@ -256,6 +256,7 @@ mod tests {
         trusted: bool,
         matching_host: bool,
         authorized: bool,
+        pipeline: &[u8],
     ) -> (ProxyResult, Vec<u8>, Vec<u8>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -288,9 +289,7 @@ mod tests {
             let bytes = head(&mut stream).unwrap_or_default();
             if !bytes.is_empty() {
                 stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
-                    )
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK")
                     .unwrap();
                 stream.conn.send_close_notify();
                 stream.flush().unwrap();
@@ -369,16 +368,23 @@ mod tests {
             }
         )
         .unwrap();
+        child.write_all(pipeline).unwrap();
         child.flush().unwrap();
         let mut response = Vec::new();
-        let _ = child.read_to_end(&mut response);
+        let read = child.read_to_end(&mut response);
+        if trusted && matching_host && authorized {
+            // Keep the client's write side open through the relay's drain.
+            // A close-delimited response needs a TLS close_notify; receiving
+            // its body followed by an unexpected transport EOF is not success.
+            read.expect("the complete response ends with a TLS close_notify");
+        }
         let event = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(proxy.stop(Duration::from_secs(10)).complete());
         (event, server.join().unwrap(), response)
     }
     #[test]
     fn tls_vault_substitutes_only_after_both_authorities_and_the_certificate_pass() {
-        let (event, upstream, response) = run_tls(true, true, true);
+        let (event, upstream, response) = run_tls(true, true, true, b"");
         assert_eq!(event.reason, Reason::Relayed);
         assert_eq!(event.origin_verification.as_deref(), Some("mitm_http_host"));
         assert!(
@@ -393,13 +399,22 @@ mod tests {
             (true, false, true),
             (true, true, false),
         ] {
-            let (event, upstream, _) = run_tls(case.0, case.1, case.2);
+            let (event, upstream, _) = run_tls(case.0, case.1, case.2, b"");
             assert_ne!(event.reason, Reason::Relayed);
             assert!(
                 upstream.is_empty(),
                 "no HTTP credential bytes may reach an unverified destination"
             );
         }
+    }
+    #[test]
+    fn tls_vault_closes_the_response_and_counts_discarded_pipeline_bytes() {
+        let pipeline = b"GET /second HTTP/1.1\r\nHost: fixture.test\r\n\r\n";
+        let (event, upstream, response) = run_tls(true, true, true, pipeline);
+        assert_eq!(event.reason, Reason::Relayed);
+        assert_eq!(event.discarded_bytes, pipeline.len() as u64);
+        assert!(!upstream.windows(7).any(|bytes| bytes == b"/second"));
+        assert_eq!(response, b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK");
     }
     #[test]
     fn plaintext_is_opt_in_and_substitution_is_exact() {

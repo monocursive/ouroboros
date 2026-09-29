@@ -1269,6 +1269,7 @@ fn connect_and_relay(
                 let mut event = slot.allowed(Reason::Relayed, Some(connected));
                 event.bytes_in = outcome.bytes_in;
                 event.bytes_out = outcome.bytes_out;
+                event.discarded_bytes = outcome.discarded;
                 event.end = Some(outcome.end);
                 event
             }
