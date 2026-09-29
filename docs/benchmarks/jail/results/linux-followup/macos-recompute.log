@@ -1,0 +1,187 @@
+   Compiling ouro-jail v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-jail)
+   Compiling xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.23s
+     Running `target/debug/xtask perf summarize --dir docs/benchmarks/jail/results/linux-followup/perf --out target/regression-20260929/perf-recomputed`
+# `ouro-jail` performance (jail-v1 §5)
+
+Collected 2026-09-29T08:13:21Z on `vps-450b3fe8` (Ubuntu 26.04.1 LTS, kernel 7.0.0-31-generic, 4 CPUs, 3814 MiB) as `ubuntu` (lingering: yes). Revision `2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa+dirty`. `ouro-jail` sha256 `af66b1cf6fc046ca876da8d7d3b31091f0ccf72d7db08dc956faae4dbe0a31d7`; `ouro-fixture` sha256 `be99eaec6b462384fc75c0d180532bca78327f5a8fd426e60859ab381e892dbf`; bubblewrap 0.11.1.
+
+Raw data: `launches.ndjson`, 630 records, sha256 `3a7f1e4444c8b7c8ca719d4b2f8c72d83192aae5d9dd8c4c44dae2c28a45e513`; summarised 2026-09-29T08:17:49Z by xtask 0.1.0 at source revision `2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa`.
+
+Parameters: 30 measured launch(es) per arm after 5 warm-up launch(es) per arm (90 warm-up records discarded); sessions ["plain","scope"]; profiles ["tool"]; workloads ["noop","spawn-tree","fileops"]; fileops 5000 rounds; spawn-tree 200 children; sampling every 5 ms; arm order seed 20260929.
+
+Host quietness: threshold `--max-load 3`: a verdict needs every counted launch of both sides at or below it. Before the measured launches the 1-minute load average was 0.83 / 1.22 / 1.63 and `/proc/pressure/cpu` `some avg10` was 0.62 / 3.30 / 3.80 % (min / median / max); across them the host's CPU stall was 0.0 / 6.6 / 88.9 ms. The host has 4 CPUs. The 1-minute load includes the harness's own recent launches.
+
+## Verdict roll-up
+
+A budget holds for a profile only if every cell below passes. The overhead budget is read three ways, each its own verdict: **work phase** (the target's own entry to end; the integrator's current reading of §5), **post-start** (work + teardown: everything after entry, so startup + post-start cover the whole run), and **end-to-end wall** (startup included).
+
+| Profile | Comparison | p95 added startup < 250 ms | Work phase < 20% | Post-start < 20% | End-to-end wall < 20% |
+|---|---|---|---|---|---|
+| tool | off vs direct | pass (6 of 6 cells pass, 0 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) |
+| tool | on vs direct | pass (6 of 6 cells pass, 0 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) |
+
+## `--observe off` against direct: the jail's own overhead (`tool`)
+
+Under the decision of 2026-09-24 the §5 budgets apply to this comparison if observation misses them (next section); otherwise they apply to both. Each cell: median / p95 over the valid launches. `exec_unconfirmed` marks valid launches whose receipt outcome is `unknown` because, with observation off, the target ended before the supervisor confirmed its exec (the jail then exits 1); the target's own lines prove it ran, and the timing is the jail's real path.
+
+| Session | Profile | Workload | Subject / baseline | Valid (excl.) subject | Valid (excl.) baseline | Max load | Baseline median startup / work / teardown / wall ms | Added startup ms | Added teardown ms | Work overhead % | Post-start overhead % | Wall overhead % | p95 added startup < 250 ms | Work phase < 20% (integrator's reading) | Post-start (work + teardown) < 20% | End-to-end wall < 20% |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | tool | noop | tool/off / direct | 30 (0; flagged: exec_unconfirmed 30) | 30 (0) | 0.84 | 1.4 / 0.0 / 0.2 / 1.6 | 111.3 / 123.4 | 22.6 / 23.2 | 50.8 / 161.5 | 9503.1 / 9802.9 | 8151.1 / 8908.6 | pass (123.4 ms) | n/a | n/a | n/a |
+| plain | tool | spawn-tree | tool/off / direct | 30 (0) | 30 (0) | 1.24 | 1.5 / 154.5 / 0.3 / 156.3 | 114.5 / 124.0 | 21.5 / 24.3 | 8.9 / 18.8 | 20.5 / 33.3 | 96.4 / 109.4 | pass (124.0 ms) | n/a | n/a | n/a |
+| plain | tool | fileops | tool/off / direct | 30 (0) | 30 (0) | 1.19 | 1.6 / 187.8 / 0.4 / 189.9 | 116.1 / 130.6 | 19.6 / 24.7 | 26.7 / 54.7 | 36.6 / 62.9 | 97.6 / 131.8 | pass (130.6 ms) | fail (26.7%) | fail (36.6%) | fail (97.6%) |
+| scope | tool | noop | tool/off / direct | 30 (0; flagged: exec_unconfirmed 30) | 30 (0) | 1.42 | 1.6 / 0.0 / 0.2 / 1.8 | 107.2 / 123.9 | 22.8 / 23.9 | 32.6 / 214.2 | 8200.4 / 8589.2 | 7108.7 / 8026.5 | pass (123.9 ms) | n/a | n/a | n/a |
+| scope | tool | spawn-tree | tool/off / direct | 30 (0) | 30 (0) | 1.63 | 1.5 / 153.3 / 0.3 / 155.0 | 96.0 / 108.6 | 21.0 / 23.7 | 6.2 / 19.3 | 20.6 / 34.2 | 81.5 / 102.0 | pass (108.6 ms) | n/a | n/a | n/a |
+| scope | tool | fileops | tool/off / direct | 30 (0) | 30 (0) | 1.56 | 1.5 / 183.0 / 0.4 / 185.0 | 100.3 / 120.8 | 20.6 / 23.8 | 29.5 / 47.4 | 40.1 / 56.7 | 95.7 / 121.1 | pass (120.8 ms) | fail (29.5%) | fail (40.1%) | fail (95.7%) |
+
+## `--observe on` against direct: the budgets with observation (`tool`)
+
+The §5 budgets as first written, observation included.
+
+| Session | Profile | Workload | Subject / baseline | Valid (excl.) subject | Valid (excl.) baseline | Max load | Baseline median startup / work / teardown / wall ms | Added startup ms | Added teardown ms | Work overhead % | Post-start overhead % | Wall overhead % | p95 added startup < 250 ms | Work phase < 20% (integrator's reading) | Post-start (work + teardown) < 20% | End-to-end wall < 20% |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | tool | noop | tool/on / direct | 30 (0) | 30 (0) | 0.84 | 1.4 / 0.0 / 0.2 / 1.6 | 120.4 / 136.0 | 5.4 / 15.4 | 63.8 / 468.0 | 2290.6 / 6526.0 | 7770.8 / 8664.2 | pass (136.0 ms) | n/a | n/a | n/a |
+| plain | tool | spawn-tree | tool/on / direct | 30 (0) | 30 (0) | 1.24 | 1.5 / 154.5 / 0.3 / 156.3 | 120.5 / 131.6 | 6.0 / 15.7 | 68.0 / 79.2 | 73.5 / 88.7 | 149.5 / 171.6 | pass (131.6 ms) | n/a | n/a | n/a |
+| plain | tool | fileops | tool/on / direct | 30 (0) | 30 (0) | 1.19 | 1.6 / 187.8 / 0.4 / 189.9 | 122.4 / 136.5 | 6.8 / 16.0 | 447.0 / 503.6 | 454.5 / 510.8 | 514.5 / 575.8 | pass (136.5 ms) | fail (447.0%) | fail (454.5%) | fail (514.5%) |
+| scope | tool | noop | tool/on / direct | 30 (0) | 30 (0) | 1.42 | 1.6 / 0.0 / 0.2 / 1.8 | 115.1 / 130.9 | 6.2 / 16.6 | 63.3 / 621.5 | 2239.2 / 5998.1 | 6675.0 / 7535.7 | pass (130.9 ms) | n/a | n/a | n/a |
+| scope | tool | spawn-tree | tool/on / direct | 30 (0) | 30 (0) | 1.63 | 1.5 / 153.3 / 0.3 / 155.0 | 104.3 / 115.1 | 6.0 / 16.2 | 66.7 / 83.0 | 71.1 / 86.4 | 139.3 / 155.9 | pass (115.1 ms) | n/a | n/a | n/a |
+| scope | tool | fileops | tool/on / direct | 30 (0) | 30 (0) | 1.56 | 1.5 / 183.0 / 0.4 / 185.0 | 105.4 / 125.7 | 6.3 / 16.0 | 455.4 / 487.4 | 463.0 / 493.0 | 514.3 / 554.4 | pass (125.7 ms) | fail (455.4%) | fail (463.0%) | fail (514.3%) |
+
+## Observation cost: `--observe on` against `--observe off` (reported, no budget)
+
+| Session | Profile | Workload | Subject / baseline | Valid (excl.) subject | Valid (excl.) baseline | Max load | Baseline median startup / work / teardown / wall ms | Added startup ms | Added teardown ms | Work overhead % | Post-start overhead % | Wall overhead % |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | tool | noop | tool/on / tool/off | 30 (0) | 30 (0) | 0.84 | 112.7 / 0.1 / 22.8 / 135.2 | 9.1 / 24.7 | -17.1 / -7.1 | 8.7 / 276.8 | -75.1 / -31.0 | -4.6 / 6.2 |
+| plain | tool | spawn-tree | tool/on / tool/off | 30 (0) | 30 (0) | 1.24 | 116.0 / 168.2 / 21.8 / 307.0 | 6.0 / 17.1 | -15.5 / -5.8 | 54.3 / 64.5 | 44.0 / 56.7 | 27.0 / 38.3 |
+| plain | tool | fileops | tool/on / tool/off | 30 (0) | 30 (0) | 1.19 | 117.7 / 237.9 / 20.0 / 375.2 | 6.3 / 20.4 | -12.8 / -3.5 | 331.7 / 376.3 | 305.9 / 347.2 | 210.9 / 241.9 |
+| scope | tool | noop | tool/on / tool/off | 30 (0) | 30 (0) | 1.42 | 108.8 / 0.0 / 23.0 / 131.9 | 7.9 / 23.7 | -16.6 / -6.1 | 23.1 / 444.0 | -71.8 / -26.5 | -6.0 / 5.9 |
+| scope | tool | spawn-tree | tool/on / tool/off | 30 (0) | 30 (0) | 1.63 | 97.4 / 162.8 / 21.3 / 281.2 | 8.3 / 19.1 | -14.9 / -4.8 | 57.0 / 72.3 | 41.9 / 54.6 | 31.9 / 41.0 |
+| scope | tool | fileops | tool/on / tool/off | 30 (0) | 30 (0) | 1.56 | 101.8 / 236.9 / 20.9 / 362.0 | 5.1 / 25.4 | -14.3 / -4.6 | 329.0 / 353.8 | 301.9 / 323.3 | 213.9 / 234.4 |
+
+## Informational profiles
+
+### `agent`, off vs direct
+
+(no data)
+
+### `agent`, on vs direct
+
+(no data)
+
+### `none`, off vs direct
+
+(no data)
+
+### `none`, on vs direct
+
+(no data)
+
+## Per arm
+
+| Session | Workload | Arm | Valid | Excluded (reasons) | Flagged | Startup ms | Work ms | Teardown ms | Post-start ms | Wall ms |
+|---|---|---|---|---|---|---|---|---|---|---|
+| plain | noop | direct | 30/30 | 0 (none) | none | 1.4 / 1.6 | 0.0 / 0.1 | 0.2 / 0.3 | 0.2 / 0.3 | 1.6 / 1.9 |
+| plain | noop | tool/off | 30/30 | 0 (none) | exec_unconfirmed 30 | 112.7 / 124.8 | 0.1 / 0.1 | 22.8 / 23.4 | 22.8 / 23.5 | 135.2 / 147.6 |
+| plain | noop | tool/on | 30/30 | 0 (none) | none | 121.8 / 137.4 | 0.1 / 0.2 | 5.6 / 15.6 | 5.7 / 15.7 | 129.0 / 143.6 |
+| plain | spawn-tree | direct | 30/30 | 0 (none) | none | 1.5 / 2.3 | 154.5 / 173.8 | 0.3 / 0.4 | 154.7 / 174.2 | 156.3 / 175.7 |
+| plain | spawn-tree | tool/off | 30/30 | 0 (none) | none | 116.0 / 125.5 | 168.2 / 183.4 | 21.8 / 24.5 | 186.4 / 206.3 | 307.0 / 327.4 |
+| plain | spawn-tree | tool/on | 30/30 | 0 (none) | none | 122.0 / 133.1 | 259.5 / 276.8 | 6.3 / 16.0 | 268.4 / 292.0 | 390.0 / 424.7 |
+| plain | fileops | direct | 30/30 | 0 (none) | none | 1.6 / 1.9 | 187.8 / 260.6 | 0.4 / 0.5 | 188.2 / 261.1 | 189.9 / 262.9 |
+| plain | fileops | tool/off | 30/30 | 0 (none) | none | 117.7 / 132.2 | 237.9 / 290.4 | 20.0 / 25.1 | 257.1 / 306.5 | 375.2 / 440.2 |
+| plain | fileops | tool/on | 30/30 | 0 (none) | none | 124.0 / 138.1 | 1027.2 / 1133.3 | 7.2 / 16.4 | 1043.5 / 1149.5 | 1166.8 / 1283.1 |
+| scope | noop | direct | 30/30 | 0 (none) | none | 1.6 / 2.1 | 0.0 / 0.1 | 0.2 / 0.3 | 0.3 / 0.3 | 1.8 / 2.5 |
+| scope | noop | tool/off | 30/30 | 0 (none) | exec_unconfirmed 30 | 108.8 / 125.5 | 0.0 / 0.1 | 23.0 / 24.1 | 23.1 / 24.1 | 131.9 / 148.7 |
+| scope | noop | tool/on | 30/30 | 0 (none) | none | 116.7 / 132.5 | 0.1 / 0.3 | 6.5 / 16.9 | 6.5 / 16.9 | 124.0 / 139.7 |
+| scope | spawn-tree | direct | 30/30 | 0 (none) | none | 1.5 / 1.9 | 153.3 / 170.5 | 0.3 / 0.4 | 153.6 / 170.7 | 155.0 / 172.3 |
+| scope | spawn-tree | tool/off | 30/30 | 0 (none) | none | 97.4 / 110.0 | 162.8 / 182.9 | 21.3 / 24.0 | 185.2 / 206.1 | 281.2 / 313.0 |
+| scope | spawn-tree | tool/on | 30/30 | 0 (none) | none | 105.8 / 116.5 | 255.6 / 280.5 | 6.3 / 16.5 | 262.9 / 286.3 | 370.8 / 396.6 |
+| scope | fileops | direct | 30/30 | 0 (none) | none | 1.5 / 2.0 | 183.0 / 210.5 | 0.4 / 0.4 | 183.4 / 210.9 | 185.0 / 212.9 |
+| scope | fileops | tool/off | 30/30 | 0 (none) | none | 101.8 / 122.3 | 236.9 / 269.7 | 20.9 / 24.2 | 256.8 / 287.2 | 362.0 / 409.0 |
+| scope | fileops | tool/on | 30/30 | 0 (none) | none | 106.9 / 127.2 | 1016.3 / 1075.0 | 6.6 / 16.4 | 1032.3 / 1087.3 | 1136.6 / 1210.7 |
+
+### Peak memory (KiB, median / p95 / max over valid launches)
+
+| Session | Workload | Arm | Launched HWM (sampled) | Reaped tree (`wait4`) | Leaf `memory.peak` (sampled) | Target |
+|---|---|---|---|---|---|---|
+| plain | noop | direct | n/a | 3984 / 4048 / 4160 | n/a | 3984 / 4048 / 4048 |
+| plain | noop | tool/off | 8216 / 8356 / 8376 | 8134 / 8296 / 8384 | 1764 / 1988 / 1992 | 3984 / 4048 / 4048 |
+| plain | noop | tool/on | 8260 / 8440 / 8452 | 8092 / 8240 / 8316 | 1942 / 1988 / 1992 | 3984 / 4048 / 4048 |
+| plain | spawn-tree | direct | 4092 / 4216 / 4216 | 4048 / 4176 / 4176 | n/a | 4048 / 4176 / 4176 |
+| plain | spawn-tree | tool/off | 8192 / 8380 / 8380 | 8058 / 8280 / 8296 | 3832 / 4508 / 4652 | 4048 / 4176 / 4176 |
+| plain | spawn-tree | tool/on | 8266 / 8408 / 8448 | 8060 / 8228 / 8284 | 3462 / 3764 / 3984 | 4046 / 4172 / 4176 |
+| plain | fileops | direct | 4024 / 4088 / 4104 | 3984 / 4048 / 4064 | n/a | 3984 / 4048 / 4048 |
+| plain | fileops | tool/off | 8210 / 8288 / 8292 | 8122 / 8224 / 8224 | 2220 / 2488 / 2488 | 3940 / 4004 / 4048 |
+| plain | fileops | tool/on | 8280 / 8396 / 8424 | 8086 / 8236 / 8252 | 1970 / 2224 / 2228 | 3980 / 4048 / 4056 |
+| scope | noop | direct | n/a | 4008 / 4084 / 4152 | n/a | 3994 / 4048 / 4084 |
+| scope | noop | tool/off | 8204 / 8360 / 8364 | 8126 / 8220 / 8220 | 1762 / 1992 / 1992 | 3984 / 4048 / 4048 |
+| scope | noop | tool/on | 8292 / 8440 / 8444 | 8054 / 8256 / 8256 | 1954 / 2060 / 2240 | 3984 / 4048 / 4048 |
+| scope | spawn-tree | direct | 4092 / 4216 / 4220 | 4044 / 4176 / 4176 | n/a | 4032 / 4172 / 4176 |
+| scope | spawn-tree | tool/off | 8226 / 8336 / 8372 | 8104 / 8272 / 8284 | 3888 / 4672 / 4676 | 4044 / 4176 / 4176 |
+| scope | spawn-tree | tool/on | 8308 / 8412 / 8452 | 8110 / 8256 / 8380 | 3278 / 3756 / 3772 | 4048 / 4176 / 4176 |
+| scope | fileops | direct | 4026 / 4096 / 4148 | 3984 / 4100 / 4104 | n/a | 3972 / 4052 / 4104 |
+| scope | fileops | tool/off | 8218 / 8320 / 8336 | 8092 / 8244 / 8296 | 2218 / 2468 / 2488 | 3982 / 4100 / 4104 |
+| scope | fileops | tool/on | 8296 / 8392 / 8404 | 8054 / 8232 / 8284 | 1968 / 2224 / 2328 | 3972 / 4052 / 4100 |
+
+### Events and losses
+
+Event counts: the receipt's `coverage.<class>.observed_count` over valid launches, median (min–max). Losses: over every measured launch of the arm, valid or not; a count that differs from the workload's exact one excludes the launch (`count_mismatch`).
+
+| Session | Workload | Arm | Excluded | exec | fs.write | fs.deny | net | proxy.net | Trace frames | Observer gaps (lost) | Coverage gaps (lost) | Receipt errors | Incomplete traces | Trace notes (all kinds) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | noop | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 3 | 0 (0) | 0 (0) | 30 | 0 | lifecycle 30 |
+| plain | noop | tool/on | 0 | 2 | 0 | 0 | 0 | n/a | 7 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | spawn-tree | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | spawn-tree | tool/on | 0 | 402 | 0 | 0 | 0 | n/a | 407 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | fileops | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | fileops | tool/on | 0 | 2 | 15000 | 0 | 0 | n/a | 15007 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | noop | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 3 | 0 (0) | 0 (0) | 30 | 0 | lifecycle 30 |
+| scope | noop | tool/on | 0 | 2 | 0 | 0 | 0 | n/a | 7 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | spawn-tree | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | spawn-tree | tool/on | 0 | 402 | 0 | 0 | 0 | n/a | 407 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | fileops | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | fileops | tool/on | 0 | 2 | 15000 | 0 | 0 | n/a | 15007 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+
+## backend-evaluation.md §4, `tool`
+
+Startup: p95 added against direct. Overheads: median against direct, work phase / post-start / end-to-end wall, each with its verdict. Peak RSS: supervisor sampled HWM median / p95 (KiB). Events: median trace frames. Losses: observer + coverage gaps, receipt errors, incomplete traces and excluded launches, over all launches.
+
+plain session:
+
+| Workload | Observe | Valid (excl.) | Startup p95 added | Work phase | Post-start | End-to-end wall | Peak RSS | Event count | Losses (gaps / errors / incomplete / excluded) |
+|---|---|---|---|---|---|---|---|---|---|
+| noop | off | 30 (0) | pass (123.4 ms) | 50.8% | 9503.1% | 8151.1% | 8216 / 8356 | 3 | 0 / 30 / 0 / 0 |
+| noop | on | 30 (0) | pass (136.0 ms) | 63.8% | 2290.6% | 7770.8% | 8260 / 8440 | 7 | 0 / 0 / 0 / 0 |
+| spawn-tree | off | 30 (0) | pass (124.0 ms) | 8.9% | 20.5% | 96.4% | 8192 / 8380 | 5 | 0 / 0 / 0 / 0 |
+| spawn-tree | on | 30 (0) | pass (131.6 ms) | 68.0% | 73.5% | 149.5% | 8266 / 8408 | 407 | 0 / 0 / 0 / 0 |
+| fileops | off | 30 (0) | pass (130.6 ms) | fail (26.7%) | fail (36.6%) | fail (97.6%) | 8210 / 8288 | 5 | 0 / 0 / 0 / 0 |
+| fileops | on | 30 (0) | pass (136.5 ms) | fail (447.0%) | fail (454.5%) | fail (514.5%) | 8280 / 8396 | 15007 | 0 / 0 / 0 / 0 |
+
+scope session:
+
+| Workload | Observe | Valid (excl.) | Startup p95 added | Work phase | Post-start | End-to-end wall | Peak RSS | Event count | Losses (gaps / errors / incomplete / excluded) |
+|---|---|---|---|---|---|---|---|---|---|
+| noop | off | 30 (0) | pass (123.9 ms) | 32.6% | 8200.4% | 7108.7% | 8204 / 8360 | 3 | 0 / 30 / 0 / 0 |
+| noop | on | 30 (0) | pass (130.9 ms) | 63.3% | 2239.2% | 6675.0% | 8292 / 8440 | 7 | 0 / 0 / 0 / 0 |
+| spawn-tree | off | 30 (0) | pass (108.6 ms) | 6.2% | 20.6% | 81.5% | 8226 / 8336 | 5 | 0 / 0 / 0 / 0 |
+| spawn-tree | on | 30 (0) | pass (115.1 ms) | 66.7% | 71.1% | 139.3% | 8308 / 8412 | 407 | 0 / 0 / 0 / 0 |
+| fileops | off | 30 (0) | pass (120.8 ms) | fail (29.5%) | fail (40.1%) | fail (95.7%) | 8218 / 8320 | 5 | 0 / 0 / 0 / 0 |
+| fileops | on | 30 (0) | pass (125.7 ms) | fail (455.4%) | fail (463.0%) | fail (514.3%) | 8296 / 8392 | 15007 | 0 / 0 / 0 / 0 |
+
+## Definitions
+
+- **Launcher.** `ouro-fixture perf-launch`, outside the jail, forks the arm's command: the workload itself (direct) or `ouro-jail run --profile P --observe on|off --workspace WS -- workload`. It reads `CLOCK_MONOTONIC` just before `fork` and again after `wait4` returns. While the command runs it samples the launched process's `VmHWM` and, for a jailed arm only, looks up the execution leaf from the receipt and reads its `memory.peak`, every sampling interval: a small asymmetric cost (`--sample-ms 0` is the control run).
+- **Startup.** From that first reading to the target's own first reading at entry to its workload mode (after its exec, dynamic loading and argument parsing, the same for every arm). The target reports its time namespace and the launcher its own; a launch where they differ or are unknown is excluded. For a jailed arm startup includes the supervisor's own start, the scope step (plain session), the capability probes, preparation, bubblewrap, observer attachment and the exec.
+- **Work.** The target's end reading minus its entry reading: the workload phase alone, where the observer's per-call cost falls.
+- **Teardown.** The launcher's reading after `wait4` minus the target's end reading: the target's exit and, for a jailed arm, settlement, tree verification, the receipts, the trace flush and the leaf's removal.
+- **Post-start.** Work + teardown: everything after the target's entry. Startup + post-start = wall, so the startup budget and a post-start budget together leave no jail time uncounted.
+- **Wall.** The launcher's two readings: spawn to the jail's exit.
+- **Added (ms).** A launch's startup (or teardown) minus the baseline arm's median, same session and workload. Warm: after the discarded warm-up launch of every arm.
+- **Overhead (%).** A launch's work, post-start or wall time over the baseline arm's median, minus one. The median of these is the ratio of medians minus one.
+- **Median / p95.** The middle value (mean of the two middle values for an even count); p95 by nearest rank, the ⌈0.95·n⌉-th smallest value (the 29th of 30).
+- **Peak RSS.** Launched HWM: the launched process's own `VmHWM` (the supervisor for a jailed arm), last sample (a lower bound). Reaped tree: `wait4`'s `ru_maxrss`, the largest resident set of the launched process and anything it reaped. Leaf: the execution leaf's `memory.peak` (cgroup memory including page cache), last sample. Target: the target's own `ru_maxrss` at its end.
+- **Validity.** A launch counts only if the launcher ran and exec'd, the target printed both lines and completed its workload, one clock and ordered readings, direct execution exited 0; and for a jailed arm: exactly one attempt, a settled final receipt of the arm's profile and observation mode, the session's scope state (`entered` from a plain session, `already_delegated` in a scope), outcome `exited 0` (or, with observation off, the recorded exec-confirmation limit with jail exit 1, flagged), no receipt error, tree death verified, no degraded class, no coverage or observer gap, with observation on an attached observer and every closed-set class active, every event count exactly the workload's (execs: 2 × (1 + children) in the `exec` class, one `proc.exec` and one `proc.exit` each; fileops: one `fs.create`, `fs.rename`, `fs.unlink` per round, their sum in `fs.write`; nothing in `fs.deny`, `net`, `limits`, `proxy.net`; the trace's audit frames equal to the receipt's closed-set counts; no audit frame with observation off), and a trace that is complete and ends on the final receipt's note (§13.3). Everything else is excluded, counted by reason, never averaged, and its attempt, stdout and stderr are kept under `kept/`.
+- **Verdicts.** Against direct execution only. `insufficient`: fewer than 30 valid launches on either side, any excluded launch on either side (no verdict over survivors), or a raw-data problem. `loaded`: the host was not shown quiet (a counted launch of either side above `--max-load` or with no load recorded, or `--allow-loaded`). A roll-up passes only if every cell passes.
+- **Arm order.** A seeded permutation per round (seed in the parameters); each launch records its predecessor.
+- **CPU share.** Not equalised: a direct target runs in the harness's own cgroup, a jailed one in its execution leaf, and their CPU weights differ only under contention, which the quiet-host condition rules out for a verdict. The direct target's cgroup is recorded per launch.
+- **Sessions.** The plain and scope passes run one after the other, so a difference between them is confounded by time; each pass's load is in `passes.ndjson`.
+

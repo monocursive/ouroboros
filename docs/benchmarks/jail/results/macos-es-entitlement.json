@@ -1,0 +1,182 @@
+{
+  "purpose": "ES capability and signing preflight; no entitled lifecycle tests ran",
+  "profiles_checked": 14,
+  "profiles_with_endpoint_security": 0,
+  "operator_confirmed_apple_approval": false,
+  "unentitled_profile_rejected_before_build": true,
+  "runs": [
+    {
+      "host": {
+        "system": "Darwin",
+        "node": "monocursives-macbook-pro.home",
+        "release": "27.0.0",
+        "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+        "machine": "arm64",
+        "processor": "arm"
+      },
+      "started_unix": 1790664768.5474198,
+      "signing": {
+        "bundle_id": "com.monocursive.ouroboros.jail-research",
+        "identity": "-",
+        "profile_supplied": false,
+        "entitlements": {},
+        "compile_argv": [
+          "cc",
+          "-O2",
+          "-fblocks",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_es.c",
+          "-lEndpointSecurity",
+          "-lbsm",
+          "-o",
+          "/Users/monocursive/code/ouroboros/target/macos-es/final-adhoc/OuroJailResearch.app/Contents/MacOS/ouro-jail-research"
+        ],
+        "codesign": "Executable=/Users/monocursive/code/ouroboros/target/macos-es/final-adhoc/OuroJailResearch.app/Contents/MacOS/ouro-jail-research\nIdentifier=com.monocursive.ouroboros.jail-research\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=488 flags=0x10002(adhoc,runtime) hashes=4+7 location=embedded\nSignature=adhoc\nInfo.plist entries=7\nTeamIdentifier=not set\nRuntime Version=27.0.0\nSealed Resources version=2 rules=13 files=0\nInternal requirements count=0 size=12\nwarning: Specifying ':' in the path is deprecated and will not work in a future release\nTotal signatures=1\nChosen signature=1\n",
+        "signed_entitlements": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict></dict></plist>\n"
+      },
+      "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428\n",
+      "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+      "xcode": "Xcode 27.0\nBuild version 27A266a\n",
+      "source_sha256": "46e7d456fdc7c26976b9d418edff5f50f77e79272f08938ac692b4114ecb5549",
+      "runner_sha256": "8abbe0ae216d5a5f0150405e1dd63405d33f01a9bab37545413ff0cde9795d2e",
+      "fixture_sha256": "dd3115297bbef8e827f75fecaf49b1e4e5fbac75c2318668b660f132a729a333",
+      "fixture_runner_sha256": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+      "binary_sha256": "6aee9f0fc88dfca40ce243204ca77d86ebb5a74d4a8329c66b3836b34ed3f903",
+      "cases": [],
+      "capability": {
+        "exit": 125,
+        "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+        "stderr": ""
+      },
+      "refusal_test": {
+        "exit": 125,
+        "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+        "marker_created": false
+      },
+      "status": "blocked_missing_entitlement",
+      "finished_unix": 1790664768.8538291,
+      "lifetime_contract_verified": false
+    },
+    {
+      "host": {
+        "system": "Darwin",
+        "node": "monocursives-macbook-pro.home",
+        "release": "27.0.0",
+        "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+        "machine": "arm64",
+        "processor": "arm"
+      },
+      "started_unix": 1790664769.095671,
+      "signing": {
+        "bundle_id": "com.monocursive.ouroboros.jail-research",
+        "identity": "DCE6C57DE9D3C0356C7376887826645631D787AD",
+        "profile_supplied": false,
+        "entitlements": {},
+        "compile_argv": [
+          "cc",
+          "-O2",
+          "-fblocks",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_es.c",
+          "-lEndpointSecurity",
+          "-lbsm",
+          "-o",
+          "/Users/monocursive/code/ouroboros/target/macos-es/final-developer-id/OuroJailResearch.app/Contents/MacOS/ouro-jail-research"
+        ],
+        "codesign": "Executable=/Users/monocursive/code/ouroboros/target/macos-es/final-developer-id/OuroJailResearch.app/Contents/MacOS/ouro-jail-research\nIdentifier=com.monocursive.ouroboros.jail-research\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=499 flags=0x10000(runtime) hashes=4+7 location=embedded\nSignature size=4664\nAuthority=Developer ID Application: Monocursive (64SGQ348QJ)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nSigned Time=29 Sep 2026 at 08:52:49\nInfo.plist entries=7\nTeamIdentifier=64SGQ348QJ\nRuntime Version=27.0.0\nSealed Resources version=2 rules=13 files=0\nInternal requirements count=1 size=200\nwarning: Specifying ':' in the path is deprecated and will not work in a future release\nTotal signatures=1\nChosen signature=1\n",
+        "signed_entitlements": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict></dict></plist>\n"
+      },
+      "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428\n",
+      "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+      "xcode": "Xcode 27.0\nBuild version 27A266a\n",
+      "source_sha256": "46e7d456fdc7c26976b9d418edff5f50f77e79272f08938ac692b4114ecb5549",
+      "runner_sha256": "8abbe0ae216d5a5f0150405e1dd63405d33f01a9bab37545413ff0cde9795d2e",
+      "fixture_sha256": "dd3115297bbef8e827f75fecaf49b1e4e5fbac75c2318668b660f132a729a333",
+      "fixture_runner_sha256": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+      "binary_sha256": "65310de77f8367be9bc2b1da03f4273021f1a87bb0af77dcc3590581f78f38b5",
+      "cases": [],
+      "capability": {
+        "exit": 125,
+        "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+        "stderr": ""
+      },
+      "refusal_test": {
+        "exit": 125,
+        "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+        "marker_created": false
+      },
+      "status": "blocked_missing_entitlement",
+      "finished_unix": 1790664769.323589,
+      "lifetime_contract_verified": false
+    },
+    {
+      "host": {
+        "system": "Darwin",
+        "node": "monocursives-macbook-pro.home",
+        "release": "27.0.0",
+        "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+        "machine": "arm64",
+        "processor": "arm"
+      },
+      "started_unix": 1790666497.688821,
+      "signing": {
+        "bundle_id": "com.monocursive.ouroboros.jail",
+        "identity": "Developer ID Application: Monocursive (64SGQ348QJ)",
+        "profile_supplied": false,
+        "entitlements": {},
+        "compile_argv": [
+          "cc",
+          "-O2",
+          "-fblocks",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_es.c",
+          "-lEndpointSecurity",
+          "-lbsm",
+          "-o",
+          "/Users/monocursive/code/ouroboros/target/macos-es/stable-identifier/OuroJailResearch.app/Contents/MacOS/ouro-jail-research"
+        ],
+        "codesign": "Executable=/Users/monocursive/code/ouroboros/target/macos-es/stable-identifier/OuroJailResearch.app/Contents/MacOS/ouro-jail-research\nIdentifier=com.monocursive.ouroboros.jail\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=490 flags=0x10000(runtime) hashes=4+7 location=embedded\nSignature size=4664\nAuthority=Developer ID Application: Monocursive (64SGQ348QJ)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nSigned Time=29 Sep 2026 at 09:21:37\nInfo.plist entries=7\nTeamIdentifier=64SGQ348QJ\nRuntime Version=27.0.0\nSealed Resources version=2 rules=13 files=0\nInternal requirements count=1 size=192\nwarning: Specifying ':' in the path is deprecated and will not work in a future release\nTotal signatures=1\nChosen signature=1\n",
+        "signed_entitlements": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict></dict></plist>\n"
+      },
+      "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428\n",
+      "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+      "xcode": "Xcode 27.0\nBuild version 27A266a\n",
+      "source_sha256": "46e7d456fdc7c26976b9d418edff5f50f77e79272f08938ac692b4114ecb5549",
+      "runner_sha256": "64e94f7bb456eba7f6ed531417b21a1dc9b96e97346298fffd19589ad2bcea9e",
+      "fixture_sha256": "dd3115297bbef8e827f75fecaf49b1e4e5fbac75c2318668b660f132a729a333",
+      "fixture_runner_sha256": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+      "binary_sha256": "111011fbb36e90e262baecf5d87805091739095136788b58382be389d750917d",
+      "cases": [],
+      "capability": {
+        "exit": 125,
+        "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+        "stderr": ""
+      },
+      "refusal_test": {
+        "exit": 125,
+        "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+        "marker_created": false
+      },
+      "status": "blocked_missing_entitlement",
+      "finished_unix": 1790666498.0222468,
+      "lifetime_contract_verified": false
+    }
+  ],
+  "seatbelt_signal_control": {
+    "policy": "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+    "profile_compiled": true,
+    "outside_fixture_signal_exit": 1,
+    "outside_fixture_survived": true,
+    "outside_fixture_stderr": "kill: 86550: Operation not permitted\n",
+    "inside_signal_exit": 0,
+    "inside_signal_stderr": "/bin/sh: line 1: 86553 Terminated: 15          /bin/sleep 10\n",
+    "cleanup_verified": true,
+    "es_used": false
+  }
+}

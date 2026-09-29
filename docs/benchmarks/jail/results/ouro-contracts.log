@@ -1,0 +1,6 @@
+PASS: 8 schemas (29 frozen files), 37 examples, 5 evidence receipts, 198 validation cases,
+      102 semantic cases, 24 gate frames, policy/argv golden bytes,
+      native codec, and 26 address cases.
+No live containment, observer, proxy, or platform execution was tested.
+Validated 1 managed-policy schema, 2 policy examples and 35 cases.
+Document contracts only; identity, policy authorization and runtime containment are not tested.

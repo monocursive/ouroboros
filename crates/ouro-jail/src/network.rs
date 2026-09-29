@@ -311,7 +311,7 @@ impl HostRule {
     /// Parses one `HOST[:PORT]` rule (`[IPV6][:PORT]`, or a bare IPv6 address
     /// without a port).
     ///
-    /// An omitted port expands to exactly two rules, port 80 and port 443
+    /// An omitted port means port 443; other ports require explicit entries
     /// (§10). The result is sorted so that a rule set has one canonical order.
     ///
     /// # Errors
@@ -371,17 +371,7 @@ impl HostRule {
         }
         Ok(match port {
             Some(port) => vec![HostRule { pattern, port }],
-            None => {
-                let mut rules = vec![
-                    HostRule {
-                        pattern: pattern.clone(),
-                        port: 80,
-                    },
-                    HostRule { pattern, port: 443 },
-                ];
-                rules.sort();
-                rules
-            }
+            None => vec![HostRule { pattern, port: 443 }],
         })
     }
 
@@ -596,10 +586,10 @@ mod tests {
     }
 
     #[test]
-    fn an_omitted_port_expands_to_eighty_and_four_four_three() {
+    fn an_omitted_port_allows_only_tls_port() {
         let rules = HostRule::parse("example.com").expect("parses");
         let canonical: Vec<String> = rules.iter().map(HostRule::canonical).collect();
-        assert_eq!(canonical, vec!["example.com:80", "example.com:443"]);
+        assert_eq!(canonical, vec!["example.com:443"]);
     }
 
     #[test]
@@ -638,7 +628,7 @@ mod tests {
             .iter()
             .map(HostRule::canonical)
             .collect();
-        assert_eq!(bare, vec!["[2001:db8::1]:80", "[2001:db8::1]:443"]);
+        assert_eq!(bare, vec!["[2001:db8::1]:443"]);
     }
 
     #[test]

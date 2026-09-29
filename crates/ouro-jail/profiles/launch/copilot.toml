@@ -1,0 +1,11 @@
+# EXPERIMENTAL and unrecorded. No ambient credentials or network authority.
+# Add provider hosts and installation grants explicitly after inspecting denials.
+name = "copilot"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+[environment]
+XDG_CONFIG_HOME = { state = "config" }
+XDG_DATA_HOME = { state = "data" }
+XDG_CACHE_HOME = { state = "cache" }
+XDG_STATE_HOME = { state = "state" }

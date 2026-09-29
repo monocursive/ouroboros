@@ -136,6 +136,8 @@ pub struct DoctorReport {
 /// separately." Each credential is named by the profile's own id, mode and
 /// destination; the support status is reported apart from the host probes.
 pub struct LaunchReadiness {
+    /// Embedded data or a trusted operator override.
+    pub resolution: String,
     /// The launch profile name.
     pub name: String,
     /// `experimental` or `supported`.
@@ -316,8 +318,8 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             } else {
                 absolutize(&config_dir, Path::new(&selection))
             };
-            let text = std::fs::read_to_string(&path)
-                .map_err(|error| usage("--profile", format!("{}: {error}", path.display())))?;
+            let text = read_operator_file(&path, "--profile")?
+                .ok_or_else(|| usage("--profile", format!("{} does not exist", path.display())))?;
             let file = config::parse_policy_file(&text)?;
             let base = ProfileName::parse(&file.extends).ok_or_else(|| {
                 usage(
@@ -547,7 +549,7 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
     let resolved = policy::resolve(&inputs)?;
     // J3-launch begin: the launch environment, vendor state and `launch`
     // field group, then the digest and requirements over the result.
-    let resolved = match &launch {
+    let mut resolved = match &launch {
         Some(launch) => launch_profile::apply(resolved, launch)?,
         None => resolved,
     };
@@ -555,6 +557,36 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
 
     // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
     // absent so that this refuses rather than inventing one.
+    if !operator_jail.commands.is_empty() {
+        operator_jail
+            .commands
+            .validate()
+            .map_err(|e| usage("jail.commands", e))?;
+        if resolved.snapshot.platform != crate::records::Os::Linux
+            || profile == ProfileName::None
+            || resolved.snapshot.observation.mode != crate::records::ObserveMode::On
+        {
+            return Err(usage(
+                "jail.commands",
+                "command rules require contained Linux execution with --observe on",
+            ));
+        }
+        resolved.snapshot.commands = operator_jail.commands.clone();
+        resolved.digest = resolved.snapshot.digest()?;
+    }
+    if args.learning {
+        if profile == ProfileName::None || resolved.snapshot.platform != crate::records::Os::Linux {
+            return Err(usage(
+                "learn",
+                "learning requires a contained Linux run with the real observer",
+            ));
+        }
+        if resolved.snapshot.observation.mode != crate::records::ObserveMode::On {
+            return Err(usage("learn", "learning requires observation on"));
+        }
+        resolved.snapshot.observation.learning = true;
+        resolved.digest = resolved.snapshot.digest()?;
+    }
     if profile == ProfileName::Build && resolved.snapshot.limits.mem.is_none() {
         return Err(usage(
             "limits.mem",
@@ -690,7 +722,7 @@ fn canonical_root(cwd: &Path, path: Option<&Path>, key: &str) -> Result<PathBuf,
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for any failure other than absence.
-fn read_operator_file(path: &Path, key: &str) -> Result<Option<String>, JailError> {
+pub(crate) fn read_operator_file(path: &Path, key: &str) -> Result<Option<String>, JailError> {
     // Security 2026-09-27 (audit 4 B1): the operator config is a trusted,
     // widening layer (§6.2), so the read is as strict as the project file's:
     // no-follow, regular file, bounded. Identity is checked on the open
@@ -826,6 +858,13 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
     // makes the plan unavailable (north star §4.5: it refuses the launch).
     let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
     let launch = args.launch.as_ref().map(|name| LaunchReadiness {
+        resolution: plan
+            .resolved
+            .provenance
+            .iter()
+            .find(|p| p.key == "launch.resolution")
+            .and_then(|p| p.detail.clone())
+            .unwrap_or_default(),
         name: name.clone(),
         support: LAUNCH_SUPPORT,
         support_reason: LAUNCH_SUPPORT_REASON,
@@ -1017,6 +1056,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // Security 2026-09-27 (audit 4 B1): the config directory holds the
     // trusted, widening `config.toml`, read on every run.
     check_config_isolation(&plan)?;
+    check_binary_isolation(&plan)?;
     validate_receipt_path(args, &plan)?;
 
     if args.label_only {
@@ -1622,6 +1662,21 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     control.as_mut(),
                     &mut journal,
                 ));
+            }
+            RunEvent::CommandForbidden { pattern } => {
+                let error = JailError::new(
+                    ErrorCode::CommandForbidden,
+                    ErrorStage::Running,
+                    Remediation::Configuration,
+                    format!("command matched forbidden pattern: {pattern}"),
+                );
+                record.errors.push(error.to_object());
+                record
+                    .outcome
+                    .cause
+                    .get_or_insert("command_forbidden".into());
+                outcome_error.get_or_insert(error);
+                running.request_stop(StopReason::CommandForbidden);
             }
             RunEvent::WallExpired => {
                 // J4-D5: the first stop wins, as it does in the platform's
@@ -2368,6 +2423,57 @@ fn check_launch_isolation(plan: &Plan) -> Result<(), JailError> {
     Ok(())
 }
 
+/// Executable code must not be replaceable through a writable child root.
+fn check_binary_isolation(plan: &Plan) -> Result<(), JailError> {
+    if plan.profile == ProfileName::None {
+        return Ok(());
+    }
+    let mut roots = vec![plan.workspace.clone()];
+    let snapshot = &plan.resolved.snapshot;
+    if let ScratchRoot::Host { path } = &snapshot.roots.scratch {
+        roots.push(PathBuf::from(std::ffi::OsString::from_vec(
+            path.as_bytes().to_vec(),
+        )));
+    }
+    for reference in &snapshot.filesystem.read_write {
+        if reference.root == crate::policy::RootToken::Host {
+            roots.push(PathBuf::from(std::ffi::OsString::from_vec(
+                reference.path.as_bytes().to_vec(),
+            )));
+        }
+    }
+    let mut binaries = vec![std::env::current_exe().map_err(|e| usage("binaries", e.to_string()))?];
+    #[cfg(target_os = "linux")]
+    if let Ok(path) = crate::platform::linux::platform::resolved_bwrap() {
+        binaries.push(path.to_path_buf());
+    }
+    #[cfg(target_os = "macos")]
+    binaries.push(PathBuf::from("/usr/bin/sandbox-exec"));
+    let roots: Vec<_> = roots.iter().map(|p| canonical_existing_prefix(p)).collect();
+    for binary in binaries {
+        let binary = canonical_existing_prefix(&binary);
+        let conflict = roots
+            .iter()
+            .find(|root| binary.starts_with(root))
+            .cloned()
+            .or(alias_conflict(&roots, &binary, "binaries")?);
+        if let Some(root) = conflict {
+            return Err(JailError::new(
+                ErrorCode::UnsafeStatePath,
+                ErrorStage::Resolving,
+                Remediation::Configuration,
+                format!(
+                    "writable child root {} exposes executable {}",
+                    root.display(),
+                    binary.display()
+                ),
+            )
+            .with_key_path("binaries"));
+        }
+    }
+    Ok(())
+}
+
 /// Security 2026-09-27 (audit 4 B1): refuses a config directory the child can
 /// reach, on every run.
 ///
@@ -2387,6 +2493,32 @@ fn check_launch_isolation(plan: &Plan) -> Result<(), JailError> {
 /// the workspace, the scratch root or any host grant, or reaches it through
 /// a bind alias.
 fn check_config_isolation(plan: &Plan) -> Result<(), JailError> {
+    if plan.profile == ProfileName::None {
+        let mut trusted = Vec::new();
+        let config = plan.config_dir.join("config.toml");
+        if config.symlink_metadata().is_ok() {
+            trusted.push(config);
+        }
+        match std::fs::read_dir(plan.config_dir.join("launch")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| usage("OURO_CONFIG_DIR", e.to_string()))?;
+                    if entry.path().extension().is_some_and(|ext| ext == "toml") {
+                        trusted.push(entry.path());
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(usage("OURO_CONFIG_DIR", e.to_string())),
+        }
+        if !trusted.is_empty() {
+            return Err(JailError::new(ErrorCode::UnsafeConfigPath, ErrorStage::Resolving,
+                Remediation::Configuration, format!(
+                    "an uncontained child can change trusted configuration: {}; move it aside or run contained",
+                    trusted.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                )).with_key_path("OURO_CONFIG_DIR"));
+        }
+    }
     let config_dir = canonical_existing_prefix(&plan.config_dir);
     let roots: Vec<PathBuf> = child_visible_roots(plan)
         .iter()
@@ -2538,7 +2670,10 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
     // root), which the comparisons above cannot see. The copy must not land
     // where the child, or the state store, reaches it through a mount.
     for guarded in std::iter::once(&state_root).chain(roots.iter()) {
-        if let Some(alias) = alias_conflict(std::slice::from_ref(&parent), guarded, "--receipt")? {
+        if let Some(alias) =
+            state::mount_alias::alias_containment(std::slice::from_ref(&parent), guarded)
+                .map_err(|error| usage(key, format!("cannot verify receipt aliases: {error}")))?
+        {
             return Err(usage(
                 key,
                 format!(
@@ -3037,7 +3172,17 @@ fn prepare_launch(
     let vendor = state::create_vendor_state(attempt_dir)?;
     // §12 and the §8.2 preparation budget: staging runs in a worker bounded
     // by what is left of it, and no source may lie in a child-writable grant.
-    let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
+    let mut forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
+    if launch.credentials.iter().any(|c| c.mode == "vault") {
+        forbidden.extend(
+            state::mount_alias::forbidden_identities(&child_visible_roots(plan)).map_err(|e| {
+                usage(
+                    "launch.credentials",
+                    format!("visible roots cannot be inspected: {e}"),
+                )
+            })?,
+        );
+    }
     let mut staged =
         match crate::credentials::stage_within(launch, vendor.as_fd(), &forbidden, &|| {
             deadline.remaining()
@@ -3086,7 +3231,14 @@ fn receipt_credentials(
         .map(|credential| {
             let mut record = credential.record.clone();
             record.digest = None;
-            record.digest_unavailable_reason = Some("receipt_verifier_withheld".to_owned());
+            record.digest_unavailable_reason = Some(
+                if record.mode == "vault" {
+                    "never_staged"
+                } else {
+                    "receipt_verifier_withheld"
+                }
+                .to_owned(),
+            );
             record
         })
         .collect()

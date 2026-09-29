@@ -1,9 +1,10 @@
 # EXPERIMENTAL launch profile for OpenCode (jail-v1 §12, north star §4.5),
 # except for the runs recorded in jail-v1 agent-compatibility.md (row A01).
 #
-# Example data only: `ouro-jail` never reads this directory. An operator who
-# wants it copies it to `<config-dir>/launch/opencode.toml` (mode 0600) and
-# checks every path and host against their own installation.
+# Embedded starter data, selected with `--launch opencode`. An operator file
+# at `<config-dir>/launch/opencode.toml` (mode 0600) overrides it. Review
+# its grants against the installation. Compatibility remains experimental
+# except for the exact builds recorded in agent-compatibility.md.
 #
 # Measured with OpenCode 1.18.32 on the reference host (jail-v1
 # agent-compatibility.md, row A01): OpenCode keeps its config, data, cache and

@@ -47,9 +47,12 @@ use crate::network::{AnswerDenial, Destination, Host, Rules};
 
 mod event;
 pub mod http;
+pub(crate) mod origin;
 mod relay;
 mod resolve;
+mod socks;
 mod sys;
+mod tls;
 
 pub use event::proxy_event;
 pub use resolve::{
@@ -172,6 +175,12 @@ pub enum ProxyDecision {
 /// A safe reason code. Never contains request data.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
+    /// The first flight names a different destination.
+    OriginMismatch,
+    /// The first flight cannot establish a supported routing name.
+    OriginUnverified,
+    /// The bounded first-flight deadline expired.
+    OriginTimeout,
     /// Allowed, connected and relayed until close.
     Relayed,
     /// Allowed, but no approved address accepted the connection.
@@ -221,6 +230,9 @@ impl Reason {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Reason::OriginMismatch => "origin_mismatch",
+            Reason::OriginUnverified => "origin_unverified",
+            Reason::OriginTimeout => "origin_timeout",
             Reason::Relayed => "relayed",
             Reason::ConnectFailed => "connect_failed",
             Reason::ConnectTimeout => "connect_timeout",
@@ -247,9 +259,12 @@ impl Reason {
 
     fn status(self) -> (u16, &'static str) {
         match self {
-            Reason::HostNotAllowed | Reason::ForbiddenAddress | Reason::MixedAnswers => {
-                (403, "Forbidden")
-            }
+            Reason::OriginMismatch
+            | Reason::OriginUnverified
+            | Reason::OriginTimeout
+            | Reason::HostNotAllowed
+            | Reason::ForbiddenAddress
+            | Reason::MixedAnswers => (403, "Forbidden"),
             Reason::ResolveEmpty | Reason::ResolveFailed | Reason::ConnectFailed => {
                 (502, "Bad Gateway")
             }
@@ -309,6 +324,12 @@ impl EndReason {
 pub struct ProxyResult {
     /// Unique within this proxy, starting at 1, in accept order.
     pub request_id: u64,
+    /// First-flight verification, never an assertion about encrypted HTTP.
+    pub origin: Option<String>,
+    /// tls_sni, http_host, or explicit_ip.
+    pub origin_verification: Option<String>,
+    /// Client protocol.
+    pub transport: String,
     /// CONNECT, plain HTTP, or unknown.
     pub kind: RequestKind,
     /// The normalized destination, when one was parsed.
@@ -417,6 +438,7 @@ impl Accounting {
 }
 
 struct Shared {
+    vault: Option<Arc<crate::vault::Vault>>,
     rules: Rules,
     budgets: Budgets,
     resolver: Arc<dyn Resolver + Send + Sync>,
@@ -572,6 +594,14 @@ fn check_descriptors(budgets: &Budgets) -> io::Result<()> {
 /// [`MAX_DEADLINE`]), when the descriptor budget does not fit, or when the
 /// accept thread cannot start.
 pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyHandle> {
+    start_with_vault(config, sink, None)
+}
+
+pub fn start_with_vault(
+    config: ProxyConfig,
+    sink: Arc<dyn ProxySink>,
+    vault: Option<Arc<crate::vault::Vault>>,
+) -> io::Result<ProxyHandle> {
     let ProxyConfig {
         listener,
         rules,
@@ -596,6 +626,7 @@ pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyH
     listener.set_nonblocking(true)?;
     let (wake, wake_reader) = UnixStream::pair()?;
     let shared = Arc::new(Shared {
+        vault,
         rules,
         budgets,
         resolver,
@@ -838,6 +869,9 @@ fn denial(
 ) -> ProxyResult {
     ProxyResult {
         request_id: id,
+        origin: None,
+        origin_verification: None,
+        transport: "http".into(),
         kind,
         destination,
         decision: ProxyDecision::Deny,
@@ -866,6 +900,8 @@ struct ResultSlot<'a> {
     accepted_at: Instant,
     kind: RequestKind,
     destination: Option<Destination>,
+    origin_verification: Option<String>,
+    transport: String,
     admitted: bool,
     done: bool,
     /// Whether the client may already have received bytes, so no error
@@ -890,13 +926,14 @@ impl ResultSlot<'_> {
     }
 
     fn deny(&mut self, reason: Reason) {
-        let result = denial(
+        let mut result = denial(
             self.id,
             self.destination.clone(),
             self.kind,
             reason,
             self.accepted_at,
         );
+        result.transport = self.transport.clone();
         self.emit(result);
     }
 
@@ -904,6 +941,13 @@ impl ResultSlot<'_> {
     fn allowed(&self, reason: Reason, connected: Option<SocketAddr>) -> ProxyResult {
         ProxyResult {
             request_id: self.id,
+            origin: self
+                .origin_verification
+                .as_ref()
+                .and(self.destination.as_ref())
+                .map(|d| d.host.to_string()),
+            origin_verification: self.origin_verification.clone(),
+            transport: self.transport.clone(),
             kind: self.kind,
             destination: self.destination.clone(),
             decision: ProxyDecision::Allow,
@@ -949,6 +993,8 @@ fn handle_connection(shared: &Shared, client: &Arc<UnixStream>, id: u64, accepte
         accepted_at,
         kind: RequestKind::Unknown,
         destination: None,
+        origin_verification: None,
+        transport: "http".into(),
         admitted: true,
         done: false,
         replied: false,
@@ -967,7 +1013,11 @@ fn handle_connection(shared: &Shared, client: &Arc<UnixStream>, id: u64, accepte
     if let Some(reason) = refusal {
         slot.deny(reason);
         if !slot.replied {
-            respond(client, reason, shared.budgets.header_deadline);
+            if slot.transport == "socks5" {
+                let _ = socks::reply(client, 2);
+            } else {
+                respond(client, reason, shared.budgets.header_deadline);
+            }
         }
     }
     drop(slot);
@@ -984,25 +1034,49 @@ fn serve(
     accepted_at: Instant,
 ) -> Result<(), Reason> {
     let budgets = shared.budgets;
-    let head = match http::read_head(
-        client,
-        budgets.max_header_bytes,
-        accepted_at + budgets.header_deadline,
-    ) {
-        Ok(head) => head,
-        Err(http::HeadError::NoBytes) => {
-            slot.no_request();
-            return Ok(());
-        }
-        Err(http::HeadError::Reject(reason)) => {
-            return Err(if reason == Reason::ClientClosed && shared.is_stopping() {
-                Reason::Stopping
-            } else {
-                reason
-            });
-        }
+    let Some(is_socks) = socks::detect(client, accepted_at + budgets.header_deadline)? else {
+        slot.no_request();
+        return Ok(());
     };
-    let request = http::parse_request(head.head())?;
+    let (head, request) = if is_socks {
+        slot.transport = "socks5".into();
+        let destination = match socks::request(client, accepted_at + budgets.header_deadline) {
+            Ok(destination) => destination,
+            Err(e) => {
+                slot.replied = true;
+                return Err(e);
+            }
+        };
+        (
+            http::Head::empty(),
+            http::Request {
+                destination,
+                framing: http::Framing::Tunnel,
+                forward_head: Vec::new(),
+            },
+        )
+    } else {
+        let head = match http::read_head(
+            client,
+            budgets.max_header_bytes,
+            accepted_at + budgets.header_deadline,
+        ) {
+            Ok(head) => head,
+            Err(http::HeadError::NoBytes) => {
+                slot.no_request();
+                return Ok(());
+            }
+            Err(http::HeadError::Reject(reason)) => {
+                return Err(if shared.is_stopping() {
+                    Reason::Stopping
+                } else {
+                    reason
+                });
+            }
+        };
+        let request = http::parse_request(head.head())?;
+        (head, request)
+    };
     slot.kind = request.kind();
     slot.destination = Some(request.destination.clone());
     if shared.is_stopping() {
@@ -1094,6 +1168,34 @@ fn connect_and_relay(
 ) -> Result<(), Reason> {
     let budgets = shared.budgets;
     let reply_budget = budgets.header_deadline;
+    let mut flight = if request.framing == http::Framing::Tunnel {
+        if matches!(request.destination.host, Host::Name(_)) {
+            if slot.transport == "socks5" {
+                socks::reply(client, 0)?;
+            } else {
+                origin::established(client)?;
+            }
+            slot.replied = true;
+        }
+        Some(origin::inspect(
+            client,
+            head.leftover(),
+            &request.destination,
+        )?)
+    } else {
+        None
+    };
+    let mut forwarded = request.clone();
+    if let Some(vault) = &shared.vault {
+        if forwarded.framing != http::Framing::Tunnel {
+            vault.inject("http", &mut forwarded)?;
+        }
+        if let Some(inner) = flight.as_mut().and_then(|f| f.http.as_mut()) {
+            vault.inject("http", inner)?;
+        }
+    }
+    let request = &forwarded;
+    slot.origin_verification = Some(flight.as_ref().map_or("http_host", |f| f.mechanism).into());
     let deadline = Instant::now() + budgets.connect_deadline;
     let (upstream, connected) = match connect_upstream(approved, request.destination.port, deadline)
     {
@@ -1103,8 +1205,14 @@ fn connect_and_relay(
             let mut result = slot.allowed(reason, None);
             result.connect_errno = errno;
             slot.emit(result);
+            if !slot.replied {
+                if slot.transport == "socks5" {
+                    let _ = socks::reply(client, 5);
+                } else {
+                    respond(client, reason, reply_budget);
+                }
+            }
             slot.replied = true;
-            respond(client, reason, reply_budget);
             return Ok(());
         }
     };
@@ -1116,18 +1224,83 @@ fn connect_and_relay(
         let mut result = slot.allowed(Reason::Stopping, Some(connected));
         result.end = Some(EndReason::Stopped);
         slot.emit(result);
+        if !slot.replied {
+            if slot.transport == "socks5" {
+                let _ = socks::reply(client, 1);
+            } else {
+                respond(client, Reason::Stopping, reply_budget);
+            }
+        }
         slot.replied = true;
-        respond(client, Reason::Stopping, reply_budget);
         return Ok(());
     }
     let _ = upstream.set_nodelay(true);
     let chunk = budgets.relay_chunk();
+    if request.framing == http::Framing::Tunnel && !slot.replied {
+        if slot.transport == "socks5" {
+            socks::reply(client, 0)?;
+        } else {
+            origin::established(client)?;
+        }
+    }
     // From here the client may receive relayed bytes; an error response can
     // no longer follow.
     slot.replied = true;
+    if let Some(vault) = &shared.vault
+        && let Some(flight) = &flight
+        && flight.http.is_none()
+    {
+        let result = tls::relay(
+            vault,
+            client,
+            &upstream,
+            &request.destination,
+            &flight.bytes,
+            chunk,
+        );
+        let mut event = match result {
+            Ok(outcome) => {
+                slot.origin_verification = Some("mitm_http_host".into());
+                let mut event = slot.allowed(Reason::Relayed, Some(connected));
+                event.bytes_in = outcome.bytes_in;
+                event.bytes_out = outcome.bytes_out;
+                event.end = Some(outcome.end);
+                event
+            }
+            Err(reason) => {
+                let mut event = denial(
+                    slot.id,
+                    slot.destination.clone(),
+                    slot.kind,
+                    reason,
+                    slot.accepted_at,
+                );
+                event.connected = Some(connected);
+                event.transport = slot.transport.clone();
+                event
+            }
+        };
+        if shared.is_stopping() {
+            event.end = Some(EndReason::Stopped);
+        }
+        slot.emit(event);
+        return Ok(());
+    }
     let relayed = match request.framing {
         http::Framing::Tunnel => {
-            relay::tunnel(client, &upstream, head.leftover(), chunk, reply_budget)
+            let flight = flight.as_ref().expect("tunnel inspected before connecting");
+            if let Some(inner) = &flight.http {
+                relay::http(
+                    client,
+                    &upstream,
+                    &inner.forward_head,
+                    inner.framing,
+                    &flight.bytes,
+                    chunk,
+                )
+            } else {
+                relay::tunnel(client, &upstream, &flight.bytes, chunk)
+            }
         }
         framing => relay::http(
             client,
@@ -1138,11 +1311,17 @@ fn connect_and_relay(
             chunk,
         ),
     };
+    if shared.vault.is_some() {
+        use zeroize::Zeroize as _;
+        forwarded.forward_head.zeroize();
+        if let Some(inner) = flight.as_mut().and_then(|f| f.http.as_mut()) {
+            inner.forward_head.zeroize();
+        }
+    }
     let Ok(outcome) = relayed else {
         // The relay could not start; nothing was written to either side.
         let _ = upstream.shutdown(Shutdown::Both);
         slot.emit(slot.allowed(Reason::ResourceExhausted, Some(connected)));
-        respond(client, Reason::ResourceExhausted, reply_budget);
         return Ok(());
     };
     let end = if shared.is_stopping() {

@@ -35,7 +35,10 @@ fn main() -> ExitCode {
     // runs `busctl` as a child and never re-executes this process; it never
     // fails the command, and every receipt and `doctor` report what it did.
     #[cfg(target_os = "linux")]
-    if matches!(cli.command, Command::Run(_) | Command::Doctor(_)) {
+    if matches!(
+        cli.command,
+        Command::Run(_) | Command::Learn(_) | Command::Doctor(_)
+    ) {
         let _ = ouro_jail::platform::linux::scope::enter();
     }
     let context = match build_context() {
@@ -48,6 +51,35 @@ fn main() -> ExitCode {
         Command::Doctor(args) => doctor(&context, &args),
         Command::Gc(args) => gc(&context, &args),
         Command::Run(args) => run(&context, &args),
+        Command::Learn(args) => match ouro_jail::learn::run(&context, *args) {
+            Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(125)),
+            Err(e) => {
+                ouro_jail::diag!("learn: {e}");
+                ExitCode::from(2)
+            }
+        },
+        Command::Tail(args) => {
+            let result = (|| {
+                let data =
+                    ouro_jail::state::data_dir(&context.env_settings, context.home.as_deref())
+                        .map_err(|e| e.message)?;
+                let attempt = ouro_jail::journal::attempt_path(&data, args.attempt.as_deref())?;
+                ouro_jail::journal::tail(
+                    &attempt,
+                    args.follow,
+                    args.json,
+                    args.since.as_deref(),
+                    &mut std::io::stdout().lock(),
+                )
+            })();
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    ouro_jail::diag!("tail: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
     }
 }
 
@@ -107,6 +139,7 @@ fn schema_identifiers() -> serde_json::Value {
         "gate": SCHEMA_GATE,
         "control": SCHEMA_CONTROL,
         "network": SCHEMA_NETWORK,
+        "learned_policy": records::SCHEMA_LEARNED_POLICY,
         // J5-D
         "doctor": SCHEMA_DOCTOR,
     })
@@ -232,6 +265,7 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             ("gate", SCHEMA_GATE),
             ("control", SCHEMA_CONTROL),
             ("network", SCHEMA_NETWORK),
+            ("learned_policy", records::SCHEMA_LEARNED_POLICY),
             // J5-D
             ("doctor", SCHEMA_DOCTOR),
         ] {
@@ -475,6 +509,7 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             "name": launch.name,
             "support": launch.support,
             "support_reason": launch.support_reason,
+            "resolution": launch.resolution,
             "credentials": launch
                 .credentials
                 .iter()

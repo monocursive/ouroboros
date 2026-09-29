@@ -76,7 +76,7 @@ pub fn tracer_pid(pid: pid_t) -> Option<pid_t> {
 /// together and the confirmation logic decides. `None` when the link cannot
 /// be read; the caller then has no corroboration, not a negative answer.
 #[must_use]
-pub fn kernel_exe(tid: pid_t) -> Option<super::KernelImage> {
+pub fn kernel_exe(tid: pid_t, images: &[Vec<u8>]) -> Option<super::KernelImage> {
     use std::os::unix::ffi::OsStrExt as _;
     let link = fs::read_link(proc_path(tid, "exe")).ok()?;
     let path = link.as_os_str().as_bytes().to_vec();
@@ -88,7 +88,18 @@ pub fn kernel_exe(tid: pid_t) -> Option<super::KernelImage> {
     let identity = std::fs::metadata(proc_path(tid, "exe"))
         .ok()
         .map(|meta| (meta.dev(), meta.ino()));
-    Some(super::KernelImage { path, identity })
+    let candidates = images
+        .iter()
+        .map(|path| super::CandidateImage {
+            path: path.clone(),
+            identity: super::super::unixpeer::path_identity(tid, path).ok(),
+        })
+        .collect();
+    Some(super::KernelImage {
+        path,
+        identity,
+        candidates,
+    })
 }
 
 /// The `NSpid` line: this task's id in each pid namespace from ours inward.

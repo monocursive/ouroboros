@@ -1,0 +1,7 @@
+{
+  "test": "seatbelt_process_group_descendant_cleanup",
+  "detached_with_setsid": true,
+  "child_alive_after_group_termination": true,
+  "policy": "(version 1)(deny default)(allow process-exec)(allow process-fork)(allow file-read*)(allow sysctl-read)(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))",
+  "meaning": "native process-group cleanup cannot establish tree_empty"
+}

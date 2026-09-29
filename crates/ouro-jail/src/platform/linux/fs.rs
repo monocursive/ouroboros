@@ -10,7 +10,7 @@
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -83,6 +83,8 @@ pub enum RootLiteralState {
 /// The result of one complete walk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtectedScan {
+    /// Identity and timestamps of every directory enumerated.
+    pub directories: Vec<DirectoryStamp>,
     /// The writable root that was walked.
     pub root: PathBuf,
     /// Every protected segment found, in walk order.
@@ -96,6 +98,38 @@ pub struct ProtectedScan {
     pub entries_seen: usize,
     /// Greatest depth reached below the root.
     pub max_depth_seen: usize,
+}
+
+/// A bounded scan is a snapshot, not an atomic filesystem transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectoryStamp {
+    pub path: PathBuf,
+    identity: (u64, u64),
+    modified: (i64, i64, i64, i64),
+}
+impl DirectoryStamp {
+    fn read(path: &Path, fd: RawFd) -> io::Result<Self> {
+        let mut st = empty_stat();
+        if unsafe { libc::fstat(fd, &raw mut st) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            identity: (st.st_dev, st.st_ino),
+            modified: (st.st_mtime, st.st_mtime_nsec, st.st_ctime, st.st_ctime_nsec),
+        })
+    }
+    pub fn verify(&self) -> io::Result<()> {
+        let pin = PinnedPath::open(&self.path)?;
+        let now = Self::read(&self.path, pin.fd.as_raw_fd())?;
+        if now != *self {
+            return Err(io::Error::other(format!(
+                "scanned directory changed: {}",
+                self.path.display()
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl ProtectedScan {
@@ -229,19 +263,29 @@ pub fn scan_pinned(
     names: &[&str],
     limits: ScanLimits,
 ) -> Result<ProtectedScan, ScanError> {
-    // SAFETY: the pin owns a live directory descriptor and "." is a C string.
-    let fd = unsafe { libc::openat(root.fd.as_raw_fd(), c".".as_ptr(), DIR_FLAGS) };
-    if fd < 0 {
-        return Err(ScanError::BadRoot {
-            path: root.path.clone(),
-            errno: last_errno(),
-        });
+    for retry in 0..2 {
+        let fd = unsafe { libc::openat(root.fd.as_raw_fd(), c".".as_ptr(), DIR_FLAGS) };
+        if fd < 0 {
+            return Err(ScanError::BadRoot {
+                path: root.path.clone(),
+                errno: last_errno(),
+            });
+        }
+        let dir = DirHandle {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+        };
+        let scan = scan_directory(&root.path, dir, names, limits)?;
+        if scan.directories.iter().all(|d| d.verify().is_ok()) {
+            return Ok(scan);
+        }
+        if retry == 1 {
+            return Err(ScanError::Unreadable {
+                path: root.path.clone(),
+                errno: libc::ESTALE,
+            });
+        }
     }
-    // SAFETY: openat returned a fresh owned fd.
-    let dir = DirHandle {
-        fd: unsafe { OwnedFd::from_raw_fd(fd) },
-    };
-    scan_directory(&root.path, dir, names, limits)
+    unreachable!()
 }
 
 fn scan_directory(
@@ -251,6 +295,7 @@ fn scan_directory(
     limits: ScanLimits,
 ) -> Result<ProtectedScan, ScanError> {
     let mut state = WalkState {
+        directories: Vec::new(),
         limits,
         entries_seen: 0,
         max_depth_seen: 0,
@@ -273,6 +318,7 @@ fn scan_directory(
         .collect();
 
     Ok(ProtectedScan {
+        directories: state.directories,
         root: root.to_owned(),
         segments: state.segments,
         skipped_symlinks: state.skipped_symlinks,
@@ -283,6 +329,7 @@ fn scan_directory(
 }
 
 struct WalkState {
+    directories: Vec<DirectoryStamp>,
     limits: ScanLimits,
     entries_seen: usize,
     max_depth_seen: usize,
@@ -298,6 +345,12 @@ fn walk(
     names: &[&str],
     state: &mut WalkState,
 ) -> Result<(), ScanError> {
+    state.directories.push(
+        DirectoryStamp::read(dir_path, dir.fd.as_raw_fd()).map_err(|e| ScanError::Unreadable {
+            path: dir_path.to_owned(),
+            errno: e.raw_os_error().unwrap_or(libc::EIO),
+        })?,
+    );
     state.max_depth_seen = state.max_depth_seen.max(depth);
     let entries = dir
         .entries(state.limits.max_entries.saturating_sub(state.entries_seen))
@@ -530,6 +583,8 @@ impl DirHandle {
 /// between validation and mount handoff is detected rather than mounted.
 #[derive(Debug)]
 pub struct PinnedPath {
+    uid: u32,
+    mode: u32,
     fd: OwnedFd,
     path: PathBuf,
     dev: u64,
@@ -638,9 +693,31 @@ impl PinnedPath {
         Ok(Self {
             fd,
             path: path.to_owned(),
+            uid: st.st_uid,
+            mode: st.st_mode,
             dev: st.st_dev,
             ino: st.st_ino,
         })
+    }
+
+    /// Executable owner/mode must stay fixed as well as its pinned identity.
+    pub fn verify_executable(&self) -> io::Result<()> {
+        let mut st = empty_stat();
+        if unsafe { libc::fstat(self.fd.as_raw_fd(), &raw mut st) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if (st.st_uid != 0 && st.st_uid != unsafe { libc::geteuid() })
+            || st.st_uid != self.uid
+            || st.st_mode != self.mode
+            || st.st_mode & libc::S_IFMT != libc::S_IFREG
+            || st.st_mode & 0o022 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "backend executable ownership or mode is unsafe or changed",
+            ));
+        }
+        self.verify().map_err(io::Error::other)
     }
 
     /// The path as it was given.

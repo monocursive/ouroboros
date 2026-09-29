@@ -794,15 +794,16 @@ impl Uncontained {
             // §13.1: gap intervals count from supervisor start on the same
             // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
             // bounds are the plan's, which the receipt records.
-            let tracer = Tracer::attach(pid, plan.tracer_config(clock::mark_supervisor_start()))
-                .map_err(|err| {
-                    // §11.4: an observer that cannot attach refuses before exec,
-                    // whatever the evidence mode says.
-                    host_setup(
-                        ErrorCode::ObserverUnavailable,
-                        format!("the closed-set observer could not attach: {err}"),
-                    )
-                })?;
+            let mut config = plan.tracer_config(clock::mark_supervisor_start());
+            config.target = Some((pid, self.target_images.clone()));
+            let tracer = Tracer::attach(pid, config).map_err(|err| {
+                // §11.4: an observer that cannot attach refuses before exec,
+                // whatever the evidence mode says.
+                host_setup(
+                    ErrorCode::ObserverUnavailable,
+                    format!("the closed-set observer could not attach: {err}"),
+                )
+            })?;
             self.tracer = Some(tracer);
             self.tracer_attached = true;
         }

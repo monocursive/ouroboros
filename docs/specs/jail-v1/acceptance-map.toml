@@ -3032,17 +3032,17 @@ tests = [
 [[clause]]
 id = "I02.3"
 gate = "I02"
-clause = "The bundled launch profiles are data the runtime never embeds or discovers (by literal-path scan)"
+clause = "Embedded launch profiles are experimental data, used only when the operator file is absent"
 tag = "portable"
 tests = [
   "ouro-jail/tests/portable_launch.rs::i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail",
-  "ouro-jail/tests/portable_launch.rs::i02_the_runtime_never_embeds_or_discovers_the_bundled_profiles",
+  "ouro-jail/tests/portable_launch.rs::bundled_resolution_uses_embedded_data_only_when_operator_file_is_absent",
 ]
 
 [[clause]]
 id = "I02.4"
 gate = "I02"
-clause = "Selecting a launch profile (--launch NAME) reads only the operator's configuration, with no built-in fallback"
+clause = "Selecting a launch profile (--launch NAME) prefers the operator file and falls back to embedded data only when absent"
 tag = "portable"
 tests = [
   "ouro-jail/tests/portable_policy.rs::i02_launch_reads_only_the_operators_configuration",

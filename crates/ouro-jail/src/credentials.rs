@@ -83,6 +83,7 @@ pub struct SourceIdentity {
 /// One successfully staged credential.
 #[derive(Debug)]
 pub struct StagedCredential {
+    pub vault: Option<Arc<crate::vault::Secret>>,
     /// The receipt row: `{id, mode, digest, digest_unavailable_reason}`.
     pub record: CredentialRecord,
     /// For `bind_ro`: a descriptor of the exact source object and the
@@ -199,6 +200,7 @@ pub fn stage_within(
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(record, source)| StagedCredential {
+                    vault: None,
                     record,
                     bind: None,
                     source,
@@ -345,7 +347,7 @@ fn stage_one(
 ) -> Result<StagedCredential, JailError> {
     let id = declaration.id.as_str();
     let mode = declaration.mode.as_str();
-    if mode != MODE_COPY_RW && mode != MODE_BIND_RO {
+    if mode != MODE_COPY_RW && mode != MODE_BIND_RO && mode != "vault" {
         return Err(refusal(
             id,
             Remediation::Configuration,
@@ -375,6 +377,51 @@ fn stage_one(
         ino: source.stat.ino,
         size: source.stat.size,
     };
+
+    if mode == "vault" {
+        if source.stat.size > 8192 {
+            return Err(refusal(
+                id,
+                Remediation::Configuration,
+                "vault value exceeds 8192 bytes",
+            ));
+        }
+        let mut reader = source
+            .reader()
+            .map_err(|e| refusal(id, Remediation::Retry, e))?;
+        let mut value = Vec::new();
+        (&mut reader)
+            .take(8193)
+            .read_to_end(&mut value)
+            .map_err(|_| refusal(id, Remediation::Retry, "vault source read failed"))?;
+        let after =
+            anchored::fstat(reader.as_fd()).map_err(|e| refusal(id, Remediation::Retry, e))?;
+        if !read_was_stable(source.stat.size, value.len() as u64, &source.stat, &after) {
+            return Err(refusal(
+                id,
+                Remediation::Retry,
+                "vault source changed while read",
+            ));
+        }
+        let policy = declaration
+            .vault
+            .clone()
+            .ok_or_else(|| refusal(id, Remediation::Configuration, "vault policy absent"))?;
+        let secret = crate::vault::Secret::new(id.to_owned(), policy, value)
+            .map_err(|e| refusal(id, Remediation::Configuration, e))?;
+        return Ok(StagedCredential {
+            vault: Some(Arc::new(secret)),
+            record: CredentialRecord {
+                never_staged: true,
+                id: id.into(),
+                mode: "vault".into(),
+                digest: None,
+                digest_unavailable_reason: Some("never_staged".into()),
+            },
+            bind: None,
+            source: identity,
+        });
+    }
 
     if mode == MODE_COPY_RW && !fits_copy_budget(*copied, source.stat.size) {
         return Err(refusal(
@@ -406,7 +453,9 @@ fn stage_one(
         let digest = copy_exactly(id, &source, &mut target)?;
         *copied += source.stat.size;
         return Ok(StagedCredential {
+            vault: None,
             record: CredentialRecord {
+                never_staged: false,
                 id: id.to_owned(),
                 mode: MODE_COPY_RW.to_owned(),
                 digest: Some(digest),
@@ -422,7 +471,9 @@ fn stage_one(
     drop(target);
     let (digest, reason) = bind_digest(&source);
     Ok(StagedCredential {
+        vault: None,
         record: CredentialRecord {
+            never_staged: false,
             id: id.to_owned(),
             mode: MODE_BIND_RO.to_owned(),
             digest,
@@ -954,6 +1005,7 @@ pub struct BindHandle {
 /// Everything a launch profile hands the platform after staging.
 #[derive(Clone, Default)]
 pub struct LaunchHandoff {
+    pub vault: Vec<Arc<crate::vault::Secret>>,
     /// The vendor-state directory, when the launch profile needs one.
     pub vendor_state: Option<VendorStateHandle>,
     /// The `bind_ro` credentials, in id order.
@@ -985,6 +1037,7 @@ impl LaunchHandoff {
             })
             .collect();
         Ok(LaunchHandoff {
+            vault: staged.iter().filter_map(|c| c.vault.clone()).collect(),
             vendor_state: Some(VendorStateHandle {
                 host_path,
                 fd: Arc::new(vendor),
@@ -1005,6 +1058,11 @@ impl PartialEq for LaunchHandoff {
             _ => false,
         };
         vendor
+            && self
+                .vault
+                .iter()
+                .map(|s| &s.id)
+                .eq(other.vault.iter().map(|s| &s.id))
             && self.binds.len() == other.binds.len()
             && self.binds.iter().zip(&other.binds).all(|(left, right)| {
                 left.id == right.id && left.dest == right.dest && left.identity == right.identity
@@ -1255,6 +1313,7 @@ mod tests {
             credentials: ["a", "b"]
                 .iter()
                 .map(|id| CredentialDecl {
+                    vault: None,
                     id: (*id).to_owned(),
                     source: NativeString::from_bytes(
                         path.join(id).as_os_str().as_encoded_bytes().to_vec(),

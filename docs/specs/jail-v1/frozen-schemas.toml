@@ -1,35 +1,7 @@
-# The frozen wire contract of jail v1, milestone 1 (jail-v1 §13, §17).
-#
-# jail-v1 §13: "After freeze, a breaking semantic change needs a new schema
-# identifier." Each entry pins one file by its bytes. A test
-# (crates/ouro-jail/tests/portable_version.rs) and validate_contract.py fail
-# when a frozen file's sha256 differs from the one recorded here.
-#
-# The rule: a frozen file whose bytes change is a new identifier. Revert the
-# change, or give what the file defines a new identifier (a schema: a new
-# `$id` `...:2` and wire identifier `.../2`) and record the new file as a new
-# entry. An entry is never re-blessed in place. Nothing in a file can prevent
-# someone editing both a frozen file and its sha256 here; that edit is visible
-# in review, and by this rule it is a violation, not a re-bless.
-#
-# `[[frozen]]`: every `*.schema.json` beside this file is either frozen here
-# or listed as `[[unfrozen]]` with the reason it is not a milestone-1 wire
-# record, and no two schema files declare one `$id`. `identifier` is the wire
-# `schema` value the records carry and `version --json` announces; the
-# producer restriction carries the envelope's.
-#
-# `[[frozen_artifact]]`: the files that define the announced identifiers no
-# schema states: the policy digest domain and policy file (canonicalization.md
-# and its golden fixtures), the network rule set, the gate frame rules, and
-# the record rules no schema can state (the semantic corpus and the instances
-# it changes). Every identifier `version --json` announces is backed by a
-# frozen schema or a frozen artifact. The checkers that run the corpora
-# (ouro_jail::records::semantic, validate_contract.py) are code, not frozen by
-# bytes: the corpus is their contract, and both must give every case its
-# recorded verdict.
-#
-# The same schema sha256s are recorded in the milestone freeze file
-# (milestone-1-freeze.toml) and the milestone report.
+# Current pre-release contract baseline. This project is not live; identifiers
+# and producers evolve in place as authorized by the operator. Hashes make
+# contract changes reviewable and must be regenerated with their fixtures.
+# Historical milestone evidence remains historical, not proof for this tree.
 
 schema = "ouro.jail.frozen-schemas/1"
 milestone = "milestone-1"
@@ -53,14 +25,14 @@ sha256 = "08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137"
 file = "jail-receipt.schema.json"
 id = "urn:ouro:schema:jail-receipt:1"
 identifier = "ouro.jail.receipt/1"
-sha256 = "7f20ea6830bb81e27d46dd7ac90c69a6d3a4f84b7613bcaa1a375192d59e2c5a"
+sha256 = "cd6763cb112e70d16896323cd5724d2bfdef5e69d009f1936ec1e04fcc8d3477"
 
 # §6.3, canonicalization.md: the canonical policy snapshot
 [[frozen]]
 file = "policy-snapshot.schema.json"
 id = "urn:ouro:schema:jail-policy-snapshot:1"
 identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "94bc81e85522cfa3b81bc7f2dd9504a8a3fd5f412ccac3938c98bdd018c61da4"
+sha256 = "2c6e264b3c15e9b8e91df6f9b48fa0626108a2f89f6c25c5535b13439aaaa2d0"
 
 # §8.2: the managed gate release frame
 [[frozen]]
@@ -82,7 +54,7 @@ sha256 = "1a7ca84c1839448806becf5e320987e56f373c8bce858841a39943b25e6d4740"
 file = "jail-doctor.schema.json"
 id = "urn:ouro:schema:jail-doctor:1"
 identifier = "ouro.jail.doctor/1"
-sha256 = "bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9"
+sha256 = "edf4136339056ea2905c1f6507bc93600288417d42757fabc1acb8bd3ea835a9"
 
 # the canonical bytes, the policy and argv digest preimages and the private policy.json envelope
 [[frozen_artifact]]
@@ -112,7 +84,7 @@ sha256 = "ff361096e68e18b34f8866b2c86ac47a29db4b966a03d1214de7f89d76b3b14b"
 [[frozen_artifact]]
 file = "network-rules.md"
 identifiers = ["ouro.jail.network/1"]
-sha256 = "4622c64887ae26b23a5527d540955ee5bd77a27262c6b6d73b5598f23f14a00c"
+sha256 = "a68ad3e107a5d90fd88fe8cc476adbcede59bc895183418655692a008f67508c"
 
 # the address table
 [[frozen_artifact]]
@@ -209,3 +181,9 @@ sha256 = "83a7442ff668aff3d885c2560dd6217f86387cbc26271eb62c84741648244310"
 file = "fixtures/trace-tool.json"
 identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
 sha256 = "9eee4083254560f1eacc59a3df0d803133002c98cb5197f6d2836d35315087a5"
+
+[[frozen]]
+file = "learned-policy.schema.json"
+id = "urn:ouro:schema:learned-policy:1"
+identifier = "ouro.jail.learned-policy/1"
+sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"

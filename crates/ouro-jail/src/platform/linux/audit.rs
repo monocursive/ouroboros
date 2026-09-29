@@ -62,6 +62,7 @@ pub struct MediatedConnect {
 
 /// Turns tracer events into audit events and counts what it emitted.
 pub struct AuditWriter {
+    learning: bool,
     attempt_id: String,
     trace: Option<SharedTrace>,
     seq: u64,
@@ -91,6 +92,7 @@ impl AuditWriter {
         scratch_inside: &[u8],
     ) -> Self {
         AuditWriter {
+            learning: false,
             attempt_id: attempt_id.to_owned(),
             trace,
             seq: 0,
@@ -104,6 +106,12 @@ impl AuditWriter {
             // J5-C: review item 12
             created_ns: now_ns(),
         }
+    }
+
+    /// Learning is explicit because absolute read-path snapshots may disclose host paths.
+    pub fn with_learning(mut self, learning: bool) -> Self {
+        self.learning = learning;
+        self
     }
 
     /// Records that an applied ceiling was proven hit (§11.4).
@@ -223,6 +231,73 @@ impl AuditWriter {
         } else {
             None
         };
+        if let Some(hit) = &args.command {
+            let mut event = Event::lifecycle_note(
+                &self.attempt_id,
+                0,
+                SystemTime::now(),
+                crate::platform::elapsed_since_start_ns(),
+                "command_rule",
+            );
+            event.fields.insert(
+                "kind".into(),
+                Value::from(if hit.forbidden {
+                    "command_forbidden"
+                } else {
+                    "command_denied"
+                }),
+            );
+            event
+                .fields
+                .insert("pattern".into(), Value::from(hit.pattern.clone()));
+            event
+                .fields
+                .insert("argv_digest".into(), Value::from(hit.digest.clone()));
+            event.fields.insert("pid".into(), Value::from(pid));
+            event.fields.insert("errno".into(), Value::from("EPERM"));
+            self.emit(&event, CoverageClass::Exec);
+        }
+        let learning_read = self.learning
+            && op == ClosedOp::Open
+            && args.flags.is_some_and(|f| {
+                f & (libc::O_ACCMODE as u64 | libc::O_CREAT as u64 | libc::O_TRUNC as u64) == 0
+            });
+        if learning_read {
+            let Some(path) = args
+                .path
+                .as_ref()
+                .filter(|p| p.complete && p.bytes.starts_with(b"/"))
+            else {
+                return;
+            };
+            let mut fields = Map::new();
+            fields.insert("kind".into(), Value::from("learning_read"));
+            fields.insert(
+                "path".into(),
+                serde_json::to_value(
+                    crate::records::NativeString::from_bytes(path.bytes.clone())
+                        .unwrap_or(crate::records::NativeString::Text(String::new())),
+                )
+                .unwrap_or(Value::Null),
+            );
+            fields.insert(
+                "errno".into(),
+                errno.map_or(Value::Null, |e| Value::from(super::sys::errno_name(e))),
+            );
+            fields.insert("syscall".into(), Value::from(syscall));
+            fields.insert("path_basis".into(), Value::from("argument_snapshot"));
+            let mut event = Event::lifecycle_note(
+                &self.attempt_id,
+                0,
+                SystemTime::now(),
+                crate::platform::elapsed_since_start_ns(),
+                "learning",
+            );
+            event.fields = fields;
+            // Failure still degrades evidence; these notes add no closed-set observation count.
+            self.emit(&event, CoverageClass::FsDeny);
+            return;
+        }
         let denied = matches!(errno, Some(libc::EACCES | libc::EPERM));
         let base = op.audit_operation(args.flags);
         let operation = if denied { "fs.deny" } else { base };

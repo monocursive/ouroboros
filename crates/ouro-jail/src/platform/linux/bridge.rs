@@ -40,6 +40,9 @@ use std::time::Duration;
 pub const SUBCOMMAND: &str = "__bridge";
 /// The only address the bridge listens on.
 pub const LISTEN: &str = "127.0.0.1:3128";
+/// SOCKS5 uses the same isolated bridge and outside policy evaluator.
+pub const SOCKS_LISTEN: &str = "127.0.0.1:3129";
+pub const SOCKS_URL: &str = "socks5h://127.0.0.1:3129";
 /// The proxy variables' value (jail-v1 §10).
 pub const PROXY_URL: &str = "http://127.0.0.1:3128";
 /// The proxy socket as the sandbox sees it.
@@ -84,10 +87,10 @@ pub fn proxy_environment() -> Vec<(&'static str, &'static str)> {
     vec![
         ("HTTP_PROXY", PROXY_URL),
         ("HTTPS_PROXY", PROXY_URL),
-        ("ALL_PROXY", PROXY_URL),
+        ("ALL_PROXY", SOCKS_URL),
         ("http_proxy", PROXY_URL),
         ("https_proxy", PROXY_URL),
-        ("all_proxy", PROXY_URL),
+        ("all_proxy", SOCKS_URL),
         ("NO_PROXY", ""),
         ("no_proxy", ""),
     ]
@@ -103,6 +106,13 @@ pub fn bridge_main(args: &[OsString]) -> ! {
         Err(_) => std::process::exit(EXIT_BIND_FAILED),
     };
     if listener.set_nonblocking(true).is_err() {
+        std::process::exit(EXIT_BIND_FAILED);
+    }
+    let socks = match TcpListener::bind(SOCKS_LISTEN) {
+        Ok(listener) => listener,
+        Err(_) => std::process::exit(EXIT_BIND_FAILED),
+    };
+    if socks.set_nonblocking(true).is_err() {
         std::process::exit(EXIT_BIND_FAILED);
     }
     // Security 2026-09-27 (audit 3 A4): the supervisor discovers and reads
@@ -123,8 +133,8 @@ pub fn bridge_main(args: &[OsString]) -> ! {
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
     }
-    serve(
-        &listener,
+    serve_many(
+        &[&listener, &socks],
         &|| UnixStream::connect(PROXY_PATH),
         &report_rejection,
     );
@@ -275,14 +285,24 @@ pub fn serve(
     connect: &dyn Fn() -> io::Result<UnixStream>,
     rejected: &dyn Fn(),
 ) {
+    serve_many(&[listener], connect, rejected);
+}
+
+fn serve_many(
+    listeners: &[&TcpListener],
+    connect: &dyn Fn() -> io::Result<UnixStream>,
+    rejected: &dyn Fn(),
+) {
     let mut relays: Vec<Relay> = Vec::new();
     loop {
-        let mut fds = Vec::with_capacity(1 + relays.len() * 2);
-        fds.push(libc::pollfd {
-            fd: listener.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
+        let mut fds = Vec::with_capacity(listeners.len() + relays.len() * 2);
+        for listener in listeners {
+            fds.push(libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
         for relay in &relays {
             let mut client = 0;
             if relay.up.wants_read() {
@@ -332,8 +352,8 @@ pub fn serve(
         }
 
         for (index, relay) in relays.iter_mut().enumerate() {
-            let client = fds[1 + index * 2].revents;
-            let upstream = fds[2 + index * 2].revents;
+            let client = fds[listeners.len() + index * 2].revents;
+            let upstream = fds[listeners.len() + 1 + index * 2].revents;
             if step(relay, client, upstream).is_err() {
                 // Either side failed: close both. The client sees its
                 // connection end; nothing else is attempted for it.
@@ -343,11 +363,13 @@ pub fn serve(
         }
         relays.retain(|relay| !relay.finished());
 
-        if fds[0].revents != 0 && accept_all(listener, connect, rejected, &mut relays) {
-            // Security 2026-09-27 (audit 3 A7b): the accept failed on
-            // process-wide resource exhaustion while the listener stayed
-            // readable; poll once less often rather than spin a core.
-            std::thread::sleep(ACCEPT_BACKOFF);
+        for (index, listener) in listeners.iter().enumerate() {
+            if fds[index].revents != 0 && accept_all(listener, connect, rejected, &mut relays) {
+                // Security 2026-09-27 (audit 3 A7b): the accept failed on
+                // process-wide resource exhaustion while the listener stayed
+                // readable; poll once less often rather than spin a core.
+                std::thread::sleep(ACCEPT_BACKOFF);
+            }
         }
     }
 }
@@ -628,8 +650,13 @@ mod tests {
         for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
             for spelling in [name.to_owned(), name.to_ascii_lowercase()] {
                 assert!(
-                    env.iter()
-                        .any(|(key, value)| *key == spelling && *value == PROXY_URL),
+                    env.iter().any(|(key, value)| *key == spelling
+                        && *value
+                            == if name == "ALL_PROXY" {
+                                SOCKS_URL
+                            } else {
+                                PROXY_URL
+                            }),
                     "{spelling}"
                 );
             }

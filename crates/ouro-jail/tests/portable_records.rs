@@ -34,6 +34,18 @@ fn specs_dir() -> PathBuf {
         .expect("the checked-in specification directory exists")
 }
 
+#[test]
+fn an_internal_setup_refusal_has_a_different_status_from_a_running_failure() {
+    let error = JailError::new(
+        ErrorCode::InternalError,
+        ErrorStage::Preparing,
+        Remediation::HostSetup,
+        "the pinned backend changed before spawn",
+    );
+    assert_eq!(error.refusal_exit_code(), 125);
+    assert_eq!(error.in_stage(ErrorStage::Running).exit_code(), 1);
+}
+
 fn read_json(path: &Path) -> serde_json::Value {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));

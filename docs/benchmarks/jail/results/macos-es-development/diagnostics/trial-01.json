@@ -1,0 +1,2213 @@
+{
+  "host": {
+    "system": "Darwin",
+    "node": "Manageds-Virtual-Machine.local",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:00:07 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_VMAPPLE",
+    "machine": "arm64"
+  },
+  "uid": 501,
+  "started_unix": 1790673613.25595,
+  "signing": {
+    "bundle_id": "com.monocursive.ouroboros.jail",
+    "identity": "-",
+    "development_vm": true,
+    "profile_supplied": false,
+    "entitlements": {
+      "com.apple.developer.endpoint-security.client": true
+    },
+    "compile_argv": [
+      "cc",
+      "-O2",
+      "-fblocks",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/Users/admin/ouro-jail-es-research/macos_es.c",
+      "-lEndpointSecurity",
+      "-lbsm",
+      "-o",
+      "/Users/admin/ouro-es-diagnostics/trial-01/OuroJailResearch.app/Contents/MacOS/ouro-jail-research"
+    ],
+    "codesign": "Executable=/Users/admin/ouro-es-diagnostics/trial-01/OuroJailResearch.app/Contents/MacOS/ouro-jail-research\nIdentifier=com.monocursive.ouroboros.jail\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=479 flags=0x10002(adhoc,runtime) hashes=4+7 location=embedded\nSignature=adhoc\nInfo.plist entries=7\nTeamIdentifier=not set\nRuntime Version=27.0.0\nSealed Resources version=2 rules=13 files=0\nInternal requirements count=0 size=12\nwarning: Specifying ':' in the path is deprecated and will not work in a future release\nTotal signatures=1\nChosen signature=1\n",
+    "signed_entitlements": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>com.apple.developer.endpoint-security.client</key><true/></dict></plist>\n"
+  },
+  "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428\n",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "xcode": "",
+  "sdk": "27.0",
+  "development": {
+    "virtualized": true,
+    "sip": "System Integrity Protection status: disabled.",
+    "approved_entitlement": false,
+    "authenticated_root": "Authenticated Root status: enabled",
+    "boot_args": "boot-args"
+  },
+  "source_sha256": "4e35cd3ea9c5b27dcdee2015925a8264017557c0f2a11ef0709a243792a70a47",
+  "runner_sha256": "ca7045ac876ebb343f99f7f1cfb541b00210b440d1841430c580a116beee530c",
+  "fixture_sha256": "dd3115297bbef8e827f75fecaf49b1e4e5fbac75c2318668b660f132a729a333",
+  "fixture_runner_sha256": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+  "binary_sha256": "37c3a81dd5d204a77bddd5ec20091e1cea6e663b173a4f86846208d5b5c6d58c",
+  "cases": [
+    {
+      "case": "wall",
+      "argv": [
+        "/Users/admin/ouro-es-diagnostics/trial-01/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "2",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/wall/workload.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/Users/admin/ouro-es-diagnostics/trial-01/fixture",
+        "tree",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/wall"
+      ],
+      "exit": 0,
+      "ready_ms": 26.302707999999953,
+      "observation_ms": 2091.7045829999997,
+      "events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4358
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1917,
+            100002,
+            4357
+          ]
+        },
+        {
+          "kind": "exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4359
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4358
+          ]
+        },
+        {
+          "kind": "release",
+          "pid": 1918,
+          "released": true
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4359
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1919,
+            100002,
+            4361
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1920,
+            100002,
+            4362
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1921,
+            100002,
+            4363
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1922,
+            100002,
+            4364
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1921,
+            100002,
+            4363
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1921,
+            100002,
+            4363
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1921,
+            100002,
+            4363
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1923,
+            100002,
+            4365
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1919,
+            100002,
+            4361
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1919,
+            100002,
+            4361
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1920,
+            100002,
+            4362
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1920,
+            100002,
+            4362
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1922,
+            100002,
+            4364
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1922,
+            100002,
+            4364
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1923,
+            100002,
+            4365
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1923,
+            100002,
+            4365
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 2.114,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 1918,
+          "ppid": 1917,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1918,
+          "pidversion": 4360,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1918,
+            100002,
+            4360
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 1919,
+          "ppid": 1918,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1919,
+          "pidversion": 4361,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1919,
+            100002,
+            4361
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 1920,
+          "ppid": 1918,
+          "pgid": 1920,
+          "sid": 1920,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1920,
+          "pidversion": 4362,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1920,
+            100002,
+            4362
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 1922,
+          "ppid": 1,
+          "pgid": 1921,
+          "sid": 1921,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1922,
+          "pidversion": 4364,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1922,
+            100002,
+            4364
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 1923,
+          "ppid": 1918,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1923,
+          "pidversion": 4365,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1923,
+            100002,
+            4365
+          ]
+        }
+      ],
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 1918,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 1919,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 1920,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 1922,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 1923,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "lifetime_contract_verified": false
+    },
+    {
+      "case": "cancel",
+      "argv": [
+        "/Users/admin/ouro-es-diagnostics/trial-01/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "2",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/cancel/workload.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/Users/admin/ouro-es-diagnostics/trial-01/fixture",
+        "tree",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/cancel"
+      ],
+      "exit": 0,
+      "ready_ms": 46.63645800000005,
+      "observation_ms": 19.69708300000006,
+      "events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4391
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1935,
+            100002,
+            4390
+          ]
+        },
+        {
+          "kind": "exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4392
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4391
+          ]
+        },
+        {
+          "kind": "release",
+          "pid": 1936,
+          "released": true
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4392
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1937,
+            100002,
+            4394
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1938,
+            100002,
+            4395
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1939,
+            100002,
+            4396
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1940,
+            100002,
+            4397
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1939,
+            100002,
+            4396
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1939,
+            100002,
+            4396
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1939,
+            100002,
+            4396
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1941,
+            100002,
+            4398
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1937,
+            100002,
+            4394
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1937,
+            100002,
+            4394
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1938,
+            100002,
+            4395
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1938,
+            100002,
+            4395
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1940,
+            100002,
+            4397
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1940,
+            100002,
+            4397
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1941,
+            100002,
+            4398
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1941,
+            100002,
+            4398
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 0.813,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 1936,
+          "ppid": 1935,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1936,
+          "pidversion": 4393,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1936,
+            100002,
+            4393
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 1937,
+          "ppid": 1936,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1937,
+          "pidversion": 4394,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1937,
+            100002,
+            4394
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 1938,
+          "ppid": 1936,
+          "pgid": 1938,
+          "sid": 1938,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1938,
+          "pidversion": 4395,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1938,
+            100002,
+            4395
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 1940,
+          "ppid": 1,
+          "pgid": 1939,
+          "sid": 1939,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1940,
+          "pidversion": 4397,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1940,
+            100002,
+            4397
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 1941,
+          "ppid": 1936,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1941,
+          "pidversion": 4398,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1941,
+            100002,
+            4398
+          ]
+        }
+      ],
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 1936,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 1937,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 1938,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 1940,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 1941,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "lifetime_contract_verified": false
+    },
+    {
+      "case": "supervisor_death",
+      "argv": [
+        "/Users/admin/ouro-es-diagnostics/trial-01/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "2",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/supervisor_death/workload.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/Users/admin/ouro-es-diagnostics/trial-01/fixture",
+        "tree",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/supervisor_death"
+      ],
+      "exit": 0,
+      "ready_ms": 53.126042000000155,
+      "observation_ms": 2016.2177080000006,
+      "events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4421
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1952,
+            100002,
+            4420
+          ]
+        },
+        {
+          "kind": "exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4422
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4421
+          ]
+        },
+        {
+          "kind": "release",
+          "pid": 1953,
+          "released": true
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4422
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1954,
+            100002,
+            4424
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1955,
+            100002,
+            4425
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1956,
+            100002,
+            4426
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1957,
+            100002,
+            4427
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1956,
+            100002,
+            4426
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1956,
+            100002,
+            4426
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1956,
+            100002,
+            4426
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1958,
+            100002,
+            4428
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1954,
+            100002,
+            4424
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1954,
+            100002,
+            4424
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1955,
+            100002,
+            4425
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1955,
+            100002,
+            4425
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1958,
+            100002,
+            4428
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1958,
+            100002,
+            4428
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1957,
+            100002,
+            4427
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1957,
+            100002,
+            4427
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 0.66,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 1953,
+          "ppid": 1952,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1953,
+          "pidversion": 4423,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1953,
+            100002,
+            4423
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 1954,
+          "ppid": 1953,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1954,
+          "pidversion": 4424,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1954,
+            100002,
+            4424
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 1955,
+          "ppid": 1953,
+          "pgid": 1955,
+          "sid": 1955,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1955,
+          "pidversion": 4425,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1955,
+            100002,
+            4425
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 1957,
+          "ppid": 1,
+          "pgid": 1956,
+          "sid": 1956,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1957,
+          "pidversion": 4427,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1957,
+            100002,
+            4427
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 1958,
+          "ppid": 1953,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1958,
+          "pidversion": 4428,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1958,
+            100002,
+            4428
+          ]
+        }
+      ],
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 1953,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 1954,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 1955,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 1957,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 1958,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "lifetime_contract_verified": false
+    },
+    {
+      "case": "custodian_death",
+      "argv": [
+        "/Users/admin/ouro-es-diagnostics/trial-01/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "2",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/custodian_death/workload.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/Users/admin/ouro-es-diagnostics/trial-01/fixture",
+        "tree",
+        "/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/ouro-es-live-4ba5p2jf/custodian_death"
+      ],
+      "exit": -9,
+      "ready_ms": 65.42479100000077,
+      "observation_ms": 2038.0104169999997,
+      "events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1970,
+            100002,
+            4451
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1969,
+            100002,
+            4450
+          ]
+        },
+        {
+          "kind": "exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1970,
+            100002,
+            4452
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1970,
+            100002,
+            4451
+          ]
+        },
+        {
+          "kind": "release",
+          "pid": 1970,
+          "released": true
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 1970,
+          "ppid": 1969,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1970,
+          "pidversion": 4453,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1970,
+            100002,
+            4453
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 1971,
+          "ppid": 1970,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1971,
+          "pidversion": 4454,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1971,
+            100002,
+            4454
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 1972,
+          "ppid": 1970,
+          "pgid": 1972,
+          "sid": 1972,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1972,
+          "pidversion": 4455,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1972,
+            100002,
+            4455
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 1974,
+          "ppid": 1,
+          "pgid": 1973,
+          "sid": 1973,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1974,
+          "pidversion": 4457,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1974,
+            100002,
+            4457
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 1975,
+          "ppid": 1970,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1975,
+          "pidversion": 4458,
+          "coalitions": [
+            542,
+            543
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            1975,
+            100002,
+            4458
+          ]
+        }
+      ],
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 1970,
+          "ppid": 1,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1970,
+          "pidversion": 4453,
+          "coalitions": [
+            542,
+            543
+          ],
+          "same_process": true,
+          "alive": true
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 1971,
+          "ppid": 1970,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1971,
+          "pidversion": 4454,
+          "coalitions": [
+            542,
+            543
+          ],
+          "same_process": true,
+          "alive": true
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 1972,
+          "ppid": 1970,
+          "pgid": 1972,
+          "sid": 1972,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1972,
+          "pidversion": 4455,
+          "coalitions": [
+            542,
+            543
+          ],
+          "same_process": true,
+          "alive": true
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 1974,
+          "ppid": 1,
+          "pgid": 1973,
+          "sid": 1973,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1974,
+          "pidversion": 4457,
+          "coalitions": [
+            542,
+            543
+          ],
+          "same_process": true,
+          "alive": true
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 1975,
+          "ppid": 1970,
+          "pgid": 1896,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 1975,
+          "pidversion": 4458,
+          "coalitions": [
+            542,
+            543
+          ],
+          "same_process": true,
+          "alive": true
+        }
+      },
+      "fixture_tree_empty_before_runner_cleanup": false,
+      "lifetime_contract_verified": false
+    }
+  ],
+  "fixture_cleanup_verified": true,
+  "capability": {
+    "exit": 0,
+    "stdout": "{\"kind\":\"capability\",\"result\":0,\"workload_released\":false}\n",
+    "stderr": ""
+  },
+  "status": "lifetime_gate_failed",
+  "finished_unix": 1790673619.781034,
+  "lifetime_contract_verified": false
+}

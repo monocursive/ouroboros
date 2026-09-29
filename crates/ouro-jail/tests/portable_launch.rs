@@ -586,7 +586,7 @@ fn i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, ["claude.toml", "codex.toml", "opencode.toml"]);
+    assert_eq!(names.len(), 14);
     for name in &names {
         let text = std::fs::read_to_string(directory.join(name)).unwrap();
         assert!(
@@ -606,34 +606,39 @@ fn i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail() {
             );
         }
         // The bundled data declares credentials, so §6.1 keeps it off `tool`.
-        assert!(launch_profile::check_jail_permits(ProfileName::Tool, &profile).is_err());
+        if !profile.credentials.is_empty() || !profile.network_allow.is_empty() {
+            assert!(launch_profile::check_jail_permits(ProfileName::Tool, &profile).is_err());
+        }
     }
 }
 
 #[test]
-fn i02_the_runtime_never_embeds_or_discovers_the_bundled_profiles() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut stack = vec![src];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                let text = std::fs::read_to_string(&path).unwrap();
-                assert!(
-                    !text.contains("profiles/launch/") || path.ends_with("launch_profile.rs"),
-                    "{} refers to the bundled profile directory",
-                    path.display()
-                );
-                assert!(
-                    !text.contains("include_str!(\"../profiles"),
-                    "{} embeds bundled profile data",
-                    path.display()
-                );
-            }
-        }
-    }
+fn bundled_resolution_uses_embedded_data_only_when_operator_file_is_absent() {
+    let fixture = Fixture::new();
+    let plan = fixture
+        .plan(launch_args("codex", &fixture.workspace))
+        .unwrap();
+    assert!(
+        plan.resolved
+            .provenance
+            .iter()
+            .any(|p| p.key == "launch.resolution" && p.detail.as_deref() == Some("bundled"))
+    );
+    fixture.launch(
+        "codex",
+        r#"name = "codex"
+jail = "agent"
+"#,
+    );
+    let plan = fixture
+        .plan(launch_args("codex", &fixture.workspace))
+        .unwrap();
+    assert!(
+        plan.resolved
+            .provenance
+            .iter()
+            .any(|p| p.detail.as_deref() == Some("operator file (shadows bundled)"))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1657,6 +1662,7 @@ fn stage_one_source(fixture: &Fixture, source: &Path) -> Result<(), (JailError, 
         home_is_state: false,
         state_subdirs: Vec::new(),
         credentials: vec![ouro_jail::policy::CredentialDecl {
+            vault: None,
             id: "only".into(),
             source: ouro_jail::records::NativeString::from_bytes(
                 source.as_os_str().as_bytes().to_vec(),
@@ -2137,10 +2143,20 @@ fn m3_a_configured_profile_is_kept_or_the_conflict_refuses_never_replaced() {
         "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n[limits]\npids = 16\nwall = \"1m\"\n",
     )
     .unwrap();
+    std::fs::set_permissions(
+        fixture.config.join("strict.toml"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     let configure = |profile: &str| {
         std::fs::write(
             fixture.config.join("config.toml"),
             format!("[jail]\nschema = \"ouro.jail.policy/1\"\nprofile = \"{profile}\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            fixture.config.join("config.toml"),
+            std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
     };
@@ -2251,6 +2267,7 @@ fn rm16_the_copy_budget_is_cumulative_across_credentials() {
         file.set_len(10 * 1024 * 1024).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         ouro_jail::policy::CredentialDecl {
+            vault: None,
             id: id.into(),
             source: ouro_jail::records::NativeString::from_bytes(
                 path.as_os_str().as_bytes().to_vec(),
@@ -2473,6 +2490,7 @@ fn stage_one_source_with(
         home_is_state: false,
         state_subdirs: Vec::new(),
         credentials: vec![ouro_jail::policy::CredentialDecl {
+            vault: None,
             id: "only".into(),
             source: ouro_jail::records::NativeString::from_bytes(
                 source.as_os_str().as_bytes().to_vec(),

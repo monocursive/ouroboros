@@ -1,0 +1,366 @@
+{
+  "host": {
+    "system": "Darwin",
+    "node": "monocursives-macbook-pro.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": true,
+      "inputs": "sha256:fa366f0c82364e99146c6a65573709799830f1904b026ed20f4b060ca31db501",
+      "opt_level": "3",
+      "revision": "2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "aarch64-apple-darwin"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": null
+    },
+    "platform": {
+      "arch": "aarch64",
+      "kernel": "Darwin 27.0.0",
+      "os": "macos"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "started_unix": 1790625507.0747259,
+  "finished_unix": 1790625508.2591958,
+  "load_before": [
+    3.5634765625,
+    2.71533203125,
+    2.91064453125
+  ],
+  "load_after": [
+    3.5634765625,
+    2.71533203125,
+    2.91064453125
+  ],
+  "samples": 30,
+  "warmup": 5,
+  "seed": 20260928,
+  "rounds": [
+    [
+      "direct_true",
+      "version",
+      "macos_contained_refusal"
+    ],
+    [
+      "version",
+      "direct_true",
+      "macos_contained_refusal"
+    ],
+    [
+      "macos_contained_refusal",
+      "direct_true",
+      "version"
+    ],
+    [
+      "direct_true",
+      "macos_contained_refusal",
+      "version"
+    ],
+    [
+      "version",
+      "direct_true",
+      "macos_contained_refusal"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "macos_contained_refusal",
+      "direct_true",
+      "version"
+    ],
+    [
+      "macos_contained_refusal",
+      "version",
+      "direct_true"
+    ],
+    [
+      "direct_true",
+      "version",
+      "macos_contained_refusal"
+    ],
+    [
+      "macos_contained_refusal",
+      "direct_true",
+      "version"
+    ],
+    [
+      "version",
+      "direct_true",
+      "macos_contained_refusal"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "macos_contained_refusal",
+      "version",
+      "direct_true"
+    ],
+    [
+      "direct_true",
+      "macos_contained_refusal",
+      "version"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "direct_true",
+      "version",
+      "macos_contained_refusal"
+    ],
+    [
+      "version",
+      "direct_true",
+      "macos_contained_refusal"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "macos_contained_refusal",
+      "version",
+      "direct_true"
+    ],
+    [
+      "direct_true",
+      "version",
+      "macos_contained_refusal"
+    ],
+    [
+      "macos_contained_refusal",
+      "direct_true",
+      "version"
+    ],
+    [
+      "version",
+      "direct_true",
+      "macos_contained_refusal"
+    ],
+    [
+      "direct_true",
+      "macos_contained_refusal",
+      "version"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "direct_true",
+      "version",
+      "macos_contained_refusal"
+    ],
+    [
+      "macos_contained_refusal",
+      "direct_true",
+      "version"
+    ],
+    [
+      "version",
+      "macos_contained_refusal",
+      "direct_true"
+    ],
+    [
+      "version",
+      "direct_true",
+      "macos_contained_refusal"
+    ]
+  ],
+  "rows": [
+    {
+      "case": "direct_true",
+      "argv": [
+        "/usr/bin/true"
+      ],
+      "expected_exit": 0,
+      "exit_counts": {
+        "0": 30
+      },
+      "errors": [],
+      "flags": [],
+      "receipts": [],
+      "samples_ms": [
+        3.009625,
+        2.553667,
+        3.060375,
+        2.588708,
+        2.629042,
+        3.264458,
+        3.046458,
+        2.537959,
+        2.201459,
+        2.95025,
+        2.493667,
+        2.750292,
+        2.800208,
+        2.582958,
+        2.221875,
+        2.785458,
+        2.395917,
+        2.498458,
+        2.690583,
+        2.658709,
+        2.345666,
+        3.037625,
+        2.31675,
+        2.858667,
+        2.731917,
+        2.759541,
+        2.28425,
+        3.06775,
+        2.606667,
+        2.511791
+      ],
+      "median_ms": 2.6438755,
+      "p95_ms": 3.06775,
+      "mean_ms": 2.6746916666666665
+    },
+    {
+      "case": "version",
+      "argv": [
+        "/Users/monocursive/code/ouroboros/target/release/ouro-jail",
+        "version",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_counts": {
+        "0": 30
+      },
+      "errors": [],
+      "flags": [],
+      "receipts": [],
+      "samples_ms": [
+        4.173708,
+        3.884459,
+        3.805083,
+        4.123791,
+        3.4245,
+        3.560625,
+        3.742167,
+        4.2565,
+        4.018584,
+        3.824041,
+        3.416084,
+        4.164584,
+        3.542958,
+        4.075166,
+        4.195125,
+        3.540667,
+        3.64425,
+        3.984167,
+        3.961791,
+        4.2185,
+        3.76375,
+        3.712167,
+        3.337666,
+        3.94675,
+        3.439042,
+        3.68025,
+        3.4855,
+        3.509667,
+        3.480375,
+        3.639
+      ],
+      "median_ms": 3.7529585,
+      "p95_ms": 4.2185,
+      "mean_ms": 3.785030566666667
+    },
+    {
+      "case": "macos_contained_refusal",
+      "argv": [
+        "/Users/monocursive/code/ouroboros/target/release/ouro-jail",
+        "run",
+        "--workspace",
+        "/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/ouro-bench-mv567u1b/work",
+        "--profile",
+        "tool",
+        "--",
+        "/usr/bin/true"
+      ],
+      "expected_exit": 125,
+      "exit_counts": {
+        "125": 30
+      },
+      "errors": [],
+      "flags": [],
+      "receipts": [],
+      "samples_ms": [
+        25.687625,
+        26.816833,
+        28.738125,
+        26.446167,
+        26.628208,
+        28.529125,
+        26.6965,
+        27.051709,
+        26.905708,
+        27.005958,
+        27.236417,
+        25.717833,
+        24.67225,
+        27.286375,
+        26.895375,
+        26.198166,
+        25.137042,
+        24.625042,
+        25.836542,
+        28.404083,
+        25.779459,
+        25.082292,
+        25.448541,
+        26.127958,
+        25.567292,
+        27.451625,
+        26.472958,
+        26.9455,
+        26.845208,
+        28.253583
+      ],
+      "median_ms": 26.662354,
+      "p95_ms": 28.529125,
+      "mean_ms": 26.549649966666667
+    }
+  ]
+}

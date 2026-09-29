@@ -77,7 +77,7 @@ impl ObserverPlan {
     pub fn tracer_config(&self, epoch_boottime_ns: u64) -> TracerConfig {
         TracerConfig {
             epoch_boottime_ns,
-            ..self.config
+            ..self.config.clone()
         }
     }
 
@@ -160,8 +160,9 @@ pub struct Target<'a> {
 }
 
 /// What one event establishes beyond its audit record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fact {
+    CommandForbidden(String),
     /// Nothing the lifecycle acts on.
     Nothing,
     /// The launcher's witnessed exec transition into one of the target's
@@ -231,12 +232,14 @@ pub fn is_target_image(
 /// file contradicts; the deleted-suffix form only confirms when nothing
 /// living under the stripped name is a *different* file.
 fn kernel_confirms(images: &[Vec<u8>], kernel: &KernelImage) -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-    let stat_of = |candidate: &[u8]| -> Option<(u64, u64)> {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::metadata(std::ffi::OsStr::from_bytes(candidate))
-            .ok()
-            .map(|meta| (meta.dev(), meta.ino()))
+    // The consumer may run after the child has renamed or removed these paths.
+    // Only the identities captured at the exec stop can decide this event.
+    let stat_of = |candidate: &[u8]| {
+        kernel
+            .candidates
+            .iter()
+            .find(|image| image.path == candidate)
+            .and_then(|image| image.identity)
     };
     // The inode decides first: a prepared spelling that resolves to the
     // image's own inode is the image, whatever the link's bytes say.
@@ -340,6 +343,11 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             ..
         } => {
             audit.record_syscall(*pid, *start_ticks, *tid, *op, syscall, args, *ret);
+            if let Some(hit) = &args.command
+                && hit.forbidden
+            {
+                return Fact::CommandForbidden(hit.pattern.clone());
+            }
             Fact::Nothing
         }
         TracerEvent::Exit {
@@ -502,10 +510,25 @@ mod tests {
         }
     }
 
-    fn kernel_with(path: &[u8], identity: Option<(u64, u64)>) -> Option<KernelImage> {
+    fn kernel_with(
+        path: &[u8],
+        identity: Option<(u64, u64)>,
+        images: &[Vec<u8>],
+    ) -> Option<KernelImage> {
         Some(KernelImage {
             path: path.to_vec(),
             identity,
+            candidates: images
+                .iter()
+                .map(|path| super::super::tracer::CandidateImage {
+                    path: path.clone(),
+                    identity: super::super::unixpeer::path_identity(
+                        std::process::id() as i32,
+                        path,
+                    )
+                    .ok(),
+                })
+                .collect(),
         })
     }
 
@@ -513,6 +536,7 @@ mod tests {
         Some(KernelImage {
             path: path.to_vec(),
             identity: None,
+            candidates: Vec::new(),
         })
     }
 
@@ -657,7 +681,7 @@ mod tests {
                 &exec_with_kernel(
                     LAUNCHER,
                     None,
-                    kernel_with(&raw(&decoy_path), Some(identity_of(&target_path))),
+                    kernel_with(&raw(&decoy_path), Some(identity_of(&target_path)), &images),
                 ),
             ),
             Fact::TargetExec
@@ -674,7 +698,7 @@ mod tests {
                 &exec_with_kernel(
                     LAUNCHER,
                     snapshot(&raw(&target_path), true),
-                    kernel_with(&deleted_link, Some(identity_of(&target_path))),
+                    kernel_with(&deleted_link, Some(identity_of(&target_path)), &images),
                 ),
             ),
             Fact::TargetExec
@@ -692,13 +716,49 @@ mod tests {
                 &exec_with_kernel(
                     LAUNCHER,
                     snapshot(&raw(&target_path), true),
-                    kernel_with(&decoy_link, Some(identity_of(&decoy_path))),
+                    kernel_with(&decoy_link, Some(identity_of(&decoy_path)), &images),
                 ),
             ),
             Fact::CoverageLost(GapReason::ExecImageMismatch)
         );
         assert!(audit.has_gaps());
     }
+    #[test]
+    fn exec_confirmation_does_not_restat_paths_after_the_stop() {
+        use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let decoy = dir.path().join("target (deleted)");
+        std::fs::write(&target, b"original").unwrap();
+        std::fs::write(&decoy, b"decoy").unwrap();
+        let images = vec![target.as_os_str().as_bytes().to_vec()];
+        let identity = |path: &std::path::Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let actual = kernel_with(&images[0], Some(identity(&target)), &images).unwrap();
+        let impostor = kernel_with(
+            decoy.as_os_str().as_bytes(),
+            Some(identity(&decoy)),
+            &images,
+        )
+        .unwrap();
+        std::fs::rename(&decoy, &target).unwrap();
+        assert!(
+            kernel_confirms(&images, &actual),
+            "replacement after resume cannot erase the witnessed exec"
+        );
+        assert!(
+            !kernel_confirms(&images, &impostor),
+            "replacement after resume cannot confirm the decoy"
+        );
+        std::fs::remove_file(&target).unwrap();
+        assert!(
+            !kernel_confirms(&images, &impostor),
+            "removing the contradicting path cannot confirm the decoy"
+        );
+    }
+
     #[test]
     fn exits_gaps_and_the_end_are_facts_and_bookkeeping_is_not_a_loss() {
         let images = images();

@@ -95,7 +95,7 @@ fn pinned_channel() -> String {
 /// build.rs documents too: SHA-256 over every file under
 /// `crates/ouro-jail/src` plus `crates/ouro-jail/build.rs`,
 /// `crates/ouro-jail/Cargo.toml`, `Cargo.toml`, `Cargo.lock` and
-/// `rust-toolchain.toml`, sorted by their `/`-separated path relative to the
+/// `rust-toolchain.toml` and embedded `profiles/` data, sorted by their `/`-separated path relative to the
 /// repository root, each as `path NUL u64-LE(length) bytes`.
 fn build_inputs_digest() -> String {
     use sha2::Digest as _;
@@ -109,7 +109,10 @@ fn build_inputs_digest() -> String {
     ]
     .map(str::to_owned)
     .to_vec();
-    let mut stack = vec![root.join("crates/ouro-jail/src")];
+    let mut stack = vec![
+        root.join("crates/ouro-jail/src"),
+        root.join("crates/ouro-jail/profiles"),
+    ];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).expect("readable") {
             let path = entry.expect("an entry").path();
@@ -695,6 +698,9 @@ fn the_doctor_schema_declares_the_announced_identifier() {
 fn this_hosts_doctor_report_is_valid_against_the_schema() {
     let doctor = doctor_once();
     assert_eq!(schema_errors(doctor), Vec::<String>::new(), "{doctor:#}");
+    let bundled = Harness::new().json(&["doctor", "--launch", "codex", "--json"]);
+    assert_eq!(bundled["launch"]["resolution"], "bundled");
+    assert_eq!(schema_errors(&bundled), Vec::<String>::new(), "{bundled:#}");
 }
 
 fn examples() -> Vec<(String, serde_json::Value)> {

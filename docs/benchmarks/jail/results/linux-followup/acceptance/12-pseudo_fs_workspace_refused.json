@@ -1,0 +1,134 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_16751cd7-8136-436f-9fe7-6038a8cc6899",
+  "revision": 1,
+  "phase": "refused",
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "Linux 7.0.0-31-generic"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": null,
+    "backend_version": null
+  },
+  "policy": {
+    "name": "tool",
+    "digest": "sha256:f89e1e5dcb0e747a433ef534faa09d78f3251276f6151eecc57e68b975a0af97",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "grants": []
+  },
+  "containment": "pending",
+  "child_protection": "pending",
+  "exec_observed": false,
+  "argv_digest": "sha256:d8f487f98ed456da19c21cc66ecce2cf817f190bad0aeb0a18bb02bcfdbadfd8",
+  "applied": {
+    "filesystem": null,
+    "network": {
+      "mode": "pending",
+      "mechanism": null,
+      "allowed_hosts": []
+    },
+    "syscalls": null,
+    "limits": [],
+    "environment_names": [],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": null,
+  "lifetime": {
+    "boundary": "pending",
+    "native": null,
+    "tree_empty": null,
+    "verified_at": null,
+    "verification_scope": null,
+    "integrity": "pending"
+  },
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "policy_widening",
+      "stage": "preparing",
+      "message": "the grant /dev/shm exposes host /proc, /sys, cgroupfs, devtmpfs or the /run runtime tree, which a contained profile never binds (jail-v1 §9.1)",
+      "key_path": "workspace",
+      "remediation_category": "configuration"
+    }
+  },
+  "state_cleanup": "not_needed",
+  "cleanup_error": null,
+  "created_at": "2026-09-29T08:12:44Z",
+  "updated_at": "2026-09-29T08:12:44Z",
+  "errors": [
+    {
+      "code": "policy_widening",
+      "stage": "preparing",
+      "message": "the grant /dev/shm exposes host /proc, /sys, cgroupfs, devtmpfs or the /run runtime tree, which a contained profile never binds (jail-v1 §9.1)",
+      "key_path": "workspace",
+      "remediation_category": "configuration"
+    }
+  ],
+  "credentials": []
+}

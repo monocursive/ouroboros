@@ -209,6 +209,7 @@ struct Bridge {
 
 /// Everything `agent` adds to a contained attempt.
 pub struct AgentNet {
+    vault: Option<Arc<crate::vault::Vault>>,
     attempt_id: String,
     trace: Option<SharedTrace>,
     variant: AgentVariant,
@@ -312,6 +313,7 @@ impl AgentNet {
             record_queue_capacity(std::env::var(RECORD_QUEUE_SEAM).ok().as_deref());
         let (tx, records) = sync_channel(queue_capacity);
         Ok(AgentNet {
+            vault: None,
             attempt_id: attempt_id.to_owned(),
             trace: trace.clone(),
             variant,
@@ -377,6 +379,10 @@ impl AgentNet {
     /// # Errors
     /// A refusal naming the proxy when it cannot start (its descriptor
     /// budget does not fit, a thread cannot be created).
+    pub fn configure_vault(&mut self, vault: Arc<crate::vault::Vault>) {
+        self.vault = Some(vault);
+    }
+
     pub fn start_proxy(&mut self) -> Result<(), JailError> {
         let Some(listener) = self.listener.take() else {
             return Err(refusal("proxy", "it was already started"));
@@ -388,7 +394,10 @@ impl AgentNet {
             resolver: Arc::new(SystemResolver::new(RESOLVER_IN_FLIGHT)),
         };
         let sink: Arc<dyn ProxySink> = self.proxy_sink.clone();
-        self.proxy = Some(proxy::start(config, sink).map_err(|error| refusal("proxy", error))?);
+        self.proxy = Some(
+            proxy::start_with_vault(config, sink, self.vault.clone())
+                .map_err(|error| refusal("proxy", error))?,
+        );
         Ok(())
     }
 
@@ -550,7 +559,14 @@ impl AgentNet {
         boundary_up: &dyn Fn() -> bool,
     ) -> Option<String> {
         let mut loss = None;
-        while let Ok(record) = self.records.try_recv() {
+        // Producers can refill the queue faster than we consume it. Bound
+        // each pass so continuous connects cannot starve wall/stop checks.
+        // After mediator.stop() there are at most queue_capacity records,
+        // so the final pass still drains every settled record.
+        for _ in 0..self.queue_capacity {
+            let Ok(record) = self.records.try_recv() else {
+                break;
+            };
             if self.account(audit, observe_on, &record) {
                 loss.get_or_insert_with(|| {
                     "the unix-peer mediator could not deliver a connect response, so the \
@@ -605,7 +621,7 @@ impl AgentNet {
             return;
         };
         let mut buffer = [0u8; 256];
-        loop {
+        for _ in 0..256 {
             match read_some(report.as_raw_fd(), &mut buffer) {
                 Some(n) if n > 0 => self.bridge_rejected += n as u64,
                 _ => return,
@@ -780,6 +796,25 @@ impl AgentNet {
     #[must_use]
     pub fn details(&self) -> (Value, Value) {
         let mut agent = Map::new();
+        agent.insert("socks5_listen".into(), Value::from("127.0.0.1:3129"));
+        agent.insert("udp_egress".into(), Value::from(false));
+        agent.insert(
+            "origin_verification".into(),
+            Value::from(if self.vault.is_some() {
+                "http_host_and_mitm_http_host"
+            } else {
+                "http_host_and_tls_sni"
+            }),
+        );
+        agent.insert(
+            "tls_application_authority_verified".into(),
+            Value::from(self.vault.is_some()),
+        );
+        agent.insert(
+            "first_flight_bytes_max".into(),
+            Value::from(crate::proxy::origin::MAX_BYTES),
+        );
+        agent.insert("first_flight_timeout_ms".into(), Value::from(5000));
         agent.insert(
             "filter_variant".to_owned(),
             Value::from(self.variant.as_str()),
@@ -993,31 +1028,20 @@ fn bind_pinned(
 /// table shows the `LISTEN` row and one of `pid`'s fds is that socket.
 fn listening_socket(pid: libc::pid_t) -> io::Result<bool> {
     let table = std::fs::read_to_string(format!("/proc/{pid}/net/tcp"))?;
-    let mut inodes = Vec::new();
-    if let Some(inode) = listening_inode(&table) {
-        inodes.push(inode);
+    let mut wanted = Vec::new();
+    for local in ["0100007F:0C38", "0100007F:0C39"] {
+        let Some(inode) = listening_inode_on(&table, &[local]) else {
+            return Ok(false);
+        };
+        wanted.push(format!("socket:[{inode}]"));
     }
-    // A namespace without an ipv6 table has no v6 row to find; that absence
-    // is not a failure of the check, so only the v4 read's error propagates.
-    if let Ok(v6) = std::fs::read_to_string(format!("/proc/{pid}/net/tcp6")) {
-        inodes.extend(listening_inode6(&v6));
-    }
-    if inodes.is_empty() {
-        return Ok(false);
-    }
-    let wanted: Vec<String> = inodes
-        .iter()
-        .map(|inode| format!("socket:[{inode}]"))
-        .collect();
     for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
         let Ok(entry) = entry else { continue };
-        if wanted.iter().any(|name| {
-            std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == name.as_str())
-        }) {
-            return Ok(true);
+        if let Ok(link) = std::fs::read_link(entry.path()) {
+            wanted.retain(|name| link.as_os_str() != name.as_str());
         }
     }
-    Ok(false)
+    Ok(wanted.is_empty())
 }
 
 /// The inode of the `LISTEN` row for `127.0.0.1:3128` in a `/proc/net/tcp`
@@ -1033,6 +1057,7 @@ pub fn listening_inode(table: &str) -> Option<u64> {
 /// the bridge's local end are `::1` (the v6 loopback) and `::` (a dual-stack
 /// listener, which also serves the v4 loopback), each on the bridge's port.
 #[must_use]
+#[cfg(test)]
 fn listening_inode6(table: &str) -> Option<u64> {
     listening_inode_on(
         table,
@@ -1238,6 +1263,9 @@ mod tests {
 
     fn a_result(id: u64) -> ProxyResult {
         ProxyResult {
+            origin: None,
+            origin_verification: None,
+            transport: "http".into(),
             request_id: id,
             kind: proxy::RequestKind::Unknown,
             destination: None,

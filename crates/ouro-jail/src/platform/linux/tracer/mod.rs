@@ -85,8 +85,13 @@ pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, t
 pub use table::closed_set_table;
 
 /// Bounds on what the observer will hold, from jail-v1 §11.4.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TracerConfig {
+    /// Launcher and candidate spellings whose identities are captured at exec stops.
+    pub target: Option<(pid_t, Vec<Vec<u8>>)>,
+    pub commands: crate::commands::Rules,
+    /// Capture read-only opens for opt-in learning.
+    pub learning: bool,
     /// Most bytes of a pathname argument to snapshot. Beyond it the snapshot
     /// is marked incomplete rather than silently shortened.
     pub path_snapshot_max: usize,
@@ -144,12 +149,22 @@ fn event_bytes(event: &TracerEvent) -> usize {
         TracerEvent::Syscall { args, .. } => {
             args.path.as_ref().map_or(0, |p| p.bytes.len())
                 + args.path2.as_ref().map_or(0, |p| p.bytes.len())
+                + args
+                    .command
+                    .as_ref()
+                    .map_or(0, |hit| hit.pattern.len() + hit.digest.len())
         }
         TracerEvent::Exec {
             path, kernel_image, ..
         } => {
             path.as_ref().map_or(0, |p| p.bytes.len())
-                + kernel_image.as_ref().map_or(0, |k| k.path.len())
+                + kernel_image.as_ref().map_or(0, |k| {
+                    k.path.len()
+                        + k.candidates
+                            .iter()
+                            .map(|candidate| candidate.path.len() + size_of::<CandidateImage>())
+                            .sum::<usize>()
+                })
         }
         _ => 0,
     };
@@ -212,6 +227,9 @@ const HANDOFF_DEPTH: usize = 64;
 impl Default for TracerConfig {
     fn default() -> Self {
         TracerConfig {
+            target: None,
+            commands: crate::commands::Rules::default(),
+            learning: false,
             path_snapshot_max: 4096,
             inflight_max: 16_384,
             queue_max: 16_384,
@@ -253,6 +271,7 @@ pub struct SockaddrSnapshot {
 /// The arguments of a closed-set call that the observer reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Args {
+    pub command: Option<Box<crate::commands::Hit>>,
     pub path: Option<PathSnapshot>,
     /// The second pathname of a two-path call. §11.3: the two are
     /// independent evidence.
@@ -467,6 +486,15 @@ pub struct KernelImage {
     /// The raw link bytes, ` (deleted)` annotation included.
     pub path: Vec<u8>,
     /// The image inode, when it could be read.
+    pub identity: Option<(u64, u64)>,
+    /// Candidate identities read in the tracee root before resuming this exec.
+    pub candidates: Vec<CandidateImage>,
+}
+
+/// A prepared candidate's identity in the stopped tracee's filesystem view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CandidateImage {
+    pub path: Vec<u8>,
     pub identity: Option<(u64, u64)>,
 }
 
@@ -1230,6 +1258,7 @@ mod tests {
     fn j4_w3_queue_bounds_are_the_budget_with_a_floor_of_one_event() {
         let bounds = |queue_bytes_max| {
             TracerConfig {
+                learning: false,
                 queue_bytes_max,
                 ..TracerConfig::default()
             }

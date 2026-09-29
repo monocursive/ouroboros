@@ -18,3 +18,10 @@ multiple-versions = "warn"
 [advisories]
 # cargo-deny 0.20 uses dependency scope here rather than a lint level.
 unmaintained = "all"
+
+# The compiled Mozilla CA data used to validate vault upstream TLS. Its
+# redistribution text ships with local packages; this is not a blanket waiver.
+[[licenses.exceptions]]
+name = "webpki-roots"
+version = "=1.0.9"
+allow = ["CDLA-Permissive-2.0"]

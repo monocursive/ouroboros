@@ -54,6 +54,18 @@ pub fn proxy_event(
     monotonic_ns: u128,
 ) -> Event {
     let mut fields = Map::new();
+    fields.insert("transport".into(), Value::from(result.transport.clone()));
+    fields.insert(
+        "origin".into(),
+        result.origin.clone().map_or(Value::Null, Value::from),
+    );
+    fields.insert(
+        "origin_verification".into(),
+        result
+            .origin_verification
+            .clone()
+            .map_or(Value::Null, Value::from),
+    );
     fields.insert("request_id".to_owned(), Value::from(result.request_id));
     fields.insert("kind".to_owned(), Value::from(result.kind.as_str()));
     fields.insert(

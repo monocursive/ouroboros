@@ -1114,7 +1114,8 @@
           "mode": {
             "enum": [
               "copy_rw",
-              "bind_ro"
+              "bind_ro",
+              "vault"
             ]
           },
           "digest": {
@@ -1133,6 +1134,9 @@
               "string",
               "null"
             ]
+          },
+          "never_staged": {
+            "type": "boolean"
           }
         },
         "required": [

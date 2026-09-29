@@ -30,7 +30,6 @@
 use std::ffi::OsString;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -38,6 +37,8 @@ use std::time::Duration;
 use super::{clock::Deadline, exec, identity};
 
 pub const START_FD: i32 = 15;
+/// Pinned backend, closed atomically on successful exec.
+pub const BACKEND_FD: i32 = 8;
 /// Where the watcher receives the leaf's `cgroup.kill`, when there is a leaf.
 pub const CGROUP_KILL_FD: i32 = 6;
 const CGROUP_KILL_ARG: &str = "--cgroup-kill-fd";
@@ -195,7 +196,38 @@ pub fn bootstrap_main(args: &[OsString]) -> ! {
     unsafe {
         libc::close(START_FD);
     }
-    let error = Command::new(&args[0]).args(&args[1..]).exec();
+    use std::os::unix::ffi::OsStrExt as _;
+    let argv: Vec<_> = args
+        .iter()
+        .map(|a| std::ffi::CString::new(a.as_bytes()))
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|_| std::process::exit(125));
+    let env: Vec<_> = std::env::vars_os()
+        .map(|(k, v)| {
+            let mut bytes = k.as_bytes().to_vec();
+            bytes.push(b'=');
+            bytes.extend_from_slice(v.as_bytes());
+            std::ffi::CString::new(bytes).unwrap_or_else(|_| std::process::exit(125))
+        })
+        .collect();
+    let argv_ptrs: Vec<_> = argv
+        .iter()
+        .map(|a| a.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    let env_ptrs: Vec<_> = env
+        .iter()
+        .map(|a| a.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    // The descriptor, not args[0], identifies the executable. No pathname fallback.
+    unsafe {
+        if libc::fcntl(BACKEND_FD, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+            std::process::exit(125);
+        }
+        libc::fexecve(BACKEND_FD, argv_ptrs.as_ptr(), env_ptrs.as_ptr());
+    }
+    let error = io::Error::last_os_error();
     // The supervisor reads the backend's status pipe while it waits for the
     // namespace init, so the reason the backend never started goes there and
     // reaches the refusal; stderr alone is not read back.

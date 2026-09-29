@@ -163,6 +163,15 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     ("adjtimex", 159),
     ("clock_settime", 227),
     ("clock_adjtime", 305),
+    ("settimeofday", 164),
+    ("setxattrat", 463),
+    ("getxattrat", 464),
+    ("listxattrat", 465),
+    ("removexattrat", 466),
+    ("open_tree_attr", 467),
+    ("file_getattr", 468),
+    ("file_setattr", 469),
+    ("listns", 470),
 ];
 
 /// `clone3`. Denied with `ENOSYS` because seccomp cannot safely dereference

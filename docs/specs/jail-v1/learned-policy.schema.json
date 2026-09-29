@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:learned-policy:1",
+  "title": "Candidate grants from one observed run, never implicitly loaded",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "warning",
+    "read_only",
+    "network_allow",
+    "unresolved_reads",
+    "denied_writes",
+    "execs",
+    "provenance"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ouro.jail.learned-policy/1"
+    },
+    "warning": {
+      "type": "string"
+    },
+    "read_only": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "network_allow": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "unresolved_reads": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "denied_writes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "execs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "receipt_digest",
+        "revision",
+        "build_inputs",
+        "event_counts",
+        "coverage_json",
+        "evidence"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "string"
+        },
+        "receipt_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "build_inputs": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "coverage_json": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

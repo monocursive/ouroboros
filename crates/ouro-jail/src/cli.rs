@@ -30,6 +30,10 @@ pub struct Cli {
 pub enum Command {
     /// Prepare a boundary and run PROGRAM under it.
     Run(Box<RunArgs>),
+    /// Replay an attempt's original journal, optionally following it live.
+    Tail(TailArgs),
+    /// Run contained with read observation and derive a reviewable policy proposal.
+    Learn(Box<LearnArgs>),
     // Boxed: `ExplainArgs` carries the full override set and dwarfs the
     // rest. A `//` comment, not `///`: clap renders doc comments as help.
     /// Render the requested policy without probing or executing.
@@ -46,6 +50,9 @@ pub enum Command {
 /// (§6.1). `doctor` has the narrower grammar of [`DoctorArgs`].
 #[derive(Debug, Default, Args)]
 pub struct PolicyArgs {
+    /// Internal learn selection; not a separate run flag.
+    #[arg(skip)]
+    pub learning: bool,
     /// Built-in profile name or a policy file path.
     #[arg(long, value_name = "agent|tool|build|none|FILE")]
     pub profile: Option<String>,
@@ -261,4 +268,40 @@ mod tests {
                 .expect_err("a usage error");
         assert_eq!(error.exit_code(), 2);
     }
+}
+
+/// Read-only journal selection.
+#[derive(Debug, Args)]
+pub struct TailArgs {
+    /// Attempt ID; defaults to the most recently updated attempt directory.
+    #[arg(long)]
+    pub attempt: Option<String>,
+    /// Follow until the supervisor releases its attempt lock.
+    #[arg(long)]
+    pub follow: bool,
+    /// Write original NDJSON envelopes without re-encoding them.
+    #[arg(long)]
+    pub json: bool,
+    /// Include events at or after this UTC timestamp.
+    #[arg(long)]
+    pub since: Option<String>,
+}
+
+/// Candidate-policy generation. Proposals never load automatically.
+#[derive(Debug, Args)]
+pub struct LearnArgs {
+    #[command(flatten)]
+    pub policy: PolicyArgs,
+    /// Proposal TOML output; default is config/learned/ATTEMPT.toml.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Review and adopt the proposals through an interactive terminal.
+    #[arg(long)]
+    pub adopt: bool,
+    /// Minimum observations before proposing an exact path or destination.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    pub min_hits: u32,
+    /// Literal command and arguments.
+    #[arg(last = true, required = true, allow_hyphen_values = true)]
+    pub argv: Vec<OsString>,
 }

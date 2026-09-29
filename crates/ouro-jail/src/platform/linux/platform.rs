@@ -121,6 +121,7 @@ const LIMIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 pub struct LinuxPlatform {
     // J5-D: the resolved backend, or why none was (review F1/F2)
     bwrap: Result<PathBuf, String>,
+    backend_pin: Result<std::sync::Arc<jfs::PinnedPath>, String>,
 }
 
 impl Default for LinuxPlatform {
@@ -134,7 +135,13 @@ impl LinuxPlatform {
     /// operator's `PATH` ([`resolved_bwrap`]).
     #[must_use]
     pub fn new() -> Self {
+        let backend_pin = resolved_bwrap().map_err(str::to_owned).and_then(|path| {
+            jfs::PinnedPath::open(path)
+                .map(std::sync::Arc::new)
+                .map_err(|e| e.to_string())
+        });
         LinuxPlatform {
+            backend_pin,
             bwrap: resolved_bwrap()
                 .map(Path::to_path_buf)
                 .map_err(str::to_owned),
@@ -514,7 +521,11 @@ impl Platform for LinuxPlatform {
                 format!("bubblewrap is not available: {reason}"),
             )
         })?;
-        let prepared = Boundary::create(bwrap, plan, sinks, deadline)?;
+        let pin = self
+            .backend_pin
+            .as_ref()
+            .map_err(|e| preparing(ErrorCode::BackendUnavailable, e.clone()))?;
+        let prepared = Boundary::create(bwrap, pin, plan, sinks, deadline)?;
         Ok(Box::new(LinuxPrepared { boundary: prepared }))
     }
 }
@@ -617,6 +628,7 @@ struct Boundary {
     placeholder_outcomes: Vec<PlaceholderOutcome>,
     applied: Applied,
     backend_version: String,
+    resolv_sanitization: &'static str,
     observe_on: bool,
     /// The §11.4 bounds the observer runs with, decided once; `None` with
     /// observation off.
@@ -668,6 +680,7 @@ impl Boundary {
     #[allow(clippy::too_many_lines)]
     fn create(
         bwrap_path: &Path,
+        backend_pin: &jfs::PinnedPath,
         plan: PreparedPlan,
         sinks: Sinks,
         deadline: clock::Deadline,
@@ -822,6 +835,52 @@ impl Boundary {
         } else {
             None
         };
+        if let Some(handoff) = &plan.launch
+            && !handoff.vault.is_empty()
+        {
+            use std::os::fd::AsFd as _;
+            let vault_io = |e| {
+                preparing(
+                    ErrorCode::CredentialUnavailable,
+                    format!("vault public CA cannot be staged: {e}"),
+                )
+            };
+            let vault = std::sync::Arc::new(
+                crate::vault::Vault::new(&plan.attempt_id, handoff.vault.clone())
+                    .map_err(|e| preparing(ErrorCode::CredentialUnavailable, e))?,
+            );
+            let vendor = handoff
+                .vendor_state
+                .as_ref()
+                .ok_or_else(|| preparing(ErrorCode::InternalError, "vault has no private state"))?;
+            let dir = crate::state::anchored::Dir::from_owned(
+                vendor.fd.as_fd().try_clone_to_owned().map_err(vault_io)?,
+            );
+            let name =
+                crate::state::anchored::Name::new(b".ouro-vault-ca.pem").map_err(vault_io)?;
+            let mut cert = dir.create_file_at(&name, 0o600).map_err(vault_io)?;
+            use std::io::Write as _;
+            cert.write_all(vault.ca_pem().as_bytes())
+                .map_err(vault_io)?;
+            let destination = PathBuf::from("/run/ouro/vault-ca.pem");
+            bplan.extra_ro_binds.push((
+                vendor.host_path.join(".ouro-vault-ca.pem"),
+                destination.clone(),
+            ));
+            for (name, value) in vault.environment() {
+                bplan.env.push((name.into(), value.into()));
+            }
+            for name in ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"] {
+                bplan.env.retain(|(key, _)| key != name);
+                bplan
+                    .env
+                    .push((name.into(), destination.clone().into_os_string()));
+            }
+            agent
+                .as_mut()
+                .ok_or_else(|| preparing(ErrorCode::InvalidConfig, "vault requires agent network"))?
+                .configure_vault(vault);
+        }
         // J3-agent end
         // J3-launch begin: the staged vendor state and bind_ro sources, bound
         // by the descriptors staging examined (§9.1, §12).
@@ -901,8 +960,17 @@ impl Boundary {
         // domains — host facts the child has no grant for. The child's
         // resolver is unreachable inside its network namespace either way;
         // the copy keeps the nameservers and drops `search`/`domain` lines.
-        bplan.resolv_source = Some(stage_sanitized_resolv_conf(&plan.attempt_dir)?);
+        let (resolv_source, resolv_sanitization) = stage_sanitized_resolv_conf(&plan.attempt_dir)?;
+        bplan.resolv_source = Some(resolv_source);
 
+        refuse_pseudo_fs_grants(
+            &[(plan.workspace.clone(), plan.workspace.clone())],
+            "workspace",
+        )?;
+        if let crate::policy::ScratchRoot::Host { path } = &plan.request.snapshot.roots.scratch {
+            let source = PathBuf::from(std::ffi::OsString::from_vec(path.as_bytes().to_vec()));
+            refuse_pseudo_fs_grants(&[(source.clone(), source)], "scratch")?;
+        }
         refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
         refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")?;
 
@@ -1023,6 +1091,11 @@ impl Boundary {
         let (status_r, status_w) = exec::pipe().map_err(io)?;
         let (start_r, start_w) = exec::pipe().map_err(io)?;
         fds.add(start_r, super::watch::START_FD).map_err(io)?;
+        fds.add(
+            backend_pin.borrow_fd().try_clone_to_owned().map_err(io)?,
+            super::watch::BACKEND_FD,
+        )
+        .map_err(io)?;
         fds.add(release_r, RELEASE_FD).map_err(io)?;
         fds.add(error_w, ERROR_FD).map_err(io)?;
         // Audit 2026-09-25-2, S14: the narrowing data is already in the pipe
@@ -1100,6 +1173,17 @@ impl Boundary {
         // §9.1 mount-handoff verification: the workspace and every pinned
         // protected segment must still resolve to the objects that were
         // scanned, or the run refuses rather than bind a replacement.
+        for directory in &scan.directories {
+            directory
+                .verify()
+                .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
+        }
+        backend_pin.verify_executable().map_err(|e| {
+            preparing(
+                ErrorCode::InternalError,
+                format!("the pinned backend changed before spawn: {e}"),
+            )
+        })?;
         for pin in &pins {
             pin.verify().map_err(|err| {
                 preparing(
@@ -1181,7 +1265,8 @@ impl Boundary {
                 sinks.trace.clone(),
                 plan.workspace.as_os_str().as_bytes(),
                 bwrap::SCRATCH_INSIDE_PATH.as_bytes(),
-            ),
+            )
+            .with_learning(snapshot.observation.learning),
             snapshot,
             workspace: workspace_path,
             child: Some(child),
@@ -1219,6 +1304,7 @@ impl Boundary {
                 removed_environment_names: Vec::new(),
             },
             backend_version: String::new(),
+            resolv_sanitization,
             observe_on,
             observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
             trace_data: trace_data.unwrap_or(super::tracer::filter::NARROWING_TRACE_DATA),
@@ -1281,6 +1367,9 @@ impl Boundary {
             // Audit 2026-09-25-2, S14: the tracer expects exactly the data
             // this attempt's narrowing filter carries.
             config.trace_data = boundary.trace_data;
+            config.learning = boundary.snapshot.observation.learning;
+            config.commands = boundary.snapshot.commands.clone();
+            config.target = Some((boundary.launcher.pid, boundary.target_images.clone()));
             match Tracer::attach(boundary.launcher.pid, config) {
                 Ok(tracer) => boundary.tracer = Some(tracer),
                 Err(err) => {
@@ -1903,6 +1992,26 @@ impl Boundary {
 
     fn boundary_identity(&self) -> BoundaryIdentity {
         let mut details = Map::new();
+        if self
+            .snapshot
+            .launch
+            .as_ref()
+            .is_some_and(|l| l.credentials.iter().any(|c| c.mode == "vault"))
+        {
+            details.insert("credential_injection".into(), Value::from("mitm_ca"));
+        }
+        details.insert("backend_exec_by".to_owned(), Value::from("descriptor"));
+        details.insert(
+            "command_rules".into(),
+            serde_json::json!({
+                "deny": self.snapshot.commands.deny.len(),
+                "forbid": self.snapshot.commands.forbid.len(),
+            }),
+        );
+        details.insert(
+            "resolv_sanitization".to_owned(),
+            Value::from(self.resolv_sanitization),
+        );
         details.insert("watcher_pid".to_owned(), Value::from(self.watcher.pid()));
         // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
         // made: already delegated, entered a scope of its own, or why not.
@@ -2599,7 +2708,10 @@ fn mount_swap_rendezvous() {
 /// §9.1), keyed by `key` (`filesystem.read_only` or `filesystem.read_write`).
 /// A policy refusal (`policy_widening`, remediation `configuration`) before
 /// any mount.
-fn refuse_pseudo_fs_grants(binds: &[(PathBuf, PathBuf)], key: &str) -> Result<(), JailError> {
+pub(crate) fn refuse_pseudo_fs_grants(
+    binds: &[(PathBuf, PathBuf)],
+    key: &str,
+) -> Result<(), JailError> {
     if binds.is_empty() {
         return Ok(());
     }
@@ -2706,7 +2818,7 @@ fn pseudo_fs_mount_points() -> Vec<PathBuf> {
 /// The host file's `search`/`domain` lines name the operator's networks;
 /// they are host facts no grant covers, and nothing in the child's network
 /// namespace can use the resolver anyway, so the copy keeps the nameservers
-/// (and every other directive) and drops exactly those two lines. The file
+/// only, with numeric addresses, and drops all other directives. The file
 /// lives in the attempt's private state, is created fresh with mode 0600,
 /// and is removed with the attempt by the existing state cleanup.
 ///
@@ -2714,20 +2826,13 @@ fn pseudo_fs_mount_points() -> Vec<PathBuf> {
 ///
 /// [`JailError`] (`state_write_failed` at preparing) when the attempt state
 /// cannot hold the copy; a host `/etc/resolv.conf` that cannot be read
-/// leaves the plan unchanged rather than refusing the run.
-fn stage_sanitized_resolv_conf(attempt_dir: &Path) -> Result<PathBuf, JailError> {
+/// produces an empty resolver file, never the unsanitized host file.
+fn stage_sanitized_resolv_conf(attempt_dir: &Path) -> Result<(PathBuf, &'static str), JailError> {
     const SOURCE: &str = "/etc/resolv.conf";
-    let Ok(host) = std::fs::read_to_string(SOURCE) else {
-        return Ok(PathBuf::from(SOURCE));
-    };
-    let sanitized: String = host
-        .lines()
-        .filter(|line| {
-            let first = line.split_whitespace().next().unwrap_or_default();
-            !matches!(first, "search" | "domain")
-        })
-        .collect::<Vec<&str>>()
-        .join("\n");
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let host = std::fs::File::open(SOURCE).and_then(|f| f.take(65537).read_to_end(&mut bytes));
+    let (sanitized, status) = sanitize_resolv_conf(host.is_ok().then_some(bytes.as_slice()));
     let dest = attempt_dir.join("resolv.conf");
     let write = || -> std::io::Result<()> {
         use std::io::Write as _;
@@ -2749,7 +2854,30 @@ fn stage_sanitized_resolv_conf(attempt_dir: &Path) -> Result<PathBuf, JailError>
             format!("the sanitized resolver view could not be staged: {error}"),
         )
     })?;
-    Ok(dest)
+    Ok((dest, status))
+}
+
+fn sanitize_resolv_conf(bytes: Option<&[u8]>) -> (String, &'static str) {
+    let text = bytes
+        .filter(|b| b.len() <= 65536)
+        .and_then(|b| std::str::from_utf8(b).ok());
+    let Some(text) = text else {
+        return (String::new(), "failed_closed");
+    };
+    let mut sanitized = String::new();
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() == Some("nameserver") {
+            let Some(ip) = words
+                .next()
+                .and_then(|v| v.parse::<std::net::IpAddr>().ok())
+            else {
+                return (String::new(), "failed_closed");
+            };
+            sanitized.push_str(&format!("nameserver {ip}\n"));
+        }
+    }
+    (sanitized, "nameservers_only")
 }
 
 /// Pin every source once, scan the pinned writable roots, then give each bind
@@ -2780,6 +2908,7 @@ fn prepare_mounts(
     roots.dedup();
     let mut aggregate = jfs::ProtectedScan {
         root: PathBuf::from("/"),
+        directories: Vec::new(),
         segments: Vec::new(),
         skipped_symlinks: Vec::new(),
         root_literals: Vec::new(),
@@ -2798,7 +2927,7 @@ fn prepare_mounts(
                 pins.insert(source.clone(), pin);
                 continue;
             }
-            let scan = jfs::scan_pinned(
+            let mut scan = jfs::scan_pinned(
                 &pin,
                 names,
                 jfs::ScanLimits {
@@ -2835,6 +2964,12 @@ fn prepare_mounts(
                     ),
                 ));
             }
+            for directory in &scan.directories {
+                directory
+                    .verify()
+                    .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
+            }
+            let added_placeholders = !scan.absent_root_literals().is_empty();
             for literal in scan.absent_root_literals() {
                 let holders = attempt_dir.join("placeholders");
                 create_private_dir(&holders)?;
@@ -2846,6 +2981,51 @@ fn prepare_mounts(
                 plan.placeholders.push(mount);
                 placeholders.push(placeholder);
             }
+            // Our placeholders mutate the root. Re-scan, rather than merely
+            // accepting a new timestamp that could hide a concurrent mutation.
+            if added_placeholders {
+                let checked = jfs::scan_pinned(
+                    &pins[source],
+                    names,
+                    jfs::ScanLimits {
+                        max_entries: jfs::ScanLimits::DEFAULT
+                            .max_entries
+                            .saturating_sub(aggregate.entries_seen),
+                        ..jfs::ScanLimits::DEFAULT
+                    },
+                )
+                .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
+                let expected: std::collections::BTreeSet<_> = scan
+                    .absent_root_literals()
+                    .iter()
+                    .map(|name| source.join(name))
+                    .collect();
+                let remaining: std::collections::BTreeSet<_> = checked
+                    .segments
+                    .iter()
+                    .filter(|s| !expected.contains(&s.path))
+                    .map(|s| (&s.path, s.dev, s.ino))
+                    .collect();
+                if remaining
+                    != scan
+                        .segments
+                        .iter()
+                        .map(|s| (&s.path, s.dev, s.ino))
+                        .collect()
+                    || checked
+                        .skipped_symlinks
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        != scan.skipped_symlinks.iter().collect()
+                {
+                    return Err(preparing(
+                        ErrorCode::MissingCapability,
+                        "protected paths changed while placeholders were prepared",
+                    ));
+                }
+                scan.directories = checked.directories;
+            }
+            aggregate.directories.extend(scan.directories);
             aggregate.entries_seen += scan.entries_seen;
             aggregate.max_depth_seen = aggregate.max_depth_seen.max(scan.max_depth_seen);
             aggregate.segments.extend(scan.segments);
@@ -3115,6 +3295,9 @@ impl LinuxRunning {
             images: &self.boundary.target_images,
         };
         match super::observed::record(&mut self.boundary.audit, &target, event) {
+            Fact::CommandForbidden(pattern) => {
+                self.pending.push(RunEvent::CommandForbidden { pattern })
+            }
             Fact::TargetExec if !self.exec_confirmed => {
                 self.exec_confirmed = true;
                 self.pending.push(RunEvent::ExecConfirmed);
@@ -3827,6 +4010,30 @@ mod tests {
     }
 
     #[test]
+    fn resolver_sanitizer_never_falls_back_to_host_bytes() {
+        for input in [
+            None,
+            Some(b"nameserver invalid".as_slice()),
+            Some(b"nameserver 1.1.1.1\n\xff".as_slice()),
+        ] {
+            assert_eq!(
+                super::sanitize_resolv_conf(input),
+                (String::new(), "failed_closed")
+            );
+        }
+        assert_eq!(
+            super::sanitize_resolv_conf(Some(&vec![b'x'; 65537])).1,
+            "failed_closed"
+        );
+        assert_eq!(
+            super::sanitize_resolv_conf(Some(
+                b"search private.example\nnameserver 1.1.1.1 # comment\noptions edns0\n"
+            )),
+            ("nameserver 1.1.1.1\n".into(), "nameservers_only")
+        );
+    }
+
+    #[test]
     fn bubblewrap_resolves_only_from_absolute_entries_to_a_canonical_file() {
         use std::ffi::OsStr;
         use std::os::unix::fs::PermissionsExt as _;
@@ -4444,6 +4651,7 @@ mod tests {
             state_subdirs: Vec::new(),
             credentials: if bind_ro {
                 vec![CredentialDecl {
+                    vault: None,
                     id: "c".to_owned(),
                     source: NativeString::Text("/src/c".to_owned()),
                     dest: NativeString::Text("c".to_owned()),
@@ -4468,6 +4676,7 @@ mod tests {
         let source_identity = fstat(source.as_fd()).unwrap().identity();
         let vendor_identity = vendor.stat().unwrap().identity();
         LaunchHandoff {
+            vault: Vec::new(),
             vendor_state: Some(VendorStateHandle {
                 host_path: root.join("v"),
                 fd: Arc::new(vendor.into_fd()),

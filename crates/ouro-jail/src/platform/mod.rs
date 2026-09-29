@@ -193,6 +193,8 @@ pub struct BoundaryIdentity {
 /// Why the supervisor is asking for termination (§9.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StopReason {
+    /// A command forbid rule matched.
+    CommandForbidden,
     /// The supervisor received INT, TERM or HUP.
     OperatorSignal,
     /// The wall deadline expired.
@@ -206,6 +208,8 @@ pub enum StopReason {
 /// One thing that happened while the target was running.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RunEvent {
+    /// An operator forbid rule matched at exec entry.
+    CommandForbidden { pattern: String },
     /// A bounded polling step completed; recheck signals and transport health.
     Poll,
     /// The target `exec` transition was confirmed; the enforced receipt and

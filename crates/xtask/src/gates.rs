@@ -3644,6 +3644,13 @@ reason = "an `ignore` doc example"
             "base64",
             "clap",
             "libc",
+            // Shared HTTP vault transport and in-memory CA, no vendor protocol.
+            "rcgen",
+            "rustls",
+            "webpki-roots",
+            "zeroize",
+            // Explicit operator-reviewed proposal adoption preserves TOML comments.
+            "toml_edit",
             "serde",
             "serde_json",
             "sha2",

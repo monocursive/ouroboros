@@ -940,6 +940,15 @@ fn open_o_path(path: &str) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// Resolve metadata in a stopped task's filesystem view without acquiring I/O authority.
+pub(super) fn path_identity(pid: libc::pid_t, path: &[u8]) -> io::Result<(u64, u64)> {
+    let root = open_o_path(&format!("/proc/{pid}/root"))?;
+    let path = path_beneath_child_root(pid, root.as_raw_fd(), path)?;
+    let fd = openat2_in_root(root.as_raw_fd(), &path)?;
+    let stat = fstat(fd.as_raw_fd())?;
+    Ok((stat.st_dev, stat.st_ino))
+}
+
 /// Express a relative address from the child's cwd beneath its *root*, not
 /// beneath the cwd as a new root. `RESOLVE_IN_ROOT` then gives `..` and absolute
 /// symlinks the same root boundary as the child has. The proc links supply only

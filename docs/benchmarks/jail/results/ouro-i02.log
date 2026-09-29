@@ -1,0 +1,8 @@
+   Compiling ouro-jail v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-jail)
+   Compiling xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.26s
+     Running `target/debug/xtask i02-scan`
+i02-scan: /Users/monocursive/code/ouroboros/crates/ouro-ledger/src is absent (nothing scanned there)
+i02-scan: /Users/monocursive/code/ouroboros/crates/ouro-ledger/Cargo.toml is absent (nothing scanned there)
+i02-scan: /Users/monocursive/code/ouroboros/crates/ouro-ledger/build.rs is absent (nothing scanned there)
+i02-scan: 82 file(s) in 3 root(s), 0 hit(s)

@@ -54,7 +54,9 @@ pub mod environment;
 pub mod gc;
 // J4-G end
 // J3-launch begin: data-only launch profiles
+pub mod journal;
 pub mod launch_profile;
+pub mod learn;
 // J3-launch end
 pub mod network;
 pub mod observer;
@@ -68,3 +70,7 @@ pub mod records;
 pub mod state;
 pub mod supervisor;
 pub mod trace;
+
+pub mod commands;
+
+pub mod vault;

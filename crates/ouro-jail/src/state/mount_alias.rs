@@ -176,9 +176,23 @@ fn alias_identities(grants: &[(PathBuf, u64)], mounts: &[Mount]) -> io::Result<V
 /// # Errors
 /// Returns `Err(io::Error)` when mountinfo cannot be read or parsed.
 pub fn alias_conflict(child_roots: &[PathBuf], guarded: &Path) -> io::Result<Option<PathBuf>> {
+    find_alias(child_roots, guarded, false)
+}
+
+/// Whether a destination directory lies inside the guarded tree through a
+/// mount alias. A destination containing that tree is not itself inside it.
+pub fn alias_containment(destinations: &[PathBuf], guarded: &Path) -> io::Result<Option<PathBuf>> {
+    find_alias(destinations, guarded, true)
+}
+
+fn find_alias(
+    child_roots: &[PathBuf],
+    guarded: &Path,
+    contained: bool,
+) -> io::Result<Option<PathBuf>> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (child_roots, guarded);
+        let _ = (child_roots, guarded, contained);
         Ok(None)
     }
     #[cfg(target_os = "linux")]
@@ -188,23 +202,35 @@ pub fn alias_conflict(child_roots: &[PathBuf], guarded: &Path) -> io::Result<Opt
         };
         let stat = fs::metadata(&canonical)?;
         let mounts = read_mountinfo()?;
-        Ok(conflict_in_mounts(
+        Ok(translated_conflict(
             child_roots,
             &canonical,
             stat.dev(),
             &mounts,
+            contained,
         ))
     }
 }
 
 /// The Linux core of [`alias_conflict`], over a supplied mount table so
 /// the coordinate math is unit-testable (audit 4 B4).
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn conflict_in_mounts(
     child_roots: &[PathBuf],
     canonical: &Path,
     dev: u64,
     mounts: &[Mount],
+) -> Option<PathBuf> {
+    translated_conflict(child_roots, canonical, dev, mounts, false)
+}
+
+#[cfg(target_os = "linux")]
+fn translated_conflict(
+    child_roots: &[PathBuf],
+    canonical: &Path,
+    dev: u64,
+    mounts: &[Mount],
+    contained: bool,
 ) -> Option<PathBuf> {
     // The guarded tree's own coordinates: its containing mount on the
     // same device, and the path relative to that mount's root.
@@ -218,17 +244,36 @@ fn conflict_in_mounts(
             .strip_prefix(&containing.point)
             .expect("prefix checked"),
     );
-    for mount in mounts {
-        if mount.dev != dev {
-            continue;
+    let mut guarded = vec![(dev, guarded_root)];
+    guarded.extend(
+        mounts
+            .iter()
+            .filter(|m| m.point.starts_with(canonical))
+            .map(|m| (m.dev, m.root.clone())),
+    );
+    for child in child_roots {
+        let containing = mounts
+            .iter()
+            .filter(|m| child.starts_with(&m.point))
+            .max_by_key(|m| m.point.as_os_str().len());
+        let Some(mount) = containing else { continue };
+        let visible = mount
+            .root
+            .join(child.strip_prefix(&mount.point).expect("prefix checked"));
+        let overlaps = |dev, path: &Path| {
+            guarded.iter().any(|(device, root)| {
+                dev == *device && (path.starts_with(root) || (!contained && root.starts_with(path)))
+            })
+        };
+        if overlaps(mount.dev, &visible) {
+            return Some(child.clone());
         }
-        let reaches =
-            mount.root.starts_with(&guarded_root) || guarded_root.starts_with(&mount.root);
-        if !reaches {
-            continue;
-        }
-        if child_roots.iter().any(|root| mount.point.starts_with(root)) {
-            return Some(mount.point.clone());
+        if !contained {
+            for mount in mounts.iter().filter(|m| m.point.starts_with(child)) {
+                if overlaps(mount.dev, &mount.root) {
+                    return Some(mount.point.clone());
+                }
+            }
         }
     }
     None
@@ -237,6 +282,42 @@ fn conflict_in_mounts(
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn containing_mounts_and_cross_device_submounts_use_translated_ranges() {
+        let mounts = vec![
+            Mount {
+                point: "/".into(),
+                root: "/".into(),
+                dev: 1,
+                ino: 1,
+            },
+            Mount {
+                point: "/alias".into(),
+                root: "/home/u".into(),
+                dev: 1,
+                ino: 2,
+            },
+            Mount {
+                point: "/home/u/state/nested".into(),
+                root: "/".into(),
+                dev: 2,
+                ino: 3,
+            },
+            Mount {
+                point: "/ws/cache".into(),
+                root: "/".into(),
+                dev: 2,
+                ino: 3,
+            },
+        ];
+        let guard = Path::new("/home/u/state");
+        assert!(conflict_in_mounts(&["/alias/state/child".into()], guard, 1, &mounts).is_some());
+        assert!(conflict_in_mounts(&["/ws".into()], guard, 1, &mounts).is_some());
+        assert!(conflict_in_mounts(&["/alias/unrelated".into()], guard, 1, &mounts).is_none());
+        assert!(translated_conflict(&["/home/u".into()], guard, 1, &mounts, true).is_none());
+        assert!(translated_conflict(&["/alias/state".into()], guard, 1, &mounts, true).is_some());
+    }
 
     #[test]
     fn bind_alias_of_writable_descendant_is_forbidden() {

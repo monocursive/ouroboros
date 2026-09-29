@@ -1,0 +1,7 @@
+[0m
+> build · big-pickle
+[0m
+[0m← [0mWrite greeting.txt
+Wrote file successfully.
+[0m
+candidate policy: /tmp/ouro-validated-agent/learned.toml (0 exact paths, 0 destinations)

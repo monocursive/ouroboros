@@ -137,6 +137,9 @@ pub struct PolicyFile {
 #[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JailSection {
+    /// Operator-only argv accident filters.
+    #[serde(default)]
+    pub commands: crate::commands::Rules,
     /// `jail.schema`.
     pub schema: Option<String>,
     /// `jail.profile`: a built-in name or an operator profile file path.
@@ -225,7 +228,16 @@ pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
 /// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key or a
 /// duplicate key.
 pub fn parse_project_config(text: &str) -> Result<ProjectConfig, JailError> {
-    toml::from_str(text).map_err(|error| invalid("jail", error.message().to_owned()))
+    let project: ProjectConfig =
+        toml::from_str(text).map_err(|error| invalid("jail", error.message().to_owned()))?;
+    if project
+        .jail
+        .as_ref()
+        .is_some_and(|j| !j.commands.is_empty())
+    {
+        return Err(invalid("jail.commands", "command rules are operator-only"));
+    }
+    Ok(project)
 }
 
 /// Builds the semantic delta of a policy file's body.

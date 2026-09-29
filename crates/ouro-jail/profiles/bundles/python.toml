@@ -1,0 +1,3 @@
+# Data-only cache mapping. Installation paths need explicit read-only grants.
+[environment]
+PIP_CACHE_DIR = { state = "cache/pip" }

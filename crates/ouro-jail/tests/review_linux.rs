@@ -19,6 +19,7 @@
 #![allow(clippy::too_many_lines)]
 
 use std::collections::BTreeSet;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -2944,6 +2945,7 @@ fn r9_all_descendants_coverage_refuses_on_linux() {
         "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n\n[filesystem]\nprotected_coverage = \"all_descendants\"\n",
     )
     .unwrap();
+    std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o600)).unwrap();
     let marker = c.workspace.join("target-ran");
     let run = c
         .jail

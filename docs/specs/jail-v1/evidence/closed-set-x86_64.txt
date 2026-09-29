@@ -4,7 +4,8 @@ filter the launcher installs (every verdict below is the program's own, run on
 that input)
 
 precondition                 verdict  meaning
-arch != 0xc000003e          TRACE    another ABI: stopped, labelled foreign, never decoded
+clone3 (nr 435 or x32|435)   ENOSYS  every ABI, before the architecture branch
+arch != 0xc000003e          TRACE    other calls: stopped, labelled foreign, never decoded
 nr & 0x40000000             TRACE    x32: stopped, labelled foreign, never decoded
 
 closed-set rows (a stop, then one result per return; EACCES or EPERM is
@@ -109,5 +110,5 @@ notes
   stop before the return was read, the call ran: entry_abandoned of its own
   classes.
 
-narrowing filter instructions: 36
-narrowing filter digest: sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66
+narrowing filter instructions: 39
+narrowing filter digest: sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181

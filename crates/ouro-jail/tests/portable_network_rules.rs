@@ -381,9 +381,9 @@ fn n03_idna_names_narrow_like_their_a_labels() {
 }
 
 #[test]
-fn n03_omitted_ports_mean_80_and_443_and_nondefault_ports_are_exact() {
+fn n03_omitted_ports_mean_443_and_nondefault_ports_are_exact() {
     let rules = rules(&["example.com", "api.example.com:8443"], &[]);
-    assert!(permits(&rules, "example.com:80"));
+    assert!(!permits(&rules, "example.com:80"));
     assert!(permits(&rules, "example.com:443"));
     assert!(!permits(&rules, "example.com:8443"));
     assert!(permits(&rules, "api.example.com:8443"));

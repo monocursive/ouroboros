@@ -1,0 +1,179 @@
+{
+  "scope": "Development VM rerun after removing invalid signal-zero probes; not production conformance",
+  "image": "ghcr.io/cirruslabs/macos-golden-gate-base@sha256:9a2f20d179d6418a128dcb76c593588ea85a263dbfa286e757db63f3d949af7c",
+  "tart": "2.38.0",
+  "vm": {
+    "name": "ouro-jail-es-dev",
+    "cpu": 4,
+    "memory_mib": 8192,
+    "ethernet_enabled": false,
+    "host_directory_shares": false,
+    "clipboard_sharing": false
+  },
+  "trials": 10,
+  "lifecycle_cases": 40,
+  "exploratory_probe_included_in_statistics": false,
+  "source_sha256": {
+    "source_sha256": "2b25c70d8d02c97f585cb66ddfb54d3d7fb064ab4851a185f57b56d6073e179d",
+    "runner_sha256": "ca7045ac876ebb343f99f7f1cfb541b00210b440d1841430c580a116beee530c",
+    "fixture_sha256": "dd3115297bbef8e827f75fecaf49b1e4e5fbac75c2318668b660f132a729a333",
+    "fixture_runner_sha256": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc"
+  },
+  "input_sha256": {
+    "trial-01.json": "045a84915c23f500a640b1dfb6c9223ca66bde5a5034280639f494d917449f64",
+    "trial-02.json": "1adf80a0600fbef835c8b0ce40101777e059a915cd5d9582f669c00f8ddd8537",
+    "trial-03.json": "7ffa6d4f5ac21d29486c8fb17737d48905ef3326aab682ff43fd61ead1fe941c",
+    "trial-04.json": "7b76c7b2bcdcd4b2a07b8c6398d586cc5c5707f3847ba0cd886a462730f02577",
+    "trial-05.json": "f7b1b41657fa54856b0da08f580d6431cd06e16d530486bafc71fd129ea012f9",
+    "trial-06.json": "f592ad140b25db9ebc0b74b9fb92c48d9bea8d05923dd45f25ae1fab9226104c",
+    "trial-07.json": "cfacfa294b84743f618be27c042394cd362a32ec299a770369ec007cfcdb5e82",
+    "trial-08.json": "d9025854b2cd6bb0c9cd9d60c973e0db0889da95093acccd65510a0ae7e6cd0b",
+    "trial-09.json": "ea495b7b1222f6ad51ca21b00c0219e8b59be25d4ea1753e6b62a4896bb72055",
+    "trial-10.json": "c040604c46cda7a92819383f9c9ccb1b1325e1639c13ea7cb5f0d29f5207bc0b"
+  },
+  "host_sip": "System Integrity Protection status: enabled.",
+  "fixture_cleanup_verified": true,
+  "lifetime_contract_verified": false,
+  "cases": {
+    "wall": {
+      "trials": 10,
+      "custodian_exit_zero": 10,
+      "integrity_refusals": 0,
+      "empty_before_runner_cleanup": 10,
+      "survivors_per_trial": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "readiness_ms": {
+        "n": 10,
+        "p50": 68.07810400000002,
+        "p95": 92.75504099999998,
+        "max": 92.75504099999998
+      },
+      "observation_ms": {
+        "n": 10,
+        "p50": 2143.4232295,
+        "p95": 2254.5867080000003,
+        "max": 2254.5867080000003
+      },
+      "termination_ms": {
+        "n": 10,
+        "p50": 1.2685,
+        "p95": 86.377,
+        "max": 86.377
+      }
+    },
+    "cancel": {
+      "trials": 10,
+      "custodian_exit_zero": 10,
+      "integrity_refusals": 0,
+      "empty_before_runner_cleanup": 10,
+      "survivors_per_trial": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "readiness_ms": {
+        "n": 10,
+        "p50": 39.05666650000006,
+        "p95": 104.44320899999981,
+        "max": 104.44320899999981
+      },
+      "observation_ms": {
+        "n": 10,
+        "p50": 25.620562500000332,
+        "p95": 27.26766699999983,
+        "max": 27.26766699999983
+      },
+      "termination_ms": {
+        "n": 10,
+        "p50": 0.846,
+        "p95": 0.968,
+        "max": 0.968
+      }
+    },
+    "supervisor_death": {
+      "trials": 10,
+      "custodian_exit_zero": 10,
+      "integrity_refusals": 0,
+      "empty_before_runner_cleanup": 10,
+      "survivors_per_trial": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "readiness_ms": {
+        "n": 10,
+        "p50": 67.73970849999999,
+        "p95": 94.47558299999992,
+        "max": 94.47558299999992
+      },
+      "observation_ms": {
+        "n": 10,
+        "p50": 2075.5063955000005,
+        "p95": 2155.410625,
+        "max": 2155.410625
+      },
+      "termination_ms": {
+        "n": 10,
+        "p50": 1.0105,
+        "p95": 72.263,
+        "max": 72.263
+      }
+    },
+    "custodian_death": {
+      "trials": 10,
+      "custodian_exit_zero": 0,
+      "integrity_refusals": 0,
+      "empty_before_runner_cleanup": 0,
+      "survivors_per_trial": [
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5
+      ],
+      "readiness_ms": {
+        "n": 10,
+        "p50": 48.279041499999835,
+        "p95": 96.2627920000001,
+        "max": 96.2627920000001
+      },
+      "observation_ms": {
+        "n": 10,
+        "p50": 2073.8079374999998,
+        "p95": 2151.1842500000002,
+        "max": 2151.1842500000002
+      },
+      "termination_ms": null
+    }
+  },
+  "fixture_tokens_correlated_with_es_and_exit_in_all_surviving_custodian_cases": true
+}

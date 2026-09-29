@@ -263,6 +263,9 @@ pub struct LimitsSnapshot {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationSnapshot {
+    /// Opt-in capture of read-only open attempts for candidate-policy learning.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub learning: bool,
     /// Requested observation mode.
     pub mode: ObserveMode,
     /// Requested evidence mode.
@@ -303,6 +306,9 @@ pub struct EnvironmentSnapshot {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialDecl {
+    /// HTTP credential policy for mode vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<crate::vault::Policy>,
     /// Unique logical id.
     pub id: String,
     /// Absolute native source path.
@@ -333,6 +339,9 @@ pub struct LaunchSnapshot {
 /// measurement, no attempt id and no chosen backend (canonicalization.md).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct PolicySnapshot {
+    /// Optional operator argv accident filters.
+    #[serde(skip_serializing_if = "crate::commands::Rules::is_empty")]
+    pub commands: crate::commands::Rules,
     /// Always [`SCHEMA_POLICY_SNAPSHOT`].
     pub schema: String,
     /// The base built-in profile.
@@ -1551,6 +1560,7 @@ fn build_snapshot(
     // into the digest.
     let proxy = authority.network_mode == NetworkMode::Proxy;
     Ok(PolicySnapshot {
+        commands: crate::commands::Rules::default(),
         schema: SCHEMA_POLICY_SNAPSHOT.to_owned(),
         profile: inputs.base_profile,
         profile_version: 1,
@@ -1654,6 +1664,10 @@ pub fn grant_exposes_pseudo_fs(
 }
 // J5-B1-w3 end
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1686,6 +1700,7 @@ mod tests {
             network_allow: Vec::new(),
             limits: Ceilings::default(),
             observation: ObservationSnapshot {
+                learning: false,
                 mode: ObserveMode::On,
                 evidence: EvidenceMode::Strict,
             },

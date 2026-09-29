@@ -1,0 +1,328 @@
+{
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": true,
+      "inputs": "sha256:b875989505499065d70e903736987a9f3c91d195d56cee3463d92c4ac8163611",
+      "opt_level": "3",
+      "revision": "2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "x86_64",
+      "kernel": "Linux 7.0.0-31-generic",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "results": [
+    {
+      "case": "compat_clone3_none",
+      "code": 0,
+      "stdout": "parent: clone3 returned 4294967258; waiting for untraced child\n",
+      "stderr": "",
+      "receipt": "acceptance/01-compat_clone3_none.json"
+    },
+    {
+      "case": "compat_clone3_tool",
+      "code": 0,
+      "stdout": "parent: clone3 returned 4294967258; waiting for untraced child\n",
+      "stderr": "",
+      "receipt": "acceptance/02-compat_clone3_tool.json"
+    },
+    {
+      "case": "compat_clone3_agent",
+      "code": 0,
+      "stdout": "parent: clone3 returned 4294967258; waiting for untraced child\n",
+      "stderr": "",
+      "receipt": "acceptance/03-compat_clone3_agent.json"
+    },
+    {
+      "case": "x32_clone3_none",
+      "code": 0,
+      "stdout": "x32 clone3 errno=38\n",
+      "stderr": "",
+      "receipt": "acceptance/04-x32_clone3_none.json"
+    },
+    {
+      "case": "x32_clone3_tool",
+      "code": 0,
+      "stdout": "x32 clone3 errno=38\n",
+      "stderr": "",
+      "receipt": "acceptance/05-x32_clone3_tool.json"
+    },
+    {
+      "case": "x32_clone3_agent",
+      "code": 0,
+      "stdout": "x32 clone3 errno=38\n",
+      "stderr": "",
+      "receipt": "acceptance/06-x32_clone3_agent.json"
+    },
+    {
+      "case": "compat_clone3_unobserved_tool",
+      "code": 1,
+      "stdout": "parent: clone3 returned 4294967295; waiting for untraced child\n",
+      "stderr": "ouro-jail: error exec_unconfirmed at running [configuration]: with observation off the target's exec could not be confirmed: it ended before the supervisor saw its new image, so whether it ran is unknown; run with --observe on to confirm it\n",
+      "exec_confirmation": "unconfirmed; syscall result observed in fixture stdout",
+      "receipt": "acceptance/07-compat_clone3_unobserved_tool.json"
+    },
+    {
+      "case": "compat_clone3_unobserved_agent",
+      "code": 1,
+      "stdout": "parent: clone3 returned 4294967295; waiting for untraced child\n",
+      "stderr": "ouro-jail: error exec_unconfirmed at running [configuration]: with observation off the target's exec could not be confirmed: it ended before the supervisor saw its new image, so whether it ran is unknown; run with --observe on to confirm it\n",
+      "exec_confirmation": "unconfirmed; syscall result observed in fixture stdout",
+      "receipt": "acceptance/08-compat_clone3_unobserved_agent.json"
+    },
+    {
+      "case": "kernel_surface_denied",
+      "code": 0,
+      "stdout": "settimeofday             nr=164  -> ret=-1 errno=1 (Operation not permitted)\nfanotify_init            nr=300  -> ret=-1 errno=1 (Operation not permitted)\nmemfd_secret             nr=447  -> ret=3 errno=0 (ok)\nmap_shadow_stack         nr=453  -> ret=-1 errno=95 (Operation not supported)\nsetxattrat               nr=463  -> ret=-1 errno=1 (Operation not permitted)\ngetxattrat               nr=464  -> ret=-1 errno=1 (Operation not permitted)\nopen_tree_attr           nr=467  -> ret=-1 errno=1 (Operation not permitted)\nfile_getattr             nr=468  -> ret=-1 errno=1 (Operation not permitted)\nlistns                   nr=470  -> ret=-1 errno=1 (Operation not permitted)\nrseq_slice_yield         nr=471  -> ret=-1 errno=38 (Function not implemented)\ntarget /home/ubuntu/.ouro-acceptance-tq99xqv2/probe-readonly fd=4\nfile_setattr(ro fd) -> ret=-1 errno=1 (Operation not permitted)\n  mode after: 100600 mtime=1790669564\nchmod(ro target) -> ret=-1 errno=30 (Read-only file system)\n",
+      "stderr": "",
+      "receipt": "acceptance/09-kernel_surface_denied.json"
+    },
+    {
+      "case": "writable_binary_root_refused",
+      "code": 125,
+      "stdout": "",
+      "stderr": "ouro-jail: error unsafe_state_path at resolving [configuration]: writable child root /home/ubuntu/ouroboros/target/release exposes executable /home/ubuntu/ouroboros/target/release/ouro-jail (key: binaries)\n"
+    },
+    {
+      "case": "writable_binary_root_refused",
+      "code": 125,
+      "stdout": "",
+      "stderr": "ouro-jail: error unsafe_state_path at resolving [configuration]: writable child root /usr/bin exposes executable /usr/bin/bwrap (key: binaries)\n"
+    },
+    {
+      "case": "pseudo_fs_workspace_refused",
+      "code": 125,
+      "stdout": "",
+      "stderr": "ouro-jail: error policy_widening at preparing [configuration]: the grant /dev/shm exposes host /proc, /sys, cgroupfs, devtmpfs or the /run runtime tree, which a contained profile never binds (jail-v1 \u00a79.1) (key: workspace)\n",
+      "receipt": "acceptance/12-pseudo_fs_workspace_refused.json"
+    },
+    {
+      "case": "profile_fifo_refused",
+      "code": 2,
+      "stdout": "",
+      "stderr": "ouro-jail: error invalid_config at resolving [configuration]: /home/ubuntu/.ouro-acceptance-tq99xqv2/profile-fifo is not a regular file (key: --profile)\n"
+    },
+    {
+      "case": "profile_symlink_refused",
+      "code": 2,
+      "stdout": "",
+      "stderr": "ouro-jail: error invalid_config at resolving [configuration]: /home/ubuntu/.ouro-acceptance-tq99xqv2/profile-link: Too many levels of symbolic links (os error 40) (key: --profile)\n"
+    },
+    {
+      "case": "profile_oversize_refused",
+      "code": 2,
+      "stdout": "",
+      "stderr": "ouro-jail: error invalid_config at resolving [configuration]: /home/ubuntu/.ouro-acceptance-tq99xqv2/profile-huge is 262145 bytes; the maximum is 262144 (key: --profile)\n"
+    },
+    {
+      "case": "command_deny",
+      "code": 0,
+      "stdout": "continued",
+      "stderr": "/bin/sh: 1: touch: Operation not permitted\n",
+      "receipt": "acceptance/16-command_deny.json"
+    },
+    {
+      "case": "command_forbid",
+      "code": 1,
+      "stdout": "",
+      "stderr": "/bin/sh: 1: touch: Operation not permitted\nouro-jail: error command_forbidden at running [configuration]: command matched forbidden pattern: touch forbidden\n",
+      "receipt": "acceptance/17-command_forbid.json"
+    },
+    {
+      "case": "root_exec_denied",
+      "code": 125,
+      "stdout": "",
+      "stderr": "ouro-jail: error exec_failed at released [configuration]: the target exec failed with EPERM\n",
+      "receipt": "acceptance/18-root_exec_denied.json"
+    },
+    {
+      "case": "command_rules_are_not_an_effect_boundary",
+      "code": 0,
+      "stdout": "",
+      "stderr": "",
+      "receipt": "acceptance/19-command_rules_are_not_an_effect_boundary.json"
+    },
+    {
+      "case": "none_refuses_trusted_config",
+      "code": 125,
+      "stdout": "",
+      "stderr": "ouro-jail: error unsafe_config_path at resolving [configuration]: an uncontained child can change trusted configuration: /home/ubuntu/.ouro-acceptance-tq99xqv2/config/config.toml; move it aside or run contained (key: OURO_CONFIG_DIR)\n"
+    },
+    {
+      "case": "learning_exact_existing_object",
+      "code": 1,
+      "stdout": "",
+      "stderr": "candidate policy: /home/ubuntu/.ouro-acceptance-tq99xqv2/proposal.toml (1 exact paths, 0 destinations)\n",
+      "receipt": "acceptance/21-learning_exact_existing_object.json"
+    },
+    {
+      "case": "learning_exact_directory",
+      "code": 1,
+      "stdout": "",
+      "stderr": "candidate policy: /home/ubuntu/.ouro-acceptance-tq99xqv2/directory.toml (1 exact paths, 0 destinations)\n",
+      "receipt": "acceptance/22-learning_exact_directory.json"
+    },
+    {
+      "case": "learning_two_denied_hosts",
+      "code": 0,
+      "stdout": "",
+      "stderr": "curl: (22) The requested URL returned error: 403\ncurl: (22) The requested URL returned error: 403\ncandidate policy: /home/ubuntu/.ouro-acceptance-tq99xqv2/hosts.toml (1 exact paths, 2 destinations)\n",
+      "receipt": "acceptance/23-learning_two_denied_hosts.json"
+    },
+    {
+      "case": "learning_denied_write_never_granted",
+      "code": 1,
+      "stdout": "",
+      "stderr": "candidate policy: /home/ubuntu/.ouro-acceptance-tq99xqv2/writes.toml (0 exact paths, 0 destinations)\n",
+      "receipt": "acceptance/24-learning_denied_write_never_granted.json"
+    },
+    {
+      "case": "adoption_requires_tty"
+    },
+    {
+      "case": "adopted_exact_read_applies",
+      "code": 0,
+      "stdout": "",
+      "stderr": "",
+      "receipt": "acceptance/26-adopted_exact_read_applies.json"
+    },
+    {
+      "case": "settled_tail_byte_equality",
+      "bytes": 3038
+    },
+    {
+      "case": "live_tail_byte_equality",
+      "bytes": 4196
+    },
+    {
+      "case": "http_vault_live",
+      "code": 0,
+      "stdout": "vault:att_9440f3f0-6476-4c30-b8c9-fc9ea1aa1d50:api\nvault-ok",
+      "stderr": "",
+      "receipt": "acceptance/29-http_vault_live.json"
+    },
+    {
+      "case": "vault_vendor_state_removed"
+    },
+    {
+      "case": "https_vault_real_chain",
+      "code": 0,
+      "stdout": "",
+      "stderr": "",
+      "receipt": "acceptance/31-https_vault_real_chain.json"
+    },
+    {
+      "case": "socks5_real_tls",
+      "code": 0,
+      "stdout": "",
+      "stderr": "",
+      "receipt": "acceptance/32-socks5_real_tls.json"
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "codex",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "claude",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "opencode",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "cursor",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "aider",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "goose",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "gemini",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "amp",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "cline",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "copilot",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "kilo",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "auggie",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "droid",
+      "code": 0,
+      "ready": true
+    },
+    {
+      "case": "bundled_doctor",
+      "name": "pi",
+      "code": 0,
+      "ready": true
+    }
+  ]
+}

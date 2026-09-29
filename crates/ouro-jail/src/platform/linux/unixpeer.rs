@@ -269,6 +269,11 @@ impl MediationSink for CollectingSink {
 
 #[cfg(target_os = "linux")]
 mod live;
+
+/// Identity lookup shared by mediation and stopped-exec evidence.
+pub(super) fn path_identity(pid: libc::pid_t, path: &[u8]) -> std::io::Result<(u64, u64)> {
+    live::path_identity(pid, path)
+}
 #[cfg(target_os = "linux")]
 pub use live::{
     FLAG_NEW_LISTENER, FLAG_WAIT_KILLABLE_RECV, LauncherFds, LauncherSetup, MediatorHandle,

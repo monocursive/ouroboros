@@ -502,6 +502,12 @@ fn startup_supervisor_helper() {
     let (start_r, start_w) = exec::pipe().unwrap();
     let mut fds = exec::FdMap::new();
     fds.add(start_r, watch::START_FD).unwrap();
+    // The private bootstrap executes a pinned fd, never the argv pathname.
+    fds.add(
+        std::fs::File::open("/usr/bin/python3").unwrap().into(),
+        watch::BACKEND_FD,
+    )
+    .unwrap();
     let code = format!(
         "import ctypes,time; ctypes.CDLL(None).prctl(1,0,0,0,0); open({:?},'w').close(); time.sleep(30)",
         root.join("cleared").to_str().unwrap()

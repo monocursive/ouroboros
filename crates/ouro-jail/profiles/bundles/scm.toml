@@ -1,0 +1,3 @@
+# Data-only cache mapping. Installation paths need explicit read-only grants.
+[environment]
+GIT_CONFIG_GLOBAL = { state = "config/gitconfig" }

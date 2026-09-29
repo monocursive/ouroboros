@@ -1224,13 +1224,14 @@ fn i02_launch_reads_only_the_operators_configuration() {
             ..PolicyArgs::default()
         }
     };
-    let error = refuses(files.plan(&args), ErrorCode::InvalidConfig, "--launch");
+    let plan = files
+        .plan(&args)
+        .expect("embedded fallback resolves, ignoring decoys");
     assert!(
-        error
-            .message
-            .contains(&files.config.join("launch").display().to_string()),
-        "the refusal names the operator's launch directory: {}",
-        error.message
+        plan.resolved
+            .provenance
+            .iter()
+            .any(|p| p.key == "launch.resolution" && p.detail.as_deref() == Some("bundled"))
     );
     files.launch("opencode", &bundled);
     let plan = files.plan(&args).expect("the operator's own file resolves");

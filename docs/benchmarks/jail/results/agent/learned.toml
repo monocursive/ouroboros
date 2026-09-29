@@ -1,0 +1,123 @@
+schema = "ouro.jail.learned-policy/1"
+warning = "Candidate grants from one untrusted run, not a statement of all program needs. Review every grant. Read paths are argument snapshots, not kernel-resolved identities."
+read_only = []
+network_allow = []
+denied_writes = []
+unresolved_reads = [
+    "/$bunfs/locales/en_US.json",
+    "/$bunfs/npmrc",
+    "/$bunfs/root/src/index.js",
+    "/System/Library/OpenSSL/certs",
+    "/etc/gitattributes",
+    "/etc/openssl/certs",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/pki/tls/cert.pem",
+    "/etc/pki/tls/certs",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/7cd4d591.0",
+    "/etc/ssl/certs/919ba934.0",
+    "/home/ubuntu/.opencode/etc/npmrc",
+    "/sys/devices/system/cpu/online",
+    "/sys/fs/cgroup//cpu.max",
+    "/sys/fs/cgroup//memory.high",
+    "/sys/fs/cgroup//memory.max",
+    "/sys/fs/cgroup/cpu.max",
+    "/sys/fs/cgroup/memory.high",
+    "/sys/fs/cgroup/memory.max",
+    "/sys/kernel/mm/transparent_hugepage/enabled",
+    "/usr/local/etc/openssl/cert.pem",
+    "/usr/local/etc/openssl/certs",
+    "/usr/local/share/ca-certificates/ca-certificates.crt",
+    "/usr/local/share/certs",
+    "/usr/share/git-core/templates/config",
+    "/var/ssl/certs",
+]
+execs = [
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:e8a554799edfb275bc7c8feb0aec39512182eb4c2407aebc1c0b9b924e1dde1f","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604249,"pid_start_ticks":57774594,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604270,"pid_start_ticks":57774715,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604272,"pid_start_ticks":57774717,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604275,"pid_start_ticks":57774718,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604277,"pid_start_ticks":57774719,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604278,"pid_start_ticks":57774719,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604281,"pid_start_ticks":57774775,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604282,"pid_start_ticks":57774775,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604283,"pid_start_ticks":57774780,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604284,"pid_start_ticks":57774836,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604290,"pid_start_ticks":57774852,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604292,"pid_start_ticks":57774854,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604293,"pid_start_ticks":57774855,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604294,"pid_start_ticks":57774856,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604295,"pid_start_ticks":57774857,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604296,"pid_start_ticks":57774858,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604297,"pid_start_ticks":57774859,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604298,"pid_start_ticks":57774860,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604299,"pid_start_ticks":57774861,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604300,"pid_start_ticks":57774862,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604301,"pid_start_ticks":57774863,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604302,"pid_start_ticks":57774864,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604303,"pid_start_ticks":57774864,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604304,"pid_start_ticks":57774865,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604305,"pid_start_ticks":57774869,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604306,"pid_start_ticks":57774870,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604307,"pid_start_ticks":57774871,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604308,"pid_start_ticks":57774872,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604309,"pid_start_ticks":57774872,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604319,"pid_start_ticks":57774880,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604320,"pid_start_ticks":57774882,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604321,"pid_start_ticks":57774884,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604324,"pid_start_ticks":57774927,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604325,"pid_start_ticks":57774928,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604326,"pid_start_ticks":57774928,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604333,"pid_start_ticks":57775096,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604334,"pid_start_ticks":57775098,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604335,"pid_start_ticks":57775098,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604336,"pid_start_ticks":57775099,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604337,"pid_start_ticks":57775100,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604338,"pid_start_ticks":57775101,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604339,"pid_start_ticks":57775102,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604340,"pid_start_ticks":57775104,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604341,"pid_start_ticks":57775105,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604342,"pid_start_ticks":57775106,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604343,"pid_start_ticks":57775107,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604344,"pid_start_ticks":57775107,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604345,"pid_start_ticks":57775110,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604346,"pid_start_ticks":57775112,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604347,"pid_start_ticks":57775112,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604348,"pid_start_ticks":57775113,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604349,"pid_start_ticks":57775115,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604350,"pid_start_ticks":57775117,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604351,"pid_start_ticks":57775119,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604352,"pid_start_ticks":57775119,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604359,"pid_start_ticks":57775243,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604360,"pid_start_ticks":57775246,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604361,"pid_start_ticks":57775246,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604362,"pid_start_ticks":57775246,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604363,"pid_start_ticks":57775248,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604364,"pid_start_ticks":57775250,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604365,"pid_start_ticks":57775250,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604366,"pid_start_ticks":57775253,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604367,"pid_start_ticks":57775257,"syscall":"execve"}',
+    '{"argv_digest":null,"argv_digest_reason":"descendant_argv_not_captured","path":{"digest":"sha256:106aa88494971ea56c867f371d12746ef6ce5f5bd4f73b857235642caeb88363","kind":"digest","reason":"outside_known_roots"},"path_basis":"argument_snapshot","path_complete":true,"pid":2604368,"pid_start_ticks":57775259,"syscall":"execve"}',
+]
+
+[provenance]
+attempt = "att_a85eb16d-f9b7-4f9b-94fa-b9762bf3f73d"
+receipt_digest = "sha256:4cb5fffa9acc53c15d2614765e5c66f1f67993f7e04e6e77434f983fa8f5d489"
+revision = "2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa"
+build_inputs = "sha256:fa366f0c82364e99146c6a65573709799830f1904b026ed20f4b060ca31db501"
+coverage_json = '{"exec":{"gaps":[],"observed_count":130,"sources":["audit"],"status":"active"},"fs.deny":{"gaps":[],"observed_count":0,"sources":["audit"],"status":"active"},"fs.write":{"gaps":[],"observed_count":589,"sources":["audit"],"status":"active"},"limits":{"gaps":[],"observed_count":0,"sources":["wrapper"],"status":"active"},"net":{"gaps":[],"observed_count":6,"sources":["audit"],"status":"active"},"proxy.net":{"gaps":[],"observed_count":6,"sources":["proxy"],"status":"active"}}'
+
+[provenance.event_counts]
+"fs.create" = 435
+"fs.rename" = 49
+"fs.unlink" = 40
+"fs.write" = 65
+"jail.receipt" = 4
+"net.connect" = 12
+note = 1101
+"proc.exec" = 65
+"proc.exit" = 65
+
+[provenance.evidence]

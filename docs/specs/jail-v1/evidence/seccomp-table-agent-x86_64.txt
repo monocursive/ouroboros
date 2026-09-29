@@ -52,6 +52,15 @@ quotactl_fd            443    EPERM
 adjtimex               159    EPERM
 clock_settime          227    EPERM
 clock_adjtime          305    EPERM
+settimeofday           164    EPERM
+setxattrat             463    EPERM
+getxattrat             464    EPERM
+listxattrat            465    EPERM
+removexattrat          466    EPERM
+open_tree_attr         467    EPERM
+file_getattr           468    EPERM
+file_setattr           469    EPERM
+listns                 470    EPERM
 clone3                 435    ENOSYS  (argument struct not inspectable)
 clone                  56     EPERM when args[0] & 0x00800000 != 0 (CLONE_UNTRACED)
 clone                  56     EPERM when args[0] & 0x7e020080 != 0
@@ -67,8 +76,8 @@ socket, socketpair     41,53  ALLOW when args[0] in {1 (AF_UNIX, restricted by t
 
 everything else        ALLOW
 
-instructions: 77
-digest: sha256:23259f574de456dd164cb073b63354f0f6562ffa0d9903098c86a51337e41f54
+instructions: 86
+digest: sha256:fff8ebe22bc6f99c511d6526913125c3d4227d9ef08b6f4f5f18bdf30a5d948a
 
 mediation filter (installed by the launcher with its own listener)
 connect                42     USER_NOTIF

@@ -1,0 +1,7 @@
+en0: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+	options=463<RXCSUM,TXCSUM,TSO4,TSO6,CHANNEL_IO>
+	ether e6:25:86:0f:90:4d
+	nd6 options=201<PERFORMNUD,DAD>
+	media: autoselect <full-duplex,flow-control>
+	status: inactive
+route: writing to routing socket: not in table

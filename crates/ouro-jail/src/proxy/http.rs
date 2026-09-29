@@ -24,6 +24,12 @@ pub struct Head {
 }
 
 impl Head {
+    pub(crate) fn empty() -> Self {
+        Self {
+            buf: Vec::new(),
+            end: 0,
+        }
+    }
     /// The head, ending with its CRLF CRLF.
     #[must_use]
     pub fn head(&self) -> &[u8] {
@@ -157,6 +163,15 @@ pub struct Request {
     pub forward_head: Vec<u8>,
 }
 
+impl Drop for Request {
+    fn drop(&mut self) {
+        // Vault substitution can put a credential here. Wipe on every exit,
+        // including failed connects and TLS handshakes.
+        use zeroize::Zeroize as _;
+        self.forward_head.zeroize();
+    }
+}
+
 impl Request {
     /// CONNECT or plain HTTP.
     #[must_use]
@@ -219,6 +234,10 @@ fn authority_text(bytes: &[u8]) -> Result<&str, Reason> {
 /// A safe [`Reason`]: `malformed_request`, `ambiguous_framing`,
 /// `host_mismatch` or `unsupported_request`.
 pub fn parse_request(head: &[u8]) -> Result<Request, Reason> {
+    parse_request_with_port(head, 80)
+}
+
+pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<Request, Reason> {
     // The same line-ending checks `read_head` applies, so this function is
     // safe on bytes that did not come through it: exactly one CRLF CRLF, at
     // the end, and no bare CR, bare LF or NUL anywhere.
@@ -376,11 +395,11 @@ pub fn parse_request(head: &[u8]) -> Result<Request, Reason> {
     if !path.iter().all(|&b| (0x21..0x7f).contains(&b)) {
         return Err(Reason::MalformedRequest);
     }
-    let destination = parse_authority(authority_text(authority)?, Some(80))
+    let destination = parse_authority(authority_text(authority)?, Some(default_port))
         .map_err(|_| Reason::MalformedRequest)?;
     match hosts.first() {
         Some(host) => {
-            let stated = parse_authority(authority_text(host.value)?, Some(80))
+            let stated = parse_authority(authority_text(host.value)?, Some(default_port))
                 .map_err(|_| Reason::HostMismatch)?;
             if stated != destination {
                 return Err(Reason::HostMismatch);
@@ -475,7 +494,7 @@ mod tests {
         )
         .expect("parses");
         assert_eq!(
-            String::from_utf8(request.forward_head).expect("ASCII"),
+            std::str::from_utf8(&request.forward_head).expect("ASCII"),
             "GET /a?b HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nConnection: close\r\n\r\n"
         );
     }

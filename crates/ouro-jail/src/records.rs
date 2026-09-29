@@ -41,6 +41,8 @@ pub const SCHEMA_POLICY_FILE: &str = "ouro.jail.policy-file/1";
 pub const SCHEMA_GATE: &str = "ouro.jail.gate/1";
 /// `ouro.jail.control/1`: the control-channel NDJSON message (§8.2).
 pub const SCHEMA_CONTROL: &str = "ouro.jail.control/1";
+/// Candidate policy output, never implicitly loaded as trusted configuration.
+pub const SCHEMA_LEARNED_POLICY: &str = "ouro.jail.learned-policy/1";
 /// `ouro.jail.network/1`: the host-rule set (`network-rules.md`).
 pub const SCHEMA_NETWORK: &str = "ouro.jail.network/1";
 /// `linux-closed-v1`: the observed operation set (§11.2).
@@ -297,6 +299,8 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    /// An operator command forbid rule matched.
+    CommandForbidden,
     /// Invalid CLI or configuration syntax, or a forbidden value.
     InvalidConfig,
     /// A narrowing file widened the authority it inherits (§6.3).
@@ -357,6 +361,7 @@ impl ErrorCode {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            ErrorCode::CommandForbidden => "command_forbidden",
             ErrorCode::InvalidConfig => "invalid_config",
             ErrorCode::PolicyWidening => "policy_widening",
             ErrorCode::UnsafeStatePath => "unsafe_state_path",
@@ -506,20 +511,18 @@ impl JailError {
         exit_code_for(self.code)
     }
 
-    // J4-R begin: S5, a persistence failure before exec is a refusal
     /// The process exit status for this error when it ends an attempt before
     /// the target executed (§6.4: "125 for refusal before user exec").
     ///
-    /// J4 decision S5: failed or ambiguous persistence before exec refuses
-    /// (§7), so `state_write_failed` exits 125 there, like every other
-    /// refusal; after exec the same code is a tool error and [`exit_code`]
-    /// (1) applies. Every other code keeps its own status.
+    /// Failed persistence or an internal setup error refuses before exec with
+    /// 125. After exec these are tool failures and [`exit_code`] (1) applies.
+    /// Other codes keep their status, including 2 for invalid configuration.
     ///
     /// [`exit_code`]: JailError::exit_code
     #[must_use]
     pub fn refusal_exit_code(&self) -> i32 {
         match self.code {
-            ErrorCode::StateWriteFailed => 125,
+            ErrorCode::StateWriteFailed | ErrorCode::InternalError => 125,
             _ => self.exit_code(),
         }
     }
@@ -665,7 +668,8 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
         | ErrorCode::ExecFailed
         // J5-B1: X04
         | ErrorCode::ExecInterpreterMissing => 125,
-        ErrorCode::EvidenceLost
+        ErrorCode::CommandForbidden
+        | ErrorCode::EvidenceLost
         | ErrorCode::TreeUnknown
         // J5-B1: §6.4
         | ErrorCode::ExecUnconfirmed
@@ -1174,6 +1178,9 @@ pub enum StateCleanup {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialRecord {
+    /// Vault secrets never enter the child filesystem.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub never_staged: bool,
     /// Unique logical id.
     pub id: String,
     /// `copy_rw` or `bind_ro`.

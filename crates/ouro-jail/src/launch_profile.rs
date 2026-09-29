@@ -137,6 +137,10 @@ pub fn valid_credential_id(id: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchFile {
+    #[serde(default)]
+    bundles: Vec<String>,
+    #[serde(default)]
+    filesystem: crate::config::FilesystemSection,
     name: String,
     jail: String,
     state_var: Option<String>,
@@ -168,7 +172,12 @@ struct StateReference {
 #[serde(deny_unknown_fields)]
 struct CredentialEntry {
     source: String,
+    #[serde(default)]
     dest: String,
+    #[serde(default)]
+    hosts: Vec<String>,
+    #[serde(default)]
+    allow_plaintext: bool,
     mode: String,
 }
 
@@ -184,6 +193,12 @@ struct LaunchNetwork {
 pub struct LaunchProfile {
     /// The profile name, equal to the file stem.
     pub name: String,
+    /// Embedded data or an explicitly loaded operator file.
+    pub resolution: String,
+    /// Data-only fragments included in this profile.
+    pub bundles: Vec<String>,
+    /// Explicit filesystem additions from the profile and fragments.
+    pub filesystem: crate::config::FilesystemSection,
     /// The default contained jail.
     pub jail: ProfileName,
     /// The variable pointed at vendor state, if any.
@@ -325,8 +340,66 @@ pub fn parse(
     base_dir: &[u8],
     home: Option<&[u8]>,
 ) -> Result<LaunchProfile, JailError> {
-    let file: LaunchFile = toml::from_str(text)
+    let mut file: LaunchFile = toml::from_str(text)
         .map_err(|error| invalid("launch", format!("launch profile: {}", error.message())))?;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Fragment {
+        #[serde(default)]
+        environment: BTreeMap<String, EnvEntry>,
+        #[serde(default)]
+        filesystem: crate::config::FilesystemSection,
+        network: Option<LaunchNetwork>,
+    }
+    let mut fragments = BTreeSet::new();
+    for name in &file.bundles {
+        if !fragments.insert(name.clone()) {
+            return Err(invalid("launch.bundles", "duplicate fragment"));
+        }
+        let source = bundled_fragment(name)
+            .ok_or_else(|| invalid("launch.bundles", format!("unknown fragment: {name}")))?;
+        let fragment: Fragment =
+            toml::from_str(source).map_err(|e| invalid("launch.bundles", e.to_string()))?;
+        for (key, value) in fragment.environment {
+            if file.environment.insert(key.clone(), value).is_some() {
+                return Err(invalid(
+                    "launch.bundles",
+                    format!("conflicting environment binding: {key}"),
+                ));
+            }
+        }
+        if fragment.filesystem.protected_coverage.is_some()
+            || !fragment.filesystem.deny_read.is_empty()
+        {
+            return Err(invalid(
+                "launch.bundles",
+                "fragments contribute grants only",
+            ));
+        }
+        file.filesystem
+            .read_only
+            .extend(fragment.filesystem.read_only);
+        file.filesystem
+            .read_write
+            .extend(fragment.filesystem.read_write);
+        if let Some(network) = fragment.network {
+            file.network
+                .get_or_insert(LaunchNetwork { allow: Vec::new() })
+                .allow
+                .extend(network.allow);
+        }
+    }
+    if file
+        .filesystem
+        .read_only
+        .iter()
+        .any(|path| file.filesystem.read_write.contains(path))
+    {
+        return Err(invalid(
+            "launch.filesystem",
+            "conflicting read-only and writable grants",
+        ));
+    }
     if file.name != expected_name {
         return Err(invalid(
             "launch.name",
@@ -425,18 +498,46 @@ pub fn parse(
 
     let mut credentials: Vec<CredentialDecl> = Vec::new();
     let mut destinations: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
+    let mut vault_names = std::collections::BTreeSet::new();
     for (id, entry) in &file.credentials {
         let key = format!("launch.credentials.{id}");
         if !valid_credential_id(id) {
             return Err(invalid(&key, format!("`{id}` is not a credential id")));
         }
-        if entry.mode != "copy_rw" && entry.mode != "bind_ro" {
+        if entry.mode != "copy_rw" && entry.mode != "bind_ro" && entry.mode != "vault" {
             return Err(invalid(
                 format!("{key}.mode"),
-                format!("`{}` is neither `copy_rw` nor `bind_ro`", entry.mode),
+                format!("`{}` is not `copy_rw`, `bind_ro` or `vault`", entry.mode),
             ));
         }
-        let dest = relative_components(&entry.dest, &format!("{key}.dest"), false)?;
+        let vault = if entry.mode == "vault" {
+            if !vault_names.insert(id.to_ascii_uppercase().replace(['.', '-'], "_")) {
+                return Err(invalid(
+                    &key,
+                    "vault ids collide as environment variable names",
+                ));
+            }
+            if !entry.dest.is_empty() {
+                return Err(invalid(&key, "vault credentials have no destination file"));
+            }
+            let policy = crate::vault::Policy {
+                hosts: entry.hosts.clone(),
+                allow_plaintext: entry.allow_plaintext,
+            };
+            policy.validate().map_err(|e| invalid(&key, e))?;
+            Some(policy)
+        } else {
+            if !entry.hosts.is_empty() || entry.allow_plaintext {
+                return Err(invalid(&key, "hosts/allow_plaintext require vault mode"));
+            }
+            None
+        };
+        let destination = if vault.is_some() {
+            format!(".vault-{id}")
+        } else {
+            entry.dest.clone()
+        };
+        let dest = relative_components(&destination, &format!("{key}.dest"), false)?;
         for (other, other_dest) in &destinations {
             if is_prefix(other_dest, &dest) || is_prefix(&dest, other_dest) {
                 return Err(invalid(
@@ -482,13 +583,17 @@ pub fn parse(
         credentials.push(CredentialDecl {
             id: id.clone(),
             source: native(source, &source_key)?,
-            dest: NativeString::Text(entry.dest.clone()),
+            dest: NativeString::Text(destination),
+            vault,
             mode: entry.mode.clone(),
         });
     }
 
     Ok(LaunchProfile {
         name: file.name,
+        resolution: "operator file".into(),
+        bundles: file.bundles,
+        filesystem: file.filesystem,
         jail,
         state_var,
         home_is_state: file.home_is_state,
@@ -543,6 +648,23 @@ pub fn load(
         return Err(unsafe_launch(format!(
             "`{name}` is not a launch profile name ([a-z][a-z0-9_-]{{0,63}})"
         )));
+    }
+    let operator_path = launch_directory(config_dir).join(format!("{name}.toml"));
+    match operator_path.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(text) = bundled_profile(name) {
+                let mut profile = parse(
+                    text,
+                    name,
+                    config_dir.as_os_str().as_bytes(),
+                    home.map(|h| h.as_os_str().as_bytes()),
+                )?;
+                profile.resolution = "bundled".into();
+                return Ok(profile);
+            }
+        }
+        Err(e) => return Err(unsafe_launch(e.to_string())),
+        Ok(_) => {}
     }
     let directory = launch_directory(config_dir);
     let directory = std::fs::canonicalize(&directory).map_err(|error| {
@@ -738,7 +860,10 @@ pub fn check_jail_permits(base: ProfileName, launch: &LaunchProfile) -> Result<(
 /// The §6.2 step-2 layer: the launch profile's allowed hosts.
 #[must_use]
 pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
-    if launch.network_allow.is_empty() {
+    if launch.network_allow.is_empty()
+        && launch.filesystem.read_only.is_empty()
+        && launch.filesystem.read_write.is_empty()
+    {
         return None;
     }
     Some(Layer {
@@ -750,6 +875,18 @@ pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
         key_prefix: "launch.".to_owned(),
         narrowing: false,
         delta: PolicyDelta {
+            read_only: launch
+                .filesystem
+                .read_only
+                .iter()
+                .map(|p| p.as_bytes().to_vec())
+                .collect(),
+            read_write: launch
+                .filesystem
+                .read_write
+                .iter()
+                .map(|p| p.as_bytes().to_vec())
+                .collect(),
             network_allow: launch.network_allow.clone(),
             network_allow_present: true,
             ..PolicyDelta::default()
@@ -771,6 +908,24 @@ pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
 /// canonicalization errors of the snapshot digest.
 pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved, JailError> {
     let origin = format!("launch-profile:{}", launch.name);
+    resolved.provenance.push(ProvenanceEntry {
+        origin: origin.clone(),
+        key: "launch.resolution".into(),
+        detail: Some(
+            if launch.resolution == "operator file" && bundled_profile(&launch.name).is_some() {
+                "operator file (shadows bundled)".into()
+            } else {
+                launch.resolution.clone()
+            },
+        ),
+    });
+    for bundle in &launch.bundles {
+        resolved.provenance.push(ProvenanceEntry {
+            origin: origin.clone(),
+            key: "launch.bundles".into(),
+            detail: Some(bundle.clone()),
+        });
+    }
     let snapshot = &mut resolved.snapshot;
     let vendor_root = PathRef {
         root: RootToken::VendorState,
@@ -856,6 +1011,9 @@ pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved,
 /// # Errors
 /// [`ErrorCode::InvalidConfig`] at key `--launch`.
 pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Result<(), JailError> {
+    if launch.resolution == "bundled" {
+        return Ok(());
+    }
     let forbidden = crate::state::mount_alias::forbidden_identities(roots)
         .map_err(|error| unsafe_launch(format!("writable grants cannot be inspected: {error}")))?;
     for root in roots {
@@ -884,6 +1042,11 @@ pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Resu
     }
     Ok(())
 }
+
+#[path = "../profiles/embedded.rs"]
+mod embedded;
+use embedded::bundled_fragment;
+pub use embedded::bundled_profile;
 
 #[cfg(test)]
 mod tests {

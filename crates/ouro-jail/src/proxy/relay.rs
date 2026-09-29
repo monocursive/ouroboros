@@ -25,7 +25,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
 
 use super::EndReason;
 use super::http::Framing;
@@ -154,7 +153,6 @@ pub(super) fn tunnel(
     upstream: &Arc<TcpStream>,
     early: &[u8],
     chunk: usize,
-    reply_budget: Duration,
 ) -> Result<RelayOutcome, SetupFailed> {
     let first = FirstEnd::default();
     let finished = Arc::new(AtomicBool::new(false));
@@ -186,22 +184,6 @@ pub(super) fn tunnel(
             (count, 0)
         })?
     };
-    let _ = client.set_write_timeout(Some(reply_budget.max(Duration::from_millis(1))));
-    let replied = (&**client)
-        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
-        .is_ok();
-    let _ = client.set_write_timeout(None);
-    if !replied {
-        let _ = go.send(false);
-        close_both(client, upstream);
-        join(request);
-        return Ok(RelayOutcome {
-            bytes_in: 0,
-            bytes_out: 0,
-            discarded: 0,
-            end: EndReason::ClientError,
-        });
-    }
     let mut bytes_out = 0u64;
     if !early.is_empty() {
         if (&**upstream).write_all(early).is_err() {

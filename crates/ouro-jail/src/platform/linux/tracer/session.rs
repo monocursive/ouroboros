@@ -1374,7 +1374,13 @@ impl Session {
         // snapshot and the kernel's own copy. A read that fails keeps the
         // event (the snapshot's claim stands, as before) without the
         // corroboration.
-        let kernel_image = proc::kernel_exe(tid);
+        let images = self
+            .config
+            .target
+            .as_ref()
+            .filter(|(pid, _)| *pid == tgid)
+            .map_or(&[][..], |(_, images)| images.as_slice());
+        let kernel_image = proc::kernel_exe(tid, images);
         let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Exec {
             pid: tgid,
@@ -1423,7 +1429,7 @@ impl Session {
         if is_seccomp && info.args[1] & listener_flags != 0 {
             return Some(InFlight::Listener);
         }
-        if is_clone && info.args[0] & untraced_flag != 0 {
+        if nr == 435 || (is_clone && info.args[0] & untraced_flag != 0) {
             return Some(InFlight::Untraced);
         }
         None
@@ -1512,7 +1518,8 @@ impl Session {
         // all, and one that is not must cost neither a read of the tracee's
         // memory, nor an in-flight slot, nor a mark in the loss counters.
         let (flags, flags_unavailable) = self.capture_flags(tid, entry, &info.args);
-        if entry.op == ClosedOp::Open
+        if !self.config.learning
+            && entry.op == ClosedOp::Open
             && let Some(flags) = flags
             && !closed_set::open_is_covered(flags)
         {
@@ -1563,6 +1570,24 @@ impl Session {
         let mut pending = self.capture_paths(tid, entry, &info.args);
         pending.args.flags = flags;
         pending.flags_unavailable = flags_unavailable;
+        if entry.op == ClosedOp::Exec && !self.config.commands.is_empty() {
+            let argv = sys::argv(tid, info.args[if info.nr == 322 { 2 } else { 1 }]);
+            pending.args.command = self
+                .config
+                .commands
+                .check(
+                    argv.as_deref(),
+                    pending.args.path.as_ref().map(|p| p.bytes.as_slice()),
+                )
+                .map(Box::new);
+            if pending.args.command.is_some() && sys::deny_exec(tid, true).is_err() {
+                self.gap(GapReason::ForeignAbi, OpSet::ALL, None);
+                unsafe {
+                    libc::kill(tid, libc::SIGKILL);
+                }
+                return;
+            }
+        }
         self.begin(tid, InFlight::Closed(pending), site);
     }
 
@@ -1718,7 +1743,7 @@ impl Session {
         }
     }
 
-    fn handle_exit(&mut self, tid: pid_t, rval: i64) {
+    fn handle_exit(&mut self, tid: pid_t, mut rval: i64) {
         let tgid = self.tgid_of(tid);
         let Some(call) = self
             .tasks
@@ -1791,6 +1816,16 @@ impl Session {
                 return;
             }
         };
+        if pending.args.command.is_some() {
+            if sys::deny_exec(tid, false).is_err() {
+                self.gap(GapReason::ForeignAbi, OpSet::ALL, None);
+                unsafe {
+                    libc::kill(tid, libc::SIGKILL);
+                }
+                return;
+            }
+            rval = -i64::from(libc::EPERM);
+        }
         if pending.exec_confirmed {
             // `Exec` was already emitted for this call at the confirmed
             // transition; the zero that follows is the same event.
@@ -1868,6 +1903,7 @@ impl Session {
             return;
         }
         if op == ClosedOp::Open
+            && (!self.config.learning || matches!(pending.entry.flags, FlagSource::OpenHow { .. }))
             && let Some(flags) = pending.args.flags
             && !closed_set::open_is_covered(flags)
         {

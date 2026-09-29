@@ -1,0 +1,815 @@
+xtask perf: writing to /home/ubuntu/ouroboros/target/regression-20260929/final/perf
+[plain noop tool/off warm-up 0] startup 111.3 ms wall 133.7 ms work 0.1 ms teardown 22.3 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/on warm-up 0] startup 115.9 ms wall 121.3 ms work 0.2 ms teardown 5.2 ms load 0.83
+[plain noop direct warm-up 0] startup 1.9 ms wall 2.1 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off warm-up 1] startup 114.3 ms wall 136.6 ms work 0.0 ms teardown 22.2 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/on warm-up 1] startup 127.1 ms wall 131.8 ms work 0.0 ms teardown 4.7 ms load 0.83
+[plain noop direct warm-up 1] startup 1.6 ms wall 1.9 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/on warm-up 2] startup 119.0 ms wall 123.3 ms work 0.0 ms teardown 4.3 ms load 0.83
+[plain noop direct warm-up 2] startup 1.2 ms wall 1.4 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off warm-up 2] startup 125.0 ms wall 147.5 ms work 0.1 ms teardown 22.5 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/off warm-up 3] startup 137.2 ms wall 160.2 ms work 0.0 ms teardown 22.9 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct warm-up 3] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/on warm-up 3] startup 126.4 ms wall 131.6 ms work 0.0 ms teardown 5.2 ms load 0.83
+[plain noop tool/off warm-up 4] startup 125.0 ms wall 147.9 ms work 0.0 ms teardown 22.9 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct warm-up 4] startup 1.5 ms wall 1.8 ms work 0.0 ms teardown 0.3 ms load 0.83
+[plain noop tool/on warm-up 4] startup 117.0 ms wall 132.6 ms work 0.1 ms teardown 15.5 ms load 0.83
+[plain noop tool/on 0] startup 126.0 ms wall 132.2 ms work 0.0 ms teardown 6.1 ms load 0.83
+[plain noop tool/off 0] startup 102.3 ms wall 124.6 ms work 0.1 ms teardown 22.2 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 0] startup 1.4 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/on 1] startup 125.1 ms wall 130.4 ms work 0.1 ms teardown 5.2 ms load 0.83
+[plain noop direct 1] startup 1.9 ms wall 2.2 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off 1] startup 119.8 ms wall 142.6 ms work 0.1 ms teardown 22.7 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/on 2] startup 118.7 ms wall 123.1 ms work 0.1 ms teardown 4.4 ms load 0.83
+[plain noop direct 2] startup 1.3 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off 2] startup 110.2 ms wall 133.0 ms work 0.0 ms teardown 22.7 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 3] startup 1.3 ms wall 1.5 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off 3] startup 118.0 ms wall 140.9 ms work 0.1 ms teardown 22.8 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/on 3] startup 123.7 ms wall 128.7 ms work 0.1 ms teardown 4.9 ms load 0.83
+[plain noop tool/off 4] startup 117.9 ms wall 140.6 ms work 0.1 ms teardown 22.6 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 4] startup 1.3 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/on 4] startup 123.3 ms wall 128.1 ms work 0.1 ms teardown 4.8 ms load 0.83
+[plain noop tool/on 5] startup 118.2 ms wall 124.1 ms work 0.1 ms teardown 5.9 ms load 0.83
+[plain noop tool/off 5] startup 113.1 ms wall 135.8 ms work 0.0 ms teardown 22.6 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 5] startup 1.4 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop direct 6] startup 1.2 ms wall 1.4 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off 6] startup 116.9 ms wall 139.6 ms work 0.1 ms teardown 22.7 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/on 6] startup 111.6 ms wall 116.2 ms work 0.1 ms teardown 4.5 ms load 0.83
+[plain noop tool/off 7] startup 103.4 ms wall 125.9 ms work 0.1 ms teardown 22.4 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 7] startup 1.4 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/on 7] startup 110.1 ms wall 114.9 ms work 0.0 ms teardown 4.8 ms load 0.83
+[plain noop tool/on 8] startup 122.0 ms wall 137.3 ms work 0.0 ms teardown 15.3 ms load 0.83
+[plain noop tool/off 8] startup 120.0 ms wall 143.1 ms work 0.0 ms teardown 23.1 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 8] startup 1.4 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/on 9] startup 112.6 ms wall 118.5 ms work 0.1 ms teardown 5.8 ms load 0.83
+[plain noop tool/off 9] startup 110.8 ms wall 133.4 ms work 0.0 ms teardown 22.6 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 9] startup 1.6 ms wall 1.9 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off 10] startup 105.0 ms wall 127.5 ms work 0.1 ms teardown 22.4 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/on 10] startup 124.6 ms wall 129.2 ms work 0.0 ms teardown 4.6 ms load 0.83
+[plain noop direct 10] startup 1.4 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/on 11] startup 123.7 ms wall 129.2 ms work 0.2 ms teardown 5.3 ms load 0.83
+[plain noop direct 11] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 0.83
+[plain noop tool/off 11] startup 133.2 ms wall 157.5 ms work 0.0 ms teardown 24.3 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop tool/on 12] startup 117.4 ms wall 132.1 ms work 0.1 ms teardown 14.6 ms load 0.83
+[plain noop tool/off 12] startup 109.8 ms wall 132.5 ms work 0.1 ms teardown 22.6 ms load 0.83 flags [ExecUnconfirmed]
+[plain noop direct 12] startup 1.2 ms wall 1.4 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop direct 13] startup 1.2 ms wall 1.4 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 13] startup 120.2 ms wall 135.1 ms work 0.1 ms teardown 14.9 ms load 0.84
+[plain noop tool/off 13] startup 116.0 ms wall 138.6 ms work 0.0 ms teardown 22.5 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/off 14] startup 106.0 ms wall 128.9 ms work 0.0 ms teardown 22.8 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop direct 14] startup 1.5 ms wall 1.8 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 14] startup 115.3 ms wall 123.1 ms work 0.0 ms teardown 7.7 ms load 0.84
+[plain noop tool/off 15] startup 112.1 ms wall 135.1 ms work 0.1 ms teardown 22.9 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/on 15] startup 100.4 ms wall 115.7 ms work 0.1 ms teardown 15.2 ms load 0.84
+[plain noop direct 15] startup 1.3 ms wall 1.5 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop direct 16] startup 1.2 ms wall 1.5 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 16] startup 125.9 ms wall 130.4 ms work 0.1 ms teardown 4.4 ms load 0.84
+[plain noop tool/off 16] startup 115.1 ms wall 129.4 ms work 0.1 ms teardown 14.2 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/off 17] startup 124.8 ms wall 147.6 ms work 0.0 ms teardown 22.8 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/on 17] startup 124.1 ms wall 128.7 ms work 0.0 ms teardown 4.5 ms load 0.84
+[plain noop direct 17] startup 1.3 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 18] startup 121.7 ms wall 126.2 ms work 0.1 ms teardown 4.4 ms load 0.84
+[plain noop tool/off 18] startup 108.2 ms wall 131.4 ms work 0.1 ms teardown 23.2 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop direct 18] startup 1.5 ms wall 1.8 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 19] startup 137.9 ms wall 143.6 ms work 0.1 ms teardown 5.6 ms load 0.84
+[plain noop direct 19] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/off 19] startup 111.5 ms wall 134.7 ms work 0.1 ms teardown 23.1 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop direct 20] startup 1.5 ms wall 1.8 ms work 0.0 ms teardown 0.3 ms load 0.84
+[plain noop tool/on 20] startup 132.7 ms wall 137.9 ms work 0.0 ms teardown 5.1 ms load 0.84
+[plain noop tool/off 20] startup 112.3 ms wall 135.3 ms work 0.0 ms teardown 23.0 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/off 21] startup 111.6 ms wall 134.2 ms work 0.1 ms teardown 22.5 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop direct 21] startup 1.3 ms wall 1.5 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 21] startup 118.2 ms wall 124.7 ms work 0.1 ms teardown 6.5 ms load 0.84
+[plain noop direct 22] startup 1.4 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 22] startup 114.4 ms wall 129.4 ms work 0.1 ms teardown 14.8 ms load 0.84
+[plain noop tool/off 22] startup 105.4 ms wall 128.0 ms work 0.0 ms teardown 22.6 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/off 23] startup 109.9 ms wall 133.1 ms work 0.0 ms teardown 23.2 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop direct 23] startup 1.4 ms wall 1.7 ms work 0.1 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 23] startup 137.4 ms wall 153.6 ms work 0.2 ms teardown 16.0 ms load 0.84
+[plain noop tool/on 24] startup 118.6 ms wall 134.2 ms work 0.1 ms teardown 15.5 ms load 0.84
+[plain noop tool/off 24] startup 111.6 ms wall 134.3 ms work 0.1 ms teardown 22.6 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop direct 24] startup 1.5 ms wall 1.8 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop direct 25] startup 1.3 ms wall 1.5 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 25] startup 125.1 ms wall 130.0 ms work 0.1 ms teardown 4.8 ms load 0.84
+[plain noop tool/off 25] startup 117.6 ms wall 141.1 ms work 0.1 ms teardown 23.4 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop direct 26] startup 1.6 ms wall 1.8 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/on 26] startup 122.7 ms wall 128.3 ms work 0.1 ms teardown 5.6 ms load 0.84
+[plain noop tool/off 26] startup 115.1 ms wall 137.9 ms work 0.1 ms teardown 22.8 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/off 27] startup 122.5 ms wall 145.7 ms work 0.0 ms teardown 23.2 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/on 27] startup 114.4 ms wall 130.2 ms work 0.1 ms teardown 15.6 ms load 0.84
+[plain noop direct 27] startup 1.3 ms wall 1.7 ms work 0.1 ms teardown 0.3 ms load 0.84
+[plain noop direct 28] startup 1.3 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 0.84
+[plain noop tool/off 28] startup 120.6 ms wall 143.8 ms work 0.1 ms teardown 23.2 ms load 0.84 flags [ExecUnconfirmed]
+[plain noop tool/on 28] startup 122.8 ms wall 127.8 ms work 0.0 ms teardown 4.9 ms load 0.84
+[plain noop direct 29] startup 1.4 ms wall 1.7 ms work 0.0 ms teardown 0.3 ms load 0.84
+[plain noop tool/on 29] startup 119.5 ms wall 126.8 ms work 0.0 ms teardown 7.3 ms load 0.84
+[plain noop tool/off 29] startup 116.3 ms wall 139.2 ms work 0.0 ms teardown 22.9 ms load 0.84 flags [ExecUnconfirmed]
+[plain spawn-tree tool/off warm-up 0] startup 112.6 ms wall 310.9 ms work 174.7 ms teardown 23.7 ms load 0.84
+[plain spawn-tree direct warm-up 0] startup 1.7 ms wall 161.7 ms work 159.7 ms teardown 0.3 ms load 0.86
+[plain spawn-tree tool/on warm-up 0] startup 126.4 ms wall 394.2 ms work 261.8 ms teardown 6.0 ms load 0.86
+[plain spawn-tree direct warm-up 1] startup 1.7 ms wall 164.7 ms work 162.6 ms teardown 0.3 ms load 0.86
+[plain spawn-tree tool/off warm-up 1] startup 119.5 ms wall 305.5 ms work 166.3 ms teardown 19.7 ms load 0.86
+[plain spawn-tree tool/on warm-up 1] startup 126.6 ms wall 386.7 ms work 252.4 ms teardown 7.7 ms load 0.86
+[plain spawn-tree tool/off warm-up 2] startup 109.9 ms wall 296.6 ms work 168.6 ms teardown 18.1 ms load 0.86
+[plain spawn-tree tool/on warm-up 2] startup 113.1 ms wall 385.5 ms work 266.9 ms teardown 5.5 ms load 0.86
+[plain spawn-tree direct warm-up 2] startup 1.4 ms wall 168.4 ms work 166.8 ms teardown 0.2 ms load 0.86
+[plain spawn-tree tool/on warm-up 3] startup 128.3 ms wall 418.5 ms work 284.3 ms teardown 5.9 ms load 0.86
+[plain spawn-tree tool/off warm-up 3] startup 112.2 ms wall 297.4 ms work 169.0 ms teardown 16.2 ms load 0.86
+[plain spawn-tree direct warm-up 3] startup 1.6 ms wall 154.5 ms work 152.6 ms teardown 0.3 ms load 0.86
+[plain spawn-tree tool/off warm-up 4] startup 111.5 ms wall 308.1 ms work 177.8 ms teardown 18.7 ms load 0.86
+[plain spawn-tree direct warm-up 4] startup 1.4 ms wall 167.8 ms work 166.0 ms teardown 0.3 ms load 0.86
+[plain spawn-tree tool/on warm-up 4] startup 128.2 ms wall 399.8 ms work 266.0 ms teardown 5.5 ms load 0.86
+[plain spawn-tree tool/off 0] startup 111.6 ms wall 297.1 ms work 166.2 ms teardown 19.4 ms load 0.86
+[plain spawn-tree direct 0] startup 1.4 ms wall 162.4 ms work 160.6 ms teardown 0.3 ms load 0.86
+[plain spawn-tree tool/on 0] startup 119.4 ms wall 381.7 ms work 246.9 ms teardown 15.4 ms load 0.86
+[plain spawn-tree tool/on 1] startup 105.1 ms wall 363.5 ms work 242.8 ms teardown 15.6 ms load 0.86
+[plain spawn-tree tool/off 1] startup 118.5 ms wall 305.7 ms work 168.3 ms teardown 19.0 ms load 1.03
+[plain spawn-tree direct 1] startup 1.4 ms wall 156.2 ms work 154.5 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/on 2] startup 123.4 ms wall 384.9 ms work 245.9 ms teardown 15.6 ms load 1.03
+[plain spawn-tree direct 2] startup 1.5 ms wall 157.8 ms work 156.0 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/off 2] startup 115.2 ms wall 301.3 ms work 162.9 ms teardown 23.1 ms load 1.03
+[plain spawn-tree direct 3] startup 1.8 ms wall 151.1 ms work 149.0 ms teardown 0.2 ms load 1.03
+[plain spawn-tree tool/off 3] startup 116.7 ms wall 303.0 ms work 170.6 ms teardown 15.7 ms load 1.03
+[plain spawn-tree tool/on 3] startup 124.3 ms wall 397.2 ms work 256.8 ms teardown 16.1 ms load 1.03
+[plain spawn-tree tool/off 4] startup 115.0 ms wall 310.3 ms work 174.1 ms teardown 21.1 ms load 1.03
+[plain spawn-tree tool/on 4] startup 120.6 ms wall 392.6 ms work 265.5 ms teardown 6.5 ms load 1.03
+[plain spawn-tree direct 4] startup 1.4 ms wall 161.8 ms work 160.1 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/off 5] startup 110.6 ms wall 296.4 ms work 169.0 ms teardown 16.9 ms load 1.03
+[plain spawn-tree tool/on 5] startup 125.8 ms wall 394.5 ms work 263.3 ms teardown 5.3 ms load 1.03
+[plain spawn-tree direct 5] startup 1.3 ms wall 156.1 ms work 154.5 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/on 6] startup 109.3 ms wall 380.2 ms work 265.3 ms teardown 5.6 ms load 1.03
+[plain spawn-tree tool/off 6] startup 125.5 ms wall 320.6 ms work 170.4 ms teardown 24.8 ms load 1.03
+[plain spawn-tree direct 6] startup 2.3 ms wall 156.5 ms work 154.0 ms teardown 0.3 ms load 1.03
+[plain spawn-tree direct 7] startup 1.3 ms wall 152.2 ms work 150.6 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/on 7] startup 113.0 ms wall 365.8 ms work 246.6 ms teardown 6.2 ms load 1.03
+[plain spawn-tree tool/off 7] startup 115.7 ms wall 301.0 ms work 167.8 ms teardown 17.4 ms load 1.03
+[plain spawn-tree tool/off 8] startup 117.8 ms wall 313.6 ms work 171.7 ms teardown 24.1 ms load 1.03
+[plain spawn-tree direct 8] startup 1.5 ms wall 162.2 ms work 160.4 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/on 8] startup 117.3 ms wall 382.0 ms work 259.4 ms teardown 5.3 ms load 1.03
+[plain spawn-tree tool/on 9] startup 128.8 ms wall 391.4 ms work 257.4 ms teardown 5.2 ms load 1.03
+[plain spawn-tree direct 9] startup 2.0 ms wall 155.2 ms work 153.0 ms teardown 0.2 ms load 1.03
+[plain spawn-tree tool/off 9] startup 111.3 ms wall 296.5 ms work 166.1 ms teardown 19.1 ms load 1.03
+[plain spawn-tree tool/on 10] startup 119.8 ms wall 381.7 ms work 256.3 ms teardown 5.6 ms load 1.03
+[plain spawn-tree direct 10] startup 1.5 ms wall 158.7 ms work 156.9 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/off 10] startup 124.4 ms wall 310.9 ms work 162.2 ms teardown 24.2 ms load 1.03
+[plain spawn-tree tool/off 11] startup 122.8 ms wall 309.4 ms work 166.7 ms teardown 19.9 ms load 1.03
+[plain spawn-tree tool/on 11] startup 123.6 ms wall 379.9 ms work 251.1 ms teardown 5.2 ms load 1.03
+[plain spawn-tree direct 11] startup 1.7 ms wall 155.1 ms work 153.2 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/on 12] startup 118.5 ms wall 379.4 ms work 255.7 ms teardown 5.2 ms load 1.03
+[plain spawn-tree direct 12] startup 1.3 ms wall 152.8 ms work 151.2 ms teardown 0.3 ms load 1.03
+[plain spawn-tree tool/off 12] startup 123.7 ms wall 309.6 ms work 168.2 ms teardown 17.7 ms load 1.03
+[plain spawn-tree tool/off 13] startup 114.1 ms wall 301.4 ms work 163.3 ms teardown 24.0 ms load 1.18
+[plain spawn-tree tool/on 13] startup 127.1 ms wall 386.6 ms work 254.0 ms teardown 5.5 ms load 1.18
+[plain spawn-tree direct 13] startup 1.4 ms wall 150.1 ms work 148.4 ms teardown 0.3 ms load 1.18
+[plain spawn-tree tool/on 14] startup 111.6 ms wall 382.2 ms work 262.1 ms teardown 8.5 ms load 1.18
+[plain spawn-tree direct 14] startup 1.4 ms wall 155.9 ms work 154.2 ms teardown 0.2 ms load 1.18
+[plain spawn-tree tool/off 14] startup 111.6 ms wall 297.6 ms work 168.1 ms teardown 17.8 ms load 1.18
+[plain spawn-tree tool/on 15] startup 128.3 ms wall 407.5 ms work 273.2 ms teardown 6.0 ms load 1.18
+[plain spawn-tree tool/off 15] startup 120.4 ms wall 316.3 ms work 173.8 ms teardown 22.1 ms load 1.18
+[plain spawn-tree direct 15] startup 1.4 ms wall 153.2 ms work 151.5 ms teardown 0.3 ms load 1.18
+[plain spawn-tree direct 16] startup 1.3 ms wall 152.5 ms work 150.9 ms teardown 0.3 ms load 1.18
+[plain spawn-tree tool/off 16] startup 112.6 ms wall 298.0 ms work 161.9 ms teardown 23.5 ms load 1.18
+[plain spawn-tree tool/on 16] startup 112.1 ms wall 376.9 ms work 257.2 ms teardown 7.5 ms load 1.18
+[plain spawn-tree direct 17] startup 1.5 ms wall 159.8 ms work 158.1 ms teardown 0.3 ms load 1.18
+[plain spawn-tree tool/on 17] startup 130.5 ms wall 399.6 ms work 263.2 ms teardown 5.9 ms load 1.18
+[plain spawn-tree tool/off 17] startup 114.3 ms wall 310.5 ms work 174.2 ms teardown 22.0 ms load 1.18
+[plain spawn-tree direct 18] startup 1.4 ms wall 169.1 ms work 167.4 ms teardown 0.3 ms load 1.18
+[plain spawn-tree tool/on 18] startup 112.6 ms wall 391.2 ms work 262.6 ms teardown 15.9 ms load 1.18
+[plain spawn-tree tool/off 18] startup 124.3 ms wall 319.9 ms work 172.0 ms teardown 23.7 ms load 1.17
+[plain spawn-tree direct 19] startup 1.4 ms wall 164.0 ms work 162.3 ms teardown 0.3 ms load 1.17
+[plain spawn-tree tool/on 19] startup 118.2 ms wall 390.7 ms work 267.0 ms teardown 5.5 ms load 1.17
+[plain spawn-tree tool/off 19] startup 116.1 ms wall 311.8 ms work 179.7 ms teardown 16.0 ms load 1.17
+[plain spawn-tree tool/on 20] startup 127.3 ms wall 395.5 ms work 256.7 ms teardown 11.5 ms load 1.17
+[plain spawn-tree direct 20] startup 1.5 ms wall 151.2 ms work 149.3 ms teardown 0.4 ms load 1.17
+[plain spawn-tree tool/off 20] startup 124.0 ms wall 309.4 ms work 163.8 ms teardown 21.6 ms load 1.17
+[plain spawn-tree tool/off 21] startup 122.7 ms wall 307.8 ms work 169.6 ms teardown 15.5 ms load 1.17
+[plain spawn-tree tool/on 21] startup 113.6 ms wall 393.2 ms work 273.3 ms teardown 6.4 ms load 1.17
+[plain spawn-tree direct 21] startup 1.4 ms wall 166.4 ms work 164.7 ms teardown 0.3 ms load 1.17
+[plain spawn-tree tool/off 22] startup 115.6 ms wall 301.7 ms work 168.2 ms teardown 17.9 ms load 1.17
+[plain spawn-tree direct 22] startup 1.6 ms wall 151.5 ms work 149.6 ms teardown 0.2 ms load 1.17
+[plain spawn-tree tool/on 22] startup 124.8 ms wall 402.9 ms work 272.3 ms teardown 5.9 ms load 1.17
+[plain spawn-tree tool/off 23] startup 129.7 ms wall 326.8 ms work 172.6 ms teardown 24.5 ms load 1.17
+[plain spawn-tree direct 23] startup 1.5 ms wall 175.7 ms work 173.8 ms teardown 0.4 ms load 1.17
+[plain spawn-tree tool/on 23] startup 131.3 ms wall 423.4 ms work 276.1 ms teardown 16.0 ms load 1.17
+[plain spawn-tree tool/on 24] startup 129.1 ms wall 428.1 ms work 283.3 ms teardown 15.7 ms load 1.17
+[plain spawn-tree direct 24] startup 1.7 ms wall 152.7 ms work 150.7 ms teardown 0.4 ms load 1.24
+[plain spawn-tree tool/off 24] startup 111.9 ms wall 298.3 ms work 164.0 ms teardown 22.4 ms load 1.24
+[plain spawn-tree tool/on 25] startup 110.9 ms wall 370.0 ms work 252.6 ms teardown 6.5 ms load 1.24
+[plain spawn-tree direct 25] startup 1.5 ms wall 170.6 ms work 168.9 ms teardown 0.2 ms load 1.24
+[plain spawn-tree tool/off 25] startup 121.1 ms wall 327.4 ms work 183.4 ms teardown 22.9 ms load 1.24
+[plain spawn-tree tool/on 26] startup 133.1 ms wall 410.6 ms work 262.8 ms teardown 14.7 ms load 1.24
+[plain spawn-tree tool/off 26] startup 110.9 ms wall 306.2 ms work 172.0 ms teardown 23.2 ms load 1.24
+[plain spawn-tree direct 26] startup 2.3 ms wall 162.5 ms work 159.9 ms teardown 0.3 ms load 1.24
+[plain spawn-tree tool/on 27] startup 118.6 ms wall 386.1 ms work 259.7 ms teardown 7.9 ms load 1.24
+[plain spawn-tree tool/off 27] startup 105.3 ms wall 280.9 ms work 157.0 ms teardown 18.6 ms load 1.24
+[plain spawn-tree direct 27] startup 1.5 ms wall 156.0 ms work 154.0 ms teardown 0.4 ms load 1.24
+[plain spawn-tree tool/off 28] startup 116.1 ms wall 302.1 ms work 162.5 ms teardown 23.4 ms load 1.24
+[plain spawn-tree tool/on 28] startup 124.1 ms wall 389.3 ms work 259.0 ms teardown 6.2 ms load 1.24
+[plain spawn-tree direct 28] startup 1.6 ms wall 164.3 ms work 162.4 ms teardown 0.3 ms load 1.24
+[plain spawn-tree tool/off 29] startup 115.9 ms wall 344.9 ms work 207.0 ms teardown 22.1 ms load 1.24
+[plain spawn-tree direct 29] startup 1.8 ms wall 188.2 ms work 186.1 ms teardown 0.3 ms load 1.24
+[plain spawn-tree tool/on 29] startup 142.5 ms wall 424.7 ms work 276.8 ms teardown 5.4 ms load 1.24
+[plain fileops tool/on warm-up 0] startup 126.0 ms wall 1109.9 ms work 978.5 ms teardown 5.4 ms load 1.14
+[plain fileops tool/off warm-up 0] startup 117.3 ms wall 398.7 ms work 257.1 ms teardown 24.3 ms load 1.14
+[plain fileops direct warm-up 0] startup 1.3 ms wall 184.6 ms work 182.9 ms teardown 0.3 ms load 1.14
+[plain fileops tool/off warm-up 1] startup 115.3 ms wall 362.1 ms work 230.1 ms teardown 16.7 ms load 1.14
+[plain fileops tool/on warm-up 1] startup 122.7 ms wall 1126.1 ms work 997.9 ms teardown 5.6 ms load 1.14
+[plain fileops direct warm-up 1] startup 1.4 ms wall 174.6 ms work 172.9 ms teardown 0.3 ms load 1.14
+[plain fileops direct warm-up 2] startup 1.5 ms wall 185.9 ms work 184.1 ms teardown 0.3 ms load 1.14
+[plain fileops tool/off warm-up 2] startup 119.9 ms wall 404.3 ms work 266.1 ms teardown 18.3 ms load 1.14
+[plain fileops tool/on warm-up 2] startup 118.0 ms wall 1156.5 ms work 1022.4 ms teardown 16.1 ms load 1.14
+[plain fileops direct warm-up 3] startup 1.5 ms wall 168.8 ms work 166.9 ms teardown 0.3 ms load 1.12
+[plain fileops tool/off warm-up 3] startup 118.3 ms wall 374.4 ms work 231.3 ms teardown 24.8 ms load 1.12
+[plain fileops tool/on warm-up 3] startup 116.6 ms wall 1117.6 ms work 994.1 ms teardown 7.0 ms load 1.12
+[plain fileops direct warm-up 4] startup 1.5 ms wall 185.7 ms work 183.8 ms teardown 0.4 ms load 1.12
+[plain fileops tool/off warm-up 4] startup 116.5 ms wall 382.0 ms work 246.9 ms teardown 18.5 ms load 1.12
+[plain fileops tool/on warm-up 4] startup 116.3 ms wall 1153.5 ms work 1020.8 ms teardown 16.5 ms load 1.12
+[plain fileops direct 0] startup 1.7 ms wall 184.7 ms work 182.6 ms teardown 0.4 ms load 1.12
+[plain fileops tool/off 0] startup 103.4 ms wall 360.1 ms work 231.3 ms teardown 25.4 ms load 1.12
+[plain fileops tool/on 0] startup 131.8 ms wall 1227.3 ms work 1089.7 ms teardown 5.7 ms load 1.12
+[plain fileops direct 1] startup 1.9 ms wall 210.7 ms work 208.4 ms teardown 0.4 ms load 1.11
+[plain fileops tool/on 1] startup 125.2 ms wall 1220.6 ms work 1088.4 ms teardown 7.0 ms load 1.11
+[plain fileops tool/off 1] startup 114.2 ms wall 349.6 ms work 219.7 ms teardown 15.7 ms load 1.11
+[plain fileops tool/on 2] startup 114.5 ms wall 1068.1 ms work 948.0 ms teardown 5.6 ms load 1.11
+[plain fileops direct 2] startup 1.3 ms wall 202.2 ms work 200.4 ms teardown 0.5 ms load 1.11
+[plain fileops tool/off 2] startup 103.4 ms wall 350.4 ms work 223.9 ms teardown 23.1 ms load 1.11
+[plain fileops tool/on 3] startup 124.7 ms wall 1146.3 ms work 1015.7 ms teardown 6.0 ms load 1.11
+[plain fileops direct 3] startup 1.6 ms wall 174.2 ms work 172.3 ms teardown 0.4 ms load 1.19
+[plain fileops tool/off 3] startup 116.6 ms wall 372.3 ms work 236.3 ms teardown 19.3 ms load 1.19
+[plain fileops tool/off 4] startup 125.8 ms wall 392.3 ms work 246.0 ms teardown 20.5 ms load 1.19
+[plain fileops tool/on 4] startup 130.6 ms wall 1212.5 ms work 1075.6 ms teardown 6.3 ms load 1.19
+[plain fileops direct 4] startup 1.6 ms wall 197.0 ms work 194.9 ms teardown 0.5 ms load 1.19
+[plain fileops direct 5] startup 1.4 ms wall 179.2 ms work 177.4 ms teardown 0.3 ms load 1.19
+[plain fileops tool/off 5] startup 117.9 ms wall 373.5 ms work 230.6 ms teardown 25.0 ms load 1.19
+[plain fileops tool/on 5] startup 120.2 ms wall 1195.7 ms work 1059.0 ms teardown 16.4 ms load 1.19
+[plain fileops direct 6] startup 1.3 ms wall 183.0 ms work 181.4 ms teardown 0.3 ms load 1.17
+[plain fileops tool/off 6] startup 111.9 ms wall 367.8 ms work 232.9 ms teardown 23.1 ms load 1.17
+[plain fileops tool/on 6] startup 138.1 ms wall 1159.0 ms work 1015.1 ms teardown 5.8 ms load 1.17
+[plain fileops direct 7] startup 1.4 ms wall 186.9 ms work 185.1 ms teardown 0.4 ms load 1.17
+[plain fileops tool/off 7] startup 113.0 ms wall 369.4 ms work 239.6 ms teardown 16.8 ms load 1.17
+[plain fileops tool/on 7] startup 123.4 ms wall 1204.2 ms work 1073.4 ms teardown 7.5 ms load 1.17
+[plain fileops direct 8] startup 1.8 ms wall 262.9 ms work 260.6 ms teardown 0.5 ms load 1.17
+[plain fileops tool/off 8] startup 132.2 ms wall 419.0 ms work 268.8 ms teardown 18.0 ms load 1.17
+[plain fileops tool/on 8] startup 115.0 ms wall 1130.8 ms work 999.6 ms teardown 16.2 ms load 1.16
+[plain fileops tool/on 9] startup 117.0 ms wall 1159.4 ms work 1026.1 ms teardown 16.3 ms load 1.16
+[plain fileops tool/off 9] startup 114.5 ms wall 420.6 ms work 290.4 ms teardown 15.6 ms load 1.16
+[plain fileops direct 9] startup 1.7 ms wall 194.7 ms work 192.7 ms teardown 0.3 ms load 1.16
+[plain fileops tool/on 10] startup 130.6 ms wall 1087.9 ms work 952.0 ms teardown 5.3 ms load 1.16
+[plain fileops direct 10] startup 2.0 ms wall 206.5 ms work 204.1 ms teardown 0.3 ms load 1.16
+[plain fileops tool/off 10] startup 125.7 ms wall 362.8 ms work 218.6 ms teardown 18.5 ms load 1.16
+[plain fileops tool/on 11] startup 126.1 ms wall 1260.0 ms work 1126.2 ms teardown 7.6 ms load 1.14
+[plain fileops tool/off 11] startup 118.7 ms wall 363.9 ms work 221.4 ms teardown 23.8 ms load 1.14
+[plain fileops direct 11] startup 1.9 ms wall 183.1 ms work 180.9 ms teardown 0.4 ms load 1.14
+[plain fileops tool/on 12] startup 119.2 ms wall 1201.9 ms work 1066.1 ms teardown 16.6 ms load 1.14
+[plain fileops direct 12] startup 1.9 ms wall 190.8 ms work 188.5 ms teardown 0.4 ms load 1.14
+[plain fileops tool/off 12] startup 122.6 ms wall 389.4 ms work 242.0 ms teardown 24.8 ms load 1.14
+[plain fileops direct 13] startup 1.7 ms wall 201.0 ms work 198.8 ms teardown 0.4 ms load 1.14
+[plain fileops tool/on 13] startup 136.9 ms wall 1191.0 ms work 1048.9 ms teardown 5.2 ms load 1.14
+[plain fileops tool/off 13] startup 111.0 ms wall 377.0 ms work 243.4 ms teardown 22.5 ms load 1.13
+[plain fileops tool/off 14] startup 108.7 ms wall 354.7 ms work 228.2 ms teardown 17.8 ms load 1.13
+[plain fileops tool/on 14] startup 111.5 ms wall 1119.5 ms work 991.8 ms teardown 16.2 ms load 1.13
+[plain fileops direct 14] startup 1.5 ms wall 196.8 ms work 194.9 ms teardown 0.4 ms load 1.13
+[plain fileops tool/on 15] startup 117.9 ms wall 1092.7 ms work 967.7 ms teardown 7.1 ms load 1.13
+[plain fileops tool/off 15] startup 116.8 ms wall 372.1 ms work 235.7 ms teardown 19.6 ms load 1.13
+[plain fileops direct 15] startup 1.4 ms wall 179.1 ms work 177.0 ms teardown 0.6 ms load 1.13
+[plain fileops direct 16] startup 1.4 ms wall 179.6 ms work 177.8 ms teardown 0.4 ms load 1.13
+[plain fileops tool/on 16] startup 122.7 ms wall 1134.2 ms work 1005.8 ms teardown 5.7 ms load 1.13
+[plain fileops tool/off 16] startup 114.4 ms wall 380.8 ms work 246.4 ms teardown 20.0 ms load 1.12
+[plain fileops tool/on 17] startup 119.1 ms wall 1066.8 ms work 941.9 ms teardown 5.9 ms load 1.12
+[plain fileops tool/off 17] startup 114.1 ms wall 359.9 ms work 227.3 ms teardown 18.6 ms load 1.12
+[plain fileops direct 17] startup 1.7 ms wall 199.9 ms work 197.8 ms teardown 0.4 ms load 1.12
+[plain fileops tool/on 18] startup 129.4 ms wall 1137.0 ms work 1000.4 ms teardown 7.3 ms load 1.12
+[plain fileops direct 18] startup 1.7 ms wall 194.3 ms work 192.2 ms teardown 0.4 ms load 1.12
+[plain fileops tool/off 18] startup 130.2 ms wall 396.6 ms work 250.1 ms teardown 16.4 ms load 1.12
+[plain fileops tool/off 19] startup 101.0 ms wall 336.2 ms work 217.5 ms teardown 17.6 ms load 1.12
+[plain fileops direct 19] startup 1.6 ms wall 179.9 ms work 177.9 ms teardown 0.4 ms load 1.19
+[plain fileops tool/on 19] startup 127.9 ms wall 1197.3 ms work 1061.6 ms teardown 7.8 ms load 1.19
+[plain fileops tool/on 20] startup 129.4 ms wall 1174.1 ms work 1028.3 ms teardown 16.4 ms load 1.19
+[plain fileops tool/off 20] startup 100.9 ms wall 346.9 ms work 226.1 ms teardown 19.9 ms load 1.19
+[plain fileops direct 20] startup 1.6 ms wall 184.2 ms work 182.2 ms teardown 0.4 ms load 1.19
+[plain fileops direct 21] startup 1.6 ms wall 184.7 ms work 182.7 ms teardown 0.4 ms load 1.19
+[plain fileops tool/off 21] startup 120.2 ms wall 377.7 ms work 232.5 ms teardown 25.1 ms load 1.19
+[plain fileops tool/on 21] startup 118.4 ms wall 1137.1 ms work 1011.1 ms teardown 7.6 ms load 1.19
+[plain fileops tool/off 22] startup 117.5 ms wall 424.0 ms work 283.0 ms teardown 23.4 ms load 1.18
+[plain fileops direct 22] startup 1.7 ms wall 211.0 ms work 209.0 ms teardown 0.4 ms load 1.18
+[plain fileops tool/on 22] startup 118.3 ms wall 1176.0 ms work 1049.4 ms teardown 8.2 ms load 1.18
+[plain fileops tool/off 23] startup 133.9 ms wall 440.5 ms work 284.9 ms teardown 21.6 ms load 1.18
+[plain fileops tool/on 23] startup 120.7 ms wall 1108.1 ms work 982.1 ms teardown 5.3 ms load 1.18
+[plain fileops direct 23] startup 1.4 ms wall 176.6 ms work 174.8 ms teardown 0.4 ms load 1.18
+[plain fileops direct 24] startup 1.7 ms wall 266.2 ms work 264.1 ms teardown 0.4 ms load 1.18
+[plain fileops tool/off 24] startup 127.7 ms wall 402.6 ms work 254.0 ms teardown 20.9 ms load 1.18
+[plain fileops tool/on 24] startup 118.7 ms wall 1100.4 ms work 975.9 ms teardown 5.8 ms load 1.16
+[plain fileops tool/on 25] startup 120.6 ms wall 1150.4 ms work 1021.9 ms teardown 7.9 ms load 1.16
+[plain fileops direct 25] startup 1.4 ms wall 172.5 ms work 170.8 ms teardown 0.4 ms load 1.16
+[plain fileops tool/off 25] startup 122.0 ms wall 407.8 ms work 268.4 ms teardown 17.4 ms load 1.16
+[plain fileops direct 26] startup 1.5 ms wall 190.9 ms work 189.1 ms teardown 0.4 ms load 1.16
+[plain fileops tool/off 26] startup 123.0 ms wall 440.2 ms work 295.6 ms teardown 21.5 ms load 1.16
+[plain fileops tool/on 26] startup 148.6 ms wall 1238.2 ms work 1083.5 ms teardown 6.1 ms load 1.16
+[plain fileops tool/on 27] startup 137.6 ms wall 1186.6 ms work 1033.5 ms teardown 15.5 ms load 1.15
+[plain fileops tool/off 27] startup 124.0 ms wall 399.9 ms work 253.6 ms teardown 22.4 ms load 1.15
+[plain fileops direct 27] startup 1.6 ms wall 178.4 ms work 176.4 ms teardown 0.4 ms load 1.15
+[plain fileops tool/off 28] startup 126.9 ms wall 403.5 ms work 257.5 ms teardown 19.0 ms load 1.15
+[plain fileops tool/on 28] startup 133.7 ms wall 1283.1 ms work 1133.3 ms teardown 16.2 ms load 1.15
+[plain fileops direct 28] startup 1.5 ms wall 189.0 ms work 187.0 ms teardown 0.5 ms load 1.15
+[plain fileops direct 29] startup 1.5 ms wall 227.9 ms work 226.0 ms teardown 0.4 ms load 1.15
+[plain fileops tool/off 29] startup 120.6 ms wall 366.1 ms work 227.2 ms teardown 18.3 ms load 1.15
+[plain fileops tool/on 29] startup 130.4 ms wall 1327.3 ms work 1190.3 ms teardown 6.7 ms load 1.15
+[scope noop direct warm-up 0] startup 1.8 ms wall 2.1 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop tool/on warm-up 0] startup 121.0 ms wall 125.5 ms work 0.1 ms teardown 4.5 ms load 1.22
+[scope noop tool/off warm-up 0] startup 115.4 ms wall 139.1 ms work 0.1 ms teardown 23.6 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/off warm-up 1] startup 107.9 ms wall 132.4 ms work 0.0 ms teardown 24.5 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/on warm-up 1] startup 115.0 ms wall 120.3 ms work 0.1 ms teardown 5.2 ms load 1.22
+[scope noop direct warm-up 1] startup 1.4 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop direct warm-up 2] startup 1.6 ms wall 1.8 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop tool/off warm-up 2] startup 110.0 ms wall 132.7 ms work 0.1 ms teardown 22.7 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/on warm-up 2] startup 114.9 ms wall 131.6 ms work 0.1 ms teardown 16.7 ms load 1.22
+[scope noop tool/off warm-up 3] startup 125.0 ms wall 147.4 ms work 0.1 ms teardown 22.3 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/on warm-up 3] startup 116.4 ms wall 121.9 ms work 0.1 ms teardown 5.4 ms load 1.22
+[scope noop direct warm-up 3] startup 2.3 ms wall 2.6 ms work 0.1 ms teardown 0.3 ms load 1.22
+[scope noop direct warm-up 4] startup 1.9 ms wall 2.2 ms work 0.1 ms teardown 0.3 ms load 1.22
+[scope noop tool/off warm-up 4] startup 112.9 ms wall 136.2 ms work 0.1 ms teardown 23.2 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/on warm-up 4] startup 127.7 ms wall 134.6 ms work 0.1 ms teardown 6.8 ms load 1.22
+[scope noop tool/off 0] startup 125.5 ms wall 148.7 ms work 0.0 ms teardown 23.2 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop direct 0] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop tool/on 0] startup 120.0 ms wall 125.3 ms work 0.0 ms teardown 5.2 ms load 1.22
+[scope noop direct 1] startup 1.5 ms wall 1.8 ms work 0.0 ms teardown 0.3 ms load 1.22
+[scope noop tool/on 1] startup 133.1 ms wall 139.7 ms work 0.0 ms teardown 6.5 ms load 1.22
+[scope noop tool/off 1] startup 99.5 ms wall 121.9 ms work 0.1 ms teardown 22.3 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/off 2] startup 101.6 ms wall 124.7 ms work 0.0 ms teardown 23.1 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop direct 2] startup 1.6 ms wall 1.9 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop tool/on 2] startup 117.2 ms wall 124.9 ms work 0.1 ms teardown 7.6 ms load 1.22
+[scope noop tool/off 3] startup 108.8 ms wall 131.6 ms work 0.0 ms teardown 22.7 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop direct 3] startup 1.4 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop tool/on 3] startup 118.4 ms wall 134.5 ms work 0.1 ms teardown 16.0 ms load 1.22
+[scope noop tool/on 4] startup 104.1 ms wall 110.0 ms work 0.1 ms teardown 5.8 ms load 1.22
+[scope noop direct 4] startup 1.3 ms wall 1.7 ms work 0.0 ms teardown 0.3 ms load 1.22
+[scope noop tool/off 4] startup 118.7 ms wall 140.6 ms work 0.1 ms teardown 21.7 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/on 5] startup 114.3 ms wall 131.1 ms work 0.1 ms teardown 16.7 ms load 1.22
+[scope noop tool/off 5] startup 117.7 ms wall 140.0 ms work 0.1 ms teardown 22.3 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop direct 5] startup 1.4 ms wall 1.6 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop tool/on 6] startup 105.5 ms wall 120.7 ms work 0.0 ms teardown 15.2 ms load 1.22
+[scope noop direct 6] startup 1.6 ms wall 1.8 ms work 0.0 ms teardown 0.2 ms load 1.22
+[scope noop tool/off 6] startup 114.1 ms wall 136.9 ms work 0.1 ms teardown 22.7 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop direct 7] startup 2.1 ms wall 2.5 ms work 0.1 ms teardown 0.3 ms load 1.22
+[scope noop tool/off 7] startup 135.9 ms wall 158.9 ms work 0.0 ms teardown 23.0 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop tool/on 7] startup 127.2 ms wall 133.5 ms work 0.1 ms teardown 6.2 ms load 1.22
+[scope noop tool/off 8] startup 117.9 ms wall 142.4 ms work 0.0 ms teardown 24.4 ms load 1.22 flags [ExecUnconfirmed]
+[scope noop direct 8] startup 2.8 ms wall 3.1 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 8] startup 114.2 ms wall 121.4 ms work 0.1 ms teardown 7.2 ms load 1.28
+[scope noop tool/on 9] startup 115.6 ms wall 123.4 ms work 0.1 ms teardown 7.6 ms load 1.28
+[scope noop direct 9] startup 1.6 ms wall 1.9 ms work 0.0 ms teardown 0.3 ms load 1.28
+[scope noop tool/off 9] startup 113.0 ms wall 135.6 ms work 0.0 ms teardown 22.6 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop tool/on 10] startup 116.9 ms wall 123.8 ms work 0.1 ms teardown 6.9 ms load 1.28
+[scope noop tool/off 10] startup 115.6 ms wall 139.1 ms work 0.0 ms teardown 23.4 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 10] startup 1.7 ms wall 2.0 ms work 0.0 ms teardown 0.3 ms load 1.28
+[scope noop tool/on 11] startup 132.5 ms wall 149.2 ms work 0.1 ms teardown 16.6 ms load 1.28
+[scope noop tool/off 11] startup 113.6 ms wall 137.3 ms work 0.1 ms teardown 23.6 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 11] startup 1.3 ms wall 1.5 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/off 12] startup 100.0 ms wall 123.3 ms work 0.1 ms teardown 23.3 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 12] startup 1.6 ms wall 1.8 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 12] startup 112.8 ms wall 118.4 ms work 0.1 ms teardown 5.6 ms load 1.28
+[scope noop direct 13] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/off 13] startup 104.1 ms wall 127.3 ms work 0.0 ms teardown 23.2 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop tool/on 13] startup 120.8 ms wall 138.1 ms work 0.1 ms teardown 17.2 ms load 1.28
+[scope noop tool/on 14] startup 119.6 ms wall 125.2 ms work 0.0 ms teardown 5.5 ms load 1.28
+[scope noop tool/off 14] startup 104.3 ms wall 127.4 ms work 0.0 ms teardown 23.0 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 14] startup 1.8 ms wall 2.1 ms work 0.1 ms teardown 0.2 ms load 1.28
+[scope noop direct 15] startup 1.5 ms wall 1.8 ms work 0.1 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 15] startup 121.1 ms wall 127.5 ms work 0.1 ms teardown 6.4 ms load 1.28
+[scope noop tool/off 15] startup 124.9 ms wall 147.5 ms work 0.1 ms teardown 22.6 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 16] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 16] startup 118.5 ms wall 135.5 ms work 0.1 ms teardown 16.9 ms load 1.28
+[scope noop tool/off 16] startup 110.2 ms wall 133.5 ms work 0.1 ms teardown 23.2 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 17] startup 1.7 ms wall 2.0 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 17] startup 118.6 ms wall 124.1 ms work 0.3 ms teardown 5.2 ms load 1.28
+[scope noop tool/off 17] startup 108.3 ms wall 131.4 ms work 0.0 ms teardown 23.0 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 18] startup 1.8 ms wall 2.1 ms work 0.0 ms teardown 0.3 ms load 1.28
+[scope noop tool/on 18] startup 118.1 ms wall 134.9 ms work 0.0 ms teardown 16.7 ms load 1.28
+[scope noop tool/off 18] startup 116.7 ms wall 140.1 ms work 0.1 ms teardown 23.3 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop tool/on 19] startup 116.4 ms wall 122.7 ms work 0.0 ms teardown 6.2 ms load 1.28
+[scope noop tool/off 19] startup 108.8 ms wall 132.3 ms work 0.0 ms teardown 23.5 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 19] startup 1.8 ms wall 2.2 ms work 0.0 ms teardown 0.3 ms load 1.28
+[scope noop tool/off 20] startup 113.6 ms wall 137.4 ms work 0.1 ms teardown 23.7 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 20] startup 2.0 ms wall 2.4 ms work 0.0 ms teardown 0.3 ms load 1.28
+[scope noop tool/on 20] startup 128.7 ms wall 134.9 ms work 0.1 ms teardown 6.1 ms load 1.28
+[scope noop tool/on 21] startup 118.6 ms wall 134.7 ms work 0.1 ms teardown 16.1 ms load 1.28
+[scope noop direct 21] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/off 21] startup 95.0 ms wall 118.1 ms work 0.1 ms teardown 23.1 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop tool/off 22] startup 96.1 ms wall 119.1 ms work 0.0 ms teardown 23.0 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 22] startup 1.8 ms wall 2.1 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 22] startup 102.6 ms wall 107.7 ms work 0.1 ms teardown 5.0 ms load 1.28
+[scope noop direct 23] startup 1.3 ms wall 1.6 ms work 0.0 ms teardown 0.3 ms load 1.28
+[scope noop tool/off 23] startup 104.9 ms wall 127.7 ms work 0.0 ms teardown 22.8 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop tool/on 23] startup 99.9 ms wall 104.9 ms work 0.0 ms teardown 4.9 ms load 1.28
+[scope noop tool/off 24] startup 110.0 ms wall 133.0 ms work 0.0 ms teardown 23.0 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop tool/on 24] startup 104.9 ms wall 111.6 ms work 0.0 ms teardown 6.6 ms load 1.28
+[scope noop direct 24] startup 1.5 ms wall 1.7 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 25] startup 110.5 ms wall 116.1 ms work 0.1 ms teardown 5.5 ms load 1.28
+[scope noop tool/off 25] startup 101.5 ms wall 123.9 ms work 0.0 ms teardown 22.4 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 25] startup 1.6 ms wall 1.9 ms work 0.0 ms teardown 0.3 ms load 1.28
+[scope noop tool/off 26] startup 96.8 ms wall 119.9 ms work 0.0 ms teardown 23.0 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 26] startup 1.6 ms wall 1.9 ms work 0.0 ms teardown 0.2 ms load 1.28
+[scope noop tool/on 26] startup 100.5 ms wall 106.4 ms work 0.0 ms teardown 5.9 ms load 1.28
+[scope noop tool/off 27] startup 99.6 ms wall 122.9 ms work 0.1 ms teardown 23.2 ms load 1.28 flags [ExecUnconfirmed]
+[scope noop direct 27] startup 1.5 ms wall 1.8 ms work 0.0 ms teardown 0.3 ms load 1.42
+[scope noop tool/on 27] startup 106.5 ms wall 112.4 ms work 0.1 ms teardown 5.8 ms load 1.42
+[scope noop direct 28] startup 1.2 ms wall 1.4 ms work 0.0 ms teardown 0.2 ms load 1.42
+[scope noop tool/off 28] startup 95.4 ms wall 118.1 ms work 0.1 ms teardown 22.7 ms load 1.42 flags [ExecUnconfirmed]
+[scope noop tool/on 28] startup 107.4 ms wall 115.1 ms work 0.2 ms teardown 7.6 ms load 1.42
+[scope noop tool/on 29] startup 112.9 ms wall 118.8 ms work 0.9 ms teardown 5.0 ms load 1.42
+[scope noop tool/off 29] startup 100.9 ms wall 125.0 ms work 0.0 ms teardown 24.1 ms load 1.42 flags [ExecUnconfirmed]
+[scope noop direct 29] startup 1.8 ms wall 2.1 ms work 0.0 ms teardown 0.3 ms load 1.42
+[scope spawn-tree direct warm-up 0] startup 1.5 ms wall 161.6 ms work 159.8 ms teardown 0.3 ms load 1.42
+[scope spawn-tree tool/on warm-up 0] startup 101.3 ms wall 371.8 ms work 255.5 ms teardown 15.1 ms load 1.42
+[scope spawn-tree tool/off warm-up 0] startup 108.1 ms wall 294.1 ms work 170.5 ms teardown 15.5 ms load 1.42
+[scope spawn-tree tool/off warm-up 1] startup 107.0 ms wall 302.1 ms work 170.7 ms teardown 24.3 ms load 1.42
+[scope spawn-tree direct warm-up 1] startup 1.4 ms wall 159.2 ms work 157.5 ms teardown 0.3 ms load 1.42
+[scope spawn-tree tool/on warm-up 1] startup 100.9 ms wall 371.2 ms work 254.9 ms teardown 15.4 ms load 1.42
+[scope spawn-tree tool/on warm-up 2] startup 97.2 ms wall 351.0 ms work 248.5 ms teardown 5.3 ms load 1.42
+[scope spawn-tree tool/off warm-up 2] startup 104.2 ms wall 288.8 ms work 166.8 ms teardown 17.9 ms load 1.42
+[scope spawn-tree direct warm-up 2] startup 1.3 ms wall 167.2 ms work 165.6 ms teardown 0.4 ms load 1.42
+[scope spawn-tree tool/on warm-up 3] startup 129.9 ms wall 390.3 ms work 254.5 ms teardown 6.0 ms load 1.42
+[scope spawn-tree direct warm-up 3] startup 1.5 ms wall 153.6 ms work 151.7 ms teardown 0.3 ms load 1.42
+[scope spawn-tree tool/off warm-up 3] startup 103.0 ms wall 299.3 ms work 177.3 ms teardown 18.9 ms load 1.42
+[scope spawn-tree tool/off warm-up 4] startup 94.4 ms wall 280.3 ms work 173.4 ms teardown 12.5 ms load 1.42
+[scope spawn-tree direct warm-up 4] startup 1.4 ms wall 160.9 ms work 159.2 ms teardown 0.3 ms load 1.42
+[scope spawn-tree tool/on warm-up 4] startup 111.5 ms wall 396.6 ms work 279.4 ms teardown 5.7 ms load 1.42
+[scope spawn-tree tool/on 0] startup 110.2 ms wall 360.9 ms work 245.5 ms teardown 5.2 ms load 1.42
+[scope spawn-tree tool/off 0] startup 106.3 ms wall 281.7 ms work 160.1 ms teardown 15.4 ms load 1.38
+[scope spawn-tree direct 0] startup 1.7 ms wall 157.4 ms work 155.5 ms teardown 0.3 ms load 1.38
+[scope spawn-tree tool/on 1] startup 106.0 ms wall 366.1 ms work 245.0 ms teardown 15.1 ms load 1.38
+[scope spawn-tree direct 1] startup 1.3 ms wall 147.2 ms work 145.7 ms teardown 0.3 ms load 1.38
+[scope spawn-tree tool/off 1] startup 93.5 ms wall 269.5 ms work 154.3 ms teardown 21.7 ms load 1.38
+[scope spawn-tree tool/off 2] startup 100.3 ms wall 275.8 ms work 158.6 ms teardown 16.9 ms load 1.38
+[scope spawn-tree tool/on 2] startup 104.2 ms wall 357.9 ms work 238.6 ms teardown 15.1 ms load 1.38
+[scope spawn-tree direct 2] startup 1.3 ms wall 151.1 ms work 149.5 ms teardown 0.3 ms load 1.38
+[scope spawn-tree tool/on 3] startup 96.7 ms wall 349.6 ms work 237.9 ms teardown 15.0 ms load 1.38
+[scope spawn-tree tool/off 3] startup 88.8 ms wall 264.2 ms work 154.9 ms teardown 20.6 ms load 1.38
+[scope spawn-tree direct 3] startup 1.4 ms wall 149.8 ms work 148.1 ms teardown 0.3 ms load 1.38
+[scope spawn-tree tool/off 4] startup 101.1 ms wall 287.0 ms work 165.4 ms teardown 20.5 ms load 1.38
+[scope spawn-tree direct 4] startup 1.7 ms wall 154.5 ms work 152.5 ms teardown 0.3 ms load 1.38
+[scope spawn-tree tool/on 4] startup 96.2 ms wall 337.2 ms work 235.8 ms teardown 5.2 ms load 1.38
+[scope spawn-tree tool/off 5] startup 99.0 ms wall 284.2 ms work 165.9 ms teardown 19.2 ms load 1.38
+[scope spawn-tree tool/on 5] startup 99.7 ms wall 360.0 ms work 254.6 ms teardown 5.7 ms load 1.38
+[scope spawn-tree direct 5] startup 1.6 ms wall 154.0 ms work 152.1 ms teardown 0.3 ms load 1.38
+[scope spawn-tree tool/off 6] startup 90.1 ms wall 285.2 ms work 171.9 ms teardown 23.2 ms load 1.38
+[scope spawn-tree tool/on 6] startup 112.7 ms wall 374.8 ms work 256.5 ms teardown 5.5 ms load 1.38
+[scope spawn-tree direct 6] startup 1.9 ms wall 163.5 ms work 161.3 ms teardown 0.3 ms load 1.51
+[scope spawn-tree direct 7] startup 1.4 ms wall 158.2 ms work 156.5 ms teardown 0.3 ms load 1.51
+[scope spawn-tree tool/off 7] startup 92.5 ms wall 278.3 ms work 163.7 ms teardown 22.2 ms load 1.51
+[scope spawn-tree tool/on 7] startup 99.7 ms wall 386.0 ms work 270.6 ms teardown 15.7 ms load 1.51
+[scope spawn-tree tool/on 8] startup 106.4 ms wall 372.3 ms work 257.4 ms teardown 8.5 ms load 1.51
+[scope spawn-tree tool/off 8] startup 98.7 ms wall 273.4 ms work 157.6 ms teardown 17.1 ms load 1.51
+[scope spawn-tree direct 8] startup 1.3 ms wall 151.9 ms work 150.2 ms teardown 0.3 ms load 1.51
+[scope spawn-tree direct 9] startup 1.4 ms wall 155.3 ms work 153.6 ms teardown 0.3 ms load 1.51
+[scope spawn-tree tool/off 9] startup 96.1 ms wall 272.0 ms work 158.5 ms teardown 17.3 ms load 1.51
+[scope spawn-tree tool/on 9] startup 106.2 ms wall 358.5 ms work 246.8 ms teardown 5.5 ms load 1.51
+[scope spawn-tree tool/on 10] startup 108.8 ms wall 372.5 ms work 247.2 ms teardown 16.5 ms load 1.51
+[scope spawn-tree direct 10] startup 1.4 ms wall 160.3 ms work 158.5 ms teardown 0.3 ms load 1.51
+[scope spawn-tree tool/off 10] startup 93.8 ms wall 278.4 ms work 161.8 ms teardown 22.8 ms load 1.51
+[scope spawn-tree tool/off 11] startup 106.4 ms wall 292.3 ms work 162.2 ms teardown 23.7 ms load 1.51
+[scope spawn-tree tool/on 11] startup 105.5 ms wall 372.3 ms work 260.4 ms teardown 6.4 ms load 1.51
+[scope spawn-tree direct 11] startup 1.9 ms wall 168.8 ms work 166.6 ms teardown 0.3 ms load 1.51
+[scope spawn-tree tool/off 12] startup 111.0 ms wall 298.0 ms work 171.0 ms teardown 16.0 ms load 1.51
+[scope spawn-tree tool/on 12] startup 111.4 ms wall 386.8 ms work 259.7 ms teardown 15.6 ms load 1.51
+[scope spawn-tree direct 12] startup 1.8 ms wall 163.0 ms work 160.9 ms teardown 0.3 ms load 1.63
+[scope spawn-tree tool/off 13] startup 96.3 ms wall 282.6 ms work 165.1 ms teardown 21.3 ms load 1.63
+[scope spawn-tree direct 13] startup 1.5 ms wall 153.5 ms work 151.7 ms teardown 0.3 ms load 1.63
+[scope spawn-tree tool/on 13] startup 123.9 ms wall 400.1 ms work 270.0 ms teardown 6.2 ms load 1.63
+[scope spawn-tree tool/on 14] startup 111.1 ms wall 396.6 ms work 280.5 ms teardown 4.9 ms load 1.63
+[scope spawn-tree direct 14] startup 1.4 ms wall 154.7 ms work 153.0 ms teardown 0.3 ms load 1.63
+[scope spawn-tree tool/off 14] startup 110.0 ms wall 295.3 ms work 163.6 ms teardown 21.6 ms load 1.63
+[scope spawn-tree tool/off 15] startup 107.5 ms wall 313.5 ms work 182.9 ms teardown 23.2 ms load 1.63
+[scope spawn-tree tool/on 15] startup 98.2 ms wall 354.9 ms work 250.7 ms teardown 6.0 ms load 1.63
+[scope spawn-tree direct 15] startup 1.3 ms wall 165.8 ms work 164.2 ms teardown 0.3 ms load 1.63
+[scope spawn-tree tool/off 16] startup 99.0 ms wall 294.5 ms work 171.0 ms teardown 24.5 ms load 1.63
+[scope spawn-tree tool/on 16] startup 112.0 ms wall 393.5 ms work 274.3 ms teardown 7.2 ms load 1.63
+[scope spawn-tree direct 16] startup 1.5 ms wall 154.5 ms work 152.6 ms teardown 0.4 ms load 1.63
+[scope spawn-tree tool/off 17] startup 108.7 ms wall 304.2 ms work 178.6 ms teardown 17.0 ms load 1.63
+[scope spawn-tree direct 17] startup 1.6 ms wall 173.9 ms work 171.9 ms teardown 0.5 ms load 1.63
+[scope spawn-tree tool/on 17] startup 101.3 ms wall 372.8 ms work 265.1 ms teardown 6.3 ms load 1.63
+[scope spawn-tree tool/on 18] startup 116.5 ms wall 375.4 ms work 243.0 ms teardown 15.8 ms load 1.63
+[scope spawn-tree tool/off 18] startup 102.8 ms wall 287.7 ms work 164.2 ms teardown 20.7 ms load 1.58
+[scope spawn-tree direct 18] startup 1.2 ms wall 153.3 ms work 151.8 ms teardown 0.3 ms load 1.58
+[scope spawn-tree direct 19] startup 1.5 ms wall 147.0 ms work 145.2 ms teardown 0.2 ms load 1.58
+[scope spawn-tree tool/off 19] startup 84.0 ms wall 269.5 ms work 161.6 ms teardown 24.0 ms load 1.58
+[scope spawn-tree tool/on 19] startup 102.6 ms wall 366.8 ms work 258.4 ms teardown 5.7 ms load 1.58
+[scope spawn-tree tool/off 20] startup 105.6 ms wall 291.8 ms work 163.4 ms teardown 22.8 ms load 1.58
+[scope spawn-tree tool/on 20] startup 108.3 ms wall 395.5 ms work 281.6 ms teardown 5.7 ms load 1.58
+[scope spawn-tree direct 20] startup 1.7 ms wall 168.5 ms work 166.4 ms teardown 0.3 ms load 1.58
+[scope spawn-tree tool/off 21] startup 95.6 ms wall 313.0 ms work 195.7 ms teardown 21.7 ms load 1.58
+[scope spawn-tree direct 21] startup 1.6 ms wall 172.3 ms work 170.5 ms teardown 0.2 ms load 1.58
+[scope spawn-tree tool/on 21] startup 96.8 ms wall 358.0 ms work 246.1 ms teardown 15.1 ms load 1.58
+[scope spawn-tree tool/on 22] startup 109.1 ms wall 350.3 ms work 234.9 ms teardown 6.3 ms load 1.58
+[scope spawn-tree direct 22] startup 1.6 ms wall 152.7 ms work 150.8 ms teardown 0.3 ms load 1.58
+[scope spawn-tree tool/off 22] startup 92.0 ms wall 267.7 ms work 152.4 ms teardown 23.3 ms load 1.58
+[scope spawn-tree direct 23] startup 1.3 ms wall 146.1 ms work 144.5 ms teardown 0.3 ms load 1.58
+[scope spawn-tree tool/on 23] startup 109.1 ms wall 379.8 ms work 265.4 ms teardown 5.3 ms load 1.58
+[scope spawn-tree tool/off 23] startup 98.6 ms wall 294.2 ms work 172.5 ms teardown 23.1 ms load 1.58
+[scope spawn-tree direct 24] startup 1.4 ms wall 157.4 ms work 155.7 ms teardown 0.3 ms load 1.58
+[scope spawn-tree tool/on 24] startup 96.2 ms wall 357.1 ms work 245.7 ms teardown 15.2 ms load 1.58
+[scope spawn-tree tool/off 24] startup 82.9 ms wall 248.0 ms work 150.7 ms teardown 14.4 ms load 1.62
+[scope spawn-tree tool/off 25] startup 91.0 ms wall 276.2 ms work 161.9 ms teardown 23.3 ms load 1.62
+[scope spawn-tree direct 25] startup 1.3 ms wall 148.6 ms work 147.0 ms teardown 0.3 ms load 1.62
+[scope spawn-tree tool/on 25] startup 101.9 ms wall 362.7 ms work 254.5 ms teardown 6.3 ms load 1.62
+[scope spawn-tree tool/off 26] startup 104.8 ms wall 280.7 ms work 155.5 ms teardown 20.4 ms load 1.62
+[scope spawn-tree tool/on 26] startup 97.8 ms wall 369.3 ms work 256.7 ms teardown 14.8 ms load 1.62
+[scope spawn-tree direct 26] startup 1.6 ms wall 160.8 ms work 158.9 ms teardown 0.3 ms load 1.62
+[scope spawn-tree tool/off 27] startup 88.5 ms wall 264.7 ms work 157.0 ms teardown 19.1 ms load 1.62
+[scope spawn-tree tool/on 27] startup 97.7 ms wall 348.5 ms work 245.0 ms teardown 5.9 ms load 1.62
+[scope spawn-tree direct 27] startup 1.4 ms wall 155.3 ms work 153.6 ms teardown 0.3 ms load 1.62
+[scope spawn-tree tool/off 28] startup 92.8 ms wall 278.5 ms work 164.5 ms teardown 21.2 ms load 1.62
+[scope spawn-tree tool/on 28] startup 102.5 ms wall 384.0 ms work 265.0 ms teardown 16.5 ms load 1.62
+[scope spawn-tree direct 28] startup 1.4 ms wall 163.9 ms work 162.2 ms teardown 0.4 ms load 1.62
+[scope spawn-tree tool/on 29] startup 111.1 ms wall 391.4 ms work 274.8 ms teardown 5.5 ms load 1.62
+[scope spawn-tree direct 29] startup 1.5 ms wall 151.8 ms work 150.1 ms teardown 0.3 ms load 1.62
+[scope spawn-tree tool/off 29] startup 95.5 ms wall 260.9 ms work 157.1 ms teardown 8.2 ms load 1.62
+[scope fileops tool/off warm-up 0] startup 107.7 ms wall 366.2 ms work 240.0 ms teardown 18.5 ms load 1.62
+[scope fileops tool/on warm-up 0] startup 113.9 ms wall 1083.4 ms work 962.3 ms teardown 7.2 ms load 1.62
+[scope fileops direct warm-up 0] startup 1.6 ms wall 216.4 ms work 214.5 ms teardown 0.3 ms load 1.57
+[scope fileops tool/off warm-up 1] startup 97.9 ms wall 343.7 ms work 228.4 ms teardown 17.4 ms load 1.57
+[scope fileops tool/on warm-up 1] startup 103.2 ms wall 1120.9 ms work 1012.3 ms teardown 5.4 ms load 1.57
+[scope fileops direct warm-up 1] startup 1.4 ms wall 180.9 ms work 179.2 ms teardown 0.3 ms load 1.57
+[scope fileops tool/on warm-up 2] startup 108.6 ms wall 1130.0 ms work 1015.6 ms teardown 5.8 ms load 1.57
+[scope fileops direct warm-up 2] startup 1.6 ms wall 234.1 ms work 232.1 ms teardown 0.4 ms load 1.57
+[scope fileops tool/off warm-up 2] startup 105.8 ms wall 392.5 ms work 270.3 ms teardown 16.4 ms load 1.57
+[scope fileops tool/on warm-up 3] startup 109.3 ms wall 1233.9 ms work 1115.0 ms teardown 9.6 ms load 1.52
+[scope fileops tool/off warm-up 3] startup 115.9 ms wall 381.6 ms work 241.4 ms teardown 24.3 ms load 1.52
+[scope fileops direct warm-up 3] startup 1.7 ms wall 191.2 ms work 189.1 ms teardown 0.4 ms load 1.52
+[scope fileops direct warm-up 4] startup 1.5 ms wall 194.1 ms work 192.3 ms teardown 0.4 ms load 1.52
+[scope fileops tool/on warm-up 4] startup 124.2 ms wall 1113.0 ms work 982.3 ms teardown 6.6 ms load 1.52
+[scope fileops tool/off warm-up 4] startup 98.7 ms wall 374.2 ms work 251.0 ms teardown 24.5 ms load 1.52
+[scope fileops tool/off 0] startup 105.9 ms wall 382.9 ms work 255.8 ms teardown 21.2 ms load 1.52
+[scope fileops tool/on 0] startup 113.2 ms wall 1200.5 ms work 1071.2 ms teardown 16.0 ms load 1.52
+[scope fileops direct 0] startup 1.5 ms wall 186.4 ms work 184.5 ms teardown 0.3 ms load 1.56
+[scope fileops direct 1] startup 1.3 ms wall 190.1 ms work 188.3 ms teardown 0.4 ms load 1.56
+[scope fileops tool/on 1] startup 105.3 ms wall 1142.5 ms work 1021.7 ms teardown 15.5 ms load 1.56
+[scope fileops tool/off 1] startup 96.4 ms wall 342.9 ms work 226.8 ms teardown 19.7 ms load 1.56
+[scope fileops direct 2] startup 1.4 ms wall 176.5 ms work 174.8 ms teardown 0.3 ms load 1.56
+[scope fileops tool/on 2] startup 98.5 ms wall 1139.3 ms work 1034.0 ms teardown 6.8 ms load 1.56
+[scope fileops tool/off 2] startup 109.0 ms wall 385.7 ms work 254.0 ms teardown 22.7 ms load 1.56
+[scope fileops tool/off 3] startup 132.7 ms wall 460.5 ms work 306.2 ms teardown 21.6 ms load 1.56
+[scope fileops direct 3] startup 1.8 ms wall 211.7 ms work 209.5 ms teardown 0.4 ms load 1.56
+[scope fileops tool/on 3] startup 116.3 ms wall 1189.3 ms work 1065.1 ms teardown 8.0 ms load 1.51
+[scope fileops tool/on 4] startup 123.2 ms wall 1168.7 ms work 1038.1 ms teardown 7.4 ms load 1.51
+[scope fileops tool/off 4] startup 94.0 ms wall 360.5 ms work 243.5 ms teardown 23.0 ms load 1.51
+[scope fileops direct 4] startup 1.7 ms wall 185.4 ms work 183.4 ms teardown 0.4 ms load 1.51
+[scope fileops direct 5] startup 1.4 ms wall 183.3 ms work 181.4 ms teardown 0.4 ms load 1.51
+[scope fileops tool/on 5] startup 106.2 ms wall 1138.9 ms work 1026.1 ms teardown 6.6 ms load 1.51
+[scope fileops tool/off 5] startup 112.3 ms wall 368.6 ms work 236.5 ms teardown 19.8 ms load 1.51
+[scope fileops tool/off 6] startup 102.8 ms wall 369.3 ms work 247.3 ms teardown 19.3 ms load 1.47
+[scope fileops direct 6] startup 1.4 ms wall 183.5 ms work 181.7 ms teardown 0.4 ms load 1.47
+[scope fileops tool/on 6] startup 112.2 ms wall 1176.9 ms work 1058.1 ms teardown 6.7 ms load 1.47
+[scope fileops tool/on 7] startup 117.3 ms wall 1150.2 ms work 1017.3 ms teardown 15.6 ms load 1.47
+[scope fileops tool/off 7] startup 101.3 ms wall 367.4 ms work 245.4 ms teardown 20.7 ms load 1.47
+[scope fileops direct 7] startup 1.2 ms wall 194.5 ms work 192.9 ms teardown 0.4 ms load 1.47
+[scope fileops direct 8] startup 1.7 ms wall 177.7 ms work 175.6 ms teardown 0.4 ms load 1.47
+[scope fileops tool/on 8] startup 111.3 ms wall 1159.7 ms work 1042.0 ms teardown 6.4 ms load 1.47
+[scope fileops tool/off 8] startup 100.3 ms wall 355.8 ms work 235.2 ms teardown 20.3 ms load 1.43
+[scope fileops tool/on 9] startup 109.0 ms wall 1212.2 ms work 1097.5 ms teardown 5.7 ms load 1.43
+[scope fileops tool/off 9] startup 102.5 ms wall 388.6 ms work 267.7 ms teardown 18.5 ms load 1.43
+[scope fileops direct 9] startup 1.5 ms wall 196.7 ms work 194.8 ms teardown 0.4 ms load 1.43
+[scope fileops direct 10] startup 1.5 ms wall 195.7 ms work 193.8 ms teardown 0.4 ms load 1.43
+[scope fileops tool/off 10] startup 99.0 ms wall 355.0 ms work 237.3 ms teardown 18.7 ms load 1.43
+[scope fileops tool/on 10] startup 127.2 ms wall 1119.6 ms work 986.9 ms teardown 5.5 ms load 1.43
+[scope fileops tool/off 11] startup 120.3 ms wall 397.1 ms work 255.1 ms teardown 21.7 ms load 1.43
+[scope fileops tool/on 11] startup 105.6 ms wall 1118.7 ms work 1007.1 ms teardown 6.0 ms load 1.43
+[scope fileops direct 11] startup 1.8 ms wall 193.4 ms work 191.3 ms teardown 0.4 ms load 1.48
+[scope fileops tool/on 12] startup 98.7 ms wall 1137.8 ms work 1022.7 ms teardown 16.4 ms load 1.48
+[scope fileops tool/off 12] startup 89.2 ms wall 334.7 ms work 228.8 ms teardown 16.7 ms load 1.48
+[scope fileops direct 12] startup 1.7 ms wall 193.7 ms work 191.6 ms teardown 0.4 ms load 1.48
+[scope fileops direct 13] startup 1.3 ms wall 184.3 ms work 182.6 ms teardown 0.4 ms load 1.48
+[scope fileops tool/on 13] startup 102.8 ms wall 1169.0 ms work 1058.5 ms teardown 7.8 ms load 1.48
+[scope fileops tool/off 13] startup 106.6 ms wall 363.6 ms work 235.7 ms teardown 21.4 ms load 1.48
+[scope fileops direct 14] startup 1.5 ms wall 179.0 ms work 177.1 ms teardown 0.3 ms load 1.44
+[scope fileops tool/off 14] startup 91.7 ms wall 347.3 ms work 232.8 ms teardown 22.8 ms load 1.44
+[scope fileops tool/on 14] startup 99.6 ms wall 1074.1 ms work 958.9 ms teardown 15.5 ms load 1.44
+[scope fileops tool/on 15] startup 115.1 ms wall 1077.9 ms work 955.9 ms teardown 6.9 ms load 1.44
+[scope fileops tool/off 15] startup 90.2 ms wall 336.0 ms work 230.4 ms teardown 15.3 ms load 1.44
+[scope fileops direct 15] startup 1.8 ms wall 178.6 ms work 176.5 ms teardown 0.3 ms load 1.44
+[scope fileops tool/on 16] startup 105.8 ms wall 991.0 ms work 878.7 ms teardown 6.5 ms load 1.44
+[scope fileops direct 16] startup 1.5 ms wall 170.5 ms work 168.7 ms teardown 0.3 ms load 1.44
+[scope fileops tool/off 16] startup 101.2 ms wall 346.5 ms work 222.2 ms teardown 23.1 ms load 1.44
+[scope fileops direct 17] startup 1.2 ms wall 193.9 ms work 192.4 ms teardown 0.3 ms load 1.41
+[scope fileops tool/off 17] startup 92.2 ms wall 327.3 ms work 214.4 ms teardown 20.7 ms load 1.41
+[scope fileops tool/on 17] startup 105.9 ms wall 1042.2 ms work 928.2 ms teardown 8.1 ms load 1.41
+[scope fileops direct 18] startup 1.4 ms wall 172.0 ms work 170.2 ms teardown 0.4 ms load 1.41
+[scope fileops tool/off 18] startup 101.0 ms wall 336.0 ms work 217.1 ms teardown 17.8 ms load 1.41
+[scope fileops tool/on 18] startup 107.6 ms wall 1051.2 ms work 938.6 ms teardown 5.0 ms load 1.41
+[scope fileops tool/on 19] startup 103.3 ms wall 1085.6 ms work 977.0 ms teardown 5.3 ms load 1.41
+[scope fileops direct 19] startup 1.4 ms wall 179.4 ms work 177.6 ms teardown 0.3 ms load 1.41
+[scope fileops tool/off 19] startup 98.7 ms wall 364.4 ms work 244.3 ms teardown 21.4 ms load 1.37
+[scope fileops direct 20] startup 1.5 ms wall 182.8 ms work 180.9 ms teardown 0.4 ms load 1.37
+[scope fileops tool/off 20] startup 102.4 ms wall 367.9 ms work 243.1 ms teardown 22.4 ms load 1.37
+[scope fileops tool/on 20] startup 94.7 ms wall 1112.2 ms work 1011.2 ms teardown 6.4 ms load 1.37
+[scope fileops tool/on 21] startup 110.4 ms wall 1107.9 ms work 988.3 ms teardown 9.3 ms load 1.37
+[scope fileops direct 21] startup 2.0 ms wall 212.9 ms work 210.5 ms teardown 0.4 ms load 1.37
+[scope fileops tool/off 21] startup 108.4 ms wall 365.0 ms work 231.4 ms teardown 25.3 ms load 1.37
+[scope fileops tool/on 22] startup 103.4 ms wall 1135.4 ms work 1015.3 ms teardown 16.6 ms load 1.37
+[scope fileops direct 22] startup 2.5 ms wall 216.1 ms work 213.2 ms teardown 0.4 ms load 1.34
+[scope fileops tool/off 22] startup 122.3 ms wall 409.0 ms work 263.1 ms teardown 23.6 ms load 1.34
+[scope fileops tool/off 23] startup 111.4 ms wall 398.6 ms work 269.7 ms teardown 17.5 ms load 1.34
+[scope fileops direct 23] startup 1.6 ms wall 192.3 ms work 190.3 ms teardown 0.3 ms load 1.34
+[scope fileops tool/on 23] startup 128.1 ms wall 1210.7 ms work 1075.0 ms teardown 7.7 ms load 1.34
+[scope fileops direct 24] startup 1.6 ms wall 184.6 ms work 182.6 ms teardown 0.3 ms load 1.34
+[scope fileops tool/off 24] startup 112.5 ms wall 378.5 ms work 244.2 ms teardown 21.8 ms load 1.34
+[scope fileops tool/on 24] startup 121.6 ms wall 1114.2 ms work 987.7 ms teardown 4.9 ms load 1.34
+[scope fileops tool/on 25] startup 121.7 ms wall 1125.3 ms work 998.3 ms teardown 5.2 ms load 1.34
+[scope fileops tool/off 25] startup 92.9 ms wall 358.4 ms work 242.6 ms teardown 22.9 ms load 1.32
+[scope fileops direct 25] startup 1.8 ms wall 202.0 ms work 199.9 ms teardown 0.3 ms load 1.32
+[scope fileops tool/off 26] startup 95.1 ms wall 330.6 ms work 216.0 ms teardown 19.6 ms load 1.32
+[scope fileops direct 26] startup 1.9 ms wall 187.8 ms work 185.5 ms teardown 0.4 ms load 1.32
+[scope fileops tool/on 26] startup 103.5 ms wall 1033.9 ms work 925.3 ms teardown 5.2 ms load 1.32
+[scope fileops tool/on 27] startup 99.6 ms wall 1172.4 ms work 1067.7 ms teardown 5.1 ms load 1.32
+[scope fileops direct 27] startup 1.8 ms wall 181.0 ms work 178.9 ms teardown 0.4 ms load 1.32
+[scope fileops tool/off 27] startup 102.3 ms wall 357.7 ms work 231.2 ms teardown 24.2 ms load 1.32
+[scope fileops tool/on 28] startup 110.0 ms wall 1168.0 ms work 1052.2 ms teardown 5.8 ms load 1.29
+[scope fileops direct 28] startup 1.6 ms wall 184.2 ms work 182.3 ms teardown 0.3 ms load 1.29
+[scope fileops tool/off 28] startup 106.4 ms wall 341.5 ms work 219.7 ms teardown 15.4 ms load 1.29
+[scope fileops direct 29] startup 1.2 ms wall 178.3 ms work 176.7 ms teardown 0.4 ms load 1.29
+[scope fileops tool/off 29] startup 99.9 ms wall 345.8 ms work 230.2 ms teardown 15.8 ms load 1.29
+[scope fileops tool/on 29] startup 105.5 ms wall 1094.4 ms work 983.4 ms teardown 5.4 ms load 1.29
+# `ouro-jail` performance (jail-v1 §5)
+
+Collected 2026-09-29T08:13:21Z on `vps-450b3fe8` (Ubuntu 26.04.1 LTS, kernel 7.0.0-31-generic, 4 CPUs, 3814 MiB) as `ubuntu` (lingering: yes). Revision `2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa+dirty`. `ouro-jail` sha256 `af66b1cf6fc046ca876da8d7d3b31091f0ccf72d7db08dc956faae4dbe0a31d7`; `ouro-fixture` sha256 `be99eaec6b462384fc75c0d180532bca78327f5a8fd426e60859ab381e892dbf`; bubblewrap 0.11.1.
+
+Raw data: `launches.ndjson`, 630 records, sha256 `3a7f1e4444c8b7c8ca719d4b2f8c72d83192aae5d9dd8c4c44dae2c28a45e513`; summarised 2026-09-29T08:16:50Z by xtask 0.1.0 at source revision `2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa`.
+
+Parameters: 30 measured launch(es) per arm after 5 warm-up launch(es) per arm (90 warm-up records discarded); sessions ["plain","scope"]; profiles ["tool"]; workloads ["noop","spawn-tree","fileops"]; fileops 5000 rounds; spawn-tree 200 children; sampling every 5 ms; arm order seed 20260929.
+
+Host quietness: threshold `--max-load 3`: a verdict needs every counted launch of both sides at or below it. Before the measured launches the 1-minute load average was 0.83 / 1.22 / 1.63 and `/proc/pressure/cpu` `some avg10` was 0.62 / 3.30 / 3.80 % (min / median / max); across them the host's CPU stall was 0.0 / 6.6 / 88.9 ms. The host has 4 CPUs. The 1-minute load includes the harness's own recent launches.
+
+## Verdict roll-up
+
+A budget holds for a profile only if every cell below passes. The overhead budget is read three ways, each its own verdict: **work phase** (the target's own entry to end; the integrator's current reading of §5), **post-start** (work + teardown: everything after entry, so startup + post-start cover the whole run), and **end-to-end wall** (startup included).
+
+| Profile | Comparison | p95 added startup < 250 ms | Work phase < 20% | Post-start < 20% | End-to-end wall < 20% |
+|---|---|---|---|---|---|
+| tool | off vs direct | pass (6 of 6 cells pass, 0 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) |
+| tool | on vs direct | pass (6 of 6 cells pass, 0 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) | fail (0 of 2 cells pass, 2 fail, 0 insufficient, 0 loaded) |
+
+## `--observe off` against direct: the jail's own overhead (`tool`)
+
+Under the decision of 2026-09-24 the §5 budgets apply to this comparison if observation misses them (next section); otherwise they apply to both. Each cell: median / p95 over the valid launches. `exec_unconfirmed` marks valid launches whose receipt outcome is `unknown` because, with observation off, the target ended before the supervisor confirmed its exec (the jail then exits 1); the target's own lines prove it ran, and the timing is the jail's real path.
+
+| Session | Profile | Workload | Subject / baseline | Valid (excl.) subject | Valid (excl.) baseline | Max load | Baseline median startup / work / teardown / wall ms | Added startup ms | Added teardown ms | Work overhead % | Post-start overhead % | Wall overhead % | p95 added startup < 250 ms | Work phase < 20% (integrator's reading) | Post-start (work + teardown) < 20% | End-to-end wall < 20% |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | tool | noop | tool/off / direct | 30 (0; flagged: exec_unconfirmed 30) | 30 (0) | 0.84 | 1.4 / 0.0 / 0.2 / 1.6 | 111.3 / 123.4 | 22.6 / 23.2 | 50.8 / 161.5 | 9503.1 / 9802.9 | 8151.1 / 8908.6 | pass (123.4 ms) | n/a | n/a | n/a |
+| plain | tool | spawn-tree | tool/off / direct | 30 (0) | 30 (0) | 1.24 | 1.5 / 154.5 / 0.3 / 156.3 | 114.5 / 124.0 | 21.5 / 24.3 | 8.9 / 18.8 | 20.5 / 33.3 | 96.4 / 109.4 | pass (124.0 ms) | n/a | n/a | n/a |
+| plain | tool | fileops | tool/off / direct | 30 (0) | 30 (0) | 1.19 | 1.6 / 187.8 / 0.4 / 189.9 | 116.1 / 130.6 | 19.6 / 24.7 | 26.7 / 54.7 | 36.6 / 62.9 | 97.6 / 131.8 | pass (130.6 ms) | fail (26.7%) | fail (36.6%) | fail (97.6%) |
+| scope | tool | noop | tool/off / direct | 30 (0; flagged: exec_unconfirmed 30) | 30 (0) | 1.42 | 1.6 / 0.0 / 0.2 / 1.8 | 107.2 / 123.9 | 22.8 / 23.9 | 32.6 / 214.2 | 8200.4 / 8589.2 | 7108.7 / 8026.5 | pass (123.9 ms) | n/a | n/a | n/a |
+| scope | tool | spawn-tree | tool/off / direct | 30 (0) | 30 (0) | 1.63 | 1.5 / 153.3 / 0.3 / 155.0 | 96.0 / 108.6 | 21.0 / 23.7 | 6.2 / 19.3 | 20.6 / 34.2 | 81.5 / 102.0 | pass (108.6 ms) | n/a | n/a | n/a |
+| scope | tool | fileops | tool/off / direct | 30 (0) | 30 (0) | 1.56 | 1.5 / 183.0 / 0.4 / 185.0 | 100.3 / 120.8 | 20.6 / 23.8 | 29.5 / 47.4 | 40.1 / 56.7 | 95.7 / 121.1 | pass (120.8 ms) | fail (29.5%) | fail (40.1%) | fail (95.7%) |
+
+## `--observe on` against direct: the budgets with observation (`tool`)
+
+The §5 budgets as first written, observation included.
+
+| Session | Profile | Workload | Subject / baseline | Valid (excl.) subject | Valid (excl.) baseline | Max load | Baseline median startup / work / teardown / wall ms | Added startup ms | Added teardown ms | Work overhead % | Post-start overhead % | Wall overhead % | p95 added startup < 250 ms | Work phase < 20% (integrator's reading) | Post-start (work + teardown) < 20% | End-to-end wall < 20% |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | tool | noop | tool/on / direct | 30 (0) | 30 (0) | 0.84 | 1.4 / 0.0 / 0.2 / 1.6 | 120.4 / 136.0 | 5.4 / 15.4 | 63.8 / 468.0 | 2290.6 / 6526.0 | 7770.8 / 8664.2 | pass (136.0 ms) | n/a | n/a | n/a |
+| plain | tool | spawn-tree | tool/on / direct | 30 (0) | 30 (0) | 1.24 | 1.5 / 154.5 / 0.3 / 156.3 | 120.5 / 131.6 | 6.0 / 15.7 | 68.0 / 79.2 | 73.5 / 88.7 | 149.5 / 171.6 | pass (131.6 ms) | n/a | n/a | n/a |
+| plain | tool | fileops | tool/on / direct | 30 (0) | 30 (0) | 1.19 | 1.6 / 187.8 / 0.4 / 189.9 | 122.4 / 136.5 | 6.8 / 16.0 | 447.0 / 503.6 | 454.5 / 510.8 | 514.5 / 575.8 | pass (136.5 ms) | fail (447.0%) | fail (454.5%) | fail (514.5%) |
+| scope | tool | noop | tool/on / direct | 30 (0) | 30 (0) | 1.42 | 1.6 / 0.0 / 0.2 / 1.8 | 115.1 / 130.9 | 6.2 / 16.6 | 63.3 / 621.5 | 2239.2 / 5998.1 | 6675.0 / 7535.7 | pass (130.9 ms) | n/a | n/a | n/a |
+| scope | tool | spawn-tree | tool/on / direct | 30 (0) | 30 (0) | 1.63 | 1.5 / 153.3 / 0.3 / 155.0 | 104.3 / 115.1 | 6.0 / 16.2 | 66.7 / 83.0 | 71.1 / 86.4 | 139.3 / 155.9 | pass (115.1 ms) | n/a | n/a | n/a |
+| scope | tool | fileops | tool/on / direct | 30 (0) | 30 (0) | 1.56 | 1.5 / 183.0 / 0.4 / 185.0 | 105.4 / 125.7 | 6.3 / 16.0 | 455.4 / 487.4 | 463.0 / 493.0 | 514.3 / 554.4 | pass (125.7 ms) | fail (455.4%) | fail (463.0%) | fail (514.3%) |
+
+## Observation cost: `--observe on` against `--observe off` (reported, no budget)
+
+| Session | Profile | Workload | Subject / baseline | Valid (excl.) subject | Valid (excl.) baseline | Max load | Baseline median startup / work / teardown / wall ms | Added startup ms | Added teardown ms | Work overhead % | Post-start overhead % | Wall overhead % |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | tool | noop | tool/on / tool/off | 30 (0) | 30 (0) | 0.84 | 112.7 / 0.1 / 22.8 / 135.2 | 9.1 / 24.7 | -17.1 / -7.1 | 8.7 / 276.8 | -75.1 / -31.0 | -4.6 / 6.2 |
+| plain | tool | spawn-tree | tool/on / tool/off | 30 (0) | 30 (0) | 1.24 | 116.0 / 168.2 / 21.8 / 307.0 | 6.0 / 17.1 | -15.5 / -5.8 | 54.3 / 64.5 | 44.0 / 56.7 | 27.0 / 38.3 |
+| plain | tool | fileops | tool/on / tool/off | 30 (0) | 30 (0) | 1.19 | 117.7 / 237.9 / 20.0 / 375.2 | 6.3 / 20.4 | -12.8 / -3.5 | 331.7 / 376.3 | 305.9 / 347.2 | 210.9 / 241.9 |
+| scope | tool | noop | tool/on / tool/off | 30 (0) | 30 (0) | 1.42 | 108.8 / 0.0 / 23.0 / 131.9 | 7.9 / 23.7 | -16.6 / -6.1 | 23.1 / 444.0 | -71.8 / -26.5 | -6.0 / 5.9 |
+| scope | tool | spawn-tree | tool/on / tool/off | 30 (0) | 30 (0) | 1.63 | 97.4 / 162.8 / 21.3 / 281.2 | 8.3 / 19.1 | -14.9 / -4.8 | 57.0 / 72.3 | 41.9 / 54.6 | 31.9 / 41.0 |
+| scope | tool | fileops | tool/on / tool/off | 30 (0) | 30 (0) | 1.56 | 101.8 / 236.9 / 20.9 / 362.0 | 5.1 / 25.4 | -14.3 / -4.6 | 329.0 / 353.8 | 301.9 / 323.3 | 213.9 / 234.4 |
+
+## Informational profiles
+
+### `agent`, off vs direct
+
+(no data)
+
+### `agent`, on vs direct
+
+(no data)
+
+### `none`, off vs direct
+
+(no data)
+
+### `none`, on vs direct
+
+(no data)
+
+## Per arm
+
+| Session | Workload | Arm | Valid | Excluded (reasons) | Flagged | Startup ms | Work ms | Teardown ms | Post-start ms | Wall ms |
+|---|---|---|---|---|---|---|---|---|---|---|
+| plain | noop | direct | 30/30 | 0 (none) | none | 1.4 / 1.6 | 0.0 / 0.1 | 0.2 / 0.3 | 0.2 / 0.3 | 1.6 / 1.9 |
+| plain | noop | tool/off | 30/30 | 0 (none) | exec_unconfirmed 30 | 112.7 / 124.8 | 0.1 / 0.1 | 22.8 / 23.4 | 22.8 / 23.5 | 135.2 / 147.6 |
+| plain | noop | tool/on | 30/30 | 0 (none) | none | 121.8 / 137.4 | 0.1 / 0.2 | 5.6 / 15.6 | 5.7 / 15.7 | 129.0 / 143.6 |
+| plain | spawn-tree | direct | 30/30 | 0 (none) | none | 1.5 / 2.3 | 154.5 / 173.8 | 0.3 / 0.4 | 154.7 / 174.2 | 156.3 / 175.7 |
+| plain | spawn-tree | tool/off | 30/30 | 0 (none) | none | 116.0 / 125.5 | 168.2 / 183.4 | 21.8 / 24.5 | 186.4 / 206.3 | 307.0 / 327.4 |
+| plain | spawn-tree | tool/on | 30/30 | 0 (none) | none | 122.0 / 133.1 | 259.5 / 276.8 | 6.3 / 16.0 | 268.4 / 292.0 | 390.0 / 424.7 |
+| plain | fileops | direct | 30/30 | 0 (none) | none | 1.6 / 1.9 | 187.8 / 260.6 | 0.4 / 0.5 | 188.2 / 261.1 | 189.9 / 262.9 |
+| plain | fileops | tool/off | 30/30 | 0 (none) | none | 117.7 / 132.2 | 237.9 / 290.4 | 20.0 / 25.1 | 257.1 / 306.5 | 375.2 / 440.2 |
+| plain | fileops | tool/on | 30/30 | 0 (none) | none | 124.0 / 138.1 | 1027.2 / 1133.3 | 7.2 / 16.4 | 1043.5 / 1149.5 | 1166.8 / 1283.1 |
+| scope | noop | direct | 30/30 | 0 (none) | none | 1.6 / 2.1 | 0.0 / 0.1 | 0.2 / 0.3 | 0.3 / 0.3 | 1.8 / 2.5 |
+| scope | noop | tool/off | 30/30 | 0 (none) | exec_unconfirmed 30 | 108.8 / 125.5 | 0.0 / 0.1 | 23.0 / 24.1 | 23.1 / 24.1 | 131.9 / 148.7 |
+| scope | noop | tool/on | 30/30 | 0 (none) | none | 116.7 / 132.5 | 0.1 / 0.3 | 6.5 / 16.9 | 6.5 / 16.9 | 124.0 / 139.7 |
+| scope | spawn-tree | direct | 30/30 | 0 (none) | none | 1.5 / 1.9 | 153.3 / 170.5 | 0.3 / 0.4 | 153.6 / 170.7 | 155.0 / 172.3 |
+| scope | spawn-tree | tool/off | 30/30 | 0 (none) | none | 97.4 / 110.0 | 162.8 / 182.9 | 21.3 / 24.0 | 185.2 / 206.1 | 281.2 / 313.0 |
+| scope | spawn-tree | tool/on | 30/30 | 0 (none) | none | 105.8 / 116.5 | 255.6 / 280.5 | 6.3 / 16.5 | 262.9 / 286.3 | 370.8 / 396.6 |
+| scope | fileops | direct | 30/30 | 0 (none) | none | 1.5 / 2.0 | 183.0 / 210.5 | 0.4 / 0.4 | 183.4 / 210.9 | 185.0 / 212.9 |
+| scope | fileops | tool/off | 30/30 | 0 (none) | none | 101.8 / 122.3 | 236.9 / 269.7 | 20.9 / 24.2 | 256.8 / 287.2 | 362.0 / 409.0 |
+| scope | fileops | tool/on | 30/30 | 0 (none) | none | 106.9 / 127.2 | 1016.3 / 1075.0 | 6.6 / 16.4 | 1032.3 / 1087.3 | 1136.6 / 1210.7 |
+
+### Peak memory (KiB, median / p95 / max over valid launches)
+
+| Session | Workload | Arm | Launched HWM (sampled) | Reaped tree (`wait4`) | Leaf `memory.peak` (sampled) | Target |
+|---|---|---|---|---|---|---|
+| plain | noop | direct | n/a | 3984 / 4048 / 4160 | n/a | 3984 / 4048 / 4048 |
+| plain | noop | tool/off | 8216 / 8356 / 8376 | 8134 / 8296 / 8384 | 1764 / 1988 / 1992 | 3984 / 4048 / 4048 |
+| plain | noop | tool/on | 8260 / 8440 / 8452 | 8092 / 8240 / 8316 | 1942 / 1988 / 1992 | 3984 / 4048 / 4048 |
+| plain | spawn-tree | direct | 4092 / 4216 / 4216 | 4048 / 4176 / 4176 | n/a | 4048 / 4176 / 4176 |
+| plain | spawn-tree | tool/off | 8192 / 8380 / 8380 | 8058 / 8280 / 8296 | 3832 / 4508 / 4652 | 4048 / 4176 / 4176 |
+| plain | spawn-tree | tool/on | 8266 / 8408 / 8448 | 8060 / 8228 / 8284 | 3462 / 3764 / 3984 | 4046 / 4172 / 4176 |
+| plain | fileops | direct | 4024 / 4088 / 4104 | 3984 / 4048 / 4064 | n/a | 3984 / 4048 / 4048 |
+| plain | fileops | tool/off | 8210 / 8288 / 8292 | 8122 / 8224 / 8224 | 2220 / 2488 / 2488 | 3940 / 4004 / 4048 |
+| plain | fileops | tool/on | 8280 / 8396 / 8424 | 8086 / 8236 / 8252 | 1970 / 2224 / 2228 | 3980 / 4048 / 4056 |
+| scope | noop | direct | n/a | 4008 / 4084 / 4152 | n/a | 3994 / 4048 / 4084 |
+| scope | noop | tool/off | 8204 / 8360 / 8364 | 8126 / 8220 / 8220 | 1762 / 1992 / 1992 | 3984 / 4048 / 4048 |
+| scope | noop | tool/on | 8292 / 8440 / 8444 | 8054 / 8256 / 8256 | 1954 / 2060 / 2240 | 3984 / 4048 / 4048 |
+| scope | spawn-tree | direct | 4092 / 4216 / 4220 | 4044 / 4176 / 4176 | n/a | 4032 / 4172 / 4176 |
+| scope | spawn-tree | tool/off | 8226 / 8336 / 8372 | 8104 / 8272 / 8284 | 3888 / 4672 / 4676 | 4044 / 4176 / 4176 |
+| scope | spawn-tree | tool/on | 8308 / 8412 / 8452 | 8110 / 8256 / 8380 | 3278 / 3756 / 3772 | 4048 / 4176 / 4176 |
+| scope | fileops | direct | 4026 / 4096 / 4148 | 3984 / 4100 / 4104 | n/a | 3972 / 4052 / 4104 |
+| scope | fileops | tool/off | 8218 / 8320 / 8336 | 8092 / 8244 / 8296 | 2218 / 2468 / 2488 | 3982 / 4100 / 4104 |
+| scope | fileops | tool/on | 8296 / 8392 / 8404 | 8054 / 8232 / 8284 | 1968 / 2224 / 2328 | 3972 / 4052 / 4100 |
+
+### Events and losses
+
+Event counts: the receipt's `coverage.<class>.observed_count` over valid launches, median (min–max). Losses: over every measured launch of the arm, valid or not; a count that differs from the workload's exact one excludes the launch (`count_mismatch`).
+
+| Session | Workload | Arm | Excluded | exec | fs.write | fs.deny | net | proxy.net | Trace frames | Observer gaps (lost) | Coverage gaps (lost) | Receipt errors | Incomplete traces | Trace notes (all kinds) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain | noop | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 3 | 0 (0) | 0 (0) | 30 | 0 | lifecycle 30 |
+| plain | noop | tool/on | 0 | 2 | 0 | 0 | 0 | n/a | 7 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | spawn-tree | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | spawn-tree | tool/on | 0 | 402 | 0 | 0 | 0 | n/a | 407 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | fileops | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| plain | fileops | tool/on | 0 | 2 | 15000 | 0 | 0 | n/a | 15007 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | noop | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 3 | 0 (0) | 0 (0) | 30 | 0 | lifecycle 30 |
+| scope | noop | tool/on | 0 | 2 | 0 | 0 | 0 | n/a | 7 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | spawn-tree | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | spawn-tree | tool/on | 0 | 402 | 0 | 0 | 0 | n/a | 407 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | fileops | tool/off | 0 | n/a | n/a | n/a | n/a | n/a | 5 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+| scope | fileops | tool/on | 0 | 2 | 15000 | 0 | 0 | n/a | 15007 | 0 (0) | 0 (0) | 0 | 0 | lifecycle 60 |
+
+## backend-evaluation.md §4, `tool`
+
+Startup: p95 added against direct. Overheads: median against direct, work phase / post-start / end-to-end wall, each with its verdict. Peak RSS: supervisor sampled HWM median / p95 (KiB). Events: median trace frames. Losses: observer + coverage gaps, receipt errors, incomplete traces and excluded launches, over all launches.
+
+plain session:
+
+| Workload | Observe | Valid (excl.) | Startup p95 added | Work phase | Post-start | End-to-end wall | Peak RSS | Event count | Losses (gaps / errors / incomplete / excluded) |
+|---|---|---|---|---|---|---|---|---|---|
+| noop | off | 30 (0) | pass (123.4 ms) | 50.8% | 9503.1% | 8151.1% | 8216 / 8356 | 3 | 0 / 30 / 0 / 0 |
+| noop | on | 30 (0) | pass (136.0 ms) | 63.8% | 2290.6% | 7770.8% | 8260 / 8440 | 7 | 0 / 0 / 0 / 0 |
+| spawn-tree | off | 30 (0) | pass (124.0 ms) | 8.9% | 20.5% | 96.4% | 8192 / 8380 | 5 | 0 / 0 / 0 / 0 |
+| spawn-tree | on | 30 (0) | pass (131.6 ms) | 68.0% | 73.5% | 149.5% | 8266 / 8408 | 407 | 0 / 0 / 0 / 0 |
+| fileops | off | 30 (0) | pass (130.6 ms) | fail (26.7%) | fail (36.6%) | fail (97.6%) | 8210 / 8288 | 5 | 0 / 0 / 0 / 0 |
+| fileops | on | 30 (0) | pass (136.5 ms) | fail (447.0%) | fail (454.5%) | fail (514.5%) | 8280 / 8396 | 15007 | 0 / 0 / 0 / 0 |
+
+scope session:
+
+| Workload | Observe | Valid (excl.) | Startup p95 added | Work phase | Post-start | End-to-end wall | Peak RSS | Event count | Losses (gaps / errors / incomplete / excluded) |
+|---|---|---|---|---|---|---|---|---|---|
+| noop | off | 30 (0) | pass (123.9 ms) | 32.6% | 8200.4% | 7108.7% | 8204 / 8360 | 3 | 0 / 30 / 0 / 0 |
+| noop | on | 30 (0) | pass (130.9 ms) | 63.3% | 2239.2% | 6675.0% | 8292 / 8440 | 7 | 0 / 0 / 0 / 0 |
+| spawn-tree | off | 30 (0) | pass (108.6 ms) | 6.2% | 20.6% | 81.5% | 8226 / 8336 | 5 | 0 / 0 / 0 / 0 |
+| spawn-tree | on | 30 (0) | pass (115.1 ms) | 66.7% | 71.1% | 139.3% | 8308 / 8412 | 407 | 0 / 0 / 0 / 0 |
+| fileops | off | 30 (0) | pass (120.8 ms) | fail (29.5%) | fail (40.1%) | fail (95.7%) | 8218 / 8320 | 5 | 0 / 0 / 0 / 0 |
+| fileops | on | 30 (0) | pass (125.7 ms) | fail (455.4%) | fail (463.0%) | fail (514.3%) | 8296 / 8392 | 15007 | 0 / 0 / 0 / 0 |
+
+## Definitions
+
+- **Launcher.** `ouro-fixture perf-launch`, outside the jail, forks the arm's command: the workload itself (direct) or `ouro-jail run --profile P --observe on|off --workspace WS -- workload`. It reads `CLOCK_MONOTONIC` just before `fork` and again after `wait4` returns. While the command runs it samples the launched process's `VmHWM` and, for a jailed arm only, looks up the execution leaf from the receipt and reads its `memory.peak`, every sampling interval: a small asymmetric cost (`--sample-ms 0` is the control run).
+- **Startup.** From that first reading to the target's own first reading at entry to its workload mode (after its exec, dynamic loading and argument parsing, the same for every arm). The target reports its time namespace and the launcher its own; a launch where they differ or are unknown is excluded. For a jailed arm startup includes the supervisor's own start, the scope step (plain session), the capability probes, preparation, bubblewrap, observer attachment and the exec.
+- **Work.** The target's end reading minus its entry reading: the workload phase alone, where the observer's per-call cost falls.
+- **Teardown.** The launcher's reading after `wait4` minus the target's end reading: the target's exit and, for a jailed arm, settlement, tree verification, the receipts, the trace flush and the leaf's removal.
+- **Post-start.** Work + teardown: everything after the target's entry. Startup + post-start = wall, so the startup budget and a post-start budget together leave no jail time uncounted.
+- **Wall.** The launcher's two readings: spawn to the jail's exit.
+- **Added (ms).** A launch's startup (or teardown) minus the baseline arm's median, same session and workload. Warm: after the discarded warm-up launch of every arm.
+- **Overhead (%).** A launch's work, post-start or wall time over the baseline arm's median, minus one. The median of these is the ratio of medians minus one.
+- **Median / p95.** The middle value (mean of the two middle values for an even count); p95 by nearest rank, the ⌈0.95·n⌉-th smallest value (the 29th of 30).
+- **Peak RSS.** Launched HWM: the launched process's own `VmHWM` (the supervisor for a jailed arm), last sample (a lower bound). Reaped tree: `wait4`'s `ru_maxrss`, the largest resident set of the launched process and anything it reaped. Leaf: the execution leaf's `memory.peak` (cgroup memory including page cache), last sample. Target: the target's own `ru_maxrss` at its end.
+- **Validity.** A launch counts only if the launcher ran and exec'd, the target printed both lines and completed its workload, one clock and ordered readings, direct execution exited 0; and for a jailed arm: exactly one attempt, a settled final receipt of the arm's profile and observation mode, the session's scope state (`entered` from a plain session, `already_delegated` in a scope), outcome `exited 0` (or, with observation off, the recorded exec-confirmation limit with jail exit 1, flagged), no receipt error, tree death verified, no degraded class, no coverage or observer gap, with observation on an attached observer and every closed-set class active, every event count exactly the workload's (execs: 2 × (1 + children) in the `exec` class, one `proc.exec` and one `proc.exit` each; fileops: one `fs.create`, `fs.rename`, `fs.unlink` per round, their sum in `fs.write`; nothing in `fs.deny`, `net`, `limits`, `proxy.net`; the trace's audit frames equal to the receipt's closed-set counts; no audit frame with observation off), and a trace that is complete and ends on the final receipt's note (§13.3). Everything else is excluded, counted by reason, never averaged, and its attempt, stdout and stderr are kept under `kept/`.
+- **Verdicts.** Against direct execution only. `insufficient`: fewer than 30 valid launches on either side, any excluded launch on either side (no verdict over survivors), or a raw-data problem. `loaded`: the host was not shown quiet (a counted launch of either side above `--max-load` or with no load recorded, or `--allow-loaded`). A roll-up passes only if every cell passes.
+- **Arm order.** A seeded permutation per round (seed in the parameters); each launch records its predecessor.
+- **CPU share.** Not equalised: a direct target runs in the harness's own cgroup, a jailed one in its execution leaf, and their CPU weights differ only under contention, which the quiet-host condition rules out for a verdict. The direct target's cgroup is recorded per launch.
+- **Sessions.** The plain and scope passes run one after the other, so a difference between them is confounded by time; each pass's load is in `passes.ndjson`.
+
+xtask perf: summary in /home/ubuntu/ouroboros/target/regression-20260929/final/perf/summary.md

@@ -1094,6 +1094,11 @@ fn p03_the_child_truncating_its_selected_profile_and_project_file_does_not_widen
         "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n\n[filesystem]\ndeny_read = [\"./by-profile\"]\n",
     )
     .unwrap();
+    std::fs::set_permissions(
+        &profile,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
     let project = workspace.join("ouro.toml");
     std::fs::write(
         &project,

@@ -1611,7 +1611,11 @@ fn a_delegated_leaf_records_the_kernels_own_answer() {
         .delegated_root
         .clone()
         .expect("the reference host delegates a subtree to this account");
-    assert!(root.ends_with("user@1001.service"), "{}", root.display());
+    assert!(
+        root.ends_with(format!("user@{}.service", unsafe { libc::geteuid() })),
+        "{}",
+        root.display()
+    );
 
     // From an SSH session scope the common-ancestor rule forbids the move.
     match attempt.status {

@@ -1,0 +1,50 @@
+   Compiling ouro-jail v0.1.0 (/home/ubuntu/ouroboros/crates/ouro-jail)
+    Finished `release` profile [optimized] target(s) in 13.52s
+     Running tests/j5_boundary_linux.rs (target/release/deps/j5_boundary_linux-4e926828834f7c82)
+
+running 26 tests
+test f01_a_workspace_symlink_to_a_home_secret_reads_as_absent ... ok
+test f02_mount_replacement_of_a_protected_git_is_denied ... ok
+test f03_a_new_deep_protected_segment_is_outside_existing_and_root_coverage ... ok
+test f04_a_source_identity_swap_at_the_mount_handoff_refuses ... ok
+test f04_a_workspace_deeper_than_the_scan_limit_refuses_without_claiming_coverage ... ok
+test k04_backend_replacement_and_mode_change_refuse_before_spawn ... FAILED
+test k04_bootstrap_executes_the_descriptor_without_pathname_fallback ... ok
+test k07_new_nested_protected_directory_after_scan_refuses_before_spawn ... ok
+test n01_build_direct_egress_fails ... ok
+test n05_a_late_socket_in_an_extra_grant_is_unreachable ... ok
+test n05_nested_sandbox_ipc_is_allowed ... ok
+test o03_a_truncated_path_is_a_gap_not_a_result ... ok
+test o03_an_unmatched_exit_is_a_gap_not_a_result ... ok
+test r03_a_wall_expires_before_the_saturation_loss_is_declared ... ok
+test r03_a_wall_fires_on_time_under_a_saturated_trace ... ok
+test r05_forging_records_mid_run_is_outside_local_evidence_assurance ... ok
+test r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer ... ok
+test r06_a_detected_escaped_descendant_loses_integrity_and_retains_state ... ok
+test s02_a_host_namespace_fd_cannot_be_opened_or_entered ... ok
+test s02_no_cgroup_filesystem_is_reachable_in_the_child ... ok
+test s03_the_outer_boundaries_cannot_be_reversed_inside_agent ... ok
+test s04_agent_and_build_inherit_no_ring ... ok
+test s04_agent_and_build_refuse_every_io_uring_interface ... ok
+test s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec ... ok
+test s04_none_installs_no_io_uring_filter ... ok
+test x06_no_tracing_privilege_reaches_the_child ... ok
+
+failures:
+
+---- k04_backend_replacement_and_mode_change_refuse_before_spawn stdout ----
+
+thread 'k04_backend_replacement_and_mode_change_refuse_before_spawn' (2716409) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:542:9:
+assertion `left == right` failed: ouro-jail: error internal_error at preparing [host_setup]: the pinned backend changed before spawn: pinned path /tmp/ouro-jail-harness-NMt2kd/backend/bwrap was replaced: pinned 44:31186520, found 44:31186560
+
+  left: Some(1)
+ right: Some(125)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    k04_backend_replacement_and_mode_change_refuse_before_spawn
+
+test result: FAILED. 25 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.45s
+
+error: test failed, to rerun pass `-p ouro-jail --test j5_boundary_linux`

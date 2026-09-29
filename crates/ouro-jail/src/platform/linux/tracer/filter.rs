@@ -76,7 +76,7 @@ pub const I386_CLONE_SYSCALL: u32 = 120;
 /// Instruction count: architecture check (2), x32 check (2), one comparison
 /// per closed-set number, the listener check (3), the untraced-clone check
 /// (3), the `clone3` check (1) and the three returns.
-const FILTER_LEN: usize = CLOSED_SET.len() + 14;
+const FILTER_LEN: usize = CLOSED_SET.len() + 17;
 
 const ZERO: libc::sock_filter = libc::sock_filter {
     code: 0,
@@ -107,28 +107,29 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 /// evidence value.
 fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16) -> usize {
     let n = CLOSED_SET.len();
-    let listener = n + 4;
-    let clone = n + 7;
-    let clone3 = n + 10;
-    let allow = n + 11;
-    let trace = n + 12;
-    let enosys = n + 13;
-    // Jump targets are relative to the instruction after the jump, so a jump
-    // at `i` reaching `t` uses an offset of `t - i - 1`. Each fits in the u8
-    // the cBPF encoding allows as long as the set stays under 240 rows.
-    debug_assert!(n <= 240);
-    out[0] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_ARCH);
-    // Not x86_64: stop. Nothing here decodes another architecture's table,
-    // so the tracer labels the stop foreign; where a baseline is installed,
-    // its EPERM for any other architecture outranks this and nothing stops.
-    out[1] = jump(sys::BPF_JEQ_K, sys::AUDIT_ARCH_X86_64, 0, (trace - 2) as u8);
-    out[2] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_NR);
-    // x32 sets bit 30 of nr on the x86_64 architecture value. Its numbers are
-    // a different table: stop, and let the tracer label it foreign rather
-    // than match it against this one.
-    out[3] = jump(sys::BPF_JSET_K, sys::X32_SYSCALL_BIT, (trace - 4) as u8, 0);
+    let listener = n + 7;
+    let clone = n + 10;
+    let clone3 = n + 13;
+    let allow = n + 14;
+    let trace = n + 15;
+    let enosys = n + 16;
+    debug_assert!(n <= 235);
+    // clone3's flags live behind a pointer on native, i386 and x32 alike.
+    // Refuse it before the architecture branch, including the x32 spelling.
+    out[0] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_NR);
+    out[1] = jump(sys::BPF_JEQ_K, 435, (enosys - 2) as u8, 0);
+    out[2] = jump(
+        sys::BPF_JEQ_K,
+        435 | sys::X32_SYSCALL_BIT,
+        (enosys - 3) as u8,
+        0,
+    );
+    out[3] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_ARCH);
+    out[4] = jump(sys::BPF_JEQ_K, sys::AUDIT_ARCH_X86_64, 0, (trace - 5) as u8);
+    out[5] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_NR);
+    out[6] = jump(sys::BPF_JSET_K, sys::X32_SYSCALL_BIT, (trace - 7) as u8, 0);
     for (i, entry) in CLOSED_SET.iter().enumerate() {
-        out[4 + i] = jump(sys::BPF_JEQ_K, entry.nr as u32, (trace - 5 - i) as u8, 0);
+        out[7 + i] = jump(sys::BPF_JEQ_K, entry.nr as u32, (trace - 8 - i) as u8, 0);
     }
     // seccomp(2) asking for a notification listener. Its flags are an
     // `unsigned int`, so the low word of the second argument is all of them.
@@ -534,8 +535,15 @@ mod tests {
                 ENOSYS
             );
         }
-        // Another ABI's clone3 number is foreign, not refused: it stops.
-        assert_eq!(interpret(0x4000_0003, CLONE3_SYSCALL.1), TRACE);
+        // Compat clone3 is refused before architecture dispatch.
+        assert_eq!(interpret(0x4000_0003, CLONE3_SYSCALL.1), ENOSYS);
+        assert_eq!(
+            interpret(
+                sys::AUDIT_ARCH_X86_64,
+                CLONE3_SYSCALL.1 | sys::X32_SYSCALL_BIT
+            ),
+            ENOSYS
+        );
         assert_eq!(
             (CLONE_SYSCALL.1, CLONE3_SYSCALL.1, CLONE_UNTRACED),
             (libc::SYS_clone as u32, 435, libc::CLONE_UNTRACED as u32)
@@ -561,7 +569,7 @@ mod tests {
     #[test]
     fn the_program_is_the_expected_shape_and_refuses_only_clone3() {
         let prog = narrowing_filter();
-        assert_eq!(prog.len(), CLOSED_SET.len() + 14);
+        assert_eq!(prog.len(), CLOSED_SET.len() + 17);
         for insn in &prog {
             if insn.code == sys::BPF_RET_K {
                 assert!(
@@ -579,8 +587,8 @@ mod tests {
         assert_eq!(prog[0].code, sys::BPF_LD_W_ABS);
         assert_eq!(
             prog[0].k,
-            sys::SECCOMP_DATA_ARCH,
-            "the architecture is read first"
+            sys::SECCOMP_DATA_NR,
+            "compat clone3 is refused before architecture dispatch"
         );
     }
 

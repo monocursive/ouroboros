@@ -13,28 +13,28 @@ rust_version = "1.98.1"
 
 # Cargo.lock, byte for byte
 [cargo_lock]
-sha256 = "83ae607b2762d6d844ea5b370f77bf8e93134a375c10a07acee4fede08696c8e"
-packages = 125
+sha256 = "766acd4b07703c5c64835c74debdaae3afcfb73bbde598f7b429e65841923503"
+packages = 173
 
 # The seccomp programs' digests, from docs/specs/jail-v1/evidence/seccomp-table-*.txt
 [filters]
 arch = "x86_64"
-tool = "sha256:1c7a04ae6add443de8680b85a62eb4e4397be8abc2027c5059c2e093fd68c045"
-agent = "sha256:23259f574de456dd164cb073b63354f0f6562ffa0d9903098c86a51337e41f54"
-agent_namespace = "sha256:3256f8b57c657c3fe2ae53b7b0e5e5a73ade813fb54fd63a2b66b3acc08a8a1c"
+tool = "sha256:6be154d0d902309f8918b03bddd6a3dae656926dbf827ccbbe551e5f73ffb2ec"
+agent = "sha256:fff8ebe22bc6f99c511d6526913125c3d4227d9ef08b6f4f5f18bdf30a5d948a"
+agent_namespace = "sha256:6c0bfdb948f9907a6a27f0d9f1fdf1cb3b89b953074fda39c39e9a06267b91b1"
 agent_mediation = "sha256:28c98e72b91a22c212d5dfdddfcc1f1ca153c5a8e89c15833c26724b263ebeff"
 
 # The evidence tables themselves, byte for byte
 [filters.table_sha256]
-"seccomp-table-tool-x86_64.txt" = "35b84ddacb62f6bfaeb28326a7a8290407849e8a750fff382afbd7366482ac7b"
-"seccomp-table-agent-x86_64.txt" = "61db423e35d11d85f695a3ba0da5ea14c4defb45d386b02f77fa8537a5293306"
-"seccomp-table-agent-namespace-x86_64.txt" = "24ab822598ebde179e57f46332400f1c8a65aa1222e29283c92a2188739e5118"
+"seccomp-table-tool-x86_64.txt" = "fd73abdbd1524a09736ec5e517ce766452afbc0f0046632b71cb18ebee97001f"
+"seccomp-table-agent-x86_64.txt" = "736c3e524dec5fd3c4dca0378365afbb6e1675e7d9419f7d4fbf2ebafe4f17a0"
+"seccomp-table-agent-namespace-x86_64.txt" = "faca49327d51849637df4420caac87f0ae5d543ba82f606b621b9a9c44fbae56"
 
 # The observer's closed set, from docs/specs/jail-v1/evidence/closed-set-x86_64.txt
 [closed_set]
 name = "linux-closed-v1"
-narrowing_filter = "sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66"
-table_sha256 = "53fad28f1e3b4bf206eecf39317d2248c537b77db55cc5c50d88bf33baca2349"
+narrowing_filter = "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181"
+table_sha256 = "1cdc2a177985afd21187638fc5c19d779f3ea275df38f4a4e7ef29bb10c3b781"
 
 # The contained mount baselines: what every contained profile mounts
 [mounts]
@@ -51,6 +51,33 @@ backend_etc_paths = ["/etc/ssl", "/etc/resolv.conf", "/etc/passwd", "/etc/group"
 # copies into the sandbox, and the hosts it allows.
 
 [[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/aider.toml"
+name = "aider"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/amp.toml"
+name = "amp"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/auggie.toml"
+name = "auggie"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
 file = "crates/ouro-jail/profiles/launch/claude.toml"
 name = "claude"
 jail = "agent"
@@ -59,16 +86,15 @@ home_is_state = false
 state_subdirs = []
 network_allow = ["api.anthropic.com:443"]
 environment = "{}"
-[[launch_profile.credential]]
-id = "credentials"
-source = "~/.claude/.credentials.json"
-dest = ".credentials.json"
-mode = "copy_rw"
-[[launch_profile.credential]]
-id = "settings"
-source = "~/.claude/settings.json"
-dest = "settings.json"
-mode = "bind_ro"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/cline.toml"
+name = "cline"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
 file = "crates/ouro-jail/profiles/launch/codex.toml"
@@ -79,16 +105,60 @@ home_is_state = true
 state_subdirs = []
 network_allow = ["api.openai.com:443", "*.openai.com:443"]
 environment = "{}"
-[[launch_profile.credential]]
-id = "auth"
-source = "~/.codex/auth.json"
-dest = "auth.json"
-mode = "copy_rw"
-[[launch_profile.credential]]
-id = "config"
-source = "~/.codex/config.toml"
-dest = "config.toml"
-mode = "bind_ro"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/copilot.toml"
+name = "copilot"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/cursor.toml"
+name = "cursor"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/droid.toml"
+name = "droid"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/gemini.toml"
+name = "gemini"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/goose.toml"
+name = "goose"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/kilo.toml"
+name = "kilo"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
 file = "crates/ouro-jail/profiles/launch/opencode.toml"
@@ -97,6 +167,15 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config/opencode", "data/opencode", "cache/opencode", "state/opencode"]
 network_allow = ["opencode.ai", "models.opencode.ai", "registry.npmjs.org"]
+environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/pi.toml"
+name = "pi"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config", "data", "cache", "state"]
+network_allow = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 # What every contained profile passes from the operator's environment, and its PATH
@@ -828,6 +907,16 @@ sections = '''
       "version": "4.6.6"
     },
     "libc": "0.2.189",
+    "rcgen": "0.14.10",
+    "rustls": {
+      "default-features": false,
+      "features": [
+        "ring",
+        "std",
+        "tls12"
+      ],
+      "version": "0.23.45"
+    },
     "serde": {
       "features": [
         "derive"
@@ -837,12 +926,15 @@ sections = '''
     "serde_json": "1.0.151",
     "sha2": "0.10.9",
     "toml": "0.8.23",
+    "toml_edit": "0.22.27",
     "uuid": {
       "features": [
         "v4"
       ],
       "version": "1.24.0"
-    }
+    },
+    "webpki-roots": "1.0",
+    "zeroize": "1.8"
   },
   "dev-dependencies": {
     "jsonschema": {
@@ -904,12 +996,12 @@ sha256 = "08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137"
 file = "jail-receipt.schema.json"
 id = "urn:ouro:schema:jail-receipt:1"
 identifier = "ouro.jail.receipt/1"
-sha256 = "7f20ea6830bb81e27d46dd7ac90c69a6d3a4f84b7613bcaa1a375192d59e2c5a"
+sha256 = "cd6763cb112e70d16896323cd5724d2bfdef5e69d009f1936ec1e04fcc8d3477"
 [[frozen_schemas.entry]]
 file = "policy-snapshot.schema.json"
 id = "urn:ouro:schema:jail-policy-snapshot:1"
 identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "94bc81e85522cfa3b81bc7f2dd9504a8a3fd5f412ccac3938c98bdd018c61da4"
+sha256 = "2c6e264b3c15e9b8e91df6f9b48fa0626108a2f89f6c25c5535b13439aaaa2d0"
 [[frozen_schemas.entry]]
 file = "jail-gate.schema.json"
 id = "urn:ouro:schema:jail-gate:1"
@@ -924,67 +1016,13 @@ sha256 = "1a7ca84c1839448806becf5e320987e56f373c8bce858841a39943b25e6d4740"
 file = "jail-doctor.schema.json"
 id = "urn:ouro:schema:jail-doctor:1"
 identifier = "ouro.jail.doctor/1"
-sha256 = "bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9"
+sha256 = "edf4136339056ea2905c1f6507bc93600288417d42757fabc1acb8bd3ea835a9"
+[[frozen_schemas.entry]]
+file = "learned-policy.schema.json"
+id = "urn:ouro:schema:learned-policy:1"
+identifier = "ouro.jail.learned-policy/1"
+sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 
-# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---
-[tested]
-debug_assertions = false
-dirty = false
-inputs = "sha256:17d6d94127e188bf2208fa0e9e307a59b775c5996c679dc01edcd9041c841220"
-opt_level = "3"
-ouro_jail_sha256 = "368afcc50ff2d13a03b8b29d0c0c52b5b7d0706bee77d5d40bc869f10577741b"
-platform_arch = "x86_64"
-platform_kernel = "Linux 7.0.0-31-generic"
-platform_os = "linux"
-ready = true
-revision = "a3837c2afc8339cd2c4a3742340b46ac41a98f22"
-rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
-target = "x86_64-unknown-linux-gnu"
-unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code"]
-verification = ["inputs_match_tree", "revision_is_ancestor_of_head", "inputs_match_revision", "frozen_inputs_unchanged_since_revision"]
-
-[tested.backend]
-path = "/usr/bin/bwrap"
-sha256 = "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6"
-version = "bubblewrap 0.11.1"
-
-[tested.host]
-apparmor_enabled = true
-cpus_online = 4
-distribution = "Ubuntu 26.04.1 LTS"
-kernel_release = "7.0.0-31-generic"
-kernel_version = "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026"
-linger = true
-operator_identity = "unprivileged"
-privileged_groups = []
-systemd_version = "systemd 259 (259.5-0ubuntu3.4)"
-virtualization = "kvm"
-
-[tested.host.apparmor_userns_restriction]
-local_files = ["README"]
-profile_files = ["bwrap-userns-restrict", "glycin.bwrap", "lxc-usernsexec", "unprivileged_userns"]
-state = "on"
-unpackaged_files = []
-
-[tested.host.cgroup]
-controllers = ["cpu", "memory", "pids"]
-delegated_root = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service"
-root_controllers = ["cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem"]
-subtree_control = ["cpu", "memory", "pids"]
-
-[tested.host.memory]
-mem_total_kib = 3905584
-swap_total_kib = 8388604
-
-[tested.host.sysctls]
-"kernel.apparmor_restrict_unprivileged_userns" = "1"
-"kernel.io_uring_disabled" = "0"
-"kernel.perf_event_paranoid" = "4"
-"kernel.unprivileged_bpf_disabled" = "2"
-"kernel.yama.ptrace_scope" = "1"
-"user.max_user_namespaces" = "11829"
-
-[tested.supervisor_scope]
-cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-2110324-9c37bbff537a4f40.scope"
-state = "entered"
-unit = "ouro-jail-2110324-9c37bbff537a4f40.scope"
+# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
+# records the milestone conformance run, and `cargo xtask freeze --check`
+# fails until it is.

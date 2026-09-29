@@ -1,0 +1,205 @@
+{
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": true,
+      "inputs": "sha256:fa366f0c82364e99146c6a65573709799830f1904b026ed20f4b060ca31db501",
+      "opt_level": "3",
+      "revision": "2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "x86_64",
+      "kernel": "Linux 7.0.0-31-generic",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "vendor_version": "1.18.32",
+  "rows": [
+    {
+      "verb": "run",
+      "argv": [
+        "/home/ubuntu/ouroboros/target/release/ouro-jail",
+        "run",
+        "--launch",
+        "opencode",
+        "--workspace",
+        "/home/ubuntu/.ouro-agent-8_g819j7/work",
+        "--ro",
+        "/home/ubuntu/.opencode/bin",
+        "--limit",
+        "wall=90s",
+        "--",
+        "/home/ubuntu/.opencode/bin/opencode",
+        "run",
+        "--model",
+        "opencode/big-pickle",
+        "Create greeting.txt containing exactly hello followed by a newline. Do not read any other file or use the network yourself."
+      ],
+      "seconds": 8.89096564007923,
+      "exit": 0,
+      "file": "hello\n",
+      "tree_empty": true,
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      },
+      "coverage": {
+        "exec": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 130,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 7663,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "net": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 31,
+          "gaps": []
+        },
+        "limits": {
+          "status": "active",
+          "sources": [
+            "wrapper"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "active",
+          "sources": [
+            "proxy"
+          ],
+          "observed_count": 31,
+          "gaps": []
+        }
+      }
+    },
+    {
+      "verb": "learn",
+      "argv": [
+        "/home/ubuntu/ouroboros/target/release/ouro-jail",
+        "learn",
+        "--launch",
+        "opencode",
+        "--workspace",
+        "/home/ubuntu/.ouro-agent-8_g819j7/work",
+        "--ro",
+        "/home/ubuntu/.opencode/bin",
+        "--limit",
+        "wall=90s",
+        "--out",
+        "/tmp/ouro-validated-agent/learned.toml",
+        "--",
+        "/home/ubuntu/.opencode/bin/opencode",
+        "run",
+        "--model",
+        "opencode/big-pickle",
+        "Create greeting.txt containing exactly hello followed by a newline. Do not read any other file or use the network yourself."
+      ],
+      "seconds": 6.918237095000222,
+      "exit": 0,
+      "file": "hello\n",
+      "tree_empty": true,
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      },
+      "coverage": {
+        "exec": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 130,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 589,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "net": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 6,
+          "gaps": []
+        },
+        "limits": {
+          "status": "active",
+          "sources": [
+            "wrapper"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "active",
+          "sources": [
+            "proxy"
+          ],
+          "observed_count": 6,
+          "gaps": []
+        }
+      }
+    }
+  ]
+}

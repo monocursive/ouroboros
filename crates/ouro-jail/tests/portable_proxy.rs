@@ -272,6 +272,8 @@ fn n02_allowed_connect_tunnel_yields_one_allow_result_at_close() {
     let (listener, port) = loopback();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accepts");
+        let mut flight = vec![0; client_hello("fixture.test").len()];
+        stream.read_exact(&mut flight).expect("TLS flight");
         let mut hello = [0u8; 5];
         stream.read_exact(&mut hello).expect("reads");
         assert_eq!(&hello, b"hello");
@@ -294,6 +296,9 @@ fn n02_allowed_connect_tunnel_yields_one_allow_result_at_close() {
         .expect("writes");
     let (status, _) = read_head(&mut client);
     assert_eq!(status, 200);
+    client
+        .write_all(&client_hello("fixture.test"))
+        .expect("TLS flight");
     client.write_all(b"hello").expect("writes");
     let mut world = [0u8; 6];
     client.read_exact(&mut world).expect("reads");
@@ -319,7 +324,10 @@ fn n02_allowed_connect_tunnel_yields_one_allow_result_at_close() {
         result.connected,
         Some(SocketAddr::new("127.0.0.1".parse().expect("ip"), port))
     );
-    assert_eq!((result.bytes_out, result.bytes_in), (5, 6));
+    assert_eq!(
+        (result.bytes_out, result.bytes_in),
+        (5 + client_hello("fixture.test").len() as u64, 6)
+    );
     assert_eq!(result.end, Some(EndReason::ClientClosed));
     assert_eq!(resolver.calls("fixture.test"), 1);
     let (summary, results) = harness.stop(WAIT);
@@ -671,6 +679,9 @@ fn n03_rebinding_connects_only_to_the_single_checked_answer() {
         1,
         "one resolution for the first request"
     );
+    client
+        .write_all(&client_hello("rebind.test"))
+        .expect("TLS flight");
     client.shutdown(Shutdown::Write).expect("half-close");
     read_to_eof(&mut client);
     let first = harness.sink.wait_for(1);
@@ -832,6 +843,9 @@ fn n03_ipv6_loopback_is_reachable_only_through_its_grant() {
         .write_all(connect_request(&format!("v6.test:{port}")).as_bytes())
         .expect("writes");
     assert_eq!(read_head(&mut client).0, 200);
+    client
+        .write_all(&client_hello("v6.test"))
+        .expect("TLS flight");
     client.shutdown(Shutdown::Write).expect("half-close");
     read_to_eof(&mut client);
     let results = harness.sink.wait_for(1);
@@ -1548,6 +1562,9 @@ fn n04_connect_falls_back_across_approved_answers_only() {
         .write_all(connect_request(&format!("fallback.test:{port}")).as_bytes())
         .expect("writes");
     assert_eq!(read_head(&mut client).0, 200);
+    client
+        .write_all(&client_hello("fallback.test"))
+        .expect("TLS flight");
     client.shutdown(Shutdown::Write).expect("half-close");
     read_to_eof(&mut client);
     let results = harness.sink.wait_for(1);
@@ -2091,6 +2108,9 @@ fn n03_a_connect_host_without_a_port_means_the_connect_port() {
 #[test]
 fn n02_a_resource_failure_event_is_truthful() {
     let result = ProxyResult {
+        origin: None,
+        origin_verification: None,
+        transport: "http".into(),
         request_id: 7,
         kind: RequestKind::Connect,
         destination: None,
@@ -2397,4 +2417,160 @@ fn proxy_limits_helper() {
         }
         other => panic!("unknown helper mode {other}"),
     }
+}
+
+// A real TLS ClientHello first flight for named CONNECT tests. The echo
+// fixture relays it unchanged; policy, DNS and byte accounting remain real.
+fn client_hello(name: &str) -> Vec<u8> {
+    let name = name.as_bytes();
+    let mut body = vec![3, 3];
+    body.extend([0; 32]);
+    body.extend([0, 0, 2, 0x13, 1, 1, 0]);
+    let mut names = vec![0];
+    names.extend((name.len() as u16).to_be_bytes());
+    names.extend(name);
+    let mut sni = Vec::from((names.len() as u16).to_be_bytes());
+    sni.extend(names);
+    let mut ext = vec![0, 0];
+    ext.extend((sni.len() as u16).to_be_bytes());
+    ext.extend(sni);
+    body.extend((ext.len() as u16).to_be_bytes());
+    body.extend(ext);
+    let mut hello = vec![1, 0, 0, body.len() as u8];
+    hello.extend(body);
+    let mut wire = vec![22, 3, 1];
+    wire.extend((hello.len() as u16).to_be_bytes());
+    wire.extend(hello);
+    wire
+}
+
+fn socks_connect(client: &mut UnixStream, name: &str, port: u16) {
+    client.write_all(&[5, 1, 0]).unwrap();
+    let mut method = [0; 2];
+    client.read_exact(&mut method).unwrap();
+    assert_eq!(method, [5, 0]);
+    let mut request = vec![5, 1, 0, 3, name.len() as u8];
+    request.extend_from_slice(name.as_bytes());
+    request.extend_from_slice(&port.to_be_bytes());
+    client.write_all(&request).unwrap();
+    let mut response = [0; 10];
+    client.read_exact(&mut response).unwrap();
+    assert_eq!(response[1], 0);
+}
+
+#[test]
+fn socks_named_tls_uses_the_same_origin_gate_and_relay() {
+    let (listener, port) = loopback();
+    let server = echo_server(listener, 1);
+    let resolver = fixtures("fixture.test", &["127.0.0.1"]);
+    let harness = start(
+        &allow(&[
+            &format!("fixture.test:{port}"),
+            &format!("127.0.0.1:{port}"),
+        ]),
+        &resolver,
+    );
+    let mut client = harness.connect();
+    socks_connect(&mut client, "fixture.test", port);
+    let flight = client_hello("fixture.test");
+    client.write_all(&flight).unwrap();
+    let mut echoed = vec![0; flight.len()];
+    client.read_exact(&mut echoed).unwrap();
+    assert_eq!(echoed, flight);
+    client.shutdown(Shutdown::Write).unwrap();
+    read_to_eof(&mut client);
+    let results = harness.sink.wait_for(1);
+    assert_eq!(results[0].transport, "socks5");
+    assert_eq!(results[0].reason, Reason::Relayed);
+    harness.stop(WAIT);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_named_tls_mismatch_never_connects_upstream() {
+    let (listener, port) = loopback();
+    listener.set_nonblocking(true).unwrap();
+    let resolver = fixtures("fixture.test", &["127.0.0.1"]);
+    let harness = start(
+        &allow(&[
+            &format!("fixture.test:{port}"),
+            &format!("127.0.0.1:{port}"),
+        ]),
+        &resolver,
+    );
+    let mut client = harness.connect();
+    client
+        .write_all(connect_request(&format!("fixture.test:{port}")).as_bytes())
+        .unwrap();
+    assert_eq!(read_head(&mut client).0, 200);
+    client.write_all(&client_hello("other.test")).unwrap();
+    read_to_eof(&mut client);
+    assert_eq!(harness.sink.wait_for(1)[0].reason, Reason::OriginMismatch);
+    assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    harness.stop(WAIT);
+}
+
+#[test]
+fn socks_udp_and_bind_are_explicitly_unsupported() {
+    let resolver = fixtures("", &[]);
+    let harness = start(&[], &resolver);
+    for (command, code) in [(2, 2), (3, 7)] {
+        let mut client = harness.connect();
+        client.write_all(&[5, 1, 0]).unwrap();
+        let mut method = [0; 2];
+        client.read_exact(&mut method).unwrap();
+        assert_eq!(method, [5, 0]);
+        client
+            .write_all(&[5, command, 0, 1, 127, 0, 0, 1, 0, 80])
+            .unwrap();
+        let mut response = [0; 10];
+        client.read_exact(&mut response).unwrap();
+        assert_eq!(response[1], code);
+    }
+    assert!(harness.stop(WAIT).0.complete());
+}
+
+#[test]
+fn named_first_flight_refusals_are_bounded_and_never_connect() {
+    let (listener, port) = loopback();
+    listener.set_nonblocking(true).unwrap();
+    let resolver = fixtures("fixture.test", &["127.0.0.1"]);
+    let harness = start(
+        &allow(&[
+            &format!("fixture.test:{port}"),
+            &format!("127.0.0.1:{port}"),
+        ]),
+        &resolver,
+    );
+    for (flight, reason) in [
+        (
+            b"GET / HTTP/1.1\r\nHost: wrong.test\r\n\r\n".to_vec(),
+            Reason::OriginMismatch,
+        ),
+        (vec![22, 3, 3, 255, 255], Reason::OriginUnverified),
+        (Vec::new(), Reason::OriginTimeout),
+    ] {
+        let mut client = harness.connect();
+        client
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        client
+            .write_all(connect_request(&format!("fixture.test:{port}")).as_bytes())
+            .unwrap();
+        assert_eq!(read_head(&mut client).0, 200);
+        let started = Instant::now();
+        client.write_all(&flight).unwrap();
+        read_to_eof(&mut client);
+        assert!(started.elapsed() < Duration::from_secs(8));
+        let results = harness.sink.wait_for(if reason == Reason::OriginMismatch {
+            1
+        } else if reason == Reason::OriginUnverified {
+            2
+        } else {
+            3
+        });
+        assert_eq!(results.last().unwrap().reason, reason);
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+    assert!(harness.stop(WAIT).0.complete());
 }

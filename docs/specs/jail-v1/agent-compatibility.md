@@ -7,8 +7,16 @@ lives here, not in the binary: `doctor` reports every launch profile
 `experimental` (jail-v1 §§14.1, 15, revision 19). No record stores a token, a
 credential, or a vendor-state archive.
 
+Current embedded starter profiles: `opencode`, `claude`, `codex`, `cursor`,
+`aider`, `goose`, `gemini`, `amp`, `cline`, `copilot`, `kilo`, `auggie`,
+`droid`, and `pi`. Every current-build combination is **experimental,
+unrecorded** until a row below names that exact build and vendor version.
+`doctor --launch` proves resolution and host capabilities, not vendor
+compatibility. The historical rows below retain their original scope.
+
 | Agent | Vendor version | Ouroboros revision | Platform | Backend | Jail mode | Credential | Result |
 |---|---|---|---|---|---|---|---|
+| OpenCode | 1.18.32 | `2c8f28dc` + dirty implementation; inputs `fa366f0c8236…` | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64 | bubblewrap 0.11.1, ptrace | `agent`, observation on, strict evidence | none (`opencode/big-pickle`) | Passed execution, learning and proposal validation ([current evidence](#opencode-current-implementation-2026-09-28)) |
 | OpenCode | 1.18.32 | `027de7d2` (the milestone revision; the bundled profile at that revision) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, stock host | bubblewrap 0.11.1, ptrace observer; the frozen filters | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active ([milestone run](#opencode-agent-no-credential-at-the-milestone-revision)) |
 | OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d`) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, stock host | bubblewrap 0.11.1, ptrace observer; pre-J4 filters (below) | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active |
 | OpenCode | 1.18.32 | `3c3638c4` (profile at `156e645d` with its `auth` input enabled and `api.z.ai` allowed) | same | same | same | the operator's own Z.AI Coding Plan key (`opencode auth login`), staged `copy_rw` | Passed: GLM-5.3 wrote the requested workspace file; receipt settled, exit 0, every coverage class active; the key reached no record |
@@ -20,6 +28,22 @@ and the narrowing filter
 the frozen ones are in [milestone-1-freeze.toml](milestone-1-freeze.toml).
 They are kept as the history of what the first real runs required; the
 milestone's A01 record is the run below.
+
+## OpenCode, current implementation (2026-09-28)
+
+This row applies only to source-input digest
+`sha256:fa366f0c82364e99146c6a65573709799830f1904b026ed20f4b060ca31db501`, Rust 1.98.1,
+x86_64 optimized build, revision `2c8f28dc` with uncommitted changes. It is not a
+clean-release or all-agent compatibility claim.
+
+The [current execution report](../../benchmarks/jail/README.md) links raw
+receipts, traces and the script. A fresh fixture project, no credentials and the
+embedded profile completed execution in 8.89 seconds and learning in 6.92
+seconds. Both wrote exactly `hello\n`, exited zero, had no coverage gaps and
+settled with `tree_empty: true`. Learning proposed no new grants; ungrantable
+pseudo-filesystem reads stayed unresolved. A contained launch with every
+proposed grant also passed. This small sample does not close the intermittent
+startup/evidence issues documented below.
 
 ## OpenCode, `agent`, no credential, at the milestone revision
 
@@ -56,7 +80,8 @@ profile `experimental`; this record carries the claim.
   `sha256:28c98e72b91a22c212d5dfdddfcc1f1ca153c5a8e89c15833c26724b263ebeff`
   and the narrowing filter
   `sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66`,
-  the digests [milestone-1-freeze.toml](milestone-1-freeze.toml) freezes.
+  the digests frozen at that milestone. The current
+  [freeze manifest](milestone-1-freeze.toml) records the updated contracts.
 - **The start-up stall.** It did not recur in this run, nor in the superseded
   run at `4380241f` earlier the same day. Two runs are not evidence that it is
   gone; the item stays open.

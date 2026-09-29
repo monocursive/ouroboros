@@ -89,6 +89,7 @@ pub fn baseline(profile: ProfileName, platform: Os, lookup: &EnvLookup) -> Profi
     };
 
     let observation = ObservationSnapshot {
+        learning: false,
         mode: ObserveMode::On,
         evidence: EvidenceMode::Strict,
     };

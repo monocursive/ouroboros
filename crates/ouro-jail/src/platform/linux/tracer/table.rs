@@ -123,7 +123,8 @@ pub fn closed_set_table() -> String {
     let _ = writeln!(
         out,
         "precondition                 verdict  meaning\n\
-         arch != 0x{x86:08x}          {}    another ABI: stopped, labelled foreign, never decoded\n\
+         clone3 (nr 435 or x32|435)   ENOSYS  every ABI, before the architecture branch\n\
+         arch != 0x{x86:08x}          {}    other calls: stopped, labelled foreign, never decoded\n\
          nr & 0x{:08x}             {}    x32: stopped, labelled foreign, never decoded",
         name(verdict(0x4000_0003, 59, 0, 0)),
         sys::X32_SYSCALL_BIT,

@@ -1,0 +1,6 @@
+{
+  "exit": 2,
+  "stderr": "usage: macos_es.py [-h] --out OUT [--identity IDENTITY] [--profile PROFILE]\n                   [--development-vm]\nmacos_es.py: error: Development testing requires a disposable macOS VM with SIP disabled\n",
+  "output_created": false,
+  "host_sip": "System Integrity Protection status: enabled."
+}

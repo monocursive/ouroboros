@@ -51,6 +51,17 @@ fn fixture_file(path: &Path, bytes: &[u8]) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+fn await_mount_pin(rendezvous: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !rendezvous.join("pinned").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the mount-swap seam never signalled `pinned`"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn case(profile: &str) -> Case {
     let jail = Jail::new().unwrap();
     let workspace = jail.root().join("workspace");
@@ -433,15 +444,7 @@ fn f04_a_source_identity_swap_at_the_mount_handoff_refuses() {
         .unwrap();
 
     // Wait for the supervisor to finish pinning the mount sources.
-    let pinned = rendezvous.join("pinned");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !pinned.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the mount-swap seam never signalled `pinned`"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    await_mount_pin(&rendezvous);
     // Replace the pinned workspace with a fresh object at the same path, then
     // let the handoff verification run.
     std::fs::rename(&workspace, root.join("workspace.gone")).unwrap();
@@ -475,6 +478,165 @@ fn f04_a_source_identity_swap_at_the_mount_handoff_refuses() {
     // The swap refusal happens before any boundary exists, so this receipt has
     // no native lifetime details; the seam is recorded in jail state at claim
     // time (S9), which is not part of this clause's assertion.
+}
+
+/// K04: change only the backend after resolution, leaving every mount source
+/// intact. The refusal must come from executable verification before spawn.
+#[test]
+fn k04_backend_replacement_and_mode_change_refuse_before_spawn() {
+    if !common::live() {
+        return;
+    }
+    for replace in [true, false] {
+        let c = case("tool");
+        let root = c.jail.root().to_path_buf();
+        let backend_dir = root.join("backend");
+        private_dir(&backend_dir);
+        let backend = backend_dir.join("bwrap");
+        // A native forwarding fixture lets capability probes use the actual
+        // distribution backend without changing its file or AppArmor profile.
+        let source = backend_dir.join("forward.c");
+        let actual = serde_json::to_string(common::bwrap_path().to_str().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            format!(
+                "#include <unistd.h>\nint main(int argc, char **argv) {{ (void)argc; execv({actual}, argv); return 127; }}\n"
+            ),
+        )
+        .unwrap();
+        let compiled = std::process::Command::new("cc")
+            .args(["-O2", "-Wall", "-Wextra", "-Werror"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&backend)
+            .output()
+            .unwrap();
+        assert!(compiled.status.success(), "{compiled:?}");
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![backend_dir];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let rendezvous = root.join("swap-rv");
+        private_dir(&rendezvous);
+        let marker = c.workspace.join("target-ran");
+        let spawned = c
+            .jail
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("OURO_JAIL_TEST_MOUNT_SWAP", &rendezvous)
+            .receipt()
+            .target([
+                OsString::from("/usr/bin/touch"),
+                marker.clone().into_os_string(),
+            ])
+            .spawn()
+            .unwrap();
+        await_mount_pin(&rendezvous);
+        if replace {
+            let replacement = root.join("replacement");
+            std::fs::copy("/usr/bin/false", &replacement).unwrap();
+            std::fs::rename(replacement, &backend).unwrap();
+        } else {
+            std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        std::fs::write(rendezvous.join("go"), b"1").unwrap();
+        let run = spawned.wait().unwrap();
+        assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+        assert!(!marker.exists(), "the target ran after the backend changed");
+        let receipt = common::checked_receipt(run.receipt_phase("refused").unwrap());
+        assert_eq!(receipt["outcome"]["error"]["code"], "internal_error");
+        assert_eq!(receipt["outcome"]["error"]["stage"], "preparing");
+        assert!(
+            receipt["outcome"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("the pinned backend changed before spawn"),
+            "{receipt:#}"
+        );
+        assert_ne!(receipt["containment"], "enforced");
+    }
+}
+
+/// K04: the private bootstrap executes the pinned image even if argv[0]'s
+/// path is replaced, and does not leak the executable descriptor into it.
+#[test]
+fn k04_bootstrap_executes_the_descriptor_without_pathname_fallback() {
+    if !common::live() {
+        return;
+    }
+    use ouro_jail::platform::linux::{exec, fs::PinnedPath, watch};
+    let root = common::private_tempdir();
+    let backend = root.path().join("backend");
+    std::fs::copy(PYTHON, &backend).unwrap();
+    let pin = PinnedPath::open(&backend).unwrap();
+    let replacement = root.path().join("replacement");
+    std::fs::copy("/usr/bin/false", &replacement).unwrap();
+    std::fs::rename(replacement, &backend).unwrap();
+    assert!(pin.verify_executable().is_err());
+    let (start_r, start_w) = exec::pipe().unwrap();
+    let mut fds = exec::FdMap::new();
+    fds.add(start_r, watch::START_FD).unwrap();
+    fds.add(
+        pin.borrow_fd().try_clone_to_owned().unwrap(),
+        watch::BACKEND_FD,
+    )
+    .unwrap();
+    let mut command = std::process::Command::new(harness::jail_path());
+    command.arg("__backend").arg(&backend).args([
+        "-c",
+        "import os,errno\ntry: os.fstat(8)\nexcept OSError as e: assert e.errno == errno.EBADF\nelse: raise AssertionError('backend descriptor leaked')\nprint('pinned backend; descriptor closed')",
+    ]);
+    fds.apply(&mut command);
+    // The bootstrap cannot execute anything until its private release byte.
+    assert_eq!(
+        unsafe { libc::write(start_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) },
+        1
+    );
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"pinned backend; descriptor closed\n");
+}
+
+/// K07/C9: adding a protected directory after enumeration does not replace
+/// any pinned inode. Directory stamps must detect it and refuse the handoff.
+#[test]
+fn k07_new_nested_protected_directory_after_scan_refuses_before_spawn() {
+    if !common::live() {
+        return;
+    }
+    let c = case("tool");
+    let nested = c.workspace.join("nested");
+    private_dir(&nested);
+    let inode = std::fs::metadata(&nested).unwrap().ino();
+    let rendezvous = c.jail.root().join("swap-rv");
+    private_dir(&rendezvous);
+    let marker = c.workspace.join("target-ran");
+    let spawned = c
+        .jail
+        .env("OURO_JAIL_TEST_MOUNT_SWAP", &rendezvous)
+        .receipt()
+        .target([
+            OsString::from("/usr/bin/touch"),
+            marker.clone().into_os_string(),
+        ])
+        .spawn()
+        .unwrap();
+    await_mount_pin(&rendezvous);
+    private_dir(&nested.join(".git"));
+    assert_eq!(std::fs::metadata(&nested).unwrap().ino(), inode);
+    std::fs::write(rendezvous.join("go"), b"1").unwrap();
+    let run = spawned.wait().unwrap();
+    assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+    assert!(!marker.exists(), "the target ran with an incomplete scan");
+    let receipt = common::checked_receipt(run.receipt_phase("refused").unwrap());
+    assert_eq!(receipt["outcome"]["error"]["code"], "missing_capability");
+    assert_eq!(receipt["outcome"]["error"]["stage"], "preparing");
+    assert!(
+        receipt["outcome"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("scanned directory changed"),
+        "{receipt:#}"
+    );
+    assert_ne!(receipt["containment"], "enforced");
 }
 
 // ===========================================================================

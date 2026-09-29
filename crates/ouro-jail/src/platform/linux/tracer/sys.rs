@@ -509,6 +509,76 @@ pub fn gettid() -> pid_t {
     unsafe { libc::gettid() }
 }
 
+/// Suppress an exec at entry, or inject its EPERM result at exit.
+#[cfg(target_arch = "x86_64")]
+pub fn deny_exec(pid: pid_t, entry: bool) -> io::Result<()> {
+    let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    ptrace_raw(
+        PTRACE_GETREGS,
+        pid,
+        std::ptr::null_mut(),
+        (&raw mut regs).cast(),
+    )?;
+    if entry {
+        regs.orig_rax = u64::MAX;
+    } else {
+        regs.rax = (-i64::from(libc::EPERM)) as u64;
+    }
+    ptrace_raw(
+        libc::PTRACE_SETREGS,
+        pid,
+        std::ptr::null_mut(),
+        (&raw mut regs).cast(),
+    )?;
+    Ok(())
+}
+#[cfg(not(target_arch = "x86_64"))]
+pub fn deny_exec(_pid: pid_t, _entry: bool) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+/// Bounded argv snapshot: at most 256 args, 64 KiB total, 4096 bytes per arg.
+pub fn argv(pid: pid_t, address: u64) -> Option<Vec<Vec<u8>>> {
+    if address == 0 {
+        return None;
+    }
+    let mut result = Vec::new();
+    let mut total = 0;
+    for i in 0..=256u64 {
+        let mut ptr = [0; 8];
+        if read_remote(pid, address.checked_add(i * 8)?, &mut ptr) != 8 {
+            return None;
+        }
+        let mut at = u64::from_ne_bytes(ptr);
+        if at == 0 {
+            return Some(result);
+        }
+        if i == 256 {
+            return None;
+        }
+        let mut arg = Vec::new();
+        loop {
+            let mut bytes = [0; 256];
+            let n = read_remote(pid, at, &mut bytes);
+            if n == 0 {
+                return None;
+            }
+            let end = bytes[..n].iter().position(|b| *b == 0);
+            arg.extend_from_slice(&bytes[..end.unwrap_or(n)]);
+            if arg.len() > 4096 || total + arg.len() > 65536 {
+                return None;
+            }
+            if end.is_some() {
+                break;
+            }
+            at = at.checked_add(n as u64)?;
+        }
+        total += arg.len();
+        result.push(arg);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
