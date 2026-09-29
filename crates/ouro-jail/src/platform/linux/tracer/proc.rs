@@ -102,6 +102,34 @@ pub fn kernel_exe(tid: pid_t, images: &[Vec<u8>]) -> Option<super::KernelImage> 
     })
 }
 
+/// The raw `/proc/<tid>/cmdline` bytes: the argument area of the image the
+/// kernel installed, read while the tracee is stopped at its exec event
+/// (audit 6 N2). The kernel copied it from the tracee's argv vector into
+/// the new image's stack; at that stop the exec has already destroyed every
+/// other thread and the new image has run no instruction, so nothing can
+/// rewrite it before this read. `None` when the file cannot be read.
+#[must_use]
+pub fn cmdline_bytes(tid: pid_t) -> Option<Vec<u8>> {
+    fs::read(proc_path(tid, "cmdline")).ok()
+}
+
+/// The argv a `/proc/<tid>/cmdline` read holds.
+///
+/// Every argument ends in one NUL, so only that final terminator is
+/// stripped: an empty argument is an argument, and dropping it would shift
+/// every later position the command rules match on. ([`cmdline`] drops
+/// trailing empty arguments, which is right for recognising a process by
+/// its argv and wrong for judging one.) An `execve` with an
+/// empty argv reads as one empty argument, because the kernel inserts one
+/// (Linux 5.18, "exec: Force single empty string when argv is empty").
+/// `None` for an empty or unterminated area, which no image stopped at its
+/// exec event has.
+#[must_use]
+pub fn parse_cmdline(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let body = bytes.strip_suffix(&[0])?;
+    Some(body.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect())
+}
+
 /// The `NSpid` line: this task's id in each pid namespace from ours inward.
 ///
 /// One entry means the task shares our namespace. Two or more mean it lives
@@ -404,5 +432,33 @@ mod tests {
     fn the_parent_of_a_task_that_does_not_exist_is_none() {
         assert_eq!(ppid(0), None);
         assert_eq!(ppid(1), Some(0), "init reports no parent");
+    }
+
+    /// Audit-6 review: only the final terminator is stripped, so empty
+    /// arguments keep their positions, and the kernel's inserted argv for
+    /// an `execve` with none reads as one empty argument, not as nothing.
+    #[test]
+    fn a_cmdline_keeps_empty_arguments_and_its_positions() {
+        let argv = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.as_bytes().to_vec())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(parse_cmdline(b"git\0push\0"), Some(argv(&["git", "push"])));
+        assert_eq!(
+            parse_cmdline(b"git\0push\0\0"),
+            Some(argv(&["git", "push", ""]))
+        );
+        assert_eq!(parse_cmdline(b"tool\0\0x\0"), Some(argv(&["tool", "", "x"])));
+        assert_eq!(parse_cmdline(b"\0"), Some(argv(&[""])));
+        assert_eq!(parse_cmdline(b""), None);
+        assert_eq!(parse_cmdline(b"unterminated"), None);
+        // This process's own area parses to its own argv.
+        let me = std::process::id() as pid_t;
+        let own: Vec<Vec<u8>> = std::env::args_os()
+            .map(|arg| std::os::unix::ffi::OsStrExt::as_bytes(arg.as_os_str()).to_vec())
+            .collect();
+        assert_eq!(cmdline_bytes(me).as_deref().and_then(parse_cmdline), Some(own));
     }
 }

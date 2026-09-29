@@ -78,12 +78,16 @@ pub(super) fn relay(
         Framing::Length(n) => n,
         _ => return Err(Reason::UnsupportedRequest),
     };
-    if request
-        .forward_head
-        .windows(7)
-        .any(|s| s.eq_ignore_ascii_case(b"expect:"))
-    {
-        return Err(Reason::UnsupportedRequest);
+    // `Expect` is refused by header name at line start, not by substring:
+    // a longer header name or a value containing "expect:" is none of this
+    // lane's business.
+    for line in request.forward_head.split_inclusive(|b| *b == b'\n') {
+        let Some(colon) = line.iter().position(|b| *b == b':') else {
+            continue;
+        };
+        if line[..colon].eq_ignore_ascii_case(b"expect") {
+            return Err(Reason::UnsupportedRequest);
+        }
     }
     upstream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -142,7 +146,24 @@ pub(super) fn relay(
         }
         outcome.bytes_in += n as u64;
     }
+    // The response is complete: say so first, so a client reading a
+    // close-delimited body finishes now and one holding the connection open
+    // sees it end, rather than either waiting out the drain below.
     incoming.conn.send_close_notify();
     let _ = incoming.flush();
+    // Security 2026-09-29 (audit 6 N3): parity with the plain lanes'
+    // `discard_rest` — one request per connection, so anything the client
+    // still sends is counted and dropped, not vanished. Bounded to one
+    // second past the response: counting must never hold the connection's
+    // teardown hostage to a client that never stops sending. A client's own
+    // `close_notify` in answer to ours ends it at once.
+    incoming.sock.deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match incoming.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => outcome.discarded += n as u64,
+            Err(_) => break,
+        }
+    }
     Ok(outcome)
 }

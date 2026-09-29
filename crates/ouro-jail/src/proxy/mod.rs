@@ -1242,7 +1242,12 @@ fn connect_and_relay(
         } else {
             origin::established(client)?;
         }
+        slot.replied = true;
     }
+    // Whether the client has heard anything yet: a tunnel has its
+    // establishment reply, a plain request nothing. A relay that cannot
+    // start writes to neither side, so that request can still be refused.
+    let answered = slot.replied;
     // From here the client may receive relayed bytes; an error response can
     // no longer follow.
     slot.replied = true;
@@ -1321,6 +1326,15 @@ fn connect_and_relay(
     let Ok(outcome) = relayed else {
         // The relay could not start; nothing was written to either side.
         let _ = upstream.shutdown(Shutdown::Both);
+        // A tunnel already answered with its establishment reply; a plain
+        // request has heard nothing yet and still gets its refusal.
+        if !answered {
+            if slot.transport == "socks5" {
+                let _ = socks::reply(client, 1);
+            } else {
+                respond(client, Reason::ResourceExhausted, reply_budget);
+            }
+        }
         slot.emit(slot.allowed(Reason::ResourceExhausted, Some(connected)));
         return Ok(());
     };

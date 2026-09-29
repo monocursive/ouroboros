@@ -136,6 +136,24 @@ pub(super) trait ProcView: Send {
     fn children(&self, pid: pid_t) -> Vec<pid_t> {
         proc::children(pid)
     }
+    /// The raw `/proc/<tid>/cmdline` bytes (audit 6 N2).
+    fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
+        proc::cmdline_bytes(tid)
+    }
+    /// The raw `/proc/<tid>/exe` link bytes (audit 6 N2).
+    fn exe(&self, tid: pid_t) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt as _;
+        std::fs::read_link(format!("/proc/{tid}/exe"))
+            .ok()
+            .map(|link| link.as_os_str().as_bytes().to_vec())
+    }
+    /// The raw `/proc/<tid>/fd/<fd>` link bytes (audit 6 N1).
+    fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt as _;
+        std::fs::read_link(format!("/proc/{tid}/fd/{fd}"))
+            .ok()
+            .map(|link| link.as_os_str().as_bytes().to_vec())
+    }
 }
 
 /// `/proc`, read now.
@@ -393,6 +411,11 @@ struct Pending {
     /// stable. Registers cannot change between the stops; only pointed
     /// memory can.
     raw: [u64; 6],
+    /// The argv the command rules judged at an exec's entry stop, kept for
+    /// the re-check against the kernel's own copy at the exec event
+    /// ([`exec_recheck`]). `None` for every other call, and whenever no
+    /// command rules are configured.
+    entry_argv: Option<Vec<Vec<u8>>>,
 }
 
 pub(super) fn run(
@@ -542,7 +565,108 @@ fn path_has_marker(snapshot: Option<&PathSnapshot>, marker: &[u8]) -> bool {
             .any(|window| window == marker)
     })
 }
+
 // J5-B2 O03 seams end.
+
+/// The named components of a raw pathname: empty components (`//`, a
+/// trailing `/`) and `.` name nothing and are dropped.
+fn components(path: &[u8]) -> impl Iterator<Item = &[u8]> {
+    path.split(|byte| *byte == b'/')
+        .filter(|component| !component.is_empty() && *component != b".")
+}
+
+/// Security 2026-09-29 (audit 6 N1, review fixes): whether the kernel's own
+/// resolution of the descriptor a successful open returned — the
+/// `/proc/<tid>/fd/<ret>` link, `resolved` — corroborates the pathname
+/// snapshot the event would certify.
+///
+/// Components are compared, not only the final one, so an A-B-A rewrite of
+/// a directory component is caught as well as one of the name: an absolute
+/// snapshot must name exactly the resolved path; a relative one, resolved
+/// against a cwd or dirfd the observer does not read, must be its tail; and
+/// past a `..` only the components after the last one are comparable. An
+/// `O_TMPFILE` open names a directory and its descriptor resolves to an
+/// unnamed `#<ino>` inside it, so the directory is compared. Anything else —
+/// a link that is no path (the `pipe:[…]` behind `/dev/stderr`), a symlink
+/// along the way, a concurrent rename — does not corroborate, which only
+/// ever weakens the claim.
+///
+/// What this cannot see: the descriptor table is shared with the sibling
+/// threads, which run while this one is stopped, so a sibling can put a
+/// same-named file at descriptor `ret` before the link is read. That is the
+/// residual of reading a shared table from outside the process.
+fn path_corroborated(snapshot: &[u8], resolved: &[u8], tmpfile: bool) -> bool {
+    let resolved = resolved.strip_suffix(b" (deleted)").unwrap_or(resolved);
+    if !resolved.starts_with(b"/") {
+        return false;
+    }
+    let mut resolved: Vec<&[u8]> = components(resolved).collect();
+    if tmpfile {
+        if !resolved.last().is_some_and(|name| name.starts_with(b"#")) {
+            return false;
+        }
+        resolved.pop();
+    }
+    let claimed: Vec<&[u8]> = components(snapshot).collect();
+    if let Some(up) = claimed.iter().rposition(|component| *component == b"..") {
+        let tail = &claimed[up + 1..];
+        return !tail.is_empty() && resolved.ends_with(tail);
+    }
+    if snapshot.starts_with(b"/") {
+        resolved == claimed
+    } else {
+        !claimed.is_empty() && resolved.ends_with(&claimed)
+    }
+}
+
+/// Security 2026-09-29 (audit 6 N2, review fixes): the command rules
+/// re-checked at the exec event, against what the kernel installed.
+///
+/// `entry` is the argv the entry stop judged (tracee memory), `kernel` the
+/// kernel's own copy (`/proc/<tid>/cmdline`), `claimed` the exec pathname
+/// snapshot and `image` the `/proc/<tid>/exe` link.
+///
+/// - The same argv (or, for an `execve` with none, the one empty argument
+///   the kernel inserts): the entry verdict stands for the arguments, and
+///   the image the kernel loaded is the new evidence for element 0.
+/// - An interpreter rewrite — a `#!` script or a `binfmt_misc` handler: the
+///   kernel replaced `argv[0]` with the interpreter, its optional argument
+///   and the file name, and kept `argv[1..]` as the tail. The rules judge
+///   what the entry check judged, the script and its arguments, so they see
+///   the kernel's copy of the element before the tail with that tail — never
+///   the interpreter's argv, so `forbid = ["bash **"]` does not kill every
+///   bash script the entry check let through.
+/// - Any other difference: the argv changed between the entry read and the
+///   kernel's copy, which is judged with the claimed path and the image as
+///   element 0's identity.
+/// - An unreadable kernel copy: refused, as an unreadable argv is at the
+///   entry stop.
+///
+/// This stays an accident filter (jail-v2 §7.2): a tracee that races its
+/// own argv into the shape of an interpreter rewrite is judged on that
+/// shape, as a `sh -c` re-spelling is.
+fn exec_recheck(
+    rules: &crate::commands::Rules,
+    entry: &[Vec<u8>],
+    kernel: Option<&[Vec<u8>]>,
+    claimed: Option<&[u8]>,
+    image: Option<&[u8]>,
+) -> Option<crate::commands::Hit> {
+    let image = image.map(|image| image.strip_suffix(b" (deleted)").unwrap_or(image));
+    let Some(kernel) = kernel else {
+        return rules.check(None, claimed);
+    };
+    if kernel == entry || (entry.is_empty() && kernel == [Vec::<u8>::new()]) {
+        return rules.check(Some(kernel), image);
+    }
+    let tail = entry.get(1..).unwrap_or(&[]);
+    if kernel.len() >= tail.len() + 2 && kernel.ends_with(tail) {
+        return rules.check(Some(&kernel[kernel.len() - tail.len() - 1..]), claimed);
+    }
+    rules
+        .check(Some(kernel), claimed)
+        .or_else(|| rules.check(Some(kernel), image))
+}
 
 struct Session {
     config: TracerConfig,
@@ -1354,6 +1478,7 @@ impl Session {
         let mut path = None;
         let mut dirfd = None;
         let mut syscall = None;
+        let mut command = None;
         if let Some(task) = self.tasks.get_mut(&tid) {
             if let Some((pending, site)) = carried {
                 task.pending = Some(pending);
@@ -1366,6 +1491,35 @@ impl Session {
                 path = pending.args.path.clone();
                 dirfd = pending.args.dirfd;
                 syscall = Some(pending.entry.name);
+                // Security 2026-09-29 (audit 6 N2): the argv the entry-stop
+                // check judged is tracee memory, which a sibling thread can
+                // rewrite for the kernel's own copy. The image is installed
+                // here and has run nothing, so the kernel's own copy of the
+                // argv and of the image are re-checked ([`exec_recheck`]).
+                // An entry the rules already denied never reaches this stop.
+                if !self.config.commands.is_empty() && pending.args.command.is_none() {
+                    let kernel_argv = self
+                        .procfs
+                        .cmdline(tid)
+                        .as_deref()
+                        .and_then(proc::parse_cmdline);
+                    let image = self.procfs.exe(tid);
+                    command = exec_recheck(
+                        &self.config.commands,
+                        pending.entry_argv.as_deref().unwrap_or(&[]),
+                        kernel_argv.as_deref(),
+                        pending.args.path.as_ref().map(|p| p.bytes.as_slice()),
+                        image.as_deref(),
+                    )
+                    .map(Box::new);
+                }
+            }
+            if command.is_some() {
+                // The exec was observed whole and its event carries the
+                // verdict, so its entry leaves flight here: the death that
+                // follows has no call to abandon.
+                task.pending = None;
+                self.inflight = self.inflight.saturating_sub(1);
             }
         }
         // Security 2026-09-27 (audit 3 A1): the kernel has already installed
@@ -1381,6 +1535,15 @@ impl Session {
             .filter(|(pid, _)| *pid == tgid)
             .map_or(&[][..], |(_, images)| images.as_slice());
         let kernel_image = proc::kernel_exe(tid, images);
+        if command.is_some() {
+            // The hit is live: the process dies before its image runs an
+            // instruction — after the image was read above, so the event
+            // keeps the kernel's evidence — and the event records the verdict
+            // and stops the run for a `forbid`.
+            unsafe {
+                libc::kill(tid, libc::SIGKILL);
+            }
+        }
         let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Exec {
             pid: tgid,
@@ -1389,6 +1552,7 @@ impl Session {
             path,
             kernel_image,
             dirfd,
+            command,
             monotonic_ns: clock::boottime_ns(),
         });
     }
@@ -1560,11 +1724,22 @@ impl Session {
                 sockaddr_unreadable: false,
                 flags_unavailable,
                 raw: info.args,
+                entry_argv: None,
             };
             self.begin(tid, InFlight::Closed(pending), site);
             return;
         }
         if !self.admit(OpSet::of(entry.op)) {
+            // With command rules configured, an exec refused its in-flight
+            // slot would resume unfollowed, with no argv read and no verdict
+            // at all. The refusal already recorded its gap; the process dies
+            // rather than run an unjudged exec (the `deny_exec` failure path
+            // below makes the same call).
+            if entry.op == ClosedOp::Exec && !self.config.commands.is_empty() {
+                unsafe {
+                    libc::kill(tid, libc::SIGKILL);
+                }
+            }
             return;
         }
         let mut pending = self.capture_paths(tid, entry, &info.args);
@@ -1580,6 +1755,7 @@ impl Session {
                     pending.args.path.as_ref().map(|p| p.bytes.as_slice()),
                 )
                 .map(Box::new);
+            pending.entry_argv = argv;
             if pending.args.command.is_some() && sys::deny_exec(tid, true).is_err() {
                 self.gap(GapReason::ForeignAbi, OpSet::ALL, None);
                 unsafe {
@@ -1772,7 +1948,7 @@ impl Session {
             return;
         }
         self.inflight = self.inflight.saturating_sub(1);
-        let pending = match call {
+        let mut pending = match call {
             InFlight::Closed(pending) => pending,
             InFlight::Foreign => {
                 if rval == -i64::from(libc::ENOSYS) {
@@ -1922,6 +2098,39 @@ impl Session {
             self.summary.loss.memory_flags_unverified += 1;
             self.gap(GapReason::MemoryFlagsUnverified, OpSet::of(op), Some(1));
             return;
+        }
+        // Security 2026-09-29 (audit 6 N1): byte stability is not
+        // certification for a pathname either — a sibling thread can
+        // rewrite the buffer for the kernel's own copy and restore it
+        // before the exit re-read, the same A-B-A rewrite the flags gap
+        // above names. A successful open hands the observer one kernel
+        // fact: the descriptor's own `/proc/<tid>/fd/<ret>` link, resolved
+        // by the kernel for the file it actually opened. When it
+        // corroborates the snapshot ([`path_corroborated`]) the claim
+        // stands; otherwise (an unreadable link, or a disagreement a
+        // symlink, a pipe or a rename could also explain) the claim is
+        // downgraded to an incomplete path, counted, and named by a
+        // bookkeeping gap, so a receipt never certifies a pathname the
+        // kernel may not have used. The call and its event are kept — no
+        // result is missing — so this never degrades a class or stops a
+        // strict run: failures of this check only weaken, never accuse.
+        if op == ClosedOp::Open
+            && rval >= 0
+            && let Some(snapshot) = pending.args.path.as_mut()
+            && snapshot.complete
+        {
+            let tmpfile = pending.args.flags.is_some_and(|flags| {
+                flags & (libc::O_TMPFILE as u64) == libc::O_TMPFILE as u64
+            });
+            let corroborated = self
+                .procfs
+                .fd_link(tid, rval)
+                .is_some_and(|resolved| path_corroborated(&snapshot.bytes, &resolved, tmpfile));
+            if !corroborated {
+                self.summary.path_claims_unverified += 1;
+                self.gap(GapReason::PathClaimUnverified, OpSet::EMPTY, Some(1));
+                snapshot.complete = false;
+            }
         }
         self.summary.ops.bump(op);
         let start_ticks = self.birth_of(tgid);
@@ -2445,6 +2654,7 @@ impl Session {
             sockaddr_unreadable,
             flags_unavailable: false,
             raw: *raw,
+            entry_argv: None,
         }
     }
 
@@ -2691,6 +2901,7 @@ mod tests {
             sockaddr_unreadable: false,
             flags_unavailable: false,
             raw,
+            entry_argv: None,
         };
         let self_pid = std::process::id() as pid_t;
         assert!(
@@ -2748,6 +2959,7 @@ mod tests {
             sockaddr_unreadable: false,
             flags_unavailable: false,
             raw,
+            entry_argv: None,
         };
         let self_pid = std::process::id() as pid_t;
         session.tasks.insert(
@@ -2951,6 +3163,7 @@ mod tests {
             sockaddr_unreadable: false,
             flags_unavailable: false,
             raw: [0; 6],
+            entry_argv: None,
         }));
         session.inflight += 1;
     }
@@ -4192,4 +4405,331 @@ mod tests {
             "stopped first: the orphan is unreaped, the bystander is not"
         );
     }
+
+    // Audit-6 review begin: the descriptor corroboration and the exec-time
+    // command re-check.
+
+    /// Plays the kernel's side of the audit-6 checks: each task's thread
+    /// group, cmdline, image link and descriptor links.
+    #[derive(Default)]
+    struct Kernel {
+        tasks: HashMap<pid_t, pid_t>,
+        cmdline: HashMap<pid_t, Vec<u8>>,
+        exe: HashMap<pid_t, Vec<u8>>,
+        fds: HashMap<(pid_t, i64), Vec<u8>>,
+    }
+
+    impl ProcView for Kernel {
+        fn tgid(&self, tid: pid_t) -> Option<pid_t> {
+            self.tasks.get(&tid).copied()
+        }
+        fn start_ticks(&self, tid: pid_t) -> Option<u64> {
+            self.tasks.contains_key(&tid).then_some(1000)
+        }
+        fn children(&self, _pid: pid_t) -> Vec<pid_t> {
+            Vec::new()
+        }
+        fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
+            self.cmdline.get(&tid).cloned()
+        }
+        fn exe(&self, tid: pid_t) -> Option<Vec<u8>> {
+            self.exe.get(&tid).cloned()
+        }
+        fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
+            self.fds.get(&(tid, fd)).cloned()
+        }
+    }
+
+    fn kernel_session(
+        config: TracerConfig,
+        kernel: Kernel,
+    ) -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
+        let tasks: Vec<pid_t> = kernel.tasks.keys().copied().collect();
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let mut session = Session::new(config, tx, Arc::default(), 0, Box::new(kernel));
+        for tid in tasks {
+            session.register(tid);
+        }
+        (session, rx)
+    }
+
+    #[test]
+    fn a_path_claim_is_corroborated_by_its_components_not_only_its_name() {
+        // Absolute: exactly the resolved path.
+        assert!(path_corroborated(b"/w/out.txt", b"/w/out.txt", false));
+        assert!(path_corroborated(b"/w//./out.txt", b"/w/out.txt", false));
+        assert!(
+            !path_corroborated(b"/w/public/x", b"/w/secret/x", false),
+            "a rewritten directory component"
+        );
+        assert!(!path_corroborated(b"/w/a", b"/w/b", false));
+        // Relative: the tail of the resolved path, bare names included.
+        assert!(path_corroborated(b"out.txt", b"/w/out.txt", false));
+        assert!(path_corroborated(b"sub/out.txt", b"/w/sub/out.txt", false));
+        assert!(
+            !path_corroborated(b"a", b"/w/b", false),
+            "a bare name is checked too"
+        );
+        assert!(!path_corroborated(b"sub/out.txt", b"/w/other/out.txt", false));
+        // Past a `..`, only what follows the last one.
+        assert!(path_corroborated(b"../out/x", b"/w/out/x", false));
+        assert!(!path_corroborated(b"../out/x", b"/w/in/x", false));
+        assert!(!path_corroborated(b"a/..", b"/w", false));
+        // Unlinked since: the annotation is the kernel's.
+        assert!(path_corroborated(b"/w/gone", b"/w/gone (deleted)", false));
+        // O_TMPFILE names the directory; its descriptor is `#<ino>` inside.
+        assert!(path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", true));
+        assert!(path_corroborated(b"/tmp/", b"/tmp/#1234 (deleted)", true));
+        assert!(!path_corroborated(b"/tmp", b"/var/tmp/#1234 (deleted)", true));
+        assert!(
+            !path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", false),
+            "only an O_TMPFILE open drops the name"
+        );
+        // No path at all: the pipe or terminal behind /dev/stderr.
+        assert!(!path_corroborated(b"/dev/stderr", b"pipe:[4242]", false));
+        assert!(!path_corroborated(b"/dev/stderr", b"/dev/pts/3", false));
+    }
+
+    /// Audit-6 review: a claim the descriptor does not corroborate is
+    /// downgraded and named by a bookkeeping gap — never loss, never a
+    /// degraded class — so ordinary `O_TMPFILE` and `/dev/stderr` opens cannot
+    /// stop a strict run, while a bare relative name is checked like any
+    /// other. Verified against this process's own memory, which the exit's
+    /// stability re-read can read.
+    #[test]
+    fn an_open_claim_the_descriptor_does_not_corroborate_is_downgraded_not_lost() {
+        let self_pid = std::process::id() as pid_t;
+        let write = (libc::O_WRONLY | libc::O_CREAT) as u64;
+        let cases: [(&[u8], u64, &[u8], bool); 5] = [
+            (b"/w/out.txt\0", write, b"/w/out.txt", true),
+            (
+                b"/tmp\0",
+                (libc::O_RDWR | libc::O_TMPFILE) as u64,
+                b"/tmp/#77 (deleted)",
+                true,
+            ),
+            (b"/dev/stderr\0", libc::O_WRONLY as u64, b"pipe:[4242]", false),
+            (b"a\0", write, b"/w/b", false),
+            (b"/w/public/x\0", write, b"/w/secret/x", false),
+        ];
+        for (path, flags, link, corroborated) in cases {
+            let (mut session, rx) = kernel_session(
+                TracerConfig::default(),
+                Kernel {
+                    tasks: [(self_pid, self_pid)].into(),
+                    fds: [((self_pid, 5), link.to_vec())].into(),
+                    ..Kernel::default()
+                },
+            );
+            let mut raw = [0u64; 6];
+            raw[1] = path.as_ptr() as u64;
+            raw[2] = flags;
+            session.tasks.get_mut(&self_pid).unwrap().pending = Some(InFlight::Closed(Pending {
+                entry: closed_set::lookup(257).expect("openat"),
+                args: Args {
+                    path: Some(PathSnapshot {
+                        bytes: path[..path.len() - 1].to_vec(),
+                        complete: true,
+                    }),
+                    flags: Some(flags),
+                    ..Args::default()
+                },
+                exec_confirmed: false,
+                path_unreadable: false,
+                path2_unreadable: false,
+                sockaddr_unreadable: false,
+                flags_unavailable: false,
+                raw,
+                entry_argv: None,
+            }));
+            session.inflight += 1;
+            session.handle_exit(self_pid, 5);
+            let events = drained(&rx, &mut session);
+            let delivered = events
+                .iter()
+                .find_map(|event| match event {
+                    TracerEvent::Syscall { args, .. } => args.path.clone(),
+                    _ => None,
+                })
+                .expect("the call is delivered either way");
+            let name = String::from_utf8_lossy(path);
+            assert_eq!(delivered.complete, corroborated, "{name}");
+            assert_eq!(
+                gaps_of(&events),
+                if corroborated {
+                    Vec::new()
+                } else {
+                    vec![(GapReason::PathClaimUnverified, OpSet::EMPTY, Some(1))]
+                },
+                "{name}"
+            );
+            assert_eq!(
+                session.summary.path_claims_unverified,
+                u64::from(!corroborated),
+                "{name}"
+            );
+            assert_eq!(session.summary.loss.total(), 0, "{name}: never loss");
+        }
+    }
+
+    #[test]
+    fn the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy() {
+        let rules = crate::commands::Rules {
+            deny: vec![
+                "git push --force".into(),
+                "git push".into(),
+                "deploy.sh --prod".into(),
+            ],
+            forbid: vec!["dangerous-tool **".into(), "bash **".into()],
+        };
+        rules.validate().unwrap();
+        let argv = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.as_bytes().to_vec())
+                .collect::<Vec<_>>()
+        };
+        let recheck = |entry: &[&str], kernel: &[&str], claimed: &str, image: &str| {
+            exec_recheck(
+                &rules,
+                &argv(entry),
+                Some(argv(kernel).as_slice()),
+                Some(claimed.as_bytes()),
+                Some(image.as_bytes()),
+            )
+            .map(|hit| (hit.pattern, hit.forbidden))
+        };
+        // An argv raced between the entry read and the kernel's copy: the
+        // kernel's copy is judged.
+        assert_eq!(
+            recheck(
+                &["git", "status"],
+                &["git", "push", "--force"],
+                "/usr/bin/git",
+                "/usr/bin/git"
+            ),
+            Some(("git push --force".to_owned(), false))
+        );
+        // Unchanged, with an empty argument kept in its place: `git push ""`
+        // is not `git push`.
+        assert_eq!(
+            recheck(
+                &["git", "push", ""],
+                &["git", "push", ""],
+                "/usr/bin/git",
+                "/usr/bin/git"
+            ),
+            None
+        );
+        // A `#!` script: the interpreter's argv is never judged...
+        assert_eq!(
+            recheck(
+                &["./build.sh", "x"],
+                &["/bin/bash", "./build.sh", "x"],
+                "./build.sh",
+                "/usr/bin/bash"
+            ),
+            None
+        );
+        // ...while the script and its arguments still are, past an
+        // interpreter argument too.
+        assert_eq!(
+            recheck(
+                &["./deploy.sh", "--prod"],
+                &["/bin/sh", "-e", "./deploy.sh", "--prod"],
+                "./deploy.sh",
+                "/usr/bin/dash"
+            ),
+            Some(("deploy.sh --prod".to_owned(), false))
+        );
+        // An execve with no argv: the kernel's inserted empty argument is
+        // that argv, and the image names the program.
+        assert_eq!(
+            recheck(&[], &[""], "/usr/bin/other-tool", "/usr/bin/other-tool"),
+            None
+        );
+        assert_eq!(
+            recheck(&[], &[""], "/usr/bin/other-tool", "/usr/bin/dangerous-tool"),
+            Some(("dangerous-tool **".to_owned(), true))
+        );
+        // A raced exec path: the image the kernel loaded names what argv[0]
+        // and the snapshot hide, unlinked or not.
+        assert_eq!(
+            recheck(
+                &["benign"],
+                &["benign"],
+                "/usr/bin/benign",
+                "/usr/bin/dangerous-tool (deleted)"
+            ),
+            Some(("dangerous-tool **".to_owned(), true))
+        );
+        // An unreadable kernel copy refuses, as an unreadable argv does at
+        // the entry stop.
+        assert_eq!(
+            exec_recheck(&rules, &argv(&["ls"]), None, Some(b"/bin/ls"), None)
+                .map(|hit| (hit.pattern, hit.forbidden)),
+            Some(("<unreadable-or-oversized-argv>".to_owned(), false))
+        );
+    }
+
+    /// Audit-6 review: the process an exec-time hit kills leaves flight at
+    /// its exec event, which carries the verdict, so the death that follows
+    /// has no entry to abandon — no invented `entry_abandoned` loss.
+    #[test]
+    fn an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap() {
+        // No real task has this pid, so the SIGKILL touches nothing.
+        const EXECER: pid_t = RECYCLED;
+        let (mut session, rx) = kernel_session(
+            TracerConfig {
+                commands: crate::commands::Rules {
+                    deny: vec!["git push --force".into()],
+                    forbid: Vec::new(),
+                },
+                ..TracerConfig::default()
+            },
+            Kernel {
+                tasks: [(EXECER, EXECER)].into(),
+                cmdline: [(EXECER, b"git\0push\0--force\0".to_vec())].into(),
+                exe: [(EXECER, b"/usr/bin/git".to_vec())].into(),
+                ..Kernel::default()
+            },
+        );
+        session.tasks.get_mut(&EXECER).unwrap().pending = Some(InFlight::Closed(Pending {
+            entry: closed_set::lookup(59).expect("execve"),
+            args: Args {
+                path: Some(PathSnapshot {
+                    bytes: b"/usr/bin/git".to_vec(),
+                    complete: true,
+                }),
+                ..Args::default()
+            },
+            exec_confirmed: false,
+            path_unreadable: false,
+            path2_unreadable: false,
+            sockaddr_unreadable: false,
+            flags_unavailable: false,
+            raw: [0; 6],
+            entry_argv: Some(vec![b"git".to_vec(), b"status".to_vec()]),
+        }));
+        session.inflight += 1;
+        session.exec_transition(EXECER, EXECER);
+        assert!(session.tasks[&EXECER].pending.is_none());
+        assert_eq!(session.inflight, 0);
+        session.handle_death(EXECER, libc::SIGKILL);
+        let events = drained(&rx, &mut session);
+        assert!(gaps_of(&events).is_empty(), "{events:?}");
+        assert_eq!(session.summary.loss.abandoned_entries, 0);
+        let command = events
+            .iter()
+            .find_map(|event| match event {
+                TracerEvent::Exec { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .expect("the exec event");
+        assert_eq!(
+            command.map(|hit| (hit.pattern, hit.forbidden)),
+            Some(("git push --force".to_owned(), false))
+        );
+    }
+    // Audit-6 review end.
 }

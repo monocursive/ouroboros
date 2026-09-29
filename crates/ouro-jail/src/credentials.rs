@@ -389,7 +389,9 @@ fn stage_one(
         let mut reader = source
             .reader()
             .map_err(|e| refusal(id, Remediation::Retry, e))?;
-        let mut value = Vec::new();
+        // Sized for the bound up front: `read_to_end` growing the buffer
+        // would free each outgrown copy of the secret unzeroed.
+        let mut value = zeroize::Zeroizing::new(Vec::with_capacity(8193));
         (&mut reader)
             .take(8193)
             .read_to_end(&mut value)
@@ -407,7 +409,7 @@ fn stage_one(
             .vault
             .clone()
             .ok_or_else(|| refusal(id, Remediation::Configuration, "vault policy absent"))?;
-        let secret = crate::vault::Secret::new(id.to_owned(), policy, value)
+        let secret = crate::vault::Secret::new(id.to_owned(), policy, std::mem::take(&mut *value))
             .map_err(|e| refusal(id, Remediation::Configuration, e))?;
         return Ok(StagedCredential {
             vault: Some(Arc::new(secret)),

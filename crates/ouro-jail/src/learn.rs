@@ -163,7 +163,12 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
             // operation. It is still a refused mutation for the learning report.
             || (op.starts_with("fs.") && event["outcome"]["errno"] == "EROFS")
         {
-            proposal.denied_writes.push(fields["path"].to_string());
+            // Plain paths report as themselves; digest snapshots and absent
+            // fields keep their recorded JSON shape, never a quoted string.
+            proposal.denied_writes.push(match fields["path"].as_str() {
+                Some(path) => path.to_owned(),
+                None => fields["path"].to_string(),
+            });
         } else if op == "proc.exec" {
             proposal.execs.push(fields.to_string());
         }

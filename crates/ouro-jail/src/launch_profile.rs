@@ -342,6 +342,16 @@ pub fn parse(
 ) -> Result<LaunchProfile, JailError> {
     let mut file: LaunchFile = toml::from_str(text)
         .map_err(|error| invalid("launch", format!("launch profile: {}", error.message())))?;
+    // Launch profiles are a widening layer (the launch `network_layer`
+    // forwards grants only), so a declared narrowing key must refuse here
+    // rather than parse into silence: the operator would believe a
+    // `deny_read` that never applied.
+    if file.filesystem.protected_coverage.is_some() || !file.filesystem.deny_read.is_empty() {
+        return Err(invalid(
+            "launch.filesystem",
+            "launch profiles contribute grants only; narrowing belongs to the policy file",
+        ));
+    }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Fragment {
@@ -1063,6 +1073,29 @@ mod tests {
             Ok(profile) => panic!("expected a refusal, got {profile:?}"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn filesystem_narrowing_keys_refuse_rather_than_parse_into_silence() {
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[filesystem]
+read_only = ["/usr"]
+deny_read = ["/etc/shadow"]
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.filesystem"));
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[filesystem]
+protected_coverage = "/usr"
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.filesystem"));
     }
 
     #[test]

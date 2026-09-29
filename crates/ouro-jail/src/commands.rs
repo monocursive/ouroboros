@@ -29,7 +29,10 @@ impl Rules {
                 return Err("command pattern exceeds 4096 bytes".into());
             }
             let parts = tokens(pattern)?;
-            if parts.is_empty() || parts.iter().take(parts.len() - 1).any(|p| p == b"**") {
+            if parts.is_empty()
+                || parts.first().is_some_and(|p| p == b"**")
+                || parts.iter().take(parts.len() - 1).any(|p| p == b"**")
+            {
                 return Err(
                     "command rules need argv[0]; ** is only allowed as the final token".into(),
                 );
@@ -141,9 +144,24 @@ fn glob(pattern: &[u8], value: &[u8]) -> bool {
     p == pattern.len()
 }
 fn matches(parts: &[Vec<u8>], argv: &[Vec<u8>], path: Option<&[u8]>) -> bool {
-    if parts.is_empty() || argv.is_empty() {
+    if parts.is_empty() {
         return false;
     }
+    // An `execve` with argc 0 carries no argv[0] to match or to spoof:
+    // element 0 then matches the exec path alone, the identity the
+    // first-position fallback already trusts.
+    let synthesized;
+    let argv: &[Vec<u8>] = if !argv.is_empty() {
+        argv
+    } else {
+        match path {
+            Some(path) => {
+                synthesized = vec![path.to_vec()];
+                &synthesized
+            }
+            None => return false,
+        }
+    };
     let rest = parts.last().is_some_and(|p| p == b"**");
     let count = parts.len() - usize::from(rest);
     if argv.len() < count || (!rest && argv.len() != count) {
@@ -201,5 +219,37 @@ mod tests {
                 b"**".to_vec()
             ]
         );
+    }
+
+    #[test]
+    fn a_rule_with_no_argv0_refuses_instead_of_matching_everything() {
+        assert!(
+            Rules {
+                deny: vec!["**".into()],
+                forbid: Vec::new(),
+            }
+            .validate()
+            .is_err(),
+            "a lone ** has no argv[0] and must not validate"
+        );
+    }
+
+    #[test]
+    fn an_exec_with_no_argv_matches_the_exec_path_alone() {
+        let rules = Rules {
+            deny: Vec::new(),
+            forbid: vec!["dangerous-tool **".into()],
+        };
+        rules.validate().unwrap();
+        let hit = rules
+            .check(Some(&[]), Some(b"/usr/bin/dangerous-tool"))
+            .expect("argc 0 still matches through the exec path");
+        assert!(hit.forbidden);
+        assert!(
+            rules
+                .check(Some(&[]), Some(b"/usr/bin/other-tool"))
+                .is_none()
+        );
+        assert!(rules.check(Some(&[]), None).is_none());
     }
 }

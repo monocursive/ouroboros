@@ -17,17 +17,30 @@ pub fn detect(stream: &UnixStream, deadline: Instant) -> Result<Option<bool>, Re
         .map_err(|_| Reason::InternalError)?;
     let mut byte = 0u8;
     // MSG_PEEK selects the protocol without consuming HTTP's request byte.
-    let n = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            (&raw mut byte).cast(),
-            1,
-            libc::MSG_PEEK,
-        )
+    let n = loop {
+        let n = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                (&raw mut byte).cast(),
+                1,
+                libc::MSG_PEEK,
+            )
+        };
+        if n >= 0 {
+            break n;
+        }
+        match std::io::Error::last_os_error().kind() {
+            // A signal may interrupt the one-byte peek; retry it rather
+            // than mislabeling a live request.
+            std::io::ErrorKind::Interrupted => continue,
+            // A reset or broken peer sent nothing: the same silence as a
+            // closed one, not a header timeout.
+            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
+                return Ok(None);
+            }
+            _ => return Err(Reason::HeaderTimeout),
+        }
     };
-    if n < 0 {
-        return Err(Reason::HeaderTimeout);
-    }
     Ok((n != 0).then_some(byte == 5))
 }
 

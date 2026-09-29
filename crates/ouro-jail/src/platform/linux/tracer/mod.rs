@@ -155,9 +155,15 @@ fn event_bytes(event: &TracerEvent) -> usize {
                     .map_or(0, |hit| hit.pattern.len() + hit.digest.len())
         }
         TracerEvent::Exec {
-            path, kernel_image, ..
+            path,
+            kernel_image,
+            command,
+            ..
         } => {
             path.as_ref().map_or(0, |p| p.bytes.len())
+                + command
+                    .as_ref()
+                    .map_or(0, |hit| hit.pattern.len() + hit.digest.len())
                 + kernel_image.as_ref().map_or(0, |k| {
                     k.path.len()
                         + k.candidates
@@ -432,6 +438,21 @@ pub enum GapReason {
     /// rewritten for the kernel's copy (audit 3 A1), so the confirmation
     /// the snapshot would have granted is refused and named here.
     ExecImageMismatch,
+    /// A successful open-class call's pathname claim could not be
+    /// corroborated against the kernel's own resolution of the returned
+    /// descriptor (`/proc/<tid>/fd/<ret>`): the link was unreadable, or its
+    /// components disagreed with the snapshot's — which a symlink, a pipe
+    /// behind `/dev/stderr` or a concurrent rename can also cause.
+    /// Security 2026-09-29 (audit 6 N1): a byte-stable snapshot still
+    /// cannot be certified as the path the kernel used, because a sibling
+    /// thread can rewrite it for the kernel's copy and restore it before the
+    /// exit re-read (the same A-B-A rewrite `MemoryFlagsUnverified` names
+    /// for flags). Unlike that gap, no result is missing here: the call is
+    /// counted and its event delivered with the claim downgraded to an
+    /// incomplete path, so the gap is bookkeeping (an empty operation set)
+    /// and never stops a strict run — ordinary `O_TMPFILE` and
+    /// `/dev/stderr` opens reach it.
+    PathClaimUnverified,
 }
 
 impl GapReason {
@@ -462,6 +483,7 @@ impl GapReason {
             GapReason::ArgumentSnapshotUnstable => "argument_snapshot_unstable",
             GapReason::MemoryFlagsUnverified => "memory_flags_unverified",
             GapReason::ExecImageMismatch => "exec_image_mismatch",
+            GapReason::PathClaimUnverified => "path_claim_unverified",
         }
     }
 
@@ -576,6 +598,19 @@ pub enum TracerEvent {
         /// accounted, never silently replaced by a cwd. `None` for a plain
         /// `execve` and for a transition whose entry was not seen.
         dirfd: Option<i32>,
+        /// Security 2026-09-29 (audit 6 N2): a command-rule hit found at this
+        /// stop by re-checking the rules against the kernel's own copy of
+        /// the new argv (`/proc/<tid>/cmdline`) and image (`/proc/<tid>/exe`).
+        /// The entry-stop check reads the tracee's memory, which a sibling
+        /// thread can rewrite between that read and the kernel's copy (the
+        /// same A-B-A race the path snapshots carry). A hit here means the
+        /// process was killed at this stop, before its image ran an
+        /// instruction; `deny`, `forbid` and an unreadable kernel argv are
+        /// all recorded, and only `forbid` stops the run. `None` when no rules
+        /// are configured, the entry check already denied the call (the exec
+        /// then fails and the denial surfaces on the syscall event), or the
+        /// re-check found nothing.
+        command: Option<Box<crate::commands::Hit>>,
         monotonic_ns: u64,
     },
     /// One completed closed-set call. `ret` is the signed raw return, so a
@@ -809,6 +844,15 @@ pub struct TracerSummary {
     /// feed [`LossCounters::total`] — otherwise a tracee could manufacture
     /// unlimited "loss" by passing pointers that cannot work.
     pub argument_invalid: u64,
+    /// Successful open-class calls whose pathname claim could not be
+    /// corroborated against the returned descriptor's `/proc/<tid>/fd` link
+    /// (audit 6 N1): each kept its count and its event, with the claim
+    /// downgraded to an incomplete path, and a bookkeeping
+    /// `path_claim_unverified` gap. Not loss — the result is there and says
+    /// its path is not certified — so it does not feed
+    /// [`LossCounters::total`]; the receipt surfaces it in
+    /// `lifetime.native.details`.
+    pub path_claims_unverified: u64,
     /// Tasks the kernel destroyed as part of another thread's `execve`,
     /// which it does not report. `tracees` equals `reaped_tasks` plus this.
     pub tasks_destroyed_by_exec: u64,

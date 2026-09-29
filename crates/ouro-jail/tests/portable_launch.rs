@@ -605,7 +605,9 @@ fn i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail() {
                 "{name}: sources are the node's own files beneath the operator home"
             );
         }
-        // The bundled data declares credentials, so §6.1 keeps it off `tool`.
+        // §6.1 keeps credentials and allowed hosts off `tool`; the bundled
+        // profiles ship their credential blocks commented out, so the
+        // refusal is exercised only where one (or a host list) is declared.
         if !profile.credentials.is_empty() || !profile.network_allow.is_empty() {
             assert!(launch_profile::check_jail_permits(ProfileName::Tool, &profile).is_err());
         }

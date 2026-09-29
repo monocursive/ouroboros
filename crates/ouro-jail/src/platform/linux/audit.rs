@@ -60,6 +60,16 @@ pub struct MediatedConnect {
 }
 // J3-agent end
 
+/// How a command-rule hit was enforced ([`AuditWriter::record_command_rule`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEnforcement {
+    /// At the exec entry stop: the exec was rewritten to fail with `EPERM`.
+    EntryDenied,
+    /// At the exec event, against the kernel's own argv and image: the
+    /// process was killed before its new image ran.
+    KilledAtExec,
+}
+
 /// Turns tracer events into audit events and counts what it emitted.
 pub struct AuditWriter {
     learning: bool,
@@ -209,6 +219,57 @@ impl AuditWriter {
         *self.counts.entry(class).or_insert(0) += 1;
     }
 
+    /// The `command_rule` note of one command-rule hit (jail-v2 §7.2):
+    /// pattern, argv digest, pid, and how the hit was enforced.
+    ///
+    /// Security 2026-09-29 (audit 6 N2, review fixes): a hit found at the
+    /// exec event, re-checked against the kernel's own argv, is recorded like
+    /// one found at the entry stop. The process was killed there, not failed
+    /// with `EPERM`, so the note says so instead of carrying an `errno`: a
+    /// `deny` or unreadable-argv hit at that stop kills the process without
+    /// stopping the run, and this note is its only account.
+    pub fn record_command_rule(
+        &mut self,
+        pid: libc::pid_t,
+        hit: &crate::commands::Hit,
+        enforcement: CommandEnforcement,
+    ) {
+        let mut event = Event::lifecycle_note(
+            &self.attempt_id,
+            0,
+            SystemTime::now(),
+            crate::platform::elapsed_since_start_ns(),
+            "command_rule",
+        );
+        event.fields.insert(
+            "kind".into(),
+            Value::from(if hit.forbidden {
+                "command_forbidden"
+            } else {
+                "command_denied"
+            }),
+        );
+        event
+            .fields
+            .insert("pattern".into(), Value::from(hit.pattern.clone()));
+        event
+            .fields
+            .insert("argv_digest".into(), Value::from(hit.digest.clone()));
+        event.fields.insert("pid".into(), Value::from(pid));
+        match enforcement {
+            CommandEnforcement::EntryDenied => {
+                event.fields.insert("errno".into(), Value::from("EPERM"));
+            }
+            CommandEnforcement::KilledAtExec => {
+                event
+                    .fields
+                    .insert("enforcement".into(), Value::from("killed_at_exec"));
+                event.fields.insert("signal".into(), Value::from("SIGKILL"));
+            }
+        }
+        self.emit(&event, CoverageClass::Exec);
+    }
+
     /// One completed closed-set call.
     ///
     /// `ret` is the signed raw return, so a failure is `-errno`.
@@ -232,30 +293,7 @@ impl AuditWriter {
             None
         };
         if let Some(hit) = &args.command {
-            let mut event = Event::lifecycle_note(
-                &self.attempt_id,
-                0,
-                SystemTime::now(),
-                crate::platform::elapsed_since_start_ns(),
-                "command_rule",
-            );
-            event.fields.insert(
-                "kind".into(),
-                Value::from(if hit.forbidden {
-                    "command_forbidden"
-                } else {
-                    "command_denied"
-                }),
-            );
-            event
-                .fields
-                .insert("pattern".into(), Value::from(hit.pattern.clone()));
-            event
-                .fields
-                .insert("argv_digest".into(), Value::from(hit.digest.clone()));
-            event.fields.insert("pid".into(), Value::from(pid));
-            event.fields.insert("errno".into(), Value::from("EPERM"));
-            self.emit(&event, CoverageClass::Exec);
+            self.record_command_rule(pid, hit, CommandEnforcement::EntryDenied);
         }
         let learning_read = self.learning
             && op == ClosedOp::Open
@@ -692,6 +730,17 @@ impl AuditWriter {
     #[must_use]
     pub fn has_gaps(&self) -> bool {
         !self.gaps.is_empty()
+    }
+
+    /// Whether any recorded gap accounts for counted loss. Every gap does
+    /// except `path_claim_unverified`, which downgrades a delivered result
+    /// and feeds no loss counter (audit 6 N1), so it never stands in for the
+    /// account of loss whose own gaps were dropped.
+    #[must_use]
+    pub fn has_loss_gaps(&self) -> bool {
+        self.gaps
+            .iter()
+            .any(|gap| gap.reason != GapReason::PathClaimUnverified.as_str())
     }
 
     /// The gaps recorded so far.

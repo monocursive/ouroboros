@@ -1197,11 +1197,11 @@ fn p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_diges
     assert_eq!(ouro_jail::canonical::argv_digest(&argv), argv_digest);
 }
 
-/// I02.4: `--launch NAME` reads only `<operator config>/launch/NAME.toml`.
-/// With no such file it refuses, even with the same name planted in the
-/// workspace, in a `profiles/launch/` directory beside it and in the default
-/// configuration under the operator home; there is no built-in fallback to
-/// the bundled profiles. The operator's own file is then what resolves.
+/// I02.4: `--launch NAME` reads `<operator config>/launch/NAME.toml`; with
+/// no such file the embedded bundled profile resolves, ignoring same-name
+/// decoys planted in the workspace, in a `profiles/launch/` directory
+/// beside it and in the default configuration under the operator home.
+/// The operator's own file always wins when it exists.
 #[test]
 fn i02_launch_reads_only_the_operators_configuration() {
     let files = Files::new();

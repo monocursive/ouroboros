@@ -238,18 +238,31 @@ fn os_bytes(path: &Path) -> Vec<u8> {
 /// that adds authority.
 pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError> {
     let config_dir = state::config_dir(&ctx.env_settings, ctx.home.as_deref())?;
+    let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
+    // Security 2026-09-29 (audit 6 F1): a `--profile none` child sees the
+    // whole host, so every trusted file that predates the end of the last
+    // uncontained run could have been written by that child, and none can be
+    // dated while such a run is live. The markers sit in both directories,
+    // which are chosen independently: a run sharing either sees them.
+    let uncontained_epoch = state::uncontained_epoch(&[&data_dir, &config_dir])?;
     // J3-launch begin: §6.2 step 2 — the operator launch profile, read once
     // through a no-follow walk; its content is what the snapshot records.
     let launch = match &args.launch {
-        Some(name) => Some(launch_profile::load(
-            &config_dir,
-            name,
-            ctx.home.as_deref(),
-        )?),
+        Some(name) => {
+            refuse_stale_trusted_file(
+                &launch_profile::launch_directory(&config_dir).join(format!("{name}.toml")),
+                &uncontained_epoch,
+                "--launch",
+            )?;
+            Some(launch_profile::load(
+                &config_dir,
+                name,
+                ctx.home.as_deref(),
+            )?)
+        }
         None => None,
     };
     // J3-launch end
-    let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
     let workspace = canonical_root(&ctx.cwd, args.workspace.as_deref(), "--workspace")?;
     if !workspace.is_dir() {
         return Err(usage(
@@ -260,6 +273,7 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
 
     // 1. Operator config, then the selected profile.
     let config_path = config_dir.join("config.toml");
+    refuse_stale_trusted_file(&config_path, &uncontained_epoch, "config")?;
     let operator = match read_operator_file(&config_path, "config")? {
         Some(text) => config::parse_operator_config(&text)?,
         None => config::OperatorConfig::default(),
@@ -318,6 +332,7 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             } else {
                 absolutize(&config_dir, Path::new(&selection))
             };
+            refuse_stale_trusted_file(&path, &uncontained_epoch, "--profile")?;
             let text = read_operator_file(&path, "--profile")?
                 .ok_or_else(|| usage("--profile", format!("{} does not exist", path.display())))?;
             let file = config::parse_policy_file(&text)?;
@@ -774,6 +789,86 @@ pub(crate) fn read_operator_file(path: &Path, key: &str) -> Result<Option<String
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| refused("is not UTF-8".to_owned()))
+}
+
+/// Security 2026-09-29 (audit 6 F1): refuses a trusted file an uncontained
+/// (`--profile none`) run's child could have written.
+///
+/// An uncontained child shares the operator's uid and the whole filesystem,
+/// so it can create `config.toml`, a launch profile or a `--profile FILE`
+/// policy with every identity `read_operator_file` checks (operator uid,
+/// 0600, one link) — the audit-5 C2 creation variant. The guard that refused
+/// `none` while trusted files exist cannot see files that do not exist yet,
+/// so the markers close the remaining direction ([`state::UncontainedRun`]):
+/// while any uncontained run is live (or ended without settling) no trusted
+/// file can be dated and each refuses; once settled, every trusted file must
+/// carry a ctime newer than the settled marker's, which the supervisor
+/// writes after that run's tree is gone. An operator who just ran `none`
+/// re-saves (or removes) their files; a child-planted file cannot re-save
+/// itself from inside a contained run, where the config directory is
+/// unreachable.
+///
+/// What this cannot see (jail-v2 §3.2): a child that left something behind
+/// that re-saves the file later — a line in a shell rc file, a crontab
+/// entry, a `systemd --user` timer — dates it after the marker. The child
+/// was the operator for the run's duration; the markers only bound what it
+/// wrote directly.
+///
+/// Absent files are not this guard's business (their absence is reported by
+/// the readers); an unreadable ctime on an existing file fails closed.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeConfigPath`] when the file exists while an
+/// uncontained run is live, or its ctime does not postdate the settled
+/// marker.
+fn refuse_stale_trusted_file(
+    path: &Path,
+    epoch: &state::UncontainedEpoch,
+    key: &str,
+) -> Result<(), JailError> {
+    if epoch.live.is_empty() && epoch.settled.is_none() {
+        return Ok(());
+    }
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(usage(key, format!("{}: {error}", path.display()))),
+    };
+    let refused = |message: String| {
+        JailError::new(
+            ErrorCode::UnsafeConfigPath,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            message,
+        )
+        .with_key_path(key)
+    };
+    if let Some(live) = epoch.live.first() {
+        let settled = live
+            .parent()
+            .map_or_else(|| PathBuf::from("uncontained.epoch"), state::uncontained_settled_path);
+        return Err(refused(format!(
+            "{} cannot be trusted while an uncontained (`--profile none`) run is live or \
+             ended without settling ({}); its child could write it. If no such run is \
+             active, check the trusted configuration, then `touch {}` and remove {}; \
+             each file must then be re-saved to be trusted again",
+            path.display(),
+            live.display(),
+            settled.display(),
+            live.display()
+        )));
+    }
+    let changed = state::ctime_of(&metadata)
+        .ok_or_else(|| usage(key, format!("{}: ctime is out of range", path.display())))?;
+    if epoch.settled.is_some_and(|settled| changed <= settled) {
+        return Err(refused(format!(
+            "{} predates the last uncontained (`--profile none`) run on this host; \
+             an uncontained child could have written it. Re-save it (touch it) or \
+             remove it",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 // J5-B1 begin: P02.9
@@ -1459,6 +1554,34 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     unsafe {
         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
     }
+    // Security 2026-09-29 (audit 6 F1): this run is uncontained, so from the
+    // moment of release nothing on this host is distinguishable from
+    // something its child wrote. Its live markers go down before release —
+    // a run that cannot write them does not start — so concurrent runs
+    // refuse every trusted file while it lives; the guard settles them when
+    // it drops, after the run's tree is gone (it is declared before
+    // `running`, so it drops after it), and every later run refuses trusted
+    // files that do not postdate that (`refuse_stale_trusted_file`).
+    let _uncontained_run = if plan.profile == ProfileName::None {
+        match state::UncontainedRun::arm(&[&plan.data_dir, &plan.config_dir], attempt_id.as_str())
+        {
+            Ok(run) => Some(run),
+            Err(error) => {
+                let teardown = prepared.abort();
+                record_teardown(&mut record, &teardown);
+                return Ok(refuse(
+                    &attempt_dir,
+                    &mut record,
+                    &error,
+                    args,
+                    control.as_mut(),
+                    &mut journal,
+                ));
+            }
+        }
+    } else {
+        None
+    };
     // Step 7: execute the exact target argv through the blocked launcher.
     // J3-launch begin: a failed release reports its teardown, so the refused
     // receipt carries the verified tree (§13.2 row 4) and vendor state can be
@@ -4500,6 +4623,68 @@ mod tests {
         );
         assert!(journal.take_new_loss().is_some());
         assert!(journal.take_new_loss().is_none());
+    }
+
+    #[test]
+    fn a_trusted_file_that_predates_the_uncontained_epoch_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let trusted = dir.path().join("config.toml");
+        std::fs::write(&trusted, "[jail]\n").unwrap();
+        // No markers yet: the file is trusted as before.
+        let none = state::uncontained_epoch(&[dir.path()]).unwrap();
+        assert!(refuse_stale_trusted_file(&trusted, &none, "config").is_ok());
+        // A settled marker written after the file: the file could have come
+        // from that run's child, so it refuses with the remediation.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(state::uncontained_settled_path(dir.path()), b"settled 0\n").unwrap();
+        let epoch = state::uncontained_epoch(&[dir.path()]).unwrap();
+        assert!(epoch.settled.is_some() && epoch.live.is_empty());
+        let error = refuse_stale_trusted_file(&trusted, &epoch, "config").unwrap_err();
+        assert_eq!(error.code, crate::records::ErrorCode::UnsafeConfigPath);
+        assert!(error.message.contains("predates the last uncontained"));
+        // A file the operator re-saves after the epoch is trusted again.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&trusted, "[jail]\n").unwrap();
+        assert!(refuse_stale_trusted_file(&trusted, &epoch, "config").is_ok());
+        // An absent file is none of this guard's business.
+        assert!(
+            refuse_stale_trusted_file(&dir.path().join("absent.toml"), &epoch, "config").is_ok()
+        );
+    }
+
+    /// Review of audit 6 F1: while an uncontained run is live — or ended
+    /// without settling — no trusted file can be dated, however new, so a
+    /// concurrent contained run refuses every one that exists; the markers
+    /// are read from both directories, which are chosen independently.
+    #[test]
+    fn a_live_uncontained_run_in_either_marker_directory_refuses_every_trusted_file() {
+        let data = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let trusted = config.path().join("config.toml");
+        std::fs::write(&trusted, "[jail]\n").unwrap();
+        for (live_in, other) in [(config.path(), data.path()), (data.path(), config.path())] {
+            let live = live_in.join("uncontained.att_other.live");
+            std::fs::write(&live, b"live\n").unwrap();
+            // Re-saved after the marker, and still refused: a live run can
+            // write at any moment.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::fs::write(&trusted, "[jail]\n").unwrap();
+            let epoch = state::uncontained_epoch(&[other, live_in]).unwrap();
+            assert_eq!(epoch.live, vec![live.clone()]);
+            let error = refuse_stale_trusted_file(&trusted, &epoch, "config").unwrap_err();
+            assert_eq!(error.code, crate::records::ErrorCode::UnsafeConfigPath);
+            assert!(
+                error.message.contains("is live or ended without settling"),
+                "{error:?}"
+            );
+            // Absent trusted files still resolve: a contained run without
+            // operator configuration is unaffected.
+            assert!(
+                refuse_stale_trusted_file(&config.path().join("absent.toml"), &epoch, "config")
+                    .is_ok()
+            );
+            std::fs::remove_file(&live).unwrap();
+        }
     }
 
     #[test]

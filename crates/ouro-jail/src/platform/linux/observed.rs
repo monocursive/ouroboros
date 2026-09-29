@@ -13,7 +13,7 @@ use std::time::Duration;
 use libc::pid_t;
 use serde_json::{Map, Value};
 
-use super::audit::AuditWriter;
+use super::audit::{AuditWriter, CommandEnforcement};
 use super::tracer::{
     GapReason, KernelImage, OpSet, PathSnapshot, Tracer, TracerConfig, TracerEvent, TracerSummary,
 };
@@ -293,9 +293,24 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             path,
             kernel_image,
             dirfd,
+            command,
             ..
         } => {
             audit.record_exec(*pid, *start_ticks, *syscall, path.as_ref(), *dirfd);
+            // Security 2026-09-29 (audit 6 N2): a hit re-checked against the
+            // kernel's own copy of the new argv killed the process at this
+            // stop. Every such hit is recorded — a `deny` or an unreadable
+            // argv as much as a `forbid`, since the note is the only account
+            // of that kill — and a `forbid` outranks everything else this
+            // event could establish, for any process in the tree: command
+            // rules govern the whole run, not only the launcher's image (the
+            // syscall arm below makes the same call).
+            if let Some(hit) = command {
+                audit.record_command_rule(*pid, hit, CommandEnforcement::KilledAtExec);
+                if hit.forbidden {
+                    return Fact::CommandForbidden(hit.pattern.clone());
+                }
+            }
             // J4-O end
             if *pid != target.launcher {
                 return Fact::Nothing;
@@ -457,7 +472,8 @@ pub fn stop(
             u64::try_from(summary.unreaped_children.len()).ok(),
         );
     }
-    if summary.loss.lifecycle_dropped > 0 || (summary.loss.total() > 0 && !audit.has_gaps()) {
+    if summary.loss.lifecycle_dropped > 0 || (summary.loss.total() > 0 && !audit.has_loss_gaps())
+    {
         audit.record_gap(
             GapReason::QueueFull,
             OpSet::ALL,
@@ -506,6 +522,7 @@ mod tests {
             path,
             kernel_image,
             dirfd: None,
+            command: None,
             monotonic_ns: 1,
         }
     }
@@ -1067,5 +1084,99 @@ mod tests {
         );
         let coverage = summary.to_coverage();
         assert_eq!(coverage.fs_write.observed_count, None);
+    }
+
+    /// Audit-6 review: a command-rule hit found at the exec event killed its
+    /// process there, so every one is recorded — the note is that kill's only
+    /// account — and only a `forbid` stops the run.
+    #[test]
+    fn an_exec_time_command_hit_is_recorded_and_only_forbid_stops_the_run() {
+        let images = images();
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
+        let mut audit = AuditWriter::new("att_x", Some(trace), b"/work", b"");
+        let killed = |pid: pid_t, pattern: &str, forbidden: bool| TracerEvent::Exec {
+            pid,
+            start_ticks: None,
+            syscall: Some("execve"),
+            path: snapshot(b"/usr/bin/tool", true),
+            kernel_image: None,
+            dirfd: None,
+            command: Some(Box::new(crate::commands::Hit {
+                pattern: pattern.to_owned(),
+                digest: "sha256:x".to_owned(),
+                forbidden,
+            })),
+            monotonic_ns: 1,
+        };
+        assert_eq!(
+            record(&mut audit, &target, &killed(7, "git push --force", false)),
+            Fact::Nothing
+        );
+        assert_eq!(
+            record(&mut audit, &target, &killed(8, "dangerous-tool **", true)),
+            Fact::CommandForbidden("dangerous-tool **".to_owned())
+        );
+        let notes: Vec<Value> = std::fs::read_to_string(file.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|event| event["fields"]["transition"] == "command_rule")
+            .collect();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        for (note, kind, pid) in [
+            (&notes[0], "command_denied", 7),
+            (&notes[1], "command_forbidden", 8),
+        ] {
+            let fields = &note["fields"];
+            assert_eq!(fields["kind"], kind);
+            assert_eq!(fields["pid"], pid);
+            assert_eq!(fields["enforcement"], "killed_at_exec");
+            assert_eq!(fields["signal"], "SIGKILL");
+            assert!(fields.get("errno").is_none(), "{fields}");
+        }
+    }
+
+    /// Audit-6 review: a `path_claim_unverified` gap is bookkeeping for a
+    /// delivered result: it degrades nothing and never stands in for the
+    /// account of counted loss whose own gaps were dropped.
+    #[test]
+    fn a_path_claim_gap_degrades_nothing_and_accounts_for_no_loss() {
+        let images = images();
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &gap(GapReason::PathClaimUnverified, OpSet::EMPTY)
+            ),
+            Fact::Nothing
+        );
+        assert!(audit.has_gaps() && !audit.has_loss_gaps());
+        let summary = audit.summary(&TracerSummary::default(), true);
+        for class in CoverageClass::ALL {
+            if let Some(entry) = summary.classes.get(&class) {
+                assert_ne!(
+                    entry.status,
+                    crate::records::SourceStatus::Degraded,
+                    "{class:?}"
+                );
+                assert!(entry.gaps.is_empty(), "{class:?}");
+            }
+        }
+        record(
+            &mut audit,
+            &target,
+            &gap(GapReason::RestartFailed, OpSet::EMPTY),
+        );
+        assert!(audit.has_loss_gaps(), "a loss-counted bookkeeping gap still accounts");
     }
 }

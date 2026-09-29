@@ -727,14 +727,22 @@ impl Boundary {
             .unwrap_or(plan.attempt_dir.as_path());
         validate_stdio(state_root)?;
 
-        // The scratch directory the child sees as /tmp.
+        // The scratch directory the child sees as /tmp. A managed one is
+        // supervisor state and gets the private identity; an operator's
+        // `--scratch` is the operator's own directory (resolved and checked
+        // against the state root at resolving), whose mode is theirs.
         let scratch = match &snapshot.roots.scratch {
-            ScratchRoot::Managed => plan.attempt_dir.join("scratch"),
+            ScratchRoot::Managed => {
+                let scratch = plan.attempt_dir.join("scratch");
+                create_private_dir(&scratch)?;
+                scratch
+            }
             ScratchRoot::Host { path } => {
-                PathBuf::from(OsString::from_vec(path.as_bytes().to_vec()))
+                let scratch = PathBuf::from(OsString::from_vec(path.as_bytes().to_vec()));
+                ensure_dir(&scratch)?;
+                scratch
             }
         };
-        create_private_dir(&scratch)?;
 
         let cgroup_required = [
             &snapshot.limits.pids,
@@ -2281,7 +2289,51 @@ fn write_until(fd: RawFd, bytes: &[u8], deadline: clock::Deadline) -> std::io::R
     Ok(())
 }
 
+/// A supervisor-state directory under the attempt: created private, or, when
+/// it already exists, accepted only with the private identity.
 fn create_private_dir(path: &Path) -> Result<(), JailError> {
+    if path.is_dir() {
+        // Security 2026-09-29 (audit 6, C11 half): a pre-existing directory
+        // is accepted only with the identity `state::create_private_dir`
+        // demands — operator-owned, not a symlink, no group/world access.
+        // The isolation guards keep uncontained peers away from these paths;
+        // this makes the acceptance independent of them. An operator's
+        // `--scratch` is not supervisor state and goes through `ensure_dir`.
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::symlink_metadata(path).map_err(|err| {
+            error(
+                ErrorCode::UnsafeStatePath,
+                ErrorStage::Preparing,
+                Remediation::InspectState,
+                format!("{} could not be inspected: {err}", path.display()),
+            )
+        })?;
+        let refuse = |what: &str| {
+            error(
+                ErrorCode::UnsafeStatePath,
+                ErrorStage::Preparing,
+                Remediation::InspectState,
+                format!("{what}: {}", path.display()),
+            )
+        };
+        if !metadata.is_dir() {
+            return Err(refuse("not a directory"));
+        }
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(refuse("not owned by this operator"));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            return Err(refuse("accessible by group or others"));
+        }
+        return Ok(());
+    }
+    ensure_dir(path)
+}
+
+/// Accepts an existing directory as it is, or creates it (and its missing
+/// parents) private. Only for directories that are not supervisor state:
+/// [`create_private_dir`] checks the identity of those.
+fn ensure_dir(path: &Path) -> Result<(), JailError> {
     use std::os::unix::fs::DirBuilderExt as _;
     if path.is_dir() {
         return Ok(());
@@ -2988,9 +3040,14 @@ fn prepare_mounts(
                     &pins[source],
                     names,
                     jfs::ScanLimits {
+                        // The placeholders this pass just created add one
+                        // entry each inside the root; the re-scan must be
+                        // able to see them without tripping the bound a
+                        // first scan at the cap would trip.
                         max_entries: jfs::ScanLimits::DEFAULT
                             .max_entries
-                            .saturating_sub(aggregate.entries_seen),
+                            .saturating_sub(aggregate.entries_seen)
+                            .saturating_add(scan.absent_root_literals().len()),
                         ..jfs::ScanLimits::DEFAULT
                     },
                 )
@@ -3684,6 +3741,18 @@ impl RunningExecution for LinuxRunning {
                 .as_ref()
                 .map_or(Value::Null, |summary| {
                     Value::from(summary.filtered_readonly_opens)
+                }),
+        );
+        // Security 2026-09-29 (audit 6 N1): open events delivered with their
+        // pathname claim downgraded because the descriptor link did not
+        // corroborate it. Not loss, so no class counts it; the receipt does.
+        details.insert(
+            "path_claims_unverified".to_owned(),
+            self.boundary
+                .tracer_summary
+                .as_ref()
+                .map_or(Value::Null, |summary| {
+                    Value::from(summary.path_claims_unverified)
                 }),
         );
         // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are counted

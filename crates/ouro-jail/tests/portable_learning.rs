@@ -29,6 +29,10 @@ fn learning_filters_network_causes_and_never_grants_denied_writes() {
     );
     assert!(proposal.read_only.is_empty());
     assert_eq!(proposal.denied_writes.len(), 2);
+    // Plain paths report as themselves; digest snapshots keep their shape.
+    assert_eq!(proposal.denied_writes[0], "/home/operator/private");
+    assert!(proposal.denied_writes[1].contains("sha256:fixture"));
+    assert!(!proposal.denied_writes[0].starts_with('"'));
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../docs/specs/jail-v1/learned-policy.schema.json"
     ))
