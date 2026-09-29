@@ -123,6 +123,53 @@ at resolving when `<config>/config.toml` or any
 supervisor-held config snapshot (read once, identity-pinned, live file
 never re-read) is the recorded future alternative and is **not** v2.
 
+Security 2026-09-29 (sixth audit, F1, as corrected by its review): that
+refusal cannot see files that do not exist yet, and an uncontained child
+shares the operator's uid and the whole filesystem — the creation
+variant planted a `config.toml` from a `none` run on a fresh
+configuration directory and every later contained run loaded it as
+trusted widening. Markers close that direction for the files the child
+writes directly. They are written to the data directory **and** the
+configuration directory, because `OURO_DATA_DIR` and `OURO_CONFIG_DIR`
+are chosen independently and a run sharing either must see them:
+
+- Before its target is released, an uncontained run writes a live marker
+  `uncontained.<attempt id>.live` into both; a run that cannot write them
+  refuses before release (`state_write_failed`).
+- While any live marker exists — a `none` run in progress, or one that
+  ended without settling — every run refuses each trusted file that
+  exists (`config.toml`, a launch profile, a `--profile FILE` policy),
+  however new: no trusted file can be dated while the child can still
+  write (`unsafe_config_path`; the remediation names the marker and how
+  to clear it once no such run is active).
+- After the run's tree is gone the supervisor writes the settled marker
+  `uncontained.epoch` (durable replacement through an exclusive,
+  unpredictable temporary), first clearing what the child could have put
+  in its way — a directory at the marker's path, the operator's own
+  directory made unwritable — then removes its live marker. A settle that
+  still fails keeps the live marker, so the failure fails closed, and is
+  reported on stderr.
+- Every later run refuses a trusted file whose ctime does not postdate
+  the newest settled marker (`unsafe_config_path`, remediation "re-save
+  it or remove it"); a settled marker that is not a regular file refuses
+  the run (`unsafe_state_path`). Nothing of the run can order its writes
+  after its own settled marker, and a contained run cannot reach the
+  configuration directory or the state root, so it cannot re-save a
+  planted file into trust.
+
+Residual, documented — each is the same `none` opt-out that says the
+child is the operator for the run's duration: a supervisor killed
+outright during a `none` run leaves its live markers (fail closed) but a
+child that also deleted them and left the settle unwritable (a full
+disk) leaves no marker at all; a descendant that outlives the run's
+teardown can still write; the child can forge or delete markers while
+the run is live, so the concurrent-run refusal holds against accidents,
+not against a hostile child; and anything the child left behind that
+re-saves a trusted file later — a line in a shell rc file, a crontab
+entry, a `systemd --user` timer — dates that file after the marker. The
+markers bound what the child wrote directly, not what it arranged to
+have written.
+
 ### 3.3 C3 — the binaries the supervisor executes
 
 A new guard, `check_binary_isolation`, runs on every contained run
@@ -310,7 +357,8 @@ ouro-jail learn [--launch NAME] [--profile NAME] [--workspace PATH]
   it does not establish which inode a previous failed syscall needed.
 - **Network**: every proxy-source denial event with reason `host_not_allowed`
   contributes its normalized destination as an `allow` proposal. Denied
-  destinations of other reasons are reported, never proposed.
+  destinations of other reasons are never proposed; they stay in the run's
+  own trace journal.
 - **Execs**: copy the observed exec fields into the proposal's notes,
   including explicit unavailable digests. Do not infer interpreter,
   library, environment or filesystem grants from an executable name.
@@ -511,7 +559,9 @@ forbid = ["dangerous-tool **"]
   within each argument, and terminal `**` matches remaining arguments.
   Shell pipelines are different processes and cannot be matched as one
   argv. The root exec is checked as well as descendants. Truncated argv
-  refuses when rules are active. There is no shell expansion, and the rule set is capped (initial 64 rules, recorded).
+  refuses when rules are active, and an `execve` with an empty argv matches
+  element 0 against the exec path alone. There is no shell expansion, and
+  the rule set is capped (initial 64 rules, recorded).
 - `deny`: at the exec entry stop (the closed set already stops every
   `execve`/`execveat`), the supervisor matches the snapshot argv; a
   match rewrites the exec to return `EPERM`, records a
@@ -520,6 +570,17 @@ forbid = ["dangerous-tool **"]
 - `forbid`: the same match stops the tree with error code
   `command_forbidden` (new, remediation `configuration`), the receipt
   recording the pattern.
+- Exec-time re-check (sixth audit F5, as corrected by its review): the
+  entry-stop argv is tracee memory a sibling thread can rewrite before
+  the kernel copies it, so at the exec event the rules are matched again
+  against the kernel's own copy (`/proc/<tid>/cmdline`, empty arguments
+  kept in place) and image (`/proc/<tid>/exe`) — never the interpreter's
+  argv of a `#!` script or `binfmt_misc` handler, whose script and
+  arguments are judged as the entry check judged them. A hit there kills
+  the process before its image runs and records a `command_rule` note
+  (`enforcement: killed_at_exec`, `signal: SIGKILL`, no `errno`); a
+  `forbid` hit also stops the tree as above, a `deny` or unreadable-argv
+  hit does not.
 - **This is an accident filter, not a boundary.** The receipt records
   `command_rules: {deny: n, forbid: m}` and the spec says plainly what
   the operator must not conclude: a child can achieve the same effect
@@ -704,7 +765,7 @@ policy semantics are updated in place; these rows are additive.
 |---|---|
 | K01 | C1: two-stage plaintext Host swap and CONNECT/SNI mismatch each close the tunnel with `proxy.deny` (`origin_mismatch`); a matching first flight relays end-to-end; host-only entries admit :443 only and the refusal names the entry. |
 | K02 | C1: absent SNI, unparseable first bytes and first-flight timeout each yield `origin_unverified`/`origin_timeout` and no upstream connection. |
-| K03 | C2: `--profile none` with a `config.toml` or any launch profile present refuses `unsafe_config_path` naming the files; without them it runs. |
+| K03 | C2: `--profile none` with a `config.toml` or any launch profile present refuses `unsafe_config_path` naming the files; without them it runs. Sixth audit F1: while a `none` run's live marker exists (in the data or the configuration directory) every existing trusted file refuses; after it settles, a trusted file that predates the settled `uncontained.epoch` marker refuses until re-saved; a `none` run that cannot write its live markers refuses before release; a directory planted at the settled marker's path refuses reads and is cleared by the settle. |
 | K04 | C3: a child-writable root over the supervisor binary's or backend's directory refuses; the backend is exec'd by pinned descriptor and an identity swap between resolution and spawn refuses at preparing. |
 | K05 | C4: i386 and x32 `clone3` return `ENOSYS` under `none` and create no child; any foreign-arch `clone3` success classifies `untraced_descendant`. |
 | K06 | C5–C7: unreadable/unparseable resolv.conf ships an empty file and records it; `--workspace /dev/shm` and a cross-device alias beneath a guarded tree both refuse. |
@@ -731,6 +792,9 @@ policy semantics are updated in place; these rows are additive.
 | K27 | Install: a clean VM reaches sandboxed `true` and the opencode A01 run in under ten minutes; corrupted artifacts fail signature verification and install nothing; the installer never requires a TTY. |
 | K28 | Bundled profiles: `--launch` resolution precedence (operator file wins, noted), fragment conflicts refuse, every bundle has a green `doctor --launch` and a recorded A-row or an explicit unrecorded status. |
 | K29 | macOS native lifetime: setsid/double-fork/spawn-attribute descendants and concurrent forks cannot evade termination after wall expiry, supervisor death or custodian death; identity reuse, event loss and failed final drains never produce a false `tree_empty=true`. Missing required entitlement refuses before workload release. |
+| K30 | Sixth audit F4: a successful open-class call whose `/proc/<tid>/fd/<ret>` link does not corroborate the snapshot (absolute: every component; relative, bare names included: the tail; `O_TMPFILE`: the directory) delivers its event with an incomplete path, counts `path_claims_unverified` in `lifetime.native.details` and records a bookkeeping `path_claim_unverified` gap that degrades no class and never stops a strict run; agreement records none of these. |
+| K31 | Sixth audit F5: an exec whose entry argv passed the rules but whose kernel copy (argv or image) hits one kills the process, records a `killed_at_exec` `command_rule` note, and for a `forbid` surfaces `command_forbidden` through the exec event, with no `entry_abandoned` gap for the killed exec; an entry-time hit still denies before the image loads; a `#!` script, an empty argument and an `execve` with no argv are judged as at the entry stop. |
+| K32 | Sixth audit F6: bytes the client pipelines after the one request of a vault MITM connection are counted in `discarded_bytes`, bounded by the one-second drain. |
 
 ## 12. Implementation order and exit criteria
 
