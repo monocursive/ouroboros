@@ -2119,9 +2119,10 @@ impl Session {
             && let Some(snapshot) = pending.args.path.as_mut()
             && snapshot.complete
         {
-            let tmpfile = pending.args.flags.is_some_and(|flags| {
-                flags & (libc::O_TMPFILE as u64) == libc::O_TMPFILE as u64
-            });
+            let tmpfile = pending
+                .args
+                .flags
+                .is_some_and(|flags| flags & (libc::O_TMPFILE as u64) == libc::O_TMPFILE as u64);
             let corroborated = self
                 .procfs
                 .fd_link(tid, rval)
@@ -4470,7 +4471,11 @@ mod tests {
             !path_corroborated(b"a", b"/w/b", false),
             "a bare name is checked too"
         );
-        assert!(!path_corroborated(b"sub/out.txt", b"/w/other/out.txt", false));
+        assert!(!path_corroborated(
+            b"sub/out.txt",
+            b"/w/other/out.txt",
+            false
+        ));
         // Past a `..`, only what follows the last one.
         assert!(path_corroborated(b"../out/x", b"/w/out/x", false));
         assert!(!path_corroborated(b"../out/x", b"/w/in/x", false));
@@ -4480,7 +4485,11 @@ mod tests {
         // O_TMPFILE names the directory; its descriptor is `#<ino>` inside.
         assert!(path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", true));
         assert!(path_corroborated(b"/tmp/", b"/tmp/#1234 (deleted)", true));
-        assert!(!path_corroborated(b"/tmp", b"/var/tmp/#1234 (deleted)", true));
+        assert!(!path_corroborated(
+            b"/tmp",
+            b"/var/tmp/#1234 (deleted)",
+            true
+        ));
         assert!(
             !path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", false),
             "only an O_TMPFILE open drops the name"
@@ -4508,7 +4517,12 @@ mod tests {
                 b"/tmp/#77 (deleted)",
                 true,
             ),
-            (b"/dev/stderr\0", libc::O_WRONLY as u64, b"pipe:[4242]", false),
+            (
+                b"/dev/stderr\0",
+                libc::O_WRONLY as u64,
+                b"pipe:[4242]",
+                false,
+            ),
             (b"a\0", write, b"/w/b", false),
             (b"/w/public/x\0", write, b"/w/secret/x", false),
         ];

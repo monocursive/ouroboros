@@ -3168,6 +3168,14 @@ reason = "an `ignore` doc example"
 test = "ouro-jail/tests/j5_process_linux.rs::j5_x03_owner_helper"
 reason = "subprocess owner invoked by the X03 driver tests"
 
+[[ignored]]
+test = "ouro-jail/src/lib.rs::platform::linux::seccomp::tests::bless_the_pinned_seccomp_tables"
+reason = "writes the pinned seccomp evidence tables; run deliberately"
+
+[[ignored]]
+test = "ouro-jail/tests/security_alias_linux.rs::private_mount_alias_fixture"
+reason = "private mount namespace helper invoked by guarded_aliases_are_detected_across_devices_and_below_mountpoints"
+
 # ---------------------------------------- the pinned ignored set, macos lane
 
 [[ignored]]

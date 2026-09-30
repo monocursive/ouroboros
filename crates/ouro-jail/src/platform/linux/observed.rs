@@ -472,8 +472,7 @@ pub fn stop(
             u64::try_from(summary.unreaped_children.len()).ok(),
         );
     }
-    if summary.loss.lifecycle_dropped > 0 || (summary.loss.total() > 0 && !audit.has_loss_gaps())
-    {
+    if summary.loss.lifecycle_dropped > 0 || (summary.loss.total() > 0 && !audit.has_loss_gaps()) {
         audit.record_gap(
             GapReason::QueueFull,
             OpSet::ALL,
@@ -1177,6 +1176,9 @@ mod tests {
             &target,
             &gap(GapReason::RestartFailed, OpSet::EMPTY),
         );
-        assert!(audit.has_loss_gaps(), "a loss-counted bookkeeping gap still accounts");
+        assert!(
+            audit.has_loss_gaps(),
+            "a loss-counted bookkeeping gap still accounts"
+        );
     }
 }

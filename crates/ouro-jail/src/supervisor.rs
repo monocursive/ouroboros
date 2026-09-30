@@ -844,9 +844,10 @@ fn refuse_stale_trusted_file(
         .with_key_path(key)
     };
     if let Some(live) = epoch.live.first() {
-        let settled = live
-            .parent()
-            .map_or_else(|| PathBuf::from("uncontained.epoch"), state::uncontained_settled_path);
+        let settled = live.parent().map_or_else(
+            || PathBuf::from("uncontained.epoch"),
+            state::uncontained_settled_path,
+        );
         return Err(refused(format!(
             "{} cannot be trusted while an uncontained (`--profile none`) run is live or \
              ended without settling ({}); its child could write it. If no such run is \
@@ -1563,8 +1564,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // `running`, so it drops after it), and every later run refuses trusted
     // files that do not postdate that (`refuse_stale_trusted_file`).
     let _uncontained_run = if plan.profile == ProfileName::None {
-        match state::UncontainedRun::arm(&[&plan.data_dir, &plan.config_dir], attempt_id.as_str())
-        {
+        match state::UncontainedRun::arm(&[&plan.data_dir, &plan.config_dir], attempt_id.as_str()) {
             Ok(run) => Some(run),
             Err(error) => {
                 let teardown = prepared.abort();

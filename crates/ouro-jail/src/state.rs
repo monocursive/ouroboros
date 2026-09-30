@@ -285,10 +285,7 @@ impl Drop for UncontainedRun {
 /// nothing re-creates the obstacle.
 fn settle(dir: &Path, contents: &[u8]) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(dir)?;
-    if metadata.is_dir()
-        && metadata.uid() == effective_uid()
-        && metadata.mode() & 0o700 != 0o700
-    {
+    if metadata.is_dir() && metadata.uid() == effective_uid() && metadata.mode() & 0o700 != 0o700 {
         std::fs::set_permissions(
             dir,
             std::fs::Permissions::from_mode((metadata.mode() & 0o7777) | 0o700),
@@ -307,7 +304,10 @@ fn settle(dir: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// created exclusively (never through a planted name or link), `fsync`,
 /// rename over the target, then the directory `fsync`.
 fn write_marker(dir: &Path, target: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let temp = dir.join(format!(".uncontained.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let temp = dir.join(format!(
+        ".uncontained.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2193,7 +2193,10 @@ mod tests {
         let stale = dir.path().join("stale.toml");
         std::fs::write(&stale, b"x").unwrap();
         let dirs = [data.as_path(), config.as_path()];
-        assert_eq!(uncontained_epoch(&dirs).unwrap(), UncontainedEpoch::default());
+        assert_eq!(
+            uncontained_epoch(&dirs).unwrap(),
+            UncontainedEpoch::default()
+        );
         // Armed: a live marker in each directory (the missing config
         // directory is created private), and no settled one yet — a
         // concurrent run cannot date anything.
@@ -2263,7 +2266,12 @@ mod tests {
         let epoch = uncontained_epoch(&dirs).unwrap();
         assert!(epoch.settled.is_some(), "{epoch:?}");
         assert!(epoch.live.is_empty(), "{epoch:?}");
-        assert!(uncontained_settled_path(&data).symlink_metadata().unwrap().is_file());
+        assert!(
+            uncontained_settled_path(&data)
+                .symlink_metadata()
+                .unwrap()
+                .is_file()
+        );
     }
 
     /// A settle that cannot be written keeps the live marker, so every later
@@ -2283,13 +2291,22 @@ mod tests {
         std::fs::create_dir(&blocker).unwrap();
         std::fs::create_dir(blocker.join("locked")).unwrap();
         std::fs::write(blocker.join("locked").join("file"), b"x").unwrap();
-        std::fs::set_permissions(blocker.join("locked"), std::fs::Permissions::from_mode(0o500))
-            .unwrap();
+        std::fs::set_permissions(
+            blocker.join("locked"),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
         drop(guard);
-        std::fs::set_permissions(blocker.join("locked"), std::fs::Permissions::from_mode(0o700))
-            .unwrap();
+        std::fs::set_permissions(
+            blocker.join("locked"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let live = uncontained_live_path(&data, "att_unsettled");
-        assert!(live.exists(), "the live marker must stay when settling failed");
+        assert!(
+            live.exists(),
+            "the live marker must stay when settling failed"
+        );
     }
 
     #[test]
