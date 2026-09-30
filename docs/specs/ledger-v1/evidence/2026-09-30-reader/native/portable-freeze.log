@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/portable_freeze.rs (target/debug/deps/portable_freeze-b6d4375b75296c4d)
+
+running 12 tests
+test the_freeze_names_itself ... ok
+test the_contained_mount_baselines_are_the_frozen_ones ... ok
+test the_contained_environment_is_the_frozen_one ... ok
+test a_recorded_tested_run_is_the_milestone_run ... ok
+test the_toolchain_is_the_frozen_one ... ok
+test the_closed_set_is_the_frozen_one ... ok
+test the_built_in_baselines_are_the_frozen_ones ... ok
+test the_filter_digests_are_the_frozen_ones ... ok
+test the_manifests_are_the_frozen_ones ... ok
+test the_bundled_launch_profiles_are_the_frozen_ones ... ok
+test the_frozen_schemas_are_the_frozen_ones ... ok
+test the_lock_file_is_the_frozen_one ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

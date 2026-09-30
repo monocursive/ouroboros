@@ -2,3 +2,4 @@
 docs/benchmarks/jail/results/**/*.log -whitespace
 docs/specs/jail-v1/evidence/**/*.log -whitespace
 docs/specs/jail-v1/evidence/**/*.txt -whitespace
+docs/specs/ledger-v1/evidence/**/*.log -whitespace

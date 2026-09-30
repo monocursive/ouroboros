@@ -1,0 +1,25 @@
+{
+  "schema": "targeted-ledger-cleanup/1",
+  "recorded_at": "2026-09-30T11:16:56.963997+00:00",
+  "revision": "d80854e4b2ba2b2fd355a6c0f7249189524951b0",
+  "removed_only": [
+    "/home/ouro-ci/ouro-ci/query-export-20260930/target",
+    "/home/ouro-ci/ouro-ci/query-export-20260930/source"
+  ],
+  "source_archive_sha256": "8e128838fee2d9a899f7ddcdf9895cb5d7d3dc55fae7f82816c81ff91c2dcee6",
+  "retained_products_before": "ouro-ledger: OK\nevidence_reader: OK\nlaunch_linux: OK\n",
+  "retained_products_after": "ouro-ledger: OK\nevidence_reader: OK\nlaunch_linux: OK\n",
+  "owned_processes_before": [],
+  "owned_processes_after": [],
+  "disk_before_cleanup": {
+    "total_bytes": 82085269504,
+    "used_bytes": 80706932736,
+    "free_bytes": 1361559552
+  },
+  "disk_after_cleanup": {
+    "total_bytes": 82085269504,
+    "used_bytes": 80325361664,
+    "free_bytes": 1743130624
+  },
+  "recovered_bytes": 381571072
+}

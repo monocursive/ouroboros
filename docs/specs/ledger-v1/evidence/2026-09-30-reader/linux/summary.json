@@ -1,0 +1,84 @@
+{
+  "schema": "targeted-ledger-evidence/1",
+  "revision": "d80854e4b2ba2b2fd355a6c0f7249189524951b0",
+  "dirty": false,
+  "status": "PASS",
+  "source_archive": {
+    "file": "source-d80854e4b2ba2b2fd355a6c0f7249189524951b0.tar.gz",
+    "sha256": "8e128838fee2d9a899f7ddcdf9895cb5d7d3dc55fae7f82816c81ff91c2dcee6"
+  },
+  "verified_package_sources": [
+    {
+      "file": "crates/ouro-ledger/Cargo.toml",
+      "sha256": "fdbdd2bbdc4c88b48f58c03ce726f135a1fe20b89d4609f4324f0b0360668a2a"
+    },
+    {
+      "file": "crates/ouro-ledger/src/daemon.rs",
+      "sha256": "5af5d83e73eb325294e1539634ca48af8d13a5ffb399c182a23edcea1b9cb929"
+    },
+    {
+      "file": "crates/ouro-ledger/src/lib.rs",
+      "sha256": "04315dccba27d3b4250672dd6a8c3de9bb96d5072e4db74e93386118738ab71f"
+    },
+    {
+      "file": "crates/ouro-ledger/src/main.rs",
+      "sha256": "91536cb1c00693757c6132757f11272e82b303c5a0da6418d9e0adc9dd062d99"
+    },
+    {
+      "file": "crates/ouro-ledger/src/protocol.rs",
+      "sha256": "b9da3ab5f678ee620314e56e32987beceecb6175602d979a25d5b32cfa60efff"
+    },
+    {
+      "file": "crates/ouro-ledger/src/reader.rs",
+      "sha256": "693c22ce6097d6b4250e1a36a5f019840e2849775e18038d5c9eaaf4a884e9b2"
+    },
+    {
+      "file": "crates/ouro-ledger/src/runner.rs",
+      "sha256": "86537f8bce53b185f466ccf55fb6121ed65a2ed711915459f9d3d1266801418f"
+    },
+    {
+      "file": "crates/ouro-ledger/src/store.rs",
+      "sha256": "ffe9ee139aad417bfa2a9cfa81e5db43c6e482c0e2e6aeea2f75190fda9e4996"
+    },
+    {
+      "file": "crates/ouro-ledger/tests/cli_local.rs",
+      "sha256": "50351a322411afa21b95ae7f40aa4a9890f423fed0d435e5b0ed09bb4d4365d5"
+    },
+    {
+      "file": "crates/ouro-ledger/tests/evidence_reader.rs",
+      "sha256": "65b8c912cb3d6a1553aefa20f5a86e85b96db48c56b1d2b23f55a4ef04a8858a"
+    },
+    {
+      "file": "crates/ouro-ledger/tests/launch_linux.rs",
+      "sha256": "f372a555f180ccedda916ac091b978e739eac4600382812437beafb2ef4be426"
+    }
+  ],
+  "products": [
+    {
+      "file": "ouro-ledger",
+      "sha256": "afde80226dfa468b7e561f1128c2f392b31f60eec7d5975857f54f5846356d3c"
+    },
+    {
+      "file": "evidence_reader",
+      "sha256": "f6b357787386b2d38107e4fbb7cc9a7d38a624ee089077776fe12a2827f932c4"
+    },
+    {
+      "file": "launch_linux",
+      "sha256": "e1adc3cf017a614344fb6bb1cbb33a4b5f821da626c8ddf1617d8023dda3a337"
+    }
+  ],
+  "tests": {
+    "groups": 6,
+    "passed": 50,
+    "failed": 0,
+    "ignored": 0,
+    "live_skips": 0,
+    "lib": 34,
+    "local_cli": 2,
+    "reader_cli": 5,
+    "real_launch": 9
+  },
+  "ledger_binary_unchanged_during_tests": "target/release/ouro-ledger: OK\n",
+  "frozen_products_before": "ouro-jail: OK\nouro-fixture: OK\nouro-ledger: OK\nlaunch_linux: OK\n",
+  "frozen_products_after": "ouro-jail: OK\nouro-fixture: OK\nouro-ledger: OK\nlaunch_linux: OK\n"
+}

@@ -1,0 +1,3 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running `target/debug/xtask freeze --check`
+xtask freeze --check: the freeze file is this tree's, and its tested run passed: inputs_match_tree, revision_is_ancestor_of_head, inputs_match_revision, frozen_inputs_unchanged_since_revision

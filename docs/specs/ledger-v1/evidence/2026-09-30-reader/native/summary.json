@@ -1,0 +1,49 @@
+{
+  "source_revision": "d80854e4b2ba2b2fd355a6c0f7249189524951b0",
+  "source_tree_clean": true,
+  "source_files_sha256": {
+    "README.md": "75796e27c18910c96e42a10809a5d35e34b703d78d6c08ecf6410cc63d3fa81c",
+    "crates/ouro-ledger/src/daemon.rs": "5af5d83e73eb325294e1539634ca48af8d13a5ffb399c182a23edcea1b9cb929",
+    "crates/ouro-ledger/src/lib.rs": "04315dccba27d3b4250672dd6a8c3de9bb96d5072e4db74e93386118738ab71f",
+    "crates/ouro-ledger/src/main.rs": "91536cb1c00693757c6132757f11272e82b303c5a0da6418d9e0adc9dd062d99",
+    "crates/ouro-ledger/src/protocol.rs": "b9da3ab5f678ee620314e56e32987beceecb6175602d979a25d5b32cfa60efff",
+    "crates/ouro-ledger/src/reader.rs": "693c22ce6097d6b4250e1a36a5f019840e2849775e18038d5c9eaaf4a884e9b2",
+    "crates/ouro-ledger/src/store.rs": "ffe9ee139aad417bfa2a9cfa81e5db43c6e482c0e2e6aeea2f75190fda9e4996",
+    "crates/ouro-ledger/tests/evidence_reader.rs": "65b8c912cb3d6a1553aefa20f5a86e85b96db48c56b1d2b23f55a4ef04a8858a",
+    "docs/roadmap.md": "8e23572d302dfb3bb18e0aacf25e69957c6768424cb5ce9620edf345664713d9",
+    "docs/specs/ledger-v1.md": "de96bcafb95ab53e6c31a763d03ebae77e5f1c20b104a4a7f53b7342ec8e8c7a",
+    "docs/specs/ledger-v1/export.schema.json": "824d8e2b6ae2f7503fad5b2dc1c01732b15e33a1116c7bc8a84512566fa19e28",
+    "docs/specs/ledger-v1/fixtures/export-checkpoint.json": "1b76295797a7518022b6e2ca0ce6d1c8b60ce88bdc1cf537c828fc95d82fc142",
+    "docs/specs/ledger-v1/fixtures/export-finished.json": "ca86097367803af87fbc581c5eb43e5b18284ef15c52843ab4a8dc8bfca431ce",
+    "docs/specs/ledger-v1/fixtures/read-page-incomplete.json": "82e0c8e67aae436373e49ce004df96426e616cebb7bb32194c2cdd8a7753e1f3",
+    "docs/specs/ledger-v1/fixtures/read-page-unobserved.json": "5bd3dae8806c955f7d910f7a810495cf4009513063b6754dd00bcfb7a2bc4bea",
+    "docs/specs/ledger-v1/fixtures/read-page.json": "2633caaa889dc63c14857f571da2d96b71acd0daabd679455756103ae94057d9",
+    "docs/specs/ledger-v1/fixtures/read-request.json": "2c47066e887ccc10e8df89e14f6b331cd74cfc1873fab143b8c685ce8cd8a211",
+    "docs/specs/ledger-v1/read-request.schema.json": "3de16f2dc2c2d0786d297ef5b1406e237643338032ad518e99351d470416266f",
+    "docs/specs/ledger-v1/read.schema.json": "adafb18c3819746a9f024b7494d66a832968848000a99f253d278fffa39355b9",
+    "docs/specs/ledger-v1/validate_contract.py": "d5cc2153b7dc4037f865cad813974f44915a98303426419ab13905f9c28f3e9b",
+    "north-star.md": "f3e69e4c9553479863b5f810ce07690722bef00282297541267f71e2c1282583"
+  },
+  "native_platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "ledger_binary_sha256": "c231ed87f1394dc6a8d9afeae61ae627fa7e7a7fe02a0e7f66a1decabd3b0a0d",
+  "tests": {
+    "library": 33,
+    "local_cli": 2,
+    "reader_cli": 5,
+    "passed": 40,
+    "failed": 0,
+    "ignored": 0,
+    "native_linux_launches": 0
+  },
+  "checks": {
+    "clippy": "all targets, -D warnings",
+    "format": "workspace check",
+    "ledger_contract": "passed",
+    "links": "39 documents, zero broken"
+  },
+  "limits": [
+    "Native macOS tests do not establish Linux containment.",
+    "Schemas remain unfrozen; full M2 is incomplete."
+  ]
+}
