@@ -1,0 +1,38 @@
+{
+  "schema": "retained-conformance-products/1",
+  "revision": "a9f8129acb718ed9d05986a4729db69ecf4b5094",
+  "dirty": false,
+  "remote_run": "20260930T085216Z-a9f8129acb71",
+  "status": "PASS",
+  "tests": {
+    "passed": 1787,
+    "failed": 0,
+    "ignored": 16,
+    "groups": 79,
+    "real_ledger_integration": 9,
+    "live_skips": 0
+  },
+  "post_suite_hash_guard": "binaries-check.txt",
+  "products": [
+    {
+      "file": "ouro-jail",
+      "sha256": "cdf8a182680ef500dfb8e9983e5fea863f95b5b72c4734703cf3c14d7a9ca602"
+    },
+    {
+      "file": "ouro-fixture",
+      "sha256": "db28b45b243369ec17add3f04bd642d7dc3c63350a6ba999e1b38ca8c85a5696"
+    },
+    {
+      "file": "ouro-ledger",
+      "sha256": "c6f3a0feda78ef6d088dbecd2168feda158f38ede8005001b158c85132ff28a9"
+    },
+    {
+      "file": "launch_linux",
+      "sha256": "246ec092e351b2ef020b855fb7f24845fd0918c51b64a10515cd2c93ac245c65"
+    }
+  ],
+  "source_archive": {
+    "file": "source-a9f8129acb718ed9d05986a4729db69ecf4b5094.tar.gz",
+    "sha256": "4f1aaf7a97efc548df078d3013669f29d7efa0e7cf8a7eb1d5b3bf9d9f2560c4"
+  }
+}

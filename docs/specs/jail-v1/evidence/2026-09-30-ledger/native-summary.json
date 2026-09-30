@@ -1,0 +1,21 @@
+{
+  "revision": "a9f8129acb718ed9d05986a4729db69ecf4b5094",
+  "platform": "aarch64-apple-darwin",
+  "conformance": true,
+  "test_groups": 79,
+  "passed": 1060,
+  "failed": 0,
+  "ignored": 7,
+  "live_linux_execution": false,
+  "checks": [
+    "workspace_clippy",
+    "macos_x86_64_compile_only",
+    "ledger_linux_x86_64_clippy_compile_only",
+    "jail_contract",
+    "ledger_contract",
+    "managed_policy_contract",
+    "links",
+    "dependency_policy",
+    "i02"
+  ]
+}

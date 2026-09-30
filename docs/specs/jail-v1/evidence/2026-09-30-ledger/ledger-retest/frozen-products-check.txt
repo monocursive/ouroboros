@@ -1,0 +1,4 @@
+ouro-jail: OK
+ouro-fixture: OK
+ouro-ledger: OK
+launch_linux: OK

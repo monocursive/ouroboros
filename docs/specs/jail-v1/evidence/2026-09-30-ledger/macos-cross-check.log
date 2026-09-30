@@ -1,0 +1,4 @@
+   Compiling ouro-jail v0.1.0 (/Users/monocursive/.codex/worktrees/ledger-first-run/ouroboros/crates/ouro-jail)
+    Checking ouro-ledger v0.1.0 (/Users/monocursive/.codex/worktrees/ledger-first-run/ouroboros/crates/ouro-ledger)
+    Checking xtask v0.1.0 (/Users/monocursive/.codex/worktrees/ledger-first-run/ouroboros/crates/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.72s

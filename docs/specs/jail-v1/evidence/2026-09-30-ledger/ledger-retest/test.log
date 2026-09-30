@@ -1,0 +1,82 @@
+     Removed 41 files, 50.3MiB total
+   Compiling once_cell v1.21.4
+   Compiling ouro-records v0.1.0 (/home/ouro-ci/ouro-ci/ledger-retest-d1a368587e1c/source/crates/ouro-records)
+   Compiling ahash v0.8.12
+   Compiling referencing v0.57.0
+   Compiling jsonschema-value v0.57.0
+   Compiling jsonschema v0.57.0
+   Compiling ouro-ledger v0.1.0 (/home/ouro-ci/ouro-ci/ledger-retest-d1a368587e1c/source/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 54.96s
+ouro-ledger-retest-revision=d1a368587e1ca53450153035dba3c9a61ed50946
+ouro-ledger-retest-conformance=1
+ouro-ledger-retest-jail=/home/ouro-ci/ouro-ci/runs/20260930T085216Z-a9f8129acb71/retained-products-a9f8129a/ouro-jail
+   Compiling ouro-ledger v0.1.0 (/home/ouro-ci/ouro-ci/ledger-retest-d1a368587e1c/source/crates/ouro-ledger)
+   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-ci/ledger-retest-d1a368587e1c/source/crates/ouro-fixture)
+    Finished `release` profile [optimized] target(s) in 47.05s
+     Running unittests src/lib.rs (/home/ouro-ci/ouro-ci/runs/20260930T085216Z-a9f8129acb71/target/release/deps/ouro_ledger-6ec23591b9e3442d)
+
+running 26 tests
+test daemon::tests::forged_producer_role_attempt_and_peer_are_all_refused ... ok
+test daemon::tests::frame_roundtrip_handles_interrupted_transport_without_accepting_partial_json ... ok
+test daemon::tests::protocol_refuses_caller_claimed_roles_and_oversized_frames ... ok
+test runner::tests::capture_keeps_the_exact_short_write_count_before_disk_failure ... ok
+test runner::tests::prepared_gate_compares_each_identity_and_receipt_digest ... ok
+test store::tests::admission_cannot_change_reserved_policy_or_argv ... ok
+test store::tests::admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt ... ok
+test store::tests::admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_loss ... ok
+test store::tests::different_payload_cannot_rebind_prepare_or_effect_identity ... ok
+test store::tests::every_persistence_failure_stops_acknowledgements_until_recovery ... ok
+test store::tests::flattened_source_is_the_original_frozen_envelope_plus_writer_fields ... ok
+test store::tests::full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state ... ok
+test store::tests::interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery ... ok
+test store::tests::lifetime_lock_refuses_a_second_writer ... ok
+test store::tests::lost_replies_replay_same_run_and_exact_receipt_after_recovery ... ok
+test store::tests::none_verify_retains_unprotected_even_if_receipt_claims_enforced ... ok
+test store::tests::owner_death_records_unknown_without_restart_or_tree_claim ... ok
+test store::tests::recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain ... ok
+test store::tests::refused_receipt_requires_the_same_attempt_and_final_source_note ... ok
+test store::tests::settlement_requires_matching_final_receipt_and_trace_and_closes_observations ... ok
+test store::tests::source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery ... ok
+test store::tests::source_replay_and_gap_are_preserved_when_projection_is_updated ... ok
+test store::tests::strict_transport_gap_and_private_metadata_refuse_without_an_ack ... ok
+test store::tests::unresolved_run_keeps_a_proven_child_exit_separate_from_unknown_outcome ... ok
+test store::tests::unsafe_store_paths_and_oversized_events_are_refused ... ok
+test store::tests::verification_detects_projection_drift_and_recovery_rebuilds_it ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/main.rs (/home/ouro-ci/ouro-ci/runs/20260930T085216Z-a9f8129acb71/target/release/deps/ouro_ledger-d39986c9b3b9ed4d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_local.rs (/home/ouro-ci/ouro-ci/runs/20260930T085216Z-a9f8129acb71/target/release/deps/cli_local-c0b396006b1f71e3)
+
+running 2 tests
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/launch_linux.rs (/home/ouro-ci/ouro-ci/runs/20260930T085216Z-a9f8129acb71/target/release/deps/launch_linux-ed873e3be9d943b7)
+
+running 9 tests
+test an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever ... ok
+test contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer ... ok
+test durable_admission_precedes_real_exec_and_replay_never_executes_twice ... ok
+test explicit_none_profile_remains_unprotected_after_real_launch_and_verification ... ok
+test failed_exec_retains_corroborated_error_without_a_second_attempt ... ok
+test invalid_inherited_stdout_is_denied_before_admission_and_never_executes ... ok
+test opted_capture_stops_storing_at_the_cap_and_keeps_draining_the_real_child ... ok
+test owner_death_is_reconciled_as_unknown_and_never_relaunched ... ok
+test writer_death_stops_the_owner_and_recovery_remains_unknown ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.96s
+
+   Doc-tests ouro_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
