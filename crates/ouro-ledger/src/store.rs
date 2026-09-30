@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::protocol::{
-    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, Peer, Result, RunRecord, VerifyReport,
+    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Result,
+    RunRecord, VerifyReport,
 };
 
 const STREAM: &str = "events-0001.ndjson";
@@ -34,6 +35,7 @@ struct Replay {
 
 struct Stream {
     run: RunRecord,
+    accepted_bytes: u64,
     replay: BTreeMap<String, Replay>,
     source_heads: BTreeMap<String, u64>,
     source_gaps: Vec<Value>,
@@ -49,6 +51,7 @@ pub struct Store {
     streams: BTreeMap<String, Stream>,
     preparations: BTreeMap<String, (String, String)>,
     recovery_ambiguous: bool,
+    readers: crate::reader::Readers,
     #[cfg(test)]
     fault: Option<Fault>,
 }
@@ -362,6 +365,7 @@ impl Store {
             streams: BTreeMap::new(),
             preparations: BTreeMap::new(),
             recovery_ambiguous: false,
+            readers: crate::reader::Readers::default(),
             #[cfg(test)]
             fault: None,
         };
@@ -434,6 +438,7 @@ impl Store {
             run_id.clone(),
             Stream {
                 run: run.clone(),
+                accepted_bytes: 0,
                 replay: BTreeMap::new(),
                 source_heads: BTreeMap::new(),
                 source_gaps: vec![],
@@ -705,6 +710,7 @@ impl Store {
             receipt.clone(),
             payload_digest.into(),
         )?;
+        stream.accepted_bytes += (bytes.len() + 1) as u64;
         let run = stream.run.clone();
         #[cfg(test)]
         if matches!(self.fault, Some(Fault::Projection)) {
@@ -756,6 +762,22 @@ impl Store {
             .keys()
             .filter_map(|id| self.show(id).ok())
             .collect()
+    }
+
+    pub fn read(&mut self, request: &ReadRequest) -> Result<ReadPage> {
+        check_run_id(&request.run_id)?;
+        let stream = self
+            .streams
+            .get(&request.run_id)
+            .ok_or_else(|| LedgerError("unknown run".into()))?;
+        self.readers.read(
+            &self.root.join(&request.run_id).join(STREAM),
+            request,
+            &stream.run,
+            &stream.poisoned,
+            stream.accepted_bytes,
+            |key| stream.replay.get(key).map(|r| r.receipt.clone()),
+        )
     }
 
     pub fn settle_orphans(
@@ -850,6 +872,7 @@ impl Store {
         let placeholder = initial_run(run_id, "", "", json!({}));
         let mut stream = Stream {
             run: placeholder,
+            accepted_bytes: 0,
             replay: BTreeMap::new(),
             source_heads: BTreeMap::new(),
             source_gaps: vec![],
@@ -986,6 +1009,7 @@ impl Store {
                 break;
             }
             events += 1;
+            stream.accepted_bytes += (bytes.len() + 1) as u64;
         }
         if events == 0 && stream.poisoned.is_empty() {
             stream.poisoned.push("empty canonical stream".into());
@@ -1397,6 +1421,334 @@ mod tests {
             &peer(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
+    }
+
+    fn read_request(run: &RunRecord, selector: crate::protocol::ReadSelector) -> ReadRequest {
+        ReadRequest {
+            run_id: run.run_id.clone(),
+            filter: crate::protocol::ReadFilter {
+                selector,
+                stage: None,
+                since: None,
+                until: None,
+            },
+            cursor: None,
+            limit: 100,
+        }
+    }
+
+    fn read_all(store: &mut Store, mut request: ReadRequest) -> (Vec<ReadPage>, String) {
+        let mut pages = vec![];
+        let mut bytes = String::new();
+        for _ in 0..1000 {
+            let page = store.read(&request).unwrap();
+            bytes.push_str(&page.ndjson);
+            request.cursor = page.next_cursor.clone();
+            let done = page.done;
+            pages.push(page);
+            if done {
+                return (pages, bytes);
+            }
+        }
+        panic!("reader did not finish its bounded snapshot");
+    }
+
+    fn source_fixture(
+        store: &mut Store,
+        run: &RunRecord,
+        fixture: &str,
+        seq: u64,
+        path: Option<&str>,
+    ) {
+        let fixtures = [
+            (
+                "exec",
+                include_str!("../../../docs/specs/jail-v1/examples/event-exec.json"),
+            ),
+            (
+                "exit",
+                include_str!("../../../docs/specs/jail-v1/examples/event-exit.json"),
+            ),
+            (
+                "path",
+                include_str!("../../../docs/specs/jail-v1/examples/event-open.json"),
+            ),
+            (
+                "deny",
+                include_str!("../../../docs/specs/jail-v1/examples/event-deny.json"),
+            ),
+            (
+                "host",
+                include_str!("../../../docs/specs/jail-v1/examples/event-connect.json"),
+            ),
+            (
+                "proxy",
+                include_str!("../../../docs/specs/jail-v1/examples/event-proxy-deny.json"),
+            ),
+        ];
+        let mut event: Value = serde_json::from_str(
+            fixtures
+                .iter()
+                .find(|(name, _)| *name == fixture)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        event["attempt_id"] = json!(run.attempt_id);
+        event["source_seq"] = json!(seq);
+        if let Some(path) = path {
+            event["fields"]["path"]["value"] = json!(path);
+        }
+        store
+            .append_source(
+                &run.run_id,
+                &event,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn reader_snapshot_export_is_exact_bounded_and_retries_the_identical_prior_page() {
+        let (temp, mut store, run) = create();
+        for n in 0..80 {
+            note(&mut store, &run, &format!("note:{n}"), json!({"index":n})).unwrap();
+        }
+        let path = temp
+            .path()
+            .join("data/ledger")
+            .join(&run.run_id)
+            .join(STREAM);
+        let original = fs::read_to_string(&path).unwrap();
+        let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+        let first = store.read(&request).unwrap();
+        assert!(!first.done);
+        assert!(first.scanned_through_seq <= crate::protocol::READ_SCAN_FRAMES as u64);
+        let snapshot = first.snapshot.clone();
+        note(&mut store, &run, "after-snapshot", json!({"later":true})).unwrap();
+        request.cursor = first.next_cursor.clone();
+        let second = store.read(&request).unwrap();
+        assert_eq!(second, store.read(&request).unwrap());
+        assert_eq!(second.snapshot, snapshot);
+        request.cursor = second.next_cursor.clone();
+        let (pages, remaining) = read_all(&mut store, request);
+        assert_eq!(
+            format!("{}{}{}", first.ndjson, second.ndjson, remaining),
+            original
+        );
+        assert!(pages.iter().all(|p| p.ndjson.len() <= crate::protocol::READ_CHUNK_BYTES && p.local_consistency));
+        assert_eq!(
+            store.show(&run.run_id).unwrap().chain.head_seq,
+            snapshot.head_seq + 1
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap().lines().count() as u64,
+            snapshot.head_seq + 1
+        );
+    }
+
+    #[test]
+    fn reader_filters_original_source_operations_stage_and_writer_time() {
+        let (_temp, mut store, run) = create();
+        for (fixture, seq) in [
+            ("exec", 1),
+            ("exit", 2),
+            ("path", 3),
+            ("deny", 4),
+            ("host", 5),
+            ("proxy", 1),
+        ] {
+            source_fixture(&mut store, &run, fixture, seq, None);
+        }
+        for (selector, count) in [
+            (crate::protocol::ReadSelector::Execs, 2),
+            (crate::protocol::ReadSelector::Paths, 2),
+            (crate::protocol::ReadSelector::Hosts, 2),
+            (crate::protocol::ReadSelector::Denials, 2),
+        ] {
+            let (pages, _) = read_all(&mut store, read_request(&run, selector));
+            let events: Vec<_> = pages.iter().flat_map(|p| &p.records).collect();
+            assert_eq!(events.len(), count);
+            assert!(events.iter().all(|e| e["schema"] == records::SCHEMA_EVENT
+                && e["stage"] == "result"
+                && e["provenance"]["role"] == "producer"));
+        }
+        let mut request = read_request(&run, crate::protocol::ReadSelector::Execs);
+        request.filter.stage = Some(crate::protocol::ReadStage::Attempt);
+        let (pages, _) = read_all(&mut store, request);
+        assert!(pages.iter().all(|p| p.records.is_empty()));
+        let mut request = read_request(&run, crate::protocol::ReadSelector::Execs);
+        request.filter.since = Some("2099-01-01T00:00:00Z".into());
+        assert!(
+            read_all(&mut store, request)
+                .0
+                .iter()
+                .all(|p| p.records.is_empty())
+        );
+        let mut request = read_request(&run, crate::protocol::ReadSelector::Execs);
+        request.filter.until = Some("2000-01-01T00:00:00Z".into());
+        assert!(
+            read_all(&mut store, request)
+                .0
+                .iter()
+                .all(|p| p.records.is_empty())
+        );
+    }
+
+    #[test]
+    fn reader_large_utf8_records_are_fully_verified_before_chunks_and_query_block_replays() {
+        let (temp, mut store, run) = create();
+        source_fixture(&mut store, &run, "path", 1, Some("small"));
+        source_fixture(&mut store, &run, "path", 2, Some(&"€\\\"".repeat(80_000)));
+        let original = fs::read_to_string(
+            temp.path()
+                .join("data/ledger")
+                .join(&run.run_id)
+                .join(STREAM),
+        )
+        .unwrap();
+        let mut request = read_request(&run, crate::protocol::ReadSelector::Paths);
+        let mut blocked = None;
+        for _ in 0..100 {
+            let page = store.read(&request).unwrap();
+            if page.oversized_record.is_some() {
+                assert_eq!(page, store.read(&request).unwrap());
+                blocked = Some(page);
+                break;
+            }
+            assert!(!page.done);
+            request.cursor = page.next_cursor;
+        }
+        let blocked = blocked.unwrap();
+        assert_eq!(blocked.oversized_record.unwrap().seq, 4);
+        let (pages, export) = read_all(
+            &mut store,
+            read_request(&run, crate::protocol::ReadSelector::All),
+        );
+        assert_eq!(export, original);
+        assert!(pages.iter().any(|p| p.ndjson.is_empty() && !p.done));
+        for page in pages {
+            assert!(page.ndjson.len() <= crate::protocol::READ_CHUNK_BYTES);
+            let response = crate::protocol::Response::Ok {
+                value: serde_json::to_value(&page).unwrap(),
+            };
+            assert!(serde_json::to_vec(&response).unwrap().len() < MAX_FRAME_BYTES);
+            let mut frame = vec![];
+            crate::daemon::write_frame(&mut frame, &response).unwrap();
+        }
+    }
+
+    #[test]
+    fn reader_refuses_filtered_corruption_and_reports_extra_tails_without_mutation() {
+        let (temp, mut store, run) = create();
+        note(&mut store, &run, "irrelevant", json!({"value":"original"})).unwrap();
+        source_fixture(&mut store, &run, "exec", 1, None);
+        let path = temp
+            .path()
+            .join("data/ledger")
+            .join(&run.run_id)
+            .join(STREAM);
+        let original = fs::read_to_string(&path).unwrap();
+        let altered = original.replace("original", "modified");
+        fs::write(&path, &altered).unwrap();
+        let (pages, _) = read_all(
+            &mut store,
+            read_request(&run, crate::protocol::ReadSelector::Execs),
+        );
+        assert!(pages.iter().all(|p| p.records.is_empty()));
+        assert_eq!(pages.last().unwrap().stream_status, "corrupt");
+        assert!(!pages.last().unwrap().local_consistency);
+        assert_eq!(fs::read_to_string(&path).unwrap(), altered);
+        fs::write(&path, format!("{original}{{\"torn\":")).unwrap();
+        let (pages, bytes) = read_all(
+            &mut store,
+            read_request(&run, crate::protocol::ReadSelector::All),
+        );
+        assert_eq!(bytes, original);
+        assert!(
+            pages
+                .iter()
+                .all(|p| !p.local_consistency && p.stream_status == "incomplete")
+        );
+        assert!(fs::read_to_string(&path).unwrap().ends_with("{\"torn\":"));
+    }
+
+    #[test]
+    fn reader_new_page_refuses_truncation_of_a_previously_verified_cached_large_frame() {
+        let (temp, mut store, run) = create();
+        source_fixture(&mut store, &run, "path", 1, Some(&"€".repeat(230_000)));
+        let path = temp
+            .path()
+            .join("data/ledger")
+            .join(&run.run_id)
+            .join(STREAM);
+        let length = fs::metadata(&path).unwrap().len();
+        let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+        let mut exercised = false;
+        for _ in 0..100 {
+            let page = store.read(&request).unwrap();
+            if page.scanned_through_seq == 3 && !page.done && !page.ndjson.is_empty() {
+                assert!(request.cursor.is_some());
+                OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(length - 1)
+                    .unwrap();
+                // A lost reply may retry the exact historical page, but a new
+                // continuation cannot publish the rest of its cached frame.
+                assert_eq!(store.read(&request).unwrap(), page);
+                request.cursor = page.next_cursor;
+                let next = store.read(&request).unwrap();
+                assert!(next.done && !next.local_consistency);
+                assert_eq!(next.stream_status, "corrupt");
+                assert!(next.ndjson.is_empty());
+                assert!(next.problems.iter().any(|p| p.contains("truncated")));
+                assert_eq!(fs::metadata(&path).unwrap().len(), length - 1);
+                exercised = true;
+                break;
+            }
+            assert!(!page.done);
+            request.cursor = page.next_cursor;
+        }
+        assert!(exercised);
+    }
+
+    #[test]
+    fn reader_cursor_cannot_change_scope_and_expires_explicitly_after_restart() {
+        let (temp, mut store, run) = create();
+        for n in 0..40 {
+            note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
+        }
+        let request = read_request(&run, crate::protocol::ReadSelector::All);
+        let page = store.read(&request).unwrap();
+        let mut resumed = request.clone();
+        resumed.cursor = page.next_cursor;
+        let mut wrong = resumed.clone();
+        wrong.filter.selector = crate::protocol::ReadSelector::Execs;
+        assert!(store.read(&wrong).unwrap_err().0.contains("mismatch"));
+        wrong = resumed.clone();
+        wrong.limit += 1;
+        assert!(store.read(&wrong).unwrap_err().0.contains("mismatch"));
+        wrong = resumed.clone();
+        wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
+        assert!(store.read(&wrong).is_err());
+        drop(store);
+        let mut recovered = Store::open(&temp.path().join("data")).unwrap();
+        assert!(recovered.read(&resumed).unwrap_err().0.contains("expired"));
+        for _ in 0..40 {
+            assert!(
+                read_all(
+                    &mut recovered,
+                    read_request(&run, crate::protocol::ReadSelector::Execs)
+                )
+                .0
+                .last()
+                .unwrap()
+                .done
+            );
+        }
     }
 
     #[test]

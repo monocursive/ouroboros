@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use ouro_ledger::{
     daemon,
-    protocol::{LedgerError, Result},
+    protocol::{LedgerError, ReadFilter, ReadRequest, ReadSelector, ReadStage, Result},
     runner,
 };
 use serde_json::{Value, json};
@@ -58,6 +58,10 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Read one bounded page of attributed observations from a run.
+    Query(Box<QueryArgs>),
+    /// Stream an exact canonical snapshot; status is written to stderr.
+    Export(Box<ExportArgs>),
     /// Verify canonical bytes, hash chains, and durable projections.
     Verify {
         run_id: Option<String>,
@@ -74,6 +78,54 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Args)]
+#[command(group(clap::ArgGroup::new("evidence_class")
+    .required(true)
+    .multiple(false)
+    .args(["execs", "paths", "hosts", "denials"])))]
+struct QueryArgs {
+    #[arg(long)]
+    run: String,
+    #[arg(long, group = "evidence_class")]
+    execs: bool,
+    #[arg(long, group = "evidence_class")]
+    paths: bool,
+    #[arg(long, group = "evidence_class")]
+    hosts: bool,
+    #[arg(long, group = "evidence_class")]
+    denials: bool,
+    /// Original source stage, as defined by the frozen jail event contract.
+    #[arg(long, value_parser = ["attempt", "result"])]
+    stage: Option<String>,
+    /// Inclusive writer receipt time, YYYY-MM-DDTHH:MM:SSZ.
+    #[arg(long)]
+    since: Option<String>,
+    /// Exclusive writer receipt time, YYYY-MM-DDTHH:MM:SSZ.
+    #[arg(long)]
+    until: Option<String>,
+    /// Resume with the same run and filters using the returned cursor.
+    #[arg(long)]
+    cursor: Option<String>,
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    limit: u32,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct ExportArgs {
+    run_id: String,
+    /// Exact canonical records only on stdout; status goes to stderr.
+    #[arg(long, required = true)]
+    ndjson: bool,
+    /// Resume the original snapshot using a previously returned cursor.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Emit machine-readable checkpoints and completion status on stderr.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -150,12 +202,178 @@ fn output(value: &Value, json_output: bool) -> Result<()> {
     Ok(())
 }
 
+fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
+    let selector = if args.execs {
+        ReadSelector::Execs
+    } else if args.paths {
+        ReadSelector::Paths
+    } else if args.hosts {
+        ReadSelector::Hosts
+    } else if args.denials {
+        ReadSelector::Denials
+    } else {
+        return Err(LedgerError("query requires one evidence class".into()));
+    };
+    let stage = match args.stage.as_deref() {
+        Some("attempt") => Some(ReadStage::Attempt),
+        Some("result") => Some(ReadStage::Result),
+        None => None,
+        _ => return Err(LedgerError("unsupported source stage".into())),
+    };
+    let page = client.read(&ReadRequest {
+        run_id: args.run,
+        filter: ReadFilter {
+            selector,
+            stage,
+            since: args.since,
+            until: args.until,
+        },
+        cursor: args.cursor,
+        limit: args.limit,
+    })?;
+    output(&serde_json::to_value(&page)?, args.json)?;
+    if page.oversized_record.is_some() {
+        eprintln!(
+            "ouro-ledger: matching record exceeds the query page bound; retrieve it with export RUN --ndjson"
+        );
+    }
+    Ok(
+        if page.local_consistency
+            && !matches!(page.stream_status.as_str(), "incomplete" | "corrupt")
+            && page.oversized_record.is_none()
+        {
+            0
+        } else {
+            1
+        },
+    )
+}
+
+fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs) -> Result<i32> {
+    use std::io::Write as _;
+    let mut request = ReadRequest {
+        run_id: args.run_id,
+        filter: ReadFilter {
+            selector: ReadSelector::All,
+            stage: None,
+            since: None,
+            until: None,
+        },
+        cursor: args.cursor,
+        limit: 100,
+    };
+    let mut snapshot = None;
+    let mut bytes_written = 0u64;
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        let page = match client.read(&request) {
+            Ok(page) => page,
+            Err(_) => {
+                // A slow output sink can outlive the socket's idle timeout.
+                // Retry the same read on the existing writer, retaining its snapshot.
+                let mut reconnected = daemon::Client::connect(data)?;
+                let page = reconnected.read(&request)?;
+                *client = reconnected;
+                page
+            }
+        };
+        if let Some((seq, digest)) = &snapshot {
+            if page.snapshot.head_seq != *seq || page.snapshot.head_digest != *digest {
+                return Err(LedgerError(
+                    "export snapshot changed during pagination".into(),
+                ));
+            }
+        } else {
+            snapshot = Some((page.snapshot.head_seq, page.snapshot.head_digest.clone()));
+        }
+        if !page.records.is_empty() || page.oversized_record.is_some() {
+            return Err(LedgerError(
+                "export received an invalid chunk response".into(),
+            ));
+        }
+        stdout.write_all(page.ndjson.as_bytes())?;
+        stdout.flush()?;
+        bytes_written += page.ndjson.len() as u64;
+        if page.done {
+            let status = json!({
+                "schema": "ouro.ledger.export/1",
+                "event": "finished",
+                "run_id": page.run_id,
+                "snapshot": page.snapshot,
+                "state": page.state,
+                "child_protection": page.child_protection,
+                "coverage": page.coverage,
+                "local_consistency": page.local_consistency,
+                "stream_status": page.stream_status,
+                "problems": page.problems,
+                "scanned_through_seq": page.scanned_through_seq,
+                "bytes_written": bytes_written,
+                "done": true,
+                "next_cursor": null,
+            });
+            let mut stderr = std::io::stderr().lock();
+            if args.json {
+                serde_json::to_writer(&mut stderr, &status)?;
+                writeln!(stderr)?;
+            } else {
+                writeln!(stderr, "{}", serde_json::to_string_pretty(&status)?)?;
+            }
+            return Ok(
+                if page.local_consistency
+                    && !matches!(page.stream_status.as_str(), "incomplete" | "corrupt")
+                {
+                    0
+                } else {
+                    1
+                },
+            );
+        }
+        let cursor = page
+            .next_cursor
+            .ok_or_else(|| LedgerError("unfinished export has no continuation cursor".into()))?;
+        if request.cursor.as_ref() == Some(&cursor) {
+            return Err(LedgerError("export cursor made no progress".into()));
+        }
+        if args.json {
+            let mut stderr = std::io::stderr().lock();
+            serde_json::to_writer(
+                &mut stderr,
+                &json!({
+                    "schema": "ouro.ledger.export/1",
+                    "event": "checkpoint",
+                    "run_id": request.run_id,
+                    "snapshot": page.snapshot,
+                    "state": page.state,
+                    "child_protection": page.child_protection,
+                    "coverage": page.coverage,
+                    "local_consistency": page.local_consistency,
+                    "stream_status": page.stream_status,
+                    "problems": page.problems,
+                    "bytes_written": bytes_written,
+                    "scanned_through_seq": page.scanned_through_seq,
+                    "done": false,
+                    "next_cursor": cursor,
+                }),
+            )?;
+            writeln!(stderr)?;
+        } else {
+            eprintln!(
+                "ouro-ledger: export checkpoint after {bytes_written} bytes; protection {}; stream {}; local consistency {}; cursor {cursor}",
+                ouro_records::records::escape_control(&page.child_protection),
+                ouro_records::records::escape_control(&page.stream_status),
+                page.local_consistency,
+            );
+        }
+        request.cursor = Some(cursor);
+    }
+}
+
 fn execute(cli: Cli) -> Result<i32> {
     let data = data_dir(cli.data_dir)?;
     match cli.command {
         Action::Version { json } => {
             output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT},"schema_frozen":false,"execution_platform":"linux"}),
+                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1"},"schema_frozen":false,"execution_platform":"linux"}),
                 json,
             )?;
             Ok(0)
@@ -256,6 +474,8 @@ fn execute(cli: Cli) -> Result<i32> {
                 Action::Show { run_id, json } => {
                     output(&serde_json::to_value(client.show(&run_id)?)?, json)?
                 }
+                Action::Query(args) => return query(&mut client, *args),
+                Action::Export(args) => return export(&mut client, &data, *args),
                 Action::Verify { run_id, json } => {
                     let reports = client.verify(run_id.as_deref())?;
                     let passed = reports.iter().all(|r| r.local_consistency);

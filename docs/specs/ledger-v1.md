@@ -1,4 +1,4 @@
-# Ledger v1: durable local admission, first execution slice
+# Ledger v1: durable local admission and bounded evidence readers
 
 This specification implements the first vertical slice of [North Star §5](../../north-star.md#5-ouro-ledger)
 and its [launch handshake](../../north-star.md#71-process-tree-and-admission).
@@ -9,7 +9,8 @@ events without attaching a probe or inventing an observation.
 The current slice provides a single local writer, stable preparation identities,
 one birth-identified launch owner, durable admission before gate release,
 authenticated event ingestion, canonical settlement, opt-in bounded captures,
-inspection, local chain verification and conservative orphan reconciliation.
+inspection, local chain verification, conservative orphan reconciliation,
+bounded single-run evidence queries and exact canonical NDJSON export.
 Linux execution is the acceptance target. macOS clients can read the local
 protocol and verify stores, but native launch ownership currently refuses because
 its birth-identity mechanism has not been implemented.
@@ -224,7 +225,91 @@ sink fails strict execution; forwarding completion has a two-second grace.
 Capture or forwarding failure records incomplete capture evidence and an unknown
 run outcome when the writer is reachable. Batch output uses independent sinks.
 
-## 7. Acceptance and remaining milestone 2 scope
+## 7. Bounded evidence readers
+
+`query` reads one run at a time through the authenticated local writer. Select
+exactly one class: `--execs`, `--paths`, `--hosts` or `--denials`. It returns the
+stored records, preserving their source fields, sequence, stage and provenance;
+it does not combine them into inferred actions or reconstruct file contents.
+
+| Selector | Included records |
+|---|---|
+| `--execs` | Source `proc.exec` and `proc.exit` events |
+| `--paths` | Source filesystem mutations and `fs.deny` events |
+| `--hosts` | Source network and proxy events, with their separate coverage classes |
+| `--denials` | Source events whose decision is deny, `fs.deny`, and owner `denied` records |
+
+An owner denial is an attributed admission decision, not an observed syscall.
+`--stage attempt|result` filters the original source stage and excludes owner
+records that have no source stage. The frozen source contract has these two
+stages; `decision` is a separate field. `--since` is inclusive and `--until`
+exclusive on the writer's `received_at`, not the source clock. Both bounds use
+whole-second UTC `YYYY-MM-DDTHH:MM:SSZ`. Dates must be valid and, when both bounds
+are present, `since` must precede `until`; equal or reversed bounds refuse.
+
+The page reports the run state, snapshot chain head, bounded coverage summary,
+`child_protection`, local consistency and stream health independently. An empty
+selection with unsupported or unobserved coverage says unobserved; it does not
+say that no action occurred. A `none` run remains unprotected. These local
+reader labels do not establish external custody or managed project authorization.
+The coverage summary includes `selection_status`: it is `unobserved` if any
+selected class lacks active coverage, including a mix of active and unsupported
+classes. This label does not erase known records returned by the query.
+
+`local_consistency` covers accepted records in the pinned snapshot checked so
+far. It is not a fresh check of the entire current file. Retrying the most recent
+cursor returns its cached, previously verified page even if the file has since
+changed. Reading a new page checks the live path, snapshot length and remaining
+record digests. Use `verify` for a fresh whole-stream check.
+
+Query pages default to 100 records and accept limits from 1 through 1,000. Each
+request scans at most 128 KiB and 32 frames, and returns at most 128 KiB of query
+records. Consequently an empty page can still have a continuation cursor:
+the scan may not yet have reached matching records. A legal matching record
+that cannot fit in the query response is identified by sequence and byte size;
+the cursor does not advance past it. Use exact NDJSON export to retrieve it.
+
+Pagination pins one run, filter, limit and snapshot head `(head_seq, head_digest)`.
+Later appends are outside that snapshot. The most recently consumed continuation
+cursor can be retried for the identical page; older positions refuse rather than
+retaining an unbounded page cache. Cursors are opaque reader positions, not
+bearer authorization.
+The writer retains at most 32 reader sessions, with a ten-minute expiry. Reader
+sessions are memory-only: restarting the writer or using an expired cursor
+refuses explicitly. Starting again creates a fresh snapshot; do not append that
+output to a partial export from the old snapshot.
+
+`export RUN --ndjson` reads all records, including preparation and owner intents.
+It writes the exact stored canonical UTF-8 bytes and LF delimiters to stdout,
+without reserialization, new fields or a new hash chain. No receipt side files,
+capture contents or vendor state are included. Status goes to stderr; `--json`
+emits NDJSON status events, not a single JSON value. A `checkpoint` event follows
+each fully written and flushed page and includes the next cursor; a `finished`
+event carries the final consistency, coverage, protection and stream labels.
+Preserve the status stream alongside the exported records.
+
+Export validates a complete record before releasing its bytes in chunks of at
+most 64 KiB. This supports a legal canonical record up to the existing 1 MiB
+frame bound without widening the socket response bound. It preserves the same
+snapshot head across chunks and supports `--cursor` within the live reader
+session. To resume after interrupted output, preserve exactly the stdout prefix
+identified by the last checkpoint's `bytes_written`, then append the resumed
+output to that prefix. Discard any later partial stdout, which has no checkpoint;
+otherwise retrying can duplicate bytes. `bytes_written` counts only the current
+CLI invocation. Truncated, noncanonical or corrupt history is never silently skipped:
+only its explicitly verified prefix can be returned, completion remains
+incomplete, and the CLI exits nonzero. A transport or cursor failure prints an
+escaped diagnostic and may have no JSON completion record. Partial stdout from a failed export must
+not be presented as a complete snapshot. `done` means the reader reached its
+snapshot boundary, not that the agent succeeded or the attempt settled.
+
+The [read request schema](ledger-v1/read-request.schema.json),
+[reader page schema](ledger-v1/read.schema.json) and
+[export status schema](ledger-v1/export.schema.json) describe this bounded local
+interface. Their fixtures are document contracts, not a production contract
+freeze or proof of an external custody boundary.
+
+## 8. Acceptance and remaining milestone 2 scope
 
 The Rust store tests exercise process-lifetime writer exclusion; lost replies
 and recovery; immutable prepare/request/effect identities; reserved admission
@@ -238,19 +323,23 @@ These are deterministic fault injections, not a physical full-disk experiment.
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
 capture truncation. A macOS unit-suite pass is not Linux containment evidence.
+Portable reader tests exercise class/stage/time filtering, bounded pages,
+snapshot/cursor identity, exact canonical export bytes and damaged-prefix
+reporting. CLI integration tests use the actual daemon and reader subprocesses;
+they do not launch a jail or establish Linux containment.
 The [contract validator](ledger-v1/validate_contract.py) checks versioned schemas
 and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
 unimplemented verbs/features: `append` for independent operator intents,
-`tail`, `query`, `diff`, `bundle`, `hold`, `release`, `gc`, `export`, retained
-deduplication/chain anchors, pagination, segment manifests, SQLite projection,
+`tail`, cross-run query and comparison, `diff`, `bundle`, `hold`, `release`, `gc`,
+retained deduplication/chain anchors, durable reader resume, segment manifests, SQLite projection,
 best-effort outage reconciliation, capture retention, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.
 
-## 8. Linux quickstart
+## 9. Linux quickstart
 
 Build both local executables from the repository root:
 
@@ -280,6 +369,12 @@ its independent outcome, coverage, protection and chain results:
   --data-dir /tmp/ouro-ledger-data show run_REPLACE_WITH_RETURNED_ID --json
 /absolute/checkout/target/release/ouro-ledger \
   --data-dir /tmp/ouro-ledger-data verify run_REPLACE_WITH_RETURNED_ID --json
+/absolute/checkout/target/release/ouro-ledger \
+  --data-dir /tmp/ouro-ledger-data query --run run_REPLACE_WITH_RETURNED_ID \
+  --execs --stage result --limit 100 --json
+/absolute/checkout/target/release/ouro-ledger \
+  --data-dir /tmp/ouro-ledger-data export run_REPLACE_WITH_RETURNED_ID \
+  --ndjson --json > records.ndjson 2> export-status.ndjson
 ```
 
 Batch JSON control has independent output sinks and is not mixed with raw child

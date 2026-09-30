@@ -82,12 +82,15 @@ separate feature from running a sandbox locally on the Mac.
 The first local `ouro-ledger` slice now reserves attempts, durably admits them
 before execution, ingests the jail's source events and records settlement.
 It includes inspection, local consistency verification, orphan reconciliation,
-and bounded opt-in output capture. The jail still works independently.
+bounded opt-in output capture, paginated evidence queries for one run, and
+export of the exact canonical NDJSON records. Query results retain their
+provenance and report coverage and protection separately from local consistency.
+The jail still works independently.
 
 The [ledger specification](specs/ledger-v1.md) names its current acceptance and
-limits. The complete milestone remains open: richer queries, comparisons,
-retention, export, best-effort recovery and managed project authorization are
-still planned.
+limits. The complete milestone remains open: cross-run queries, comparisons,
+retention, signed bundles, best-effort recovery and managed project authorization
+are still planned. A plain local export does not establish external custody.
 
 ## Later: submit work to a team worker
 

@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-read-request:1",
+  "title": "Single-run bounded reader request; cursors are not authorization",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "filter": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "enum": [
+            "all",
+            "execs",
+            "paths",
+            "hosts",
+            "denials"
+          ]
+        },
+        "stage": {
+          "enum": [
+            "attempt",
+            "result",
+            null
+          ]
+        },
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      },
+      "required": [
+        "selector",
+        "stage",
+        "since",
+        "until"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "selector": {
+                "const": "all"
+              }
+            },
+            "required": [
+              "selector"
+            ]
+          },
+          "then": {
+            "properties": {
+              "stage": {
+                "type": "null"
+              },
+              "since": {
+                "type": "null"
+              },
+              "until": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cursor": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    }
+  },
+  "required": [
+    "run_id",
+    "filter",
+    "cursor",
+    "limit"
+  ],
+  "additionalProperties": false
+}

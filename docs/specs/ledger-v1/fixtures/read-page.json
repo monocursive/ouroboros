@@ -1,0 +1,117 @@
+{
+  "schema": "ouro.ledger.read/1",
+  "run_id": "run_11111111111111111111111111111111",
+  "snapshot": {
+    "head_seq": 7,
+    "head_digest": "sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30"
+  },
+  "state": "settled",
+  "child_protection": "enforced",
+  "coverage": {
+    "scope": "snapshot_run",
+    "status": "by_class",
+    "classes": {
+      "exec": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 1,
+        "gap_count": 0
+      },
+      "fs.write": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "fs.deny": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "net": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "limits": {
+        "status": "active",
+        "sources": [
+          "wrapper"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "proxy.net": {
+        "status": "unsupported",
+        "sources": [],
+        "observed_count": null,
+        "gap_count": 0
+      }
+    },
+    "gap_count": 0,
+    "selection_status": "active"
+  },
+  "local_consistency": true,
+  "stream_status": "complete",
+  "problems": [],
+  "records": [
+    {
+      "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+      "decision": null,
+      "fields": {
+        "path": {
+          "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "kind": "digest",
+          "reason": "outside_known_roots"
+        },
+        "path_basis": "argument_snapshot",
+        "path_complete": true,
+        "pid": 1240,
+        "pid_start_ticks": 123460,
+        "syscall": "execve",
+        "tid": 1240
+      },
+      "kind": "source",
+      "monotonic_ns": "260000000",
+      "observed_at": "2026-09-21T12:00:00Z",
+      "operation": "proc.exec",
+      "outcome": {
+        "completion": "syscall_return",
+        "errno": "ENOENT",
+        "ok": false,
+        "return_value": -2
+      },
+      "prev": "sha256:486604c5ea8c50c4c1f3345d0eacc2b42cdf031e8fd4eb07ed50fae96457a9a9",
+      "provenance": {
+        "peer_birth": "boot:fixture:start:42",
+        "peer_pid": 41200,
+        "peer_uid": 1000,
+        "role": "producer",
+        "token_id": "ffffffffffffffffffffffffffffffff"
+      },
+      "received_at": "2026-09-30T12:00:01Z",
+      "request_id": "source:audit:1",
+      "run_id": "run_11111111111111111111111111111111",
+      "schema": "ouro.event/1",
+      "seq": 5,
+      "source": "audit",
+      "source_seq": 1,
+      "stage": "result"
+    }
+  ],
+  "ndjson": "",
+  "next_cursor": null,
+  "scanned_through_seq": 7,
+  "done": true,
+  "oversized_record": null
+}

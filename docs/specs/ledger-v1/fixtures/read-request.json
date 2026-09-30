@@ -1,0 +1,11 @@
+{
+  "run_id": "run_11111111111111111111111111111111",
+  "filter": {
+    "selector": "execs",
+    "stage": "result",
+    "since": "2026-09-30T00:00:00Z",
+    "until": "2026-10-01T00:00:00Z"
+  },
+  "cursor": null,
+  "limit": 100
+}

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-export:1",
+  "title": "NDJSON export status on stderr, separate from original canonical bytes",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.export/1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "snapshot": {
+      "$ref": "urn:ouro:schema:ledger-read:1#/$defs/chain"
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "admitted",
+        "denied",
+        "settled",
+        "outcome_unknown"
+      ]
+    },
+    "child_protection": {
+      "enum": [
+        "enforced",
+        "unprotected"
+      ]
+    },
+    "coverage": {
+      "$ref": "urn:ouro:schema:ledger-read:1#/$defs/coverage"
+    },
+    "local_consistency": {
+      "type": "boolean"
+    },
+    "stream_status": {
+      "enum": [
+        "complete",
+        "active",
+        "incomplete",
+        "corrupt"
+      ]
+    },
+    "problems": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 512
+      }
+    },
+    "scanned_through_seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "done": {
+      "type": "boolean"
+    },
+    "next_cursor": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event": {
+      "enum": [
+        "checkpoint",
+        "finished"
+      ]
+    },
+    "bytes_written": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "schema",
+    "run_id",
+    "snapshot",
+    "state",
+    "child_protection",
+    "coverage",
+    "local_consistency",
+    "stream_status",
+    "problems",
+    "scanned_through_seq",
+    "done",
+    "next_cursor",
+    "event",
+    "bytes_written"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "checkpoint"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "done": {
+            "const": false
+          },
+          "next_cursor": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "done": {
+            "const": true
+          },
+          "next_cursor": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

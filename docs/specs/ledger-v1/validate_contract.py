@@ -34,6 +34,65 @@ def expect_invalid(validator, instance, label):
     assert not validator.is_valid(instance), f"invalid fixture accepted: {label}"
 
 
+def reader_fixtures(validators, records, run):
+    request = read("read-request.json")
+    page = read("read-page.json")
+    unobserved = read("read-page-unobserved.json")
+    incomplete = read("read-page-incomplete.json")
+    finished = read("export-finished.json")
+    checkpoint = read("export-checkpoint.json")
+    for name, instance in [("read-request", request), ("read", page),
+                           ("read", unobserved), ("read", incomplete),
+                           ("export", finished), ("export", checkpoint)]:
+        validators[name].validate(instance)
+    assert page["records"] == [records[4]], "reader altered stored source attribution"
+    assert page["snapshot"] == finished["snapshot"] == checkpoint["snapshot"] == run["chain"]
+    assert page["child_protection"] == run["child_protection"]
+    assert len(page["ndjson"].encode("utf-8")) <= 65536
+    assert sum(len(rfc8785.dumps(record)) + 1 for record in page["records"]) <= 131072
+    canonical_bytes = (ROOT / "fixtures/exec-failure-records.ndjson").read_bytes()
+    assert finished["bytes_written"] == len(canonical_bytes)
+    assert checkpoint["bytes_written"] == len(canonical_bytes.splitlines(keepends=True)[0])
+    assert unobserved["records"] == [] and unobserved["coverage"]["selection_status"] == "unobserved"
+    assert unobserved["child_protection"] == "unprotected"
+    assert incomplete["records"] == page["records"] and not incomplete["local_consistency"]
+    assert incomplete["stream_status"] == "incomplete" and incomplete["problems"]
+
+    for limit in [0, 1001]:
+        altered = copy.deepcopy(request)
+        altered["limit"] = limit
+        expect_invalid(validators["read-request"], altered, "unbounded reader limit")
+    for label, key, value in [("caller principal", "principal", "forged"),
+                              ("cursor shape", "cursor", "arbitrary-token")]:
+        altered = copy.deepcopy(request)
+        altered[key] = value
+        expect_invalid(validators["read-request"], altered, label)
+    for label, key, value in [("decision is not a stage", "stage", "decision"),
+                              ("filtered full export", "selector", "all"),
+                              ("invalid calendar date", "since", "2026-02-30T12:00:00Z")]:
+        altered = copy.deepcopy(request)
+        altered["filter"][key] = value
+        expect_invalid(validators["read-request"], altered, label)
+    altered = copy.deepcopy(page)
+    altered["records"][0]["inferred_action"] = "exec succeeded"
+    expect_invalid(validators["read"], altered, "embellished source record")
+    altered = copy.deepcopy(page)
+    altered["ndjson"] = "{}\n"
+    expect_invalid(validators["read"], altered, "mixed query and export payload")
+    altered = copy.deepcopy(page)
+    altered["coverage"]["classes"]["exec"]["observed_count"] = "unbounded payload"
+    expect_invalid(validators["read"], altered, "non-numeric observed count")
+    altered = copy.deepcopy(finished)
+    altered["next_cursor"] = "f" * 64
+    expect_invalid(validators["export"], altered, "finished status retains a cursor")
+    altered = copy.deepcopy(checkpoint)
+    altered["done"] = True
+    expect_invalid(validators["export"], altered, "checkpoint claims completion")
+    altered = copy.deepcopy(finished)
+    altered["ndjson"] = canonical_bytes.decode()
+    expect_invalid(validators["export"], altered, "record bytes in status metadata")
+
+
 def main():
     jail_schemas = jail.load_schemas(JAIL)
     ledger_schemas = jail.load_schemas(ROOT)
@@ -97,6 +156,7 @@ def main():
     assert not jail.semantic_receipt(receipt)
     assert not jail.semantic_trace(trace)
     assert not jail.trace_ends_with(trace, receipt)
+    reader_fixtures(validators, failure_records, failure_run)
     for label, path, value in [
         ("generic admitted refusal", ["outcome", "kind"], "refused"),
         ("exec observed in refused receipt", ["exec_observed"], True),
@@ -141,7 +201,7 @@ def main():
     altered = copy.deepcopy(canonical_source)
     altered["fields"]["transition"] = "changed"
     assert digest(altered) != digest(canonical_source)
-    print("Ledger schemas, source preservation, canonical bytes, chain and privacy fixtures pass.")
+    print("Ledger schemas, bounded readers, source preservation, canonical bytes, chain and privacy fixtures pass.")
     print("Document contract only; no live durability, launch or containment is tested.")
 
 

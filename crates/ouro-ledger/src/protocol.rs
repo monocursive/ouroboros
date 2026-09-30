@@ -54,7 +54,7 @@ pub struct Peer {
     pub boot_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Chain {
     pub head_seq: u64,
@@ -91,6 +91,75 @@ pub struct VerifyReport {
     pub problems: Vec<String>,
 }
 
+pub const MAX_READ_LIMIT: u32 = 1000;
+pub const READ_SCAN_BYTES: usize = 131_072;
+pub const READ_SCAN_FRAMES: usize = 32;
+pub const READ_OUTPUT_BYTES: usize = 131_072;
+pub const READ_CHUNK_BYTES: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadSelector {
+    All,
+    Execs,
+    Paths,
+    Hosts,
+    Denials,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadStage {
+    Attempt,
+    Result,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadFilter {
+    pub selector: ReadSelector,
+    pub stage: Option<ReadStage>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadRequest {
+    pub run_id: String,
+    pub filter: ReadFilter,
+    pub cursor: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OversizedRecord {
+    pub seq: u64,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPage {
+    pub schema: String,
+    pub run_id: String,
+    pub snapshot: Chain,
+    pub state: String,
+    pub child_protection: String,
+    pub coverage: Value,
+    pub local_consistency: bool,
+    pub stream_status: String,
+    pub problems: Vec<String>,
+    pub records: Vec<Value>,
+    /// Exact canonical NDJSON fragments; concatenate pages of one snapshot.
+    pub ndjson: String,
+    pub next_cursor: Option<String>,
+    pub scanned_through_seq: u64,
+    pub done: bool,
+    pub oversized_record: Option<OversizedRecord>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
@@ -120,6 +189,9 @@ pub enum Request {
     Runs,
     Verify {
         run_id: Option<String>,
+    },
+    Read {
+        request: ReadRequest,
     },
     Ping,
     SettleOrphans,

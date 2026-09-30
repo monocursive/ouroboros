@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::{
     protocol::{
-        AppendReceipt, ClaimedOwner, LedgerError, MAX_CONNECTIONS, MAX_FRAME_BYTES, Peer, Request,
-        Response, Result, RunRecord, VerifyReport,
+        AppendReceipt, ClaimedOwner, LedgerError, MAX_CONNECTIONS, MAX_FRAME_BYTES, Peer, ReadPage,
+        ReadRequest, Request, Response, Result, RunRecord, VerifyReport,
     },
     store::Store,
 };
@@ -120,6 +120,11 @@ impl Client {
     pub fn verify(&mut self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
         self.request(Request::Verify {
             run_id: run_id.map(str::to_owned),
+        })
+    }
+    pub fn read(&mut self, request: &ReadRequest) -> Result<ReadPage> {
+        self.request(Request::Read {
+            request: request.clone(),
         })
     }
     pub fn settle_orphans(&mut self) -> Result<Vec<RunRecord>> {
@@ -333,6 +338,7 @@ fn dispatch(
         Request::Show { run_id } => Ok(serde_json::to_value(store.show(&run_id)?)?),
         Request::Runs => Ok(serde_json::to_value(store.runs())?),
         Request::Verify { run_id } => Ok(serde_json::to_value(store.verify(run_id.as_deref())?)?),
+        Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
             json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false}),
         ),

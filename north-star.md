@@ -679,7 +679,9 @@ Implementation status 2026-09-30: the [first local execution slice](docs/specs/l
 provides a durable single writer, preparation and replay identities, gated Linux
 launch ownership, source ingestion, settlement, bounded opt-in output capture,
 inspection, verification and orphan reconciliation. Its schema is not frozen.
-Query, retention, export, best-effort recovery and managed authorization remain
+Bounded single-run queries preserve source records and their evidence labels;
+plain NDJSON export preserves exact canonical bytes. Cross-run query, comparisons,
+retention, signed bundles, best-effort recovery and managed authorization remain
 open; the complete milestone-2 contract below is not yet implemented.
 
 The ledger joins authorisation and attributed observation into one ordered record,

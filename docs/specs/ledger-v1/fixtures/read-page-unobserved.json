@@ -1,0 +1,26 @@
+{
+  "schema": "ouro.ledger.read/1",
+  "run_id": "run_11111111111111111111111111111111",
+  "snapshot": {
+    "head_seq": 1,
+    "head_digest": "sha256:995d8cffb5c2ab694a06451e7633a30230a77d6c65d3842acd3811a029cbcba6"
+  },
+  "state": "prepared",
+  "child_protection": "unprotected",
+  "coverage": {
+    "scope": "snapshot_run",
+    "status": "unobserved",
+    "classes": {},
+    "gap_count": 0,
+    "selection_status": "unobserved"
+  },
+  "local_consistency": true,
+  "stream_status": "active",
+  "problems": [],
+  "records": [],
+  "ndjson": "",
+  "next_cursor": null,
+  "scanned_through_seq": 1,
+  "done": true,
+  "oversized_record": null
+}

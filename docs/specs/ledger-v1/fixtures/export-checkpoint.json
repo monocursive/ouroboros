@@ -1,0 +1,72 @@
+{
+  "schema": "ouro.ledger.export/1",
+  "run_id": "run_11111111111111111111111111111111",
+  "snapshot": {
+    "head_seq": 7,
+    "head_digest": "sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30"
+  },
+  "state": "settled",
+  "child_protection": "enforced",
+  "coverage": {
+    "scope": "snapshot_run",
+    "status": "by_class",
+    "classes": {
+      "exec": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 1,
+        "gap_count": 0
+      },
+      "fs.write": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "fs.deny": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "net": {
+        "status": "active",
+        "sources": [
+          "audit"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "limits": {
+        "status": "active",
+        "sources": [
+          "wrapper"
+        ],
+        "observed_count": 0,
+        "gap_count": 0
+      },
+      "proxy.net": {
+        "status": "unsupported",
+        "sources": [],
+        "observed_count": null,
+        "gap_count": 0
+      }
+    },
+    "gap_count": 0,
+    "selection_status": "unobserved"
+  },
+  "local_consistency": true,
+  "stream_status": "complete",
+  "problems": [],
+  "next_cursor": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "scanned_through_seq": 1,
+  "done": false,
+  "event": "checkpoint",
+  "bytes_written": 893
+}
