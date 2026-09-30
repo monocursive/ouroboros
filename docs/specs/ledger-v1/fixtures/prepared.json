@@ -1,0 +1,42 @@
+{
+  "schema": "ouro.ledger.event/1",
+  "run_id": "run_11111111111111111111111111111111",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "seq": 1,
+  "prev": null,
+  "received_at": "2026-09-30T12:00:00Z",
+  "provenance": {
+    "role": "operator",
+    "peer_uid": 1000,
+    "peer_pid": 41200,
+    "peer_birth": "boot:fixture:start:42",
+    "token_id": null
+  },
+  "kind": "prepared",
+  "request_id": "prepare:fixture",
+  "body": {
+    "request_id": "fixture",
+    "payload": {
+      "schema": "ouro.ledger.request/1",
+      "profile": "tool",
+      "argv_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "jail_image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "requirements": [
+        "tree_termination",
+        "closed_set_observation"
+      ],
+      "evidence": "strict",
+      "io": {
+        "mode": "batch",
+        "pty": false
+      },
+      "capture": {
+        "streams": [
+          "stdout"
+        ],
+        "limit_bytes": 32
+      }
+    }
+  }
+}

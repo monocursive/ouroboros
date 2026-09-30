@@ -95,7 +95,7 @@ fn pinned_channel() -> String {
 /// build.rs documents too: SHA-256 over every file under
 /// `crates/ouro-jail/src` plus `crates/ouro-jail/build.rs`,
 /// `crates/ouro-jail/Cargo.toml`, `Cargo.toml`, `Cargo.lock` and
-/// `rust-toolchain.toml` and embedded `profiles/` data, sorted by their `/`-separated path relative to the
+/// `rust-toolchain.toml`, the shared records crate and embedded `profiles/` data, sorted by their `/`-separated path relative to the
 /// repository root, each as `path NUL u64-LE(length) bytes`.
 fn build_inputs_digest() -> String {
     use sha2::Digest as _;
@@ -103,6 +103,7 @@ fn build_inputs_digest() -> String {
     let mut files: Vec<String> = [
         "crates/ouro-jail/build.rs",
         "crates/ouro-jail/Cargo.toml",
+        "crates/ouro-records/Cargo.toml",
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
@@ -112,6 +113,7 @@ fn build_inputs_digest() -> String {
     let mut stack = vec![
         root.join("crates/ouro-jail/src"),
         root.join("crates/ouro-jail/profiles"),
+        root.join("crates/ouro-records/src"),
     ];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).expect("readable") {

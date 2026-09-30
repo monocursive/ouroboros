@@ -25,3 +25,11 @@ unmaintained = "all"
 name = "webpki-roots"
 version = "=1.0.9"
 allow = ["CDLA-Permissive-2.0"]
+
+# Frozen-schema validation now runs in the ledger, so this previously test-only
+# URI helper enters the runtime graph. Its checked-in MIT No Attribution text
+# permits redistribution; keep the exception confined to the locked version.
+[[licenses.exceptions]]
+name = "borrow-or-share"
+version = "=0.2.4"
+allow = ["MIT-0"]

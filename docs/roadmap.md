@@ -33,10 +33,12 @@ tap are not yet available.
 A new user should be able to install the jail, check their host, and run a
 command without having to understand the whole implementation first.
 
-The packaging and signature-verification tools work locally. The next
-onboarding check is a clean Linux VM with no Rust toolchain: install, run a
-sandboxed command, then run OpenCode, aiming for under ten minutes. That is
-an acceptance target, not a measured install time.
+The packaging and signature-verification tools work locally. A
+[clean Ubuntu 26.04.1 VM](benchmarks/jail/onboarding-2026-09-30.md), with no Rust
+toolchain, completed signed installation, a sandboxed command and a real
+OpenCode run in 67.32 seconds. The record names the exact build and host and
+preserves the unsuccessful Ubuntu 22 and stock Ubuntu 24 attempts. This local
+package test does not establish public release availability or wider support.
 
 Before public distribution, we also need to choose the release repository,
 Homebrew tap, and production signing identity. Until those are configured,
@@ -75,14 +77,17 @@ security settings and passes the failure tests. Inspection commands remain
 useful in the meantime. A future Mac client that submits work to Linux is a
 separate feature from running a sandbox locally on the Mac.
 
-## Later: keep useful records across runs
+## In progress: keep useful records across runs
 
-Today, each attempt has its own receipt and journal. A run ledger would make
-it easier to find an earlier attempt, compare outcomes, and export the
-records needed for a review.
+The first local `ouro-ledger` slice now reserves attempts, durably admits them
+before execution, ingests the jail's source events and records settlement.
+It includes inspection, local consistency verification, orphan reconciliation,
+and bounded opt-in output capture. The jail still works independently.
 
-Retention and export controls are part of that plan. This work builds on the
-existing receipts; it is not implemented yet.
+The [ledger specification](specs/ledger-v1.md) names its current acceptance and
+limits. The complete milestone remains open: richer queries, comparisons,
+retention, export, best-effort recovery and managed project authorization are
+still planned.
 
 ## Later: submit work to a team worker
 
@@ -90,6 +95,10 @@ A managed worker would let a developer submit a task to a company-controlled
 Linux machine under project policy, then receive artifacts and test results
 to review. The first target is one worker with a submission client, including
 for developers on Macs.
+
+The [pilot preparation record](benchmarks/managed/pilot-plan-2026-09-30.md)
+names the repository, team, model-service and deployment decisions still needed,
+and the implementation gates that follow the ledger prerequisites.
 
 After the single-worker workflow is proved, multiple workers could share
 and report work across a fleet. Both stages are planned. The standalone jail

@@ -22,7 +22,7 @@ pub mod pipes;
 pub mod readback;
 // The product's RFC 8785 serializer, included by path for the same reason:
 // the receipt digest a trace note carries is over these canonical bytes.
-#[path = "../../../ouro-jail/src/canonical/jcs.rs"]
+#[path = "../../../ouro-records/src/canonical/jcs.rs"]
 pub mod jcs;
 pub mod tempdir;
 pub mod unix_probe;

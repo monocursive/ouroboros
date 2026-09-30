@@ -3644,6 +3644,8 @@ reason = "an `ignore` doc example"
             "base64",
             "clap",
             "libc",
+            // The frozen receipt/event types and canonical encoding, shared with the ledger.
+            "ouro-records",
             // Shared HTTP vault transport and in-memory CA, no vendor protocol.
             "rcgen",
             "rustls",

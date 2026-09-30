@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-request:1",
+  "title": "Ledger immutable request plan, first execution slice",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.request/1"
+    },
+    "profile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "argv_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "jail_image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "requirements": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_.:-]+$"
+      }
+    },
+    "evidence": {
+      "enum": [
+        "strict",
+        "best-effort"
+      ]
+    },
+    "io": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "batch",
+            "foreground"
+          ]
+        },
+        "pty": {
+          "const": false
+        }
+      },
+      "required": [
+        "mode",
+        "pty"
+      ],
+      "additionalProperties": false
+    },
+    "capture": {
+      "type": "object",
+      "properties": {
+        "streams": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "stdout",
+              "stderr"
+            ]
+          }
+        },
+        "limit_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        }
+      },
+      "required": [
+        "streams",
+        "limit_bytes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "profile",
+    "argv_digest",
+    "policy_digest",
+    "jail_image_digest",
+    "requirements",
+    "evidence",
+    "io",
+    "capture"
+  ]
+}

@@ -174,15 +174,29 @@ before it could be confirmed. Their timings are included; they are not
 successful run receipts. See the [method and raw results](docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
 and [validation record](docs/benchmarks/jail/README.md).
 
+## Local ledger work
+
+The first `ouro-ledger` slice is available in source. It reserves one attempt,
+records admission durably before releasing the jail's execution gate, stores
+source events and settlement, and supports `runs`, `show`, `verify`, and
+`settle-orphans`. Output capture is opt-in and bounded. Linux owns execution;
+macOS supports local store inspection. The jail still works independently.
+
+See the [ledger specification and commands](docs/specs/ledger-v1.md). The full
+ledger milestone remains open: query, retention, export, best-effort recovery,
+and managed project authorization are not implemented.
+
 ## Planned work
 
-- **Next:** clean-VM onboarding, signed public distribution, more agent/version
-  compatibility records, and benchmarks refreshed against a committed build.
+- **Next:** complete the ledger acceptance and remaining verbs, signed public
+  distribution, more agent/version compatibility records, and benchmarks
+  refreshed against a committed build. [Clean-VM onboarding](docs/benchmarks/jail/onboarding-2026-09-30.md)
+  completed in 67.32 seconds on the documented Ubuntu 26.04.1 combination.
 - **Research:** native macOS execution, including process-tree cleanup when the
   supervising helper dies. Apple entitlement approval is also pending; approval
   alone does not resolve the cleanup blocker.
-- **Later:** a shared run ledger, retention and export controls, and
-  company-managed Linux workers, starting with one worker before a fleet.
+- **Later:** ledger retention and export controls, and company-managed Linux
+  workers, starting with one worker before a fleet.
 
 These are planned features with no release dates. See the [roadmap](docs/roadmap.md),
 [north star](north-star.md), and [managed-teams specification](docs/specs/managed-teams-v1.md).
@@ -195,6 +209,7 @@ acceptance gates.
 
 ```sh
 uv run docs/specs/jail-v1/validate_contract.py
+uv run docs/specs/ledger-v1/validate_contract.py
 uv run docs/specs/managed-teams-v1/validate_policy.py
 uv run docs/specs/validate_links.py
 cargo +1.98.1 fmt --all -- --check

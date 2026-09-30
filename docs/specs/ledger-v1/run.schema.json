@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-run:1",
+  "title": "Rebuildable local run projection",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.run/1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^att_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "payload": {
+      "$ref": "urn:ouro:schema:ledger-request:1"
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "admitted",
+        "denied",
+        "settled",
+        "outcome_unknown"
+      ],
+      "description": "Settled means a durably recorded terminal result after admission, including a proved exec_error; it does not imply success. Denied is a refusal before ledger admission."
+    },
+    "child_protection": {
+      "enum": [
+        "enforced",
+        "unprotected"
+      ]
+    },
+    "owner": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "uid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "birth": {
+              "type": "string",
+              "minLength": 1
+            },
+            "boot_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "uid",
+            "pid",
+            "birth",
+            "boot_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Terminal owner/receipt outcome. Source operation outcomes remain on their canonical source events and never replace this projection."
+    },
+    "coverage": {
+      "type": "object"
+    },
+    "settlement": {
+      "enum": [
+        "pending",
+        "recorded"
+      ]
+    },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:ouro:schema:jail-receipt:1"
+      }
+    },
+    "capture": {
+      "type": "object"
+    },
+    "chain": {
+      "type": "object",
+      "properties": {
+        "head_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "head_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "head_seq",
+        "head_digest"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "attempt_id",
+    "request_id",
+    "payload",
+    "state",
+    "child_protection",
+    "owner",
+    "outcome",
+    "coverage",
+    "settlement",
+    "receipts",
+    "capture",
+    "chain"
+  ]
+}

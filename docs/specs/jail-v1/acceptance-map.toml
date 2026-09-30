@@ -2813,7 +2813,7 @@ tag = "portable"
 lane = "macos"
 tests = [
   "ouro-fixture/src/lib.rs::bounded::tests::a_read_never_writes_past_the_buffer_it_was_given",
-  "ouro-jail/src/lib.rs::canonical::tests::argv_framing_is_length_prefixed_not_delimited",
+  "ouro-records/src/lib.rs::canonical::tests::argv_framing_is_length_prefixed_not_delimited",
   "ouro-jail/tests/portable_canonical.rs::p01_both_canonical_inputs_resolve_to_the_golden_snapshot",
   "ouro-jail/tests/portable_gate.rs::x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever",
   "ouro-jail/tests/portable_gc.rs::j4_c03_a_foreign_os_or_architecture_is_retained",
@@ -3206,4 +3206,9 @@ lane = "macos"
 [[ignored]]
 test = "ouro-fixture/doc::crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail"
 reason = "an `ignore` doc example"
+lane = "macos"
+
+[[ignored]]
+test = "ouro-jail/src/lib.rs::platform::linux::seccomp::tests::bless_the_pinned_seccomp_tables"
+reason = "writes the pinned seccomp evidence tables; run deliberately"
 lane = "macos"

@@ -1,0 +1,1505 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.event/1"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^att_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "source": {
+      "enum": [
+        "wrapper",
+        "audit",
+        "proxy"
+      ]
+    },
+    "source_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "monotonic_ns": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "operation": {
+      "enum": [
+        "proc.exec",
+        "proc.exit",
+        "fs.create",
+        "fs.write",
+        "fs.rename",
+        "fs.unlink",
+        "fs.deny",
+        "net.connect",
+        "net.dns",
+        "limit.hit",
+        "jail.receipt",
+        "intent.admitted",
+        "intent.denied",
+        "intent.settled",
+        "note"
+      ]
+    },
+    "stage": {
+      "enum": [
+        "attempt",
+        "result"
+      ]
+    },
+    "decision": {
+      "enum": [
+        "allow",
+        "deny",
+        null
+      ]
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/outcome"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fields": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "raw_argv",
+            "raw_environment",
+            "credential_contents"
+          ]
+        }
+      }
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "prev": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "const": "producer"
+        },
+        "peer_uid": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "peer_pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "peer_birth": {
+          "type": "string",
+          "minLength": 1
+        },
+        "token_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "peer_uid",
+        "peer_pid",
+        "peer_birth",
+        "token_id"
+      ],
+      "additionalProperties": false
+    },
+    "kind": {
+      "const": "source"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    }
+  },
+  "required": [
+    "schema",
+    "attempt_id",
+    "source",
+    "source_seq",
+    "observed_at",
+    "monotonic_ns",
+    "operation",
+    "stage",
+    "decision",
+    "outcome",
+    "fields",
+    "run_id",
+    "seq",
+    "prev",
+    "received_at",
+    "provenance",
+    "kind",
+    "request_id"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-source:1",
+  "title": "Canonical source envelope plus authenticated writer metadata",
+  "description": "Frozen at jail milestone 1 (jail-v1 §13, §17). The shared envelope and the meaning of the audit and proxy sources; jail-event.schema.json restricts it to what the jail writes. Stream rules (source_seq, one attempt, receipt-note order) and native byte strings are ouro_jail::records::semantic and validate_contract.py over fixtures/semantic-cases.json.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "attempt"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "$ref": "#/$defs/outcome"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "proc.exec",
+              "proc.exit",
+              "fs.create",
+              "fs.write",
+              "fs.rename",
+              "fs.unlink",
+              "fs.deny",
+              "net.connect"
+            ]
+          },
+          "decision": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "net.connect",
+              "net.dns"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "fs.deny"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "stage": {
+            "const": "result"
+          },
+          "outcome": {
+            "properties": {
+              "ok": {
+                "const": false
+              },
+              "errno": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "ok",
+              "errno"
+            ]
+          },
+          "fields": {
+            "properties": {
+              "attempted_operation": {
+                "enum": [
+                  "proc.exec",
+                  "fs.create",
+                  "fs.write",
+                  "fs.rename",
+                  "fs.unlink",
+                  "net.connect"
+                ]
+              }
+            },
+            "required": [
+              "attempted_operation"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1808-1813 (§13.1) and O01: an audit result's outcome is ok, return_value, errno and a syscall-side completion kind; proxy counters are proxy-only, so no audit event asserts bytes written.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "required": [
+              "return_value",
+              "errno"
+            ],
+            "properties": {
+              "completion": {
+                "enum": [
+                  "syscall_return",
+                  "exec_transition",
+                  "process_exit"
+                ]
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "bytes_in"
+                  ]
+                },
+                {
+                  "required": [
+                    "bytes_out"
+                  ]
+                },
+                {
+                  "required": [
+                    "duration_ms"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1809-1810 (§13.1), :1421 and :1446-1448 (§11.2): an exec transition is a confirmed new image: only proc.exec has one, and it is a success without an errno.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "exec_transition"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "proc.exec"
+          },
+          "outcome": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "errno": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1421 (§11.2): never infer exec success from an entry; a successful proc.exec is the confirmed transition, never a syscall return.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "proc.exec"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "completion": {
+                "const": "exec_transition"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1422 (§11.2) and :1454-1455 (§11.4): process_exit is the final thread-group death, which only proc.exit reports.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "process_exit"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "proc.exit"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1422 (§11.2): an audit proc.exit result is a process exit, not a syscall return.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "proc.exit"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "operation",
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "completion": {
+                "const": "process_exit"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1445 (§11.2) and :1808 (§13.1): a syscall return states its raw return and its errno, and a success has no errno while a failure names one. The sign of the raw return is the Linux convention and is in jail-event.schema.json (§13.2:1901-1903).",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "syscall_return"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "required": [
+              "return_value",
+              "errno"
+            ],
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "return_value": {
+                "type": "integer"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "errno": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "errno": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1432-1436 (§11.2): attempted_operation is the classification field of an fs.deny result and of nothing else.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "not": {
+              "const": "fs.deny"
+            }
+          }
+        },
+        "required": [
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "not": {
+              "required": [
+                "attempted_operation"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1811-1813 (§13.1): a proxy connect result describes connect status, counters and duration, closed by the proxy.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          },
+          "operation": {
+            "const": "net.connect"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "operation",
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "required": [
+              "bytes_in",
+              "bytes_out",
+              "duration_ms"
+            ],
+            "properties": {
+              "completion": {
+                "const": "proxy_close"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1811-1813 (§13.1): proxy counters and a proxy close belong to the proxy source; consumers must not equate proxy bytes with file bytes.",
+      "if": {
+        "properties": {
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "proxy_close"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "note",
+              "jail.receipt"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "net.connect"
+          },
+          "stage": {
+            "const": "result"
+          },
+          "decision": {
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "not": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "net.dns",
+              "limit.hit",
+              "intent.admitted",
+              "intent.denied",
+              "intent.settled"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "§13.1 names a completion kind for audit results (jail-v1.md:1808-1810) and describes proxy outcomes by their counters (:1811-1813); the spec names no completion for a wrapper fact, and the jail writes `wrapper` on every one of its own facts (records.rs constructors). O01: no event but a proxy result carries byte counters. The value is a producer-contract choice (J5-C spec proposal §2).",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "outcome": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "completion": {
+                "const": "wrapper"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "bytes_in"
+                  ]
+                },
+                {
+                  "required": [
+                    "bytes_out"
+                  ]
+                },
+                {
+                  "required": [
+                    "duration_ms"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1790-1791 (§13.1): a coverage gap is a wrapper note with the classes, the interval, a reason and a known-or-null count.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "coverage_gap"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "fields",
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "classes",
+              "start_ns",
+              "end_ns",
+              "reason",
+              "lost_count"
+            ],
+            "properties": {
+              "classes": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "exec",
+                    "fs.write",
+                    "fs.deny",
+                    "net",
+                    "proxy.net",
+                    "limits"
+                  ]
+                },
+                "uniqueItems": true
+              },
+              "source": {
+                "enum": [
+                  "wrapper",
+                  "audit",
+                  "proxy"
+                ]
+              },
+              "start_ns": {
+                "$ref": "#/$defs/decimal"
+              },
+              "end_ns": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/decimal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "lost_count": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1792-1794 (§13.1) and :932-934 (§8.2): a receipt update is a wrapper jail.receipt event naming the receipt's phase and its canonical sha256 digest.",
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "jail.receipt"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "phase",
+              "receipt_digest"
+            ],
+            "properties": {
+              "phase": {
+                "enum": [
+                  "prepared",
+                  "enforced",
+                  "settled",
+                  "refused"
+                ]
+              },
+              "receipt_digest": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1799-1800 (§13.1): a lifecycle note carries a safe named transition: a name, never free text.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "lifecycle"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "fields",
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "transition"
+            ],
+            "properties": {
+              "transition": {
+                "$ref": "#/$defs/name"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1412-1413 (§11.2): a successful exec's proc.exec names its call in fields.syscall. The one exception the product writes is an exec transition whose entry the observer did not follow (the in-flight bound, or a process seized inside its own execve): it has no call and no path to name, so it carries no syscall and the path {unavailable, argument_not_read} (j4_tracer_precision_linux.rs non-leader exec tests; J5-C spec proposal §2).",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "proc.exec"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "exec_transition"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "properties": {
+              "syscall": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "syscall"
+                ]
+              },
+              {
+                "properties": {
+                  "path": {
+                    "const": {
+                      "kind": "unavailable",
+                      "reason": "argument_not_read"
+                    }
+                  }
+                },
+                "required": [
+                  "path"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1489-1491 (§11.2): an fs.write result always carries its precise action, so it cannot be presented as a content diff.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "operation": {
+            "const": "fs.write"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "operation",
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1516-1519 (§11.3): every audit result carries fields.pid (host thread-group id) and fields.pid_start_ticks (null if unknown).",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "stage": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "source",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "pid",
+              "pid_start_ticks"
+            ],
+            "properties": {
+              "pid": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pid_start_ticks": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1496-1505 (§11.3): a path is workspace-relative only when that relationship is established, otherwise a digest or an unavailable marker with a reason; its basis and completeness are recorded, and both paths of a two-path call independently.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/path"
+              },
+              "path2": {
+                "$ref": "#/$defs/path"
+              },
+              "path_basis": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path_complete": {
+                "type": "boolean"
+              },
+              "path2_complete": {
+                "type": "boolean"
+              },
+              "path_dirfd": {
+                "type": "integer"
+              },
+              "path2_dirfd": {
+                "type": "integer"
+              }
+            },
+            "dependentRequired": {
+              "path": [
+                "path_basis",
+                "path_complete"
+              ],
+              "path2": [
+                "path_basis",
+                "path2_complete"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1445 (§11.2): the observer records the signed raw Linux return: a success is non-negative, a failure is the negated errno (§13.2:1901-1903 keeps that convention out of the shared envelope).",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "completion": {
+                "const": "syscall_return"
+              }
+            },
+            "required": [
+              "completion"
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "return_value": {
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "ok": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "return_value": {
+                      "maximum": -1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1427 and :1432-1435 (§11.2): in linux-closed-v1 a covered EACCES/EPERM result is one fs.deny, never a success-shaped or failed result of the original operation.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "audit"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "errno": {
+                "enum": [
+                  "EACCES",
+                  "EPERM"
+                ]
+              }
+            },
+            "required": [
+              "errno"
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "fs.deny"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-v1.md:1427 (§11.2): an fs.deny of linux-closed-v1 is a call that returned EACCES or EPERM.",
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "fs.deny"
+          },
+          "outcome": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "operation",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "errno": {
+                "enum": [
+                  "EACCES",
+                  "EPERM"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "outcome": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "return_value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errno": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completion": {
+          "enum": [
+            "syscall_return",
+            "exec_transition",
+            "process_exit",
+            "proxy_close",
+            "wrapper"
+          ]
+        },
+        "bytes_in": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "bytes_out": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "ok",
+        "completion"
+      ],
+      "additionalProperties": false
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "native_string": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[^\\u0000]*$"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "encoding": {
+              "const": "base64"
+            },
+            "data": {
+              "type": "string",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            }
+          },
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "path": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "workspace_relative",
+                "scratch_relative"
+              ]
+            },
+            "value": {
+              "$ref": "#/$defs/native_string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "digest"
+            },
+            "digest": {
+              "$ref": "#/$defs/sha256"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "digest",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

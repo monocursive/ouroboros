@@ -1,0 +1,201 @@
+{
+  "schema": "ouro.jail.onboarding/1",
+  "status": "blocked",
+  "expected_revision": "41d8c230716877b5da6e6db3220017b7eb685344",
+  "rows": [
+    {
+      "name": "host",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -a; cat /etc/os-release; systemd-detect-virt; id; getconf GNU_LIBC_VERSION; bwrap --version; minisign -v; cat /proc/sys/kernel/yama/ptrace_scope; cat /proc/sys/user/max_user_namespaces; cat /proc/sys/kernel/unprivileged_userns_clone; cat /proc/self/cgroup; cat /etc/machine-id; cat /proc/sys/kernel/random/boot_id"
+      ],
+      "seconds": 0.1282904500000086,
+      "exit": 0
+    },
+    {
+      "name": "virtualization",
+      "argv": [
+        "systemd-detect-virt"
+      ],
+      "seconds": 0.0332463389999873,
+      "exit": 0
+    },
+    {
+      "name": "install",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "artifacts",
+        "--public-key",
+        "RWQfzSONjQPC9VRG597whEhS7d6HpXwxdtO0nrShZY7ik/3zFL0U1xuP",
+        "--yes"
+      ],
+      "seconds": 1.3526512280000134,
+      "exit": 0
+    },
+    {
+      "name": "version",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "version",
+        "--json"
+      ],
+      "seconds": 0.01962561300001653,
+      "exit": 0
+    },
+    {
+      "name": "git-init",
+      "argv": [
+        "git",
+        "init",
+        "-q",
+        "/home/ubuntu/onboarding-project"
+      ],
+      "seconds": 0.08392334399999868,
+      "exit": 0
+    },
+    {
+      "name": "true",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "run",
+        "--workspace",
+        "/home/ubuntu/onboarding-project",
+        "--",
+        "/usr/bin/true"
+      ],
+      "seconds": 0.3190087460000086,
+      "exit": 125
+    },
+    {
+      "name": "failure-doctor",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "opencode",
+        "--json"
+      ],
+      "seconds": 0.9595262500000104,
+      "exit": 125
+    },
+    {
+      "name": "failure-bwrap",
+      "argv": [
+        "bwrap",
+        "--unshare-all",
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "/usr/bin/true"
+      ],
+      "seconds": 0.022833555999994815,
+      "exit": 1
+    },
+    {
+      "name": "failure-security-policy",
+      "argv": [
+        "sh",
+        "-c",
+        "cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns; sudo -n aa-status; ls /etc/apparmor.d | sort"
+      ],
+      "seconds": 0.17980650600000558,
+      "exit": 0
+    },
+    {
+      "name": "corrupt-archive",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "/home/ubuntu/corrupt-artifacts",
+        "--public-key",
+        "RWQfzSONjQPC9VRG597whEhS7d6HpXwxdtO0nrShZY7ik/3zFL0U1xuP",
+        "--upgrade"
+      ],
+      "seconds": 0.4256347290000235,
+      "exit": 1
+    },
+    {
+      "name": "corrupt-signature",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "/home/ubuntu/corrupt-artifacts",
+        "--public-key",
+        "RWQfzSONjQPC9VRG597whEhS7d6HpXwxdtO0nrShZY7ik/3zFL0U1xuP",
+        "--upgrade"
+      ],
+      "seconds": 0.07271159700002272,
+      "exit": 1
+    },
+    {
+      "name": "upgrade",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "artifacts",
+        "--public-key",
+        "RWQfzSONjQPC9VRG597whEhS7d6HpXwxdtO0nrShZY7ik/3zFL0U1xuP",
+        "--upgrade"
+      ],
+      "seconds": 1.9797349840000038,
+      "exit": 0
+    }
+  ],
+  "timer_scope": "signed install through first sandboxed OpenCode result; includes agent download, excludes VM/dependency bootstrap",
+  "publication": "deferred",
+  "signing_identity": "ephemeral test key",
+  "rust_before": {
+    "cargo": null,
+    "rustc": null,
+    "rustup": null
+  },
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": false,
+      "inputs": "sha256:f5486df5891709f837825bb55d051275c42b2e634165caeb239919247cc0cbfb",
+      "opt_level": "3",
+      "revision": "41d8c230716877b5da6e6db3220017b7eb685344",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "x86_64",
+      "kernel": "Linux 6.8.0-142-generic",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "binary_sha256": "1b52abdbd326eb0b422ba7638b4b3fb0fdc0fd0b72628a7a125184b5571037cd",
+  "receipt_validation_error": "refused",
+  "blocker": "true refused with exit 125; see true.stderr",
+  "workflow_seconds_to_failure": 1.8943335849999983,
+  "distribution_checks": "passed"
+}

@@ -1,0 +1,16 @@
+{
+  "status": "blocked",
+  "image_url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+  "image_sha256": "0c9811a81e6329acacbb5ae4e701a7650f85cd3f19852cd159d79ab8357b210e",
+  "accelerator": "tcg",
+  "cpus": 2,
+  "memory_mib": 3072,
+  "guest_glibc": "2.35",
+  "binary_revision": "41d8c230716877b5da6e6db3220017b7eb685344",
+  "binary_sha256": "1b52abdbd326eb0b422ba7638b4b3fb0fdc0fd0b72628a7a125184b5571037cd",
+  "blockers": [
+    "GNU binary requires GLIBC_2.39",
+    "Ubuntu22 archive has no minisign package"
+  ],
+  "host_policy_changes": []
+}

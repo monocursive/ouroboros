@@ -1,6 +1,8 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 18.** Written 2026-09-21, revised 2026-09-25. Revision 18
+Status: **specification, revision 19.** Written 2026-09-21, revised 2026-09-30. Revision 19
+records the first local ledger slice and measured clean-VM onboarding; milestone 2
+and managed submission remain open. Revision 18
 declares milestone 1 green (§8). Revision 17
 records D8 and the milestone-1 status (§§2, 8, 11). Revision 16 makes
 the jail require no host configuration (D9, §4.6). Revision 6 cut the
@@ -11,7 +13,8 @@ Ouroboros ships no agent of its own. The first agents are Codex, Claude Code,
 and OpenCode. The jail is the audit sensor. The ledger only stores what that
 sensor emits. Decisions settled with these revisions are dated in §2. The rest
 stay recommendations until a date is recorded. Every value marked *initial* is
-a default to implement first and measure. Nothing described as new exists yet.
+a default to implement first and measure. Current implementation status is in §8;
+the remaining contracts below are targets, not support claims.
 
 Revision 9 names this document the north star and records Linux and macOS as
 the long-term host platforms. Linux remains the first execution release.
@@ -671,6 +674,13 @@ refusal, and violation halves of `sandbox.ex`, and `core.md` §7.
 
 ## 5. `ouro-ledger`
 
+Implementation status 2026-09-30: the [first local execution slice](docs/specs/ledger-v1.md)
+provides a durable single writer, preparation and replay identities, gated Linux
+launch ownership, source ingestion, settlement, bounded opt-in output capture,
+inspection, verification and orphan reconciliation. Its schema is not frozen.
+Query, retention, export, best-effort recovery and managed authorization remain
+open; the complete milestone-2 contract below is not yet implemented.
+
 The ledger joins authorisation and attributed observation into one ordered record,
 keeps that record outside a contained child's write authority, and separates
 completeness, local consistency, and protection from the child. Under `none`,
@@ -1101,7 +1111,15 @@ stock reference host, merged into `dev` at `6a18b4f4`. The evidence is in
 them with named limits), the freeze (`cargo xtask freeze --check` passes), the
 A01 record (OpenCode under `agent`) and the performance report, whose
 fixed-workload budget is the measured ceiling of jail-v1 §5.2. D8 is recorded
-(§2). The profiles stay experimental. Milestone 2 can start.
+(§2). The profiles stay experimental.
+
+Status 2026-09-30: the [current jail baseline](docs/specs/jail-v1/evidence/2026-09-30-baseline/README.md)
+passes reference-host Linux conformance and the native macOS lane at
+`41d8c230`. [Clean-VM onboarding](docs/benchmarks/jail/onboarding-2026-09-30.md)
+completed signed installation, a contained command and OpenCode in 67.32 seconds
+on the documented Ubuntu 26.04.1 VM. The first ledger slice in §5 is implemented;
+milestone 2 remains open. Neither result establishes managed-worker readiness
+or native macOS execution.
 
 | Milestone | Deliverable | Exit |
 |---|---|---|

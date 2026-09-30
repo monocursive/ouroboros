@@ -752,6 +752,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "ouro-fixture",
+ "ouro-records",
  "rcgen",
  "rustls",
  "serde",
@@ -763,6 +764,32 @@ dependencies = [
  "uuid",
  "webpki-roots",
  "zeroize",
+]
+
+[[package]]
+name = "ouro-ledger"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "jsonschema",
+ "libc",
+ "ouro-fixture",
+ "ouro-records",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "ouro-records"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

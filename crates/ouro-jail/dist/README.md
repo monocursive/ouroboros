@@ -33,6 +33,14 @@ Use `--upgrade` to replace an existing installation without a TTY. Failure to
 verify the signed manifest or archive checksum preserves the installed binary.
 The distribution includes the project license and the CA-data license notice.
 
+The [2026-09-30 fresh-VM onboarding report](../../../docs/benchmarks/jail/onboarding-2026-09-30.md)
+records signed non-TTY installation, contained `true`, a real OpenCode run and
+corruption/upgrade checks on a clean Ubuntu 26.04 VM without Rust. The tested
+reference-built GNU artifact refuses on Ubuntu 22.04 (glibc mismatch), and
+stock Ubuntu 24.04's bubblewrap namespace setup fails under its default policy;
+the report retains those limits. Public releases and production signing remain
+operator choices.
+
 Run the installer regression with an ephemeral test key:
 
 ```sh

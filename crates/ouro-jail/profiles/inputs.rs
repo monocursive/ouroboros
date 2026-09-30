@@ -1,4 +1,10 @@
 [
+    "crates/ouro-records/Cargo.toml",
+    "crates/ouro-records/src/lib.rs",
+    "crates/ouro-records/src/records.rs",
+    "crates/ouro-records/src/records/semantic.rs",
+    "crates/ouro-records/src/canonical.rs",
+    "crates/ouro-records/src/canonical/jcs.rs",
     "crates/ouro-jail/build.rs",
     "crates/ouro-jail/Cargo.toml",
     "Cargo.toml",

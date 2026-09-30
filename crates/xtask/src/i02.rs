@@ -33,6 +33,8 @@ pub const FORBIDDEN: &[&str] = &[
 ///
 /// A root may be a directory, which is walked, or a single file.
 pub const ROOTS: &[&str] = &[
+    "crates/ouro-records/src",
+    "crates/ouro-records/Cargo.toml",
     "crates/ouro-jail/src",
     "crates/ouro-jail/Cargo.toml",
     "crates/ouro-jail/build.rs",
@@ -187,7 +189,12 @@ mod tests {
         let clean = scan_roots(&base, ROOTS).unwrap();
         assert!(clean.hits.is_empty(), "{:?}", clean.hits);
         assert_eq!(clean.roots_scanned.len(), 1, "only src/ exists here");
-        assert_eq!(clean.roots_absent.len(), 5, "{:?}", clean.roots_absent);
+        assert_eq!(
+            clean.roots_absent.len(),
+            ROOTS.len() - 1,
+            "{:?}",
+            clean.roots_absent
+        );
         assert_eq!(clean.files_scanned, 1);
 
         std::fs::write(

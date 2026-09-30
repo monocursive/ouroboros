@@ -1,0 +1,22 @@
+{
+  "schema": "ouro.ledger.request/1",
+  "profile": "tool",
+  "argv_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "jail_image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "requirements": [
+    "tree_termination",
+    "closed_set_observation"
+  ],
+  "evidence": "strict",
+  "io": {
+    "mode": "batch",
+    "pty": false
+  },
+  "capture": {
+    "streams": [
+      "stdout"
+    ],
+    "limit_bytes": 32
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "schema": "ouro.ledger.run/1",
+  "run_id": "run_11111111111111111111111111111111",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "request_id": "fixture",
+  "payload": {
+    "schema": "ouro.ledger.request/1",
+    "profile": "tool",
+    "argv_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "jail_image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation"
+    ],
+    "evidence": "strict",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "capture": {
+      "streams": [
+        "stdout"
+      ],
+      "limit_bytes": 32
+    }
+  },
+  "state": "prepared",
+  "child_protection": "unprotected",
+  "owner": {
+    "uid": 1000,
+    "pid": 41200,
+    "birth": "boot:fixture:start:42",
+    "boot_id": "fixture"
+  },
+  "outcome": null,
+  "coverage": {
+    "status": "unobserved"
+  },
+  "settlement": "pending",
+  "receipts": [],
+  "capture": {
+    "stdout": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "state": "not_captured"
+    },
+    "argv": {
+      "state": "not_captured"
+    }
+  },
+  "chain": {
+    "head_seq": 3,
+    "head_digest": "sha256:59d00d8feb930504b847939bf9d7de18d82d331e1bb9c5160e413e23e6ff1ca5"
+  }
+}

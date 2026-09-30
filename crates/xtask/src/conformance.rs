@@ -162,11 +162,14 @@ pub fn run_path_for_humans(run_dir: &str) -> String {
 }
 
 /// The remote build, run by [`detached_start`] in the run directory, with
-/// the build-provenance environment of [`build_env`].
+/// the build-provenance environment of [`build_env`]. Compile the suite before
+/// measuring the executables: test dependency features can rebuild plain binaries.
 #[must_use]
 pub fn build_command(jobs: u32, revision: &str) -> String {
     format!(
-        "env {} {REMOTE_CARGO} build --release --workspace -j{jobs}",
+        "env {} {REMOTE_CARGO} build --release --workspace -j{jobs} && \
+         env {} {REMOTE_CARGO} test --release --workspace --no-run -j{jobs}",
+        build_env(revision),
         build_env(revision)
     )
 }
@@ -259,6 +262,17 @@ pub fn doctor_command(run_dir: &str) -> String {
          ./target/release/ouro-jail doctor --json > doctor.json 2> doctor.stderr; \
          rc=$?; cat doctor.stderr 1>&2; exit $rc"
     )
+}
+
+/// Bind the measured executable bytes to the bytes used throughout the suite.
+#[must_use]
+pub fn binary_hashes_command(run_dir: &str, check: bool) -> String {
+    let command = if check {
+        "sha256sum --check binaries.sha256"
+    } else {
+        "sha256sum target/release/ouro-jail target/release/ouro-fixture target/release/ouro-ledger > binaries.sha256 && cat binaries.sha256"
+    };
+    format!("cd {} && {command}", run_path(run_dir))
 }
 
 /// The user scope the suite runs in, named so a driver that gives up can
@@ -1416,6 +1430,15 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
         print!("{}", r.stdout);
         outcomes.i02 = Some(r);
 
+        step("record the compiled executable hashes");
+        let hashes = ssh(opts, &binary_hashes_command(&run_dir, false))?;
+        write_evidence(opts, "binaries.sha256", &hashes.stdout, &mut outcomes);
+        if !hashes.ok() {
+            outcomes
+                .evidence_errors
+                .push("compiled executable hashes could not be recorded".into());
+        }
+
         step("doctor --json");
         let d = ssh(opts, &doctor_command(&run_dir))?;
         if !d.stderr.trim().is_empty() {
@@ -1500,6 +1523,14 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
                 });
             }
             None => outcomes.suite_wait = suite.problem,
+        }
+        step("verify executable bytes did not change during the suite");
+        let unchanged = ssh(opts, &binary_hashes_command(&run_dir, true))?;
+        write_evidence(opts, "binaries-check.txt", &unchanged.stdout, &mut outcomes);
+        if !unchanged.ok() {
+            outcomes.evidence_errors.push(
+                "executable bytes changed after doctor measurement or could not be verified".into(),
+            );
         }
     }
 
@@ -1890,13 +1921,28 @@ mod tests {
             b,
             format!(
                 "env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
-                 $HOME/.cargo/bin/cargo build --release --workspace -j2"
+                 $HOME/.cargo/bin/cargo build --release --workspace -j2 && \
+                 env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
+                 $HOME/.cargo/bin/cargo test --release --workspace --no-run -j2"
             )
         );
         let started = detached_start("d", "build", &b);
         assert!(
             started.starts_with("cd $HOME/ouro-ci/runs/d && mkdir build.started &&"),
             "{started}"
+        );
+    }
+
+    #[test]
+    fn executable_measurement_covers_each_execution_binary_and_checks_afterwards() {
+        let before = binary_hashes_command("d", false);
+        for name in ["ouro-jail", "ouro-fixture", "ouro-ledger"] {
+            assert!(before.contains(&format!("target/release/{name}")));
+        }
+        assert!(before.contains("> binaries.sha256 && cat binaries.sha256"));
+        assert_eq!(
+            binary_hashes_command("d", true),
+            "cd $HOME/ouro-ci/runs/d && sha256sum --check binaries.sha256"
         );
     }
 
