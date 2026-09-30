@@ -10,8 +10,9 @@ product to a jail, a ledger, and a fleet around existing agents. Revision 7
 answered five review findings by specifying the mechanism that would close
 each hole. Revision 8 keeps the findings as named limits and stops there.
 Ouroboros ships no agent of its own. The first agents are Codex, Claude Code,
-and OpenCode. The jail is the audit sensor. The ledger only stores what that
-sensor emits. Decisions settled with these revisions are dated in §2. The rest
+and OpenCode. The jail owns audit observations. The ledger preserves its source
+events and records preparation, admission and settlement. Decisions settled with
+these revisions are dated in §2. The rest
 stay recommendations until a date is recorded. Every value marked *initial* is
 a default to implement first and measure. Current implementation status is in §8;
 the remaining contracts below are targets, not support claims.

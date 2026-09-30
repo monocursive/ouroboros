@@ -7,11 +7,13 @@ including MT01–MT14 and the real U01–U03 workflows.
 
 ## What an approved model service means
 
-It is the AI endpoint the repository owner permits to receive that input's
-code and prompts. Approval is an operator decision recorded for a particular
-project and data classification; it is not a certification supplied by Ouroboros.
-Examples are an existing provider account, a company model gateway or a
-self-hosted endpoint. Network reachability alone supplies no such permission.
+It is a model service the company policy administrator authorizes to receive
+that input's code and prompts, within the organization and project ceilings.
+The decision is recorded for a particular project and data classification.
+An existing provider account or self-hosted model can supply the upstream model.
+Managed access requires a company-authorized gateway that keeps upstream secrets
+outside the child, accepts attempt/project-scoped credentials and enforces
+model/tenant permissions, request/token budgets and expiry.
 
 The model service registry must bind that decision to the actual endpoint,
 capabilities, credential source and declared processing location. A service
@@ -29,7 +31,7 @@ repository to the same endpoint.
 |---|---|---|
 | Repository | Logical project id, source repository, pinned input commit and owner-assigned classification | Not selected |
 | Team | Organization and authorized principals, with the existing company identity mapping | Not supplied |
-| Model service | Endpoint/account or gateway, permitted classifications/capabilities and declared processing location | Not selected |
+| Model service | Scoped company gateway and upstream provider/model, permitted classifications/capabilities and declared processing location | Not selected |
 | Worker | Dedicated Linux worker, administrator, execution region and enforced storage quotas | Not provisioned for managed access |
 | Result storage | Project-scoped readers, storage/backup location and retention policy | Not supplied |
 
@@ -42,7 +44,9 @@ it would not replace the confidential-model workflow or the managed gates.
 
 1. Finish the ledger prerequisites in [milestone 2](../../../north-star.md#8-milestones),
    including durable replay/retention anchors and the remaining fault gates.
-   Preserve the jail's standalone operation and one Rust launch owner.
+   Preserve the jail's standalone operation and one Rust launch owner. Add owner
+   and output-drain survival across SSH disconnects; the current foreground owner
+   explicitly defers that prerequisite.
 2. Freeze bounded submission frames and build the Rust single-worker managed
    entry point. Authenticate the principal through restricted, pinned SSH;
    check project access for every operation; prohibit a worker shell or forwarding.
@@ -54,7 +58,8 @@ it would not replace the confidential-model workflow or the managed gates.
    status, cancellation, evidence and fetch operations.
 5. Run MT01–MT14 against the provisioned worker, then the actual internal-code,
    untrusted-contribution and confidential-model scenarios. Exercise native Linux
-   and macOS submission clients. Record provider/location declarations separately
+   and macOS submission clients, including disconnect/reconnect while the same
+   owner continues draining output. Record provider/location declarations separately
    from kernel-measured containment and lifecycle evidence.
 
 Fleet scheduling and native macOS execution have separate acceptance gates.

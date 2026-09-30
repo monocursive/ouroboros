@@ -436,6 +436,23 @@ fn output_pipe() -> Result<(File, File)> {
     }
     Ok((parent, child))
 }
+
+#[cfg(target_os = "linux")]
+fn write_capture(writer: &mut impl Write, mut bytes: &[u8], stored: &mut u64) -> Result<()> {
+    while !bytes.is_empty() {
+        match writer.write(bytes) {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
+            Ok(n) => {
+                *stored += n as u64;
+                bytes = &bytes[n..];
+            }
+            Err(problem) if problem.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(problem) => return Err(problem.into()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 impl Capture {
     fn drain(&mut self) -> Result<()> {
@@ -454,8 +471,7 @@ impl Capture {
             self.observed = self.observed.saturating_add(n as u64);
             if let Some(file) = self.file.as_mut() {
                 let keep = (self.limit - self.stored).min(n as u64) as usize;
-                file.write_all(&buffer[..keep])?;
-                self.stored += keep as u64;
+                write_capture(file, &buffer[..keep], &mut self.stored)?;
             }
             if let Some(tee) = self.tee.as_mut() {
                 tee.forward(&buffer[..n])?;
@@ -1041,6 +1057,42 @@ pub fn jail_binary(explicit: Option<PathBuf>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capture_keeps_the_exact_short_write_count_before_disk_failure() {
+        struct FailingDisk {
+            interrupted: bool,
+            bytes: Vec<u8>,
+        }
+        impl Write for FailingDisk {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if !self.bytes.is_empty() {
+                    return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+                }
+                let n = bytes.len().min(4);
+                self.bytes.extend_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut disk = FailingDisk {
+            interrupted: false,
+            bytes: Vec::new(),
+        };
+        let cap = 7;
+        let mut stored = 0;
+        assert!(write_capture(&mut disk, &b"abcdefghijk"[..cap], &mut stored).is_err());
+        assert_eq!(disk.bytes, b"abcd");
+        assert_eq!(stored, disk.bytes.len() as u64);
+        assert!(stored <= cap as u64);
+    }
 
     #[test]
     fn prepared_gate_compares_each_identity_and_receipt_digest() {
