@@ -5,7 +5,7 @@ passed at `aceed908b804315dfe71524d66885bf4f203d5f4`. The directory contains
 the driver's original outputs. The jail build inputs are
 `sha256:f5a3d1816d5ae070fc9af25c51075ab11ecf22fde57d80696f6a98c976150f94`.
 All three product executable hashes remain unchanged after the suite
-(`binaries-check.txt`). The tested milestone freeze now records this run.
+(`binaries-check.txt`). The freeze checkpoint at `9ad6313d` records this run.
 
 The native macOS workspace suite passed at the same revision. Its raw log
 includes the PATH, revision and conformance markers printed before execution.
@@ -44,6 +44,8 @@ budget (`queue-aligned-before.log`, `queue-aligned-after.log`). The stronger tes
 keeps process RSS as a diagnostic and independently enforces the live allocation
 bound. This runtime correction changes the build inputs and requires a new
 conformance run and tested freeze; the original baseline above remains historical.
+The [final committed-workspace run](../2026-10-02-final/README.md) subsequently
+passed and supplies the current tested freeze.
 
 The conformance driver's I02 scan now invokes the precompiled driver, avoiding
 an unnecessary feature/provenance rebuild between suite preparation and execution.

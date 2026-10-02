@@ -1091,14 +1091,14 @@ sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 [tested]
 debug_assertions = false
 dirty = false
-inputs = "sha256:f5a3d1816d5ae070fc9af25c51075ab11ecf22fde57d80696f6a98c976150f94"
+inputs = "sha256:a5fe16ac97675c2573050942de9bb9b952db8815e348c6eb85cfbe48781bc52b"
 opt_level = "3"
-ouro_jail_sha256 = "064425e1cf29daa7cba026cf1b22471ada03f41a80f8d69da0345a5574ba1ad0"
+ouro_jail_sha256 = "6ef945e1a093efbe192993fd02ff92d8662b08b50d95ae38e3c44e9061df9c48"
 platform_arch = "x86_64"
 platform_kernel = "Linux 7.0.0-31-generic"
 platform_os = "linux"
 ready = true
-revision = "aceed908b804315dfe71524d66885bf4f203d5f4"
+revision = "52b546038b69d8647021399371b5236bb43f2275"
 rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
 target = "x86_64-unknown-linux-gnu"
 unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
@@ -1146,5 +1146,5 @@ swap_total_kib = 8388604
 "user.max_user_namespaces" = "11829"
 
 [tested.supervisor_scope]
-cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p2652397-i11043088.scope"
+cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p2753432-i11136283.scope"
 state = "already_delegated"

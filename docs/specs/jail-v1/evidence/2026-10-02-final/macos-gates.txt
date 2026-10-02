@@ -1,0 +1,59 @@
+ouro.jail.gate-verdict/1: acceptance verdict over the macos log(s), map /Users/monocursive/code/ouroboros/docs/specs/jail-v1/acceptance-map.toml
+lanes combined: macos (revision 52b546038b69d8647021399371b5236bb43f2275, OURO_CONFORMANCE=1)
+evidence: how each gate's clauses are proved (live-cli, live-lib, portable, simulated, recorded-limit, untested); a pass is only as strong as its column
+
+gate  status       clauses   evidence                                     detail
+P01   elsewhere    0/8       live-cli×2 portable×6                        P01.1 in the linux lane | P01.2 in the linux lane | P01.3 in the linux lane | P01.6 in the linux lane | P01.4 in the linux lane | P01.7 in the linux lane | P01.5 in the linux lane | P01.8 in the linux lane
+P02   elsewhere    0/13      live-cli×1 portable×12                       P02.1 in the linux lane | P02.11 in the linux lane | P02.12 in the linux lane | P02.2 in the linux lane | P02.3 in the linux lane | P02.4 in the linux lane | P02.5 in the linux lane | P02.6 in the linux lane | P02.7 in the linux lane | P02.8 in the linux lane | P02.9 in the linux lane | P02.10 in the linux lane | P02.13 in the linux lane
+P03   elsewhere    0/2       live-cli×2                                   P03.1 in the linux lane | P03.2 in the linux lane
+P04   elsewhere    0/9       live-cli×6 live-lib×1 portable×2             P04.1 in the linux lane | P04.6 in the linux lane | P04.2 in the linux lane | P04.3 in the linux lane | P04.7 in the linux lane | P04.8 in the linux lane | P04.4 in the linux lane | P04.9 in the linux lane | P04.5 in the linux lane
+X01   elsewhere    0/1       live-cli×1                                   X01.1 in the linux lane
+X02   elsewhere    2/9       live-cli×8 portable×1                        X02.1 in the linux lane | X02.2 in the linux lane | X02.3 in the linux lane | X02.4 in the linux lane | X02.5 in the linux lane | X02.8 in the linux lane | X02.9 in the linux lane
+X03   elsewhere    0/3       live-cli×3                                   X03.1 in the linux lane | X03.2 in the linux lane | X03.3 in the linux lane
+X04   elsewhere    0/3       live-cli×3                                   X04.1 in the linux lane | X04.2 in the linux lane | X04.3 in the linux lane
+X05   elsewhere    0/4       live-cli×3 recorded-limit×1                  X05.1 in the linux lane | X05.3 in the linux lane | X05.2 in the linux lane | X05.4 in the linux lane
+X06   elsewhere    0/4       live-cli×4                                   X06.1 in the linux lane | X06.2 in the linux lane | X06.3 in the linux lane | X06.4 in the linux lane
+X07   elsewhere    0/2       live-cli×2                                   X07.1 in the linux lane | X07.2 in the linux lane
+F01   elsewhere    0/4       live-cli×3 live-lib×1                        F01.1 in the linux lane | F01.2 in the linux lane | F01.3 in the linux lane | F01.4 in the linux lane
+F02   elsewhere    0/4       live-cli×3 live-lib×1                        F02.1 in the linux lane | F02.4 in the linux lane | F02.2 in the linux lane | F02.3 in the linux lane
+F03   elsewhere    0/3       live-cli×3                                   F03.1 in the linux lane | F03.2 in the linux lane | F03.3 in the linux lane
+F04   elsewhere    0/3       live-cli×2 live-lib×1                        F04.1 in the linux lane | F04.2 in the linux lane | F04.3 in the linux lane
+S01   elsewhere    0/3       live-cli×3                                   S01.1 in the linux lane | S01.2 in the linux lane | S01.3 in the linux lane
+S02   elsewhere    0/7       live-cli×7                                   S02.1 in the linux lane | S02.2 in the linux lane | S02.6 in the linux lane | S02.3 in the linux lane | S02.4 in the linux lane | S02.5 in the linux lane | S02.7 in the linux lane
+S03   elsewhere    0/5       live-cli×4 recorded-limit×1                  S03.1 in the linux lane | S03.2 in the linux lane | S03.3 in the linux lane | S03.4 in the linux lane | S03.5 in the linux lane
+S04   elsewhere    0/7       live-cli×7                                   S04.1 in the linux lane | S04.2 in the linux lane | S04.3 in the linux lane | S04.4 in the linux lane | S04.6 in the linux lane | S04.7 in the linux lane | S04.5 in the linux lane
+N01   elsewhere    0/2       live-cli×2                                   N01.1 in the linux lane | N01.2 in the linux lane
+N02   elsewhere    0/2       live-cli×2                                   N02.1 in the linux lane | N02.2 in the linux lane
+N03   elsewhere    0/9       live-cli×1 portable×8                        N03.1 in the linux lane | N03.2 in the linux lane | N03.3 in the linux lane | N03.4 in the linux lane | N03.5 in the linux lane | N03.6 in the linux lane | N03.7 in the linux lane | N03.8 in the linux lane | N03.9 in the linux lane
+N04   elsewhere    0/5       live-cli×5                                   N04.1 in the linux lane | N04.2 in the linux lane | N04.3 in the linux lane | N04.4 in the linux lane | N04.5 in the linux lane
+N05   elsewhere    0/8       live-cli×8                                   N05.1 in the linux lane | N05.2 in the linux lane | N05.3 in the linux lane | N05.4 in the linux lane | N05.5 in the linux lane | N05.6 in the linux lane | N05.7 in the linux lane | N05.8 in the linux lane
+O01   elsewhere    0/2       live-cli×2                                   O01.1 in the linux lane | O01.2 in the linux lane
+O02   elsewhere    0/10      live-cli×4 live-lib×4 simulated×2            O02.1 in the linux lane | O02.2 in the linux lane | O02.3 in the linux lane | O02.4 in the linux lane | O02.10 in the linux lane | O02.5 in the linux lane | O02.6 in the linux lane | O02.7 in the linux lane | O02.8 in the linux lane | O02.9 in the linux lane
+O03   elsewhere    0/6       live-cli×1 live-lib×1 simulated×4            O03.1 in the linux lane | O03.2 in the linux lane | O03.6 in the linux lane | O03.3 in the linux lane | O03.4 in the linux lane | O03.5 in the linux lane
+O04   elsewhere    0/3       live-cli×3                                   O04.1 in the linux lane | O04.2 in the linux lane | O04.3 in the linux lane
+O05   elsewhere    0/5       live-cli×4 simulated×1                       O05.1 in the linux lane | O05.2 in the linux lane | O05.3 in the linux lane | O05.4 in the linux lane | O05.5 in the linux lane
+O06   elsewhere    0/5       live-cli×5                                   O06.1 in the linux lane | O06.2 in the linux lane | O06.3 in the linux lane | O06.4 in the linux lane | O06.5 in the linux lane
+L01   elsewhere    0/12      live-cli×12                                  L01.1 in the linux lane | L01.9 in the linux lane | L01.10 in the linux lane | L01.2 in the linux lane | L01.11 in the linux lane | L01.3 in the linux lane | L01.4 in the linux lane | L01.5 in the linux lane | L01.6 in the linux lane | L01.7 in the linux lane | L01.8 in the linux lane | L01.12 in the linux lane
+L02   elsewhere    0/11      live-cli×8 live-lib×2 recorded-limit×1       L02.1 in the linux lane | L02.7 in the linux lane | L02.2 in the linux lane | L02.3 in the linux lane | L02.8 in the linux lane | L02.9 in the linux lane | L02.4 in the linux lane | L02.5 in the linux lane | L02.6 in the linux lane | L02.10 in the linux lane | L02.11 in the linux lane
+L03   elsewhere    0/7       live-cli×3 live-lib×2 portable×1 recorded-limit×1 L03.1 in the linux lane | L03.2 in the linux lane | L03.5 in the linux lane | L03.6 in the linux lane | L03.3 in the linux lane | L03.4 in the linux lane | L03.7 in the linux lane
+L04   elsewhere    0/6       live-cli×3 simulated×3                       L04.1 in the linux lane | L04.2 in the linux lane | L04.3 in the linux lane | L04.4 in the linux lane | L04.5 in the linux lane | L04.6 in the linux lane
+L05   elsewhere    0/2       simulated×2                                  L05.1 in the linux lane | L05.2 in the linux lane
+R01   elsewhere    0/11      live-cli×3 portable×7 simulated×1            R01.1 in the linux lane | R01.2 in the linux lane | R01.5 in the linux lane | R01.3 in the linux lane | R01.4 in the linux lane | R01.6 in the linux lane | R01.7 in the linux lane | R01.8 in the linux lane | R01.9 in the linux lane | R01.10 in the linux lane | R01.11 in the linux lane
+R02   elsewhere    0/4       live-cli×2 simulated×2                       R02.1 in the linux lane | R02.3 in the linux lane | R02.2 in the linux lane | R02.4 in the linux lane
+R03   elsewhere    0/8       live-cli×4 portable×1 simulated×2 recorded-limit×1 R03.1 in the linux lane | R03.5 in the linux lane | R03.2 in the linux lane | R03.6 in the linux lane | R03.3 in the linux lane | R03.7 in the linux lane | R03.4 in the linux lane | R03.8 in the linux lane
+R04   elsewhere    0/5       live-cli×3 simulated×2                       R04.1 in the linux lane | R04.2 in the linux lane | R04.3 in the linux lane | R04.5 in the linux lane | R04.4 in the linux lane
+R05   elsewhere    0/3       live-cli×3                                   R05.1 in the linux lane | R05.2 in the linux lane | R05.3 in the linux lane
+R06   elsewhere    0/6       live-cli×5 recorded-limit×1                  R06.1 in the linux lane | R06.2 in the linux lane | R06.4 in the linux lane | R06.5 in the linux lane | R06.3 in the linux lane | R06.6 in the linux lane
+C01   elsewhere    0/6       live-cli×2 portable×3 recorded-limit×1       C01.1 in the linux lane | C01.2 in the linux lane | C01.6 in the linux lane | C01.3 in the linux lane | C01.4 in the linux lane | C01.5 in the linux lane
+C02   elsewhere    0/5       live-cli×5                                   C02.1 in the linux lane | C02.2 in the linux lane | C02.3 in the linux lane | C02.5 in the linux lane | C02.4 in the linux lane
+C03   elsewhere    0/7       live-cli×3 portable×1 simulated×3            C03.1 in the linux lane | C03.2 in the linux lane | C03.3 in the linux lane | C03.7 in the linux lane | C03.4 in the linux lane | C03.5 in the linux lane | C03.6 in the linux lane
+M01   pass         3/3       live-cli×2 portable×1                        
+M02   elsewhere    1/4       portable×4                                   M02.1 in the linux lane | M02.3 in the linux lane | M02.4 in the linux lane
+M03   pass         5/5       live-cli×3 portable×2                        
+I01   elsewhere    0/3       live-cli×3                                   I01.1 in the linux lane | I01.2 in the linux lane | I01.3 in the linux lane
+I02   elsewhere    0/4       portable×4                                   I02.1 in the linux lane | I02.2 in the linux lane | I02.3 in the linux lane | I02.4 in the linux lane
+I03   elsewhere    0/4       live-cli×4                                   I03.1 in the linux lane | I03.2 in the linux lane | I03.3 in the linux lane | I03.4 in the linux lane
+A01   credential   0/1       credential×1                                 A01.1 needs a real agent
+
+gates: 1 credential, 48 elsewhere, 2 pass
+every noncredential gate passes in these lanes: no

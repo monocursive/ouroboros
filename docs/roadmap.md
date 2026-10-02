@@ -63,7 +63,7 @@ write workload cost remains high. The
 [write and disk-quota follow-up](benchmarks/sandboxes/write-observation-and-disk-quotas-2026-10-01.md)
 reduces paired write workload time by 3.6% and verifies ext4/XFS user hard
 quotas with 41 live checks. Explicit swap and bounded tmpfs ceilings also have
-live checks. The [October 2 baseline](specs/jail-v1/evidence/2026-10-02-baseline/README.md)
+live checks. The [October 2 baseline](specs/jail-v1/evidence/2026-10-02-final/README.md)
 records a passing conformance run and current tested freeze. Project quotas and
 automatic volume provisioning remain pending.
 

@@ -1126,7 +1126,7 @@ on the documented Ubuntu 26.04.1 VM. The first ledger slice in §5 is implemente
 milestone 2 remains open. Neither result establishes managed-worker readiness
 or native macOS execution.
 
-Status 2026-10-02: the [refreshed jail baseline](docs/specs/jail-v1/evidence/2026-10-02-baseline/README.md)
+Status 2026-10-02: the [refreshed jail baseline](docs/specs/jail-v1/evidence/2026-10-02-final/README.md)
 passes both acceptance lanes and records the current tested freeze. The ledger
 adds [detached batch ownership](docs/specs/ledger-v1.md#31-detached-batch-ownership)
 under independently provisioned Linux user services, bounded capture draining,

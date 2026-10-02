@@ -36,6 +36,11 @@ hashes. The jail source-input digest is the one in the
 These development measurements precede the subsequent committed-workspace CI
 run; they are not release performance numbers.
 
+The [final committed-workspace validation](../../../jail-v1/evidence/2026-10-02-final/README.md)
+at `52b54603` passed hosted Linux/macOS CI and the complete optimized reference
+suite, including all 15 ledger launch tests. Its updated freeze also covers the
+observer allocation-accounting correction discovered during CI.
+
 ## Failed attempts retained
 
 The first focused run exposed rejection of the new `owner_lifetime` request
