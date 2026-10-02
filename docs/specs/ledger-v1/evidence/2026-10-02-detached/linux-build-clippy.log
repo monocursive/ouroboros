@@ -1,0 +1,9 @@
+   Compiling ouro-ledger v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-ledger)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.41s
+  Executable unittests src/lib.rs (target/debug/deps/ouro_ledger-8474ed36f6ae822f)
+  Executable unittests src/main.rs (target/debug/deps/ouro_ledger-8e45f31d4c7b1b31)
+  Executable tests/cli_local.rs (target/debug/deps/cli_local-556d4fc61ddd818e)
+  Executable tests/evidence_reader.rs (target/debug/deps/evidence_reader-f846a2353738e33b)
+  Executable tests/launch_linux.rs (target/debug/deps/launch_linux-d4a00f320024a1a5)
+    Checking ouro-ledger v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-ledger)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.56s

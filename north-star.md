@@ -1,6 +1,8 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 19.** Written 2026-09-21, revised 2026-09-30. Revision 19
+Status: **specification, revision 20.** Written 2026-09-21, revised 2026-10-02. Revision 20
+records tested detached Linux batch ownership; the rest of milestone 2 and managed
+submission remain open. Revision 19
 records the first local ledger slice and measured clean-VM onboarding; milestone 2
 and managed submission remain open. Revision 18
 declares milestone 1 green (§8). Revision 17
@@ -1123,6 +1125,15 @@ completed signed installation, a contained command and OpenCode in 67.32 seconds
 on the documented Ubuntu 26.04.1 VM. The first ledger slice in §5 is implemented;
 milestone 2 remains open. Neither result establishes managed-worker readiness
 or native macOS execution.
+
+Status 2026-10-02: the [refreshed jail baseline](docs/specs/jail-v1/evidence/2026-10-02-baseline/README.md)
+passes both acceptance lanes and records the current tested freeze. The ledger
+adds [detached batch ownership](docs/specs/ledger-v1.md#31-detached-batch-ownership)
+under independently provisioned Linux user services, bounded capture draining,
+wait and cancellation. [Lifecycle evidence](docs/specs/ledger-v1/evidence/2026-10-02-detached/README.md)
+includes killing the SSH client, reconnecting to the same owner and observing
+exactly one execution. This is local operator authority; managed ingress and
+the remaining milestone-2 contracts are still open.
 
 | Milestone | Deliverable | Exit |
 |---|---|---|

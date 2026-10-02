@@ -1,0 +1,84 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling ouro-ledger v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-ledger)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running unittests src/lib.rs (target/debug/deps/ouro_ledger-9b73426265e7f3b4)
+
+running 34 tests
+test daemon::tests::forged_producer_role_attempt_and_peer_are_all_refused ... ok
+test daemon::tests::frame_roundtrip_handles_interrupted_transport_without_accepting_partial_json ... ok
+test daemon::tests::protocol_refuses_caller_claimed_roles_and_oversized_frames ... ok
+test reader::tests::summaries_are_bounded_even_for_arbitrary_owner_coverage_and_keep_gaps_unknown ... ok
+test reader::tests::time_filters_reject_invalid_dates_offsets_fractional_times_and_non_ascii ... ok
+test runner::tests::prepared_gate_compares_each_identity_and_receipt_digest ... ok
+test store::tests::admission_cannot_change_reserved_policy_or_argv ... ok
+test store::tests::admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt ... ok
+test store::tests::admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_loss ... ok
+test store::tests::detached_request_lifetime_is_validated_and_cannot_rebind_a_request ... ok
+test store::tests::different_payload_cannot_rebind_prepare_or_effect_identity ... ok
+test store::tests::every_persistence_failure_stops_acknowledgements_until_recovery ... ok
+test store::tests::flattened_source_is_the_original_frozen_envelope_plus_writer_fields ... ok
+test store::tests::full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state ... ok
+test store::tests::interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery ... ok
+test store::tests::lifetime_lock_refuses_a_second_writer ... ok
+test store::tests::lost_replies_replay_same_run_and_exact_receipt_after_recovery ... ok
+test store::tests::none_verify_retains_unprotected_even_if_receipt_claims_enforced ... ok
+test store::tests::owner_death_records_unknown_without_restart_or_tree_claim ... ok
+test store::tests::reader_cursor_cannot_change_scope_and_expires_explicitly_after_restart ... ok
+test store::tests::reader_filters_original_source_operations_stage_and_writer_time ... ok
+test store::tests::reader_large_utf8_records_are_fully_verified_before_chunks_and_query_block_replays ... ok
+test store::tests::reader_new_page_refuses_truncation_of_a_previously_verified_cached_large_frame ... ok
+test store::tests::reader_refuses_filtered_corruption_and_reports_extra_tails_without_mutation ... ok
+test store::tests::reader_snapshot_export_is_exact_bounded_and_retries_the_identical_prior_page ... ok
+test store::tests::recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain ... ok
+test store::tests::refused_receipt_requires_the_same_attempt_and_final_source_note ... ok
+test store::tests::settlement_requires_matching_final_receipt_and_trace_and_closes_observations ... ok
+test store::tests::source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery ... ok
+test store::tests::source_replay_and_gap_are_preserved_when_projection_is_updated ... ok
+test store::tests::strict_transport_gap_and_private_metadata_refuse_without_an_ack ... ok
+test store::tests::unresolved_run_keeps_a_proven_child_exit_separate_from_unknown_outcome ... ok
+test store::tests::unsafe_store_paths_and_oversized_events_are_refused ... ok
+test store::tests::verification_detects_projection_drift_and_recovery_rebuilds_it ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.79s
+
+     Running unittests src/main.rs (target/debug/deps/ouro_ledger-5e15a49f66407caf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_local.rs (target/debug/deps/cli_local-31ba55316a750cf0)
+
+running 3 tests
+test doctor_does_not_start_a_session_writer ... ok
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+     Running tests/evidence_reader.rs (target/debug/deps/evidence_reader-bac5748c8d74fe5b)
+
+running 5 tests
+test closed_export_sink_exits_nonzero_without_finished_success ... ok
+test export_keeps_large_canonical_record_bytes_out_of_status_metadata ... ok
+test incomplete_history_exports_only_verified_prefix_and_exits_nonzero ... ok
+test live_writer_detects_unexpected_tail_before_export ... ok
+test query_filters_paginate_exact_attribution_and_refuse_cursor_rebinding ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+     Running tests/launch_linux.rs (target/debug/deps/launch_linux-832332800a4f92ac)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests ouro_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

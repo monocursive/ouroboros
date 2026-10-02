@@ -1,0 +1,15 @@
+   Compiling ouro-ledger v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-ledger)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.59s
+   Compiling ouro-ledger v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-ledger)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.81s
+  Executable tests/launch_linux.rs (target/debug/deps/launch_linux-d4a00f320024a1a5)
+
+running 5 tests
+test detached_cancel_requests_stop_then_waits_for_verified_settlement ... ok
+test detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt ... ok
+test detached_mode_refuses_a_session_bound_existing_writer ... ok
+test detached_owner_death_stops_tree_and_replay_preserves_unknown ... ok
+test detached_submitter_exit_preserves_owner_output_and_one_execution ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 9.84s
+

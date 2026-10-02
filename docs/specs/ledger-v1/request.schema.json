@@ -4,6 +4,9 @@
   "title": "Ledger immutable request plan, first execution slice",
   "type": "object",
   "properties": {
+    "owner_lifetime": {
+      "const": "systemd_user_service"
+    },
     "schema": {
       "const": "ouro.ledger.request/1"
     },
@@ -99,5 +102,25 @@
     "evidence",
     "io",
     "capture"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "owner_lifetime"
+        ]
+      },
+      "then": {
+        "properties": {
+          "io": {
+            "properties": {
+              "mode": {
+                "const": "batch"
+              }
+            }
+          }
+        }
+      }
+    }
   ]
 }

@@ -39,7 +39,10 @@ const FRAME_MAX: usize = 1_048_576;
 #[cfg(target_os = "linux")]
 const CAPTURE_MAX: u64 = 16 * 1_048_576;
 
-/// The operator's literal execution request. Raw argv stays in this process.
+/// The operator's literal execution request. Raw argv is never persisted;
+/// detached submission transfers it to the owner over a private socket.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunOptions {
     pub data: PathBuf,
     pub jail: PathBuf,
@@ -48,6 +51,7 @@ pub struct RunOptions {
     pub policy_args: Vec<OsString>,
     pub argv: Vec<OsString>,
     pub batch: bool,
+    pub detached: bool,
     pub captures: Vec<String>,
     pub capture_limit: u64,
     pub best_effort: bool,
@@ -198,14 +202,16 @@ fn payload(options: &RunOptions, plan: &Value, image_digest: &str) -> Result<Val
         .iter()
         .map(|r| r["name"].clone())
         .collect();
-    Ok(
-        json!({"schema":"ouro.ledger.request/1", "argv_digest":canonical::argv_digest(&argv),
+    let mut request = json!({"schema":"ouro.ledger.request/1", "argv_digest":canonical::argv_digest(&argv),
         "policy_digest":plan["policy"]["digest"], "requirements":requirements,
         "profile":plan["policy"]["name"], "jail_image_digest":image_digest,
         "io":{"mode":if options.batch {"batch"} else {"foreground"},"pty":false},
         "capture":{"streams":options.captures,"limit_bytes":options.capture_limit},
-        "evidence":if options.best_effort {"best-effort"} else {"strict"}}),
-    )
+        "evidence":if options.best_effort {"best-effort"} else {"strict"}});
+    if options.detached {
+        request["owner_lifetime"] = "systemd_user_service".into();
+    }
+    Ok(request)
 }
 
 #[cfg(target_os = "linux")]
@@ -532,6 +538,11 @@ impl Drop for OwnedChild {
 
 /// Launch exactly one reserved attempt. Existing owners and settled runs are never relaunched.
 pub fn run(options: &RunOptions) -> Result<RunResult> {
+    if options.detached {
+        return Err(error(
+            "detached runs must enter through the independent service launcher",
+        ));
+    }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = options;
@@ -540,11 +551,22 @@ pub fn run(options: &RunOptions) -> Result<RunResult> {
         ))
     }
     #[cfg(target_os = "linux")]
-    run_linux(options)
+    run_linux(options, None)
 }
 
 #[cfg(target_os = "linux")]
-fn run_linux(options: &RunOptions) -> Result<RunResult> {
+pub(crate) fn run_notifying(
+    options: &RunOptions,
+    notify: &mut dyn FnMut(&RunRecord),
+) -> Result<RunResult> {
+    run_linux(options, Some(notify))
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux(
+    options: &RunOptions,
+    mut notify: Option<&mut dyn FnMut(&RunRecord)>,
+) -> Result<RunResult> {
     if options.argv.is_empty() {
         return Err(error("run needs a program after --"));
     }
@@ -570,7 +592,13 @@ fn run_linux(options: &RunOptions) -> Result<RunResult> {
         return Err(error("jail image changed during policy resolution"));
     }
     let payload = payload(options, &plan, &expected_image)?;
-    let mut client = connect_or_start(&options.data)?;
+    let mut client = if options.detached {
+        // Losing the independent writer must never create a replacement inside
+        // this attempt's service cgroup. Strict evidence fails closed instead.
+        Client::connect(&options.data)?
+    } else {
+        connect_or_start(&options.data)?
+    };
     let run = if let Some(id) = &options.prepared {
         let existing = client.show(id)?;
         if existing.payload != payload {
@@ -581,18 +609,31 @@ fn run_linux(options: &RunOptions) -> Result<RunResult> {
         client.prepare(&options.request_id, &payload)?
     };
     if run.state == "settled" || run.state == "denied" {
+        if let Some(notify) = notify.as_mut() {
+            notify(&run);
+        }
         return Ok(RunResult {
             exit_code: record_exit(&run),
             record: run,
         });
     }
     if run.owner.is_some() || run.state != "prepared" {
+        if let Some(notify) = notify.as_mut() {
+            notify(&run);
+            return Ok(RunResult {
+                exit_code: record_exit(&run),
+                record: run,
+            });
+        }
         return Err(error(format!(
             "{} already has a launch owner; inspect or reconcile it, never restart it",
             run.run_id
         )));
     }
     let claim = client.claim_owner(&run.run_id)?;
+    if let Some(notify) = notify.as_mut() {
+        notify(&client.show(&run.run_id)?);
+    }
     let result = run_owned(options, &image, &expected_image, &run, &claim, &mut client);
     if result.is_err() {
         // Covers setup, finalization and lost mutation replies while this
@@ -797,8 +838,21 @@ fn run_owned(
     let mut exit = None;
     let preparation_deadline = Instant::now() + Duration::from_secs(30);
     let mut exit_seen = None;
+    let mut cancel_sent = false;
     let result: Result<()> = (|| {
         loop {
+            if options.detached && crate::service::cancel_requested() && !cancel_sent {
+                cancel_sent = true;
+                if let Some(pipe) = gate.take() {
+                    pipe.shutdown(std::net::Shutdown::Write)?;
+                }
+                if child.0.try_wait()?.is_none() {
+                    // The direct child is unreaped, so its pid cannot be reused.
+                    unsafe {
+                        libc::kill(child.0.id() as i32, libc::SIGTERM);
+                    }
+                }
+            }
             for value in control.drain()? {
                 let message: ControlMessage = serde_json::from_value(value)?;
                 if message.schema != records::SCHEMA_CONTROL
@@ -813,6 +867,9 @@ fn run_owned(
                 }
                 match message.kind {
                     ControlKind::Prepared => {
+                        if cancel_sent {
+                            continue;
+                        }
                         if admitted {
                             return Err(error("duplicate prepared control"));
                         }
@@ -1008,8 +1065,7 @@ fn run_owned(
     Ok(RunResult { record, exit_code })
 }
 
-#[cfg(target_os = "linux")]
-fn record_exit(record: &RunRecord) -> i32 {
+pub fn record_exit(record: &RunRecord) -> i32 {
     if record
         .outcome
         .as_ref()

@@ -1,0 +1,11 @@
+
+running 6 tests
+test detached_cancel_requests_stop_then_waits_for_verified_settlement ... ok
+test detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt ... ok
+test detached_mode_refuses_a_session_bound_existing_writer ... ok
+test detached_owner_death_stops_tree_and_replay_preserves_unknown ... ok
+test detached_submitter_exit_preserves_owner_output_and_one_execution ... ok
+test detached_writer_death_fails_closed_without_starting_a_session_writer ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 11.38s
+

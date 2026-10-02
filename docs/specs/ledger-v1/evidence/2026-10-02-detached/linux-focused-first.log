@@ -1,0 +1,35 @@
+
+running 5 tests
+test detached_cancel_requests_stop_then_waits_for_verified_settlement ... 
+thread 'detached_cancel_requests_stop_then_waits_for_verified_settlement' (2660346) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-cancel: prepare only accepts the versioned digest-only request plan; inspect or replay this same request id, never invent a replacement
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt ... 
+thread 'detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt' (2660487) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-lost-reply: prepare only accepts the versioned digest-only request plan; inspect or replay this same request id, never invent a replacement
+
+FAILED
+test detached_mode_refuses_a_session_bound_existing_writer ... ok
+test detached_owner_death_stops_tree_and_replay_preserves_unknown ... FAILED
+test detached_submitter_exit_preserves_owner_output_and_one_execution ... 
+thread 'detached_owner_death_stops_tree_and_replay_preserves_unknown' (2660570) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-owner-loss: prepare only accepts the versioned digest-only request plan; inspect or replay this same request id, never invent a replacement
+
+
+thread 'detached_submitter_exit_preserves_owner_output_and_one_execution' (2660606) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-one-execution: prepare only accepts the versioned digest-only request plan; inspect or replay this same request id, never invent a replacement
+
+FAILED
+
+failures:
+
+failures:
+    detached_cancel_requests_stop_then_waits_for_verified_settlement
+    detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt
+    detached_owner_death_stops_tree_and_replay_preserves_unknown
+    detached_submitter_exit_preserves_owner_output_and_one_execution
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 9 filtered out; finished in 4.83s
+

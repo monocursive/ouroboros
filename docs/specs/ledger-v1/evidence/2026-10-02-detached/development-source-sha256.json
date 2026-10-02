@@ -1,0 +1,13 @@
+{
+  "crates/ouro-ledger/src/daemon.rs": "5af5d83e73eb325294e1539634ca48af8d13a5ffb399c182a23edcea1b9cb929",
+  "crates/ouro-ledger/src/lib.rs": "9b77941d68e951ec8d7500ef77ca06ca306a44d0e2573284f752c1177cdf5506",
+  "crates/ouro-ledger/src/main.rs": "ebe69fa8e98394a646013b25e474a44dcc10bcface892e50858a7b39f4f6e193",
+  "crates/ouro-ledger/src/protocol.rs": "b9da3ab5f678ee620314e56e32987beceecb6175602d979a25d5b32cfa60efff",
+  "crates/ouro-ledger/src/reader.rs": "693c22ce6097d6b4250e1a36a5f019840e2849775e18038d5c9eaaf4a884e9b2",
+  "crates/ouro-ledger/src/runner.rs": "7964326f0e3d688eba826dc5768884c36187fa0fa527fc249d3c76dab2a09405",
+  "crates/ouro-ledger/src/service.rs": "3ad2447765be4f091caa677fea1e091a0994626ed46a173508976c9ad4323476",
+  "crates/ouro-ledger/src/store.rs": "79abcb05bee5ab66691995f404ca36ec9bbb0d2c7347282fff4cc26d911c9fc8",
+  "crates/ouro-ledger/tests/cli_local.rs": "4c575ecdddeb952ce2cae9a9d1a9f1a197e9b7482f60a946791a8f8547a1d06a",
+  "crates/ouro-ledger/tests/evidence_reader.rs": "65b8c912cb3d6a1553aefa20f5a86e85b96db48c56b1d2b23f55a4ef04a8858a",
+  "crates/ouro-ledger/tests/launch_linux.rs": "3fb5a37c604075d31d6b9f7770ad8ae7decf5eed0b7673a7152e79829046a4df"
+}

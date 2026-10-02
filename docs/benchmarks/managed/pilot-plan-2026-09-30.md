@@ -44,9 +44,11 @@ it would not replace the confidential-model workflow or the managed gates.
 
 1. Finish the ledger prerequisites in [milestone 2](../../../north-star.md#8-milestones),
    including durable replay/retention anchors and the remaining fault gates.
-   Preserve the jail's standalone operation and one Rust launch owner. Add owner
-   and output-drain survival across SSH disconnects; the current foreground owner
-   explicitly defers that prerequisite.
+   Preserve the jail's standalone operation and one Rust launch owner.
+   [Detached local ownership](../../specs/ledger-v1/evidence/2026-10-02-detached/README.md)
+   now covers owner and output-drain survival across SSH disconnects on a
+   provisioned Linux user manager. The remaining ledger and managed authorization
+   prerequisites still apply.
 2. Freeze bounded submission frames and build the Rust single-worker managed
    entry point. Authenticate the principal through restricted, pinned SSH;
    check project access for every operation; prohibit a worker shell or forwarding.

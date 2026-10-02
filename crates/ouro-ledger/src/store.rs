@@ -260,8 +260,14 @@ fn validate_payload(payload: &Value) -> Result<()> {
     let Some(object) = payload.as_object() else {
         return Err(LedgerError("prepare payload must be an object".into()));
     };
-    if object.len() != keys.len()
-        || object.keys().any(|key| !keys.contains(&key.as_str()))
+    let detached = object.contains_key("owner_lifetime");
+    if object.len() != keys.len() + usize::from(detached)
+        || object
+            .keys()
+            .any(|key| !keys.contains(&key.as_str()) && key != "owner_lifetime")
+        || detached
+            && (payload["owner_lifetime"] != "systemd_user_service"
+                || payload["io"]["mode"] != "batch")
         || payload["schema"] != "ouro.ledger.request/1"
         || !is_digest(&payload["argv_digest"])
         || !is_digest(&payload["policy_digest"])
@@ -1395,6 +1401,28 @@ mod tests {
         ))
         .unwrap();
         json!({"schema":"ouro.ledger.request/1","profile":"tool","argv_digest":receipt["argv_digest"],"policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"],"jail_image_digest":receipt["argv_digest"],"io":{"mode":"batch","pty":false},"capture":{"streams":[],"limit_bytes":1_048_576},"evidence":"strict"})
+    }
+
+    #[test]
+    fn detached_request_lifetime_is_validated_and_cannot_rebind_a_request() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = Store::open(temp.path()).unwrap();
+        let mut plan = payload();
+        plan["owner_lifetime"] = "systemd_user_service".into();
+        let run = store.prepare("detached", &plan, &peer()).unwrap();
+        assert!(store.prepare("detached", &payload(), &peer()).is_err());
+        drop(store);
+        let mut store = Store::open(temp.path()).unwrap();
+        assert_eq!(
+            store.prepare("detached", &plan, &peer()).unwrap().run_id,
+            run.run_id
+        );
+        plan["io"]["mode"] = "foreground".into();
+        assert!(store.prepare("foreground", &plan, &peer()).is_err());
+        plan["io"]["mode"] = "batch".into();
+        plan["owner_lifetime"] = "unchecked_double_fork".into();
+        assert!(store.prepare("unproved", &plan, &peer()).is_err());
     }
     fn prepared(run: &RunRecord) -> Value {
         let mut receipt: Value = serde_json::from_str(include_str!(

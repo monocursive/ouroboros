@@ -10,7 +10,8 @@ The current slice provides a single local writer, stable preparation identities,
 one birth-identified launch owner, durable admission before gate release,
 authenticated event ingestion, canonical settlement, opt-in bounded captures,
 inspection, local chain verification, conservative orphan reconciliation,
-bounded single-run evidence queries and exact canonical NDJSON export.
+bounded single-run evidence queries, exact canonical NDJSON export, and optional
+detached batch ownership on a provisioned Linux systemd user manager.
 Linux execution is the acceptance target. macOS clients can read the local
 protocol and verify stores, but native launch ownership currently refuses because
 its birth-identity mechanism has not been implemented.
@@ -91,8 +92,8 @@ jail waits on the closed gate. Any mismatch refuses before gate release.
 the jail. A replay that already has an owner or admission does not launch again.
 The owner creates the private trace, control and closed gate channels. The jail
 is its direct child; Linux parent-death setup and the existing jail supervisor
-provide the contained lifetime mechanism. Detached fleet-independent ownership
-is outside this slice.
+provide the contained lifetime mechanism. Foreground ownership stays attached
+to its invoking process; optional detached ownership follows §3.1.
 
 The jail emits its prepared receipt while execution is still blocked. Admission
 refuses unless the receipt schema, phase, attempt id, argv digest, policy digest
@@ -132,6 +133,61 @@ does not fabricate a durable acknowledgement. Owner loss records
 occur. The first slice uses strict evidence: daemon or ingestion loss stops the
 owner from releasing a new gate and triggers termination for an admitted child.
 Best-effort continuation with a reconciled bounded pending queue is deferred.
+
+### 3.1 Detached batch ownership
+
+`run --io batch --detach` requires an existing, reachable systemd user manager
+with lingering enabled. It never enables lingering or changes host policy.
+`doctor --json` reports mechanism availability without starting a writer; an
+absent writer reports `ready: false`, separately from `detached_owner.available`.
+No unsupported host falls back
+to a foreground process or a double fork.
+
+The writer and each launch owner run in separate transient user services.
+The writer service name is derived from the canonical data-directory path;
+owner service names are random. The submitter verifies the bootstrap peer's
+kernel uid, birth identity and the user manager's `MainPID` before transferring
+the request. An existing session-bound writer refuses detached submission;
+finish its active work and stop it before switching to a service writer.
+The owner connects to the independent writer without an on-demand fallback.
+
+Launch options, working directory and the submitting process's environment
+cross a private, bounded Unix socket. They are not written to files, unit
+arguments, unit environment properties or the journal. The owner restores its
+environment before starting threads. Unit commands contain only the ledger
+executable, data-directory or bootstrap path, and unit identity. Rendezvous
+sockets are removed after connection. The child retains the jail's ordinary
+environment and descriptor restrictions.
+
+The immutable request records `owner_lifetime: systemd_user_service` and batch
+I/O. The reply identifies a durably claimed owner; it does **not** assert that
+the child has executed or settled. Losing that reply does not cancel the owner.
+Replaying the same request returns the same run or refuses a conflicting plan;
+it never creates a second jail for an owned, terminal or unknown attempt.
+The batch owner keeps draining bounded captures without client descriptors.
+
+`wait RUN --timeout SECONDS --json` reads until a durable terminal record and
+returns its outcome code. Timeout or client loss does not cancel the run.
+`cancel RUN --json` requests a detached owner's stop through a birth-checked
+Linux pidfd. Its `stop_requested` response leaves settlement pending. The owner
+forwards cancellation to its direct jail child and drains final evidence;
+only a corroborated receipt establishes tree death. Owner death keeps the
+existing parent-death chain, and `settle-orphans` records unknown outcomes
+without re-executing work. Writer death retains strict fail-closed behavior.
+
+For example, on a provisioned worker:
+
+```sh
+ouro-ledger --data-dir "$HOME/.local/share/ouro-batch" run \
+  --request-id build-001 --io batch --detach --json \
+  --workspace "$PWD" --limit wall=60s --capture stdout --capture stderr \
+  -- /bin/sh -c 'make test'
+ouro-ledger --data-dir "$HOME/.local/share/ouro-batch" wait RUN_ID --json
+```
+
+This is local operator authority on Linux. Remote callers can invoke the CLI
+over their existing SSH access; restricted managed ingress, project ACLs,
+artifact transfer and the managed submission client remain separate work.
 
 ## 4. Store and canonical record
 
@@ -323,6 +379,9 @@ These are deterministic fault injections, not a physical full-disk experiment.
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
 capture truncation. A macOS unit-suite pass is not Linux containment evidence.
+The [October 2 lifecycle record](ledger-v1/evidence/2026-10-02-detached/README.md)
+adds actual SSH disconnect/reconnect, independent writer/owner services,
+bounded capture draining, cancellation and strict writer-loss checks.
 Portable reader tests exercise class/stage/time filtering, bounded pages,
 snapshot/cursor identity, exact canonical export bytes and damaged-prefix
 reporting. CLI integration tests use the actual daemon and reader subprocesses;

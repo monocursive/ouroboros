@@ -724,3 +724,305 @@ fn an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever() {
     assert_eq!(run.capture["stdout"]["state"], "incomplete");
     assert!(run.capture["stdout"]["stored_bytes"].as_u64().unwrap() <= 8);
 }
+
+fn detached_fixture() -> Option<Fixture> {
+    let jail = live_jail()?;
+    let readiness = ouro_ledger::service::probe();
+    if readiness["available"] != true {
+        harness::skip_or_fail(&format!("independent owner unavailable: {readiness}"));
+        return None;
+    }
+    let mut fixture = Fixture::new(&jail);
+    fixture.writer.kill();
+    fixture.on_demand = true;
+    Some(fixture)
+}
+
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + COMMAND_LIMIT;
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "missing fixture marker {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn signal_birth(peer: &ouro_ledger::protocol::Peer, signal: i32) {
+    use std::os::fd::AsRawFd as _;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid as libc::pid_t, 0) };
+    assert!(fd >= 0);
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    assert!(daemon::peer_alive(peer));
+    assert_eq!(
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        },
+        0
+    );
+}
+
+#[test]
+fn detached_submitter_exit_preserves_owner_output_and_one_execution() {
+    let Some(fixture) = detached_fixture() else {
+        return;
+    };
+    let make = || {
+        let mut command = fixture.command("detached-one-execution", true);
+        command.env("OURO_TEST_LAUNCH_SECRET", "bootstrap-only-canary-289101");
+        command.args(["--detach", "--capture", "stdout", "--capture-limit", "64", "--", "/bin/sh", "-c",
+            "printf x >> executions; touch started; sleep 1; printf '%05000d' 0; printf done > finished"]);
+        command
+    };
+    let (output, first) = fixture.run(&mut make());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(first.payload["owner_lifetime"], "systemd_user_service");
+    wait_for_file(&fixture.workspace.join("started"));
+    let peer = first.owner.as_ref().unwrap();
+    let writer_peer = daemon::peer_credentials(
+        &UnixStream::connect(fixture.data.join("ledger/serve.sock")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        daemon::peer_alive(peer),
+        "the owner must outlive the submitter"
+    );
+    let cgroup = fs::read_to_string(format!("/proc/{}/cgroup", peer.pid)).unwrap();
+    assert!(cgroup.contains("ouro-ledger-owner-") && cgroup.contains(".service"));
+    let cmdline = fs::read(format!("/proc/{}/cmdline", peer.pid)).unwrap();
+    assert!(!String::from_utf8_lossy(&cmdline).contains("printf"));
+    assert!(!String::from_utf8_lossy(&cmdline).contains("bootstrap-only-canary"));
+    let (_, replay) = fixture.run(&mut make());
+    assert_eq!(first.run_id, replay.run_id);
+    assert_eq!(first.owner, replay.owner);
+    let mut wait = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
+    wait.arg("--data-dir")
+        .arg(&fixture.data)
+        .arg("wait")
+        .arg(&first.run_id)
+        .args(["--timeout", "15", "--json"]);
+    let output = Process::spawn(&mut wait, true).finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settled: RunRecord = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(settled.run_id, first.run_id);
+    assert_eq!(settled.state, "settled");
+    assert!(
+        daemon::peer_alive(&writer_peer),
+        "the writer must outlive an owner service"
+    );
+    assert_eq!(settled.capture["stdout"]["observed_bytes"], 5000);
+    assert_eq!(settled.capture["stdout"]["stored_bytes"], 64);
+    assert_eq!(settled.capture["stdout"]["truncated"], true);
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("finished")).unwrap(),
+        b"done"
+    );
+    assert_eq!(
+        fs::read(
+            fixture
+                .data
+                .join("ledger")
+                .join(&first.run_id)
+                .join("artifacts/stdout.bin")
+        )
+        .unwrap()
+        .len(),
+        64
+    );
+    assert!(
+        !serde_json::to_string(&fixture.events(&settled))
+            .unwrap()
+            .contains("bootstrap-only-canary")
+    );
+    assert!(fixture.client().verify(Some(&first.run_id)).unwrap()[0].local_consistency);
+    assert_eq!(fixture.run(&mut make()).1.run_id, first.run_id);
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+}
+
+#[test]
+fn detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt() {
+    let Some(fixture) = detached_fixture() else {
+        return;
+    };
+    let make = || {
+        let mut command = fixture.command("detached-lost-reply", true);
+        command.args([
+            "--detach",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf x >> executions; sleep 1; touch finished",
+        ]);
+        command
+    };
+    let mut child = make()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take()); // The submitting terminal cannot receive the run id.
+    let output = Process::from_child(child, false).finish();
+    assert!(!output.status.success());
+    let (_, replay) = fixture.run(&mut make());
+    let settled = ouro_ledger::service::wait(&fixture.data, &replay.run_id, COMMAND_LIMIT).unwrap();
+    assert_eq!(settled.state, "settled");
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+    assert_eq!(fixture.client().runs().unwrap().len(), 1);
+}
+
+#[test]
+fn detached_cancel_requests_stop_then_waits_for_verified_settlement() {
+    let Some(fixture) = detached_fixture() else {
+        return;
+    };
+    let mut command = fixture.command("detached-cancel", true);
+    command.args([
+        "--detach",
+        "--",
+        "/bin/sh",
+        "-c",
+        "touch started; sleep 8; touch must-not-finish",
+    ]);
+    let (_, run) = fixture.run(&mut command);
+    wait_for_file(&fixture.workspace.join("started"));
+    let mut cancel = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
+    cancel
+        .arg("--data-dir")
+        .arg(&fixture.data)
+        .arg("cancel")
+        .arg(&run.run_id)
+        .arg("--json");
+    let output = Process::spawn(&mut cancel, true).finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["status"],
+        "stop_requested"
+    );
+    let settled = ouro_ledger::service::wait(&fixture.data, &run.run_id, COMMAND_LIMIT).unwrap();
+    assert_eq!(settled.state, "settled", "{settled:?}");
+    assert_eq!(
+        settled.receipts.last().unwrap()["lifetime"]["tree_empty"],
+        true
+    );
+    assert!(!fixture.workspace.join("must-not-finish").exists());
+    assert_eq!(
+        ouro_ledger::service::cancel(&fixture.data, &run.run_id).unwrap()["status"],
+        "already_terminal"
+    );
+}
+
+#[test]
+fn detached_owner_death_stops_tree_and_replay_preserves_unknown() {
+    let Some(fixture) = detached_fixture() else {
+        return;
+    };
+    let make = || {
+        let mut command = fixture.command("detached-owner-loss", true);
+        command.args([
+            "--detach",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf x >> executions; touch started; sleep 8; touch must-not-finish",
+        ]);
+        command
+    };
+    let (_, run) = fixture.run(&mut make());
+    wait_for_file(&fixture.workspace.join("started"));
+    signal_birth(run.owner.as_ref().unwrap(), libc::SIGKILL);
+    fixture.assert_tree_stopped(&run);
+    fixture.client().settle_orphans().unwrap();
+    fixture.assert_unknown(&run.run_id);
+    let (_, replay) = fixture.run(&mut make());
+    assert_eq!(replay.run_id, run.run_id);
+    assert_eq!(replay.state, "outcome_unknown");
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+    assert!(!fixture.workspace.join("must-not-finish").exists());
+}
+
+#[test]
+fn detached_mode_refuses_a_session_bound_existing_writer() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    if ouro_ledger::service::probe()["available"] != true {
+        harness::skip_or_fail("independent user manager absent");
+        return;
+    }
+    let fixture = Fixture::new(&jail);
+    let mut command = fixture.command("unsafe-writer", true);
+    command.args(["--detach", "--", "/bin/sh", "-c", "touch must-not-execute"]);
+    let output = Process::spawn(&mut command, true).finish();
+    assert!(!output.status.success());
+    assert!(!fixture.workspace.join("must-not-execute").exists());
+    assert!(fixture.client().runs().unwrap().is_empty());
+}
+
+#[test]
+fn detached_writer_death_fails_closed_without_starting_a_session_writer() {
+    let Some(fixture) = detached_fixture() else {
+        return;
+    };
+    let mut command = fixture.command("detached-writer-loss", true);
+    command.args([
+        "--detach",
+        "--",
+        "/bin/sh",
+        "-c",
+        "touch started; sleep 8; touch must-not-finish",
+    ]);
+    let (_, run) = fixture.run(&mut command);
+    wait_for_file(&fixture.workspace.join("started"));
+    stop_on_demand_writer(&fixture.data).unwrap();
+    fixture.assert_tree_stopped(&run);
+    assert!(!fixture.workspace.join("must-not-finish").exists());
+    assert!(
+        Client::connect(&fixture.data).is_err(),
+        "strict evidence must not silently replace the writer"
+    );
+    let deadline = Instant::now() + COMMAND_LIMIT;
+    while daemon::peer_alive(run.owner.as_ref().unwrap()) {
+        assert!(
+            Instant::now() < deadline,
+            "owner stayed alive after evidence loss"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _writer = Fixture::start_writer(&fixture.data);
+    fixture.client().settle_orphans().unwrap();
+    fixture.assert_unknown(&run.run_id);
+}

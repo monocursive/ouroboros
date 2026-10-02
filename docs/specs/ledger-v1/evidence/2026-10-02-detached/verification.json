@@ -1,0 +1,57 @@
+[
+  {
+    "child_protection": "enforced",
+    "coverage": {
+      "exec": {
+        "gaps": [],
+        "observed_count": 6,
+        "sources": [
+          "audit"
+        ],
+        "status": "active"
+      },
+      "fs.deny": {
+        "gaps": [],
+        "observed_count": 0,
+        "sources": [
+          "audit"
+        ],
+        "status": "active"
+      },
+      "fs.write": {
+        "gaps": [],
+        "observed_count": 3,
+        "sources": [
+          "audit"
+        ],
+        "status": "active"
+      },
+      "limits": {
+        "gaps": [],
+        "observed_count": 0,
+        "sources": [
+          "wrapper"
+        ],
+        "status": "active"
+      },
+      "net": {
+        "gaps": [],
+        "observed_count": 0,
+        "sources": [
+          "audit"
+        ],
+        "status": "active"
+      },
+      "proxy.net": {
+        "gaps": [],
+        "observed_count": null,
+        "sources": [],
+        "status": "unsupported"
+      }
+    },
+    "events": 18,
+    "local_consistency": true,
+    "problems": [],
+    "run_id": "run_d2079ef1483d4d36a53cca13093334ff"
+  }
+]

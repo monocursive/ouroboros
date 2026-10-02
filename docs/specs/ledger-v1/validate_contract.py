@@ -99,6 +99,16 @@ def main():
     assert not set(jail_schemas) & set(ledger_schemas)
     validators = jail.build_validators(jail_schemas | ledger_schemas)
     request = read("request.json")
+    detached = copy.deepcopy(request)
+    detached["owner_lifetime"] = "systemd_user_service"
+    detached["io"]["mode"] = "batch"
+    validators["request"].validate(detached)
+    altered = copy.deepcopy(detached)
+    altered["io"]["mode"] = "foreground"
+    expect_invalid(validators["request"], altered, "detached foreground streams")
+    altered = copy.deepcopy(detached)
+    altered["owner_lifetime"] = "unchecked_double_fork"
+    expect_invalid(validators["request"], altered, "unproved owner independence")
     source = read("source.json")
     canonical_source = read("canonical-source.json")
     prepared = read("prepared.json")

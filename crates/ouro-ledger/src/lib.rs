@@ -3,4 +3,5 @@ pub mod daemon;
 pub mod protocol;
 mod reader;
 pub mod runner;
+pub mod service;
 pub mod store;

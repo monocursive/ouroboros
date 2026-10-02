@@ -17,6 +17,17 @@ use serde_json::{Value, json};
 
 const WAIT_LIMIT: Duration = Duration::from_secs(5);
 
+#[test]
+fn doctor_does_not_start_a_session_writer() {
+    let mut cli = LocalCli::new();
+    let output = cli.invoke(&["doctor", "--json"]);
+    assert!(!output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["ready"], false);
+    assert_eq!(value["writer"], "unreachable");
+    assert!(!cli.data.join("ledger/serve.sock").exists());
+}
+
 /// Own every subprocess from spawn through wait, including assertion failures.
 struct Process(Child);
 

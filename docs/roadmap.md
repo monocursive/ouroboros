@@ -63,8 +63,9 @@ write workload cost remains high. The
 [write and disk-quota follow-up](benchmarks/sandboxes/write-observation-and-disk-quotas-2026-10-01.md)
 reduces paired write workload time by 3.6% and verifies ext4/XFS user hard
 quotas with 41 live checks. Explicit swap and bounded tmpfs ceilings also have
-live checks. Project quotas, automatic volume provisioning and a new committed
-conformance freeze remain pending.
+live checks. The [October 2 baseline](specs/jail-v1/evidence/2026-10-02-baseline/README.md)
+records a passing conformance run and current tested freeze. Project quotas and
+automatic volume provisioning remain pending.
 
 The release checks also include the full test suite, Linux conformance,
 security review, and unresolved findings. Documentation and a successful
@@ -99,6 +100,13 @@ bounded opt-in output capture, paginated evidence queries for one run, and
 export of the exact canonical NDJSON records. Query results retain their
 provenance and report coverage and protection separately from local consistency.
 The jail still works independently.
+
+Detached batch runs now use separate Linux user services for the writer and
+launch owner. They require an already provisioned lingering user manager.
+[Live lifecycle checks](specs/ledger-v1/evidence/2026-10-02-detached/README.md)
+cover SSH disconnect/reconnect, duplicate submission, bounded output,
+cancellation, owner death and writer loss. `wait` reads the durable outcome;
+`cancel` requests a stop and leaves final settlement to the owner.
 
 The [ledger specification](specs/ledger-v1.md) names its current acceptance and
 limits. The complete milestone remains open: cross-run queries, comparisons,

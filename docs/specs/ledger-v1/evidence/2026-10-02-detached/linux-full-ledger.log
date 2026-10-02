@@ -1,0 +1,205 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/ouro_ledger-8474ed36f6ae822f)
+
+running 35 tests
+test daemon::tests::forged_producer_role_attempt_and_peer_are_all_refused ... ok
+test daemon::tests::frame_roundtrip_handles_interrupted_transport_without_accepting_partial_json ... ok
+test daemon::tests::protocol_refuses_caller_claimed_roles_and_oversized_frames ... ok
+test reader::tests::summaries_are_bounded_even_for_arbitrary_owner_coverage_and_keep_gaps_unknown ... ok
+test reader::tests::time_filters_reject_invalid_dates_offsets_fractional_times_and_non_ascii ... ok
+test runner::tests::capture_keeps_the_exact_short_write_count_before_disk_failure ... ok
+test runner::tests::prepared_gate_compares_each_identity_and_receipt_digest ... ok
+test store::tests::admission_cannot_change_reserved_policy_or_argv ... ok
+test store::tests::admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt ... ok
+test store::tests::admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_loss ... ok
+test store::tests::detached_request_lifetime_is_validated_and_cannot_rebind_a_request ... ok
+test store::tests::different_payload_cannot_rebind_prepare_or_effect_identity ... ok
+test store::tests::every_persistence_failure_stops_acknowledgements_until_recovery ... ok
+test store::tests::flattened_source_is_the_original_frozen_envelope_plus_writer_fields ... ok
+test store::tests::full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state ... ok
+test store::tests::interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery ... ok
+test store::tests::lifetime_lock_refuses_a_second_writer ... ok
+test store::tests::lost_replies_replay_same_run_and_exact_receipt_after_recovery ... ok
+test store::tests::none_verify_retains_unprotected_even_if_receipt_claims_enforced ... ok
+test store::tests::owner_death_records_unknown_without_restart_or_tree_claim ... ok
+test store::tests::reader_cursor_cannot_change_scope_and_expires_explicitly_after_restart ... ok
+test store::tests::reader_filters_original_source_operations_stage_and_writer_time ... ok
+test store::tests::reader_large_utf8_records_are_fully_verified_before_chunks_and_query_block_replays ... ok
+test store::tests::reader_new_page_refuses_truncation_of_a_previously_verified_cached_large_frame ... ok
+test store::tests::reader_refuses_filtered_corruption_and_reports_extra_tails_without_mutation ... ok
+test store::tests::reader_snapshot_export_is_exact_bounded_and_retries_the_identical_prior_page ... ok
+test store::tests::recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain ... ok
+test store::tests::refused_receipt_requires_the_same_attempt_and_final_source_note ... ok
+test store::tests::settlement_requires_matching_final_receipt_and_trace_and_closes_observations ... ok
+test store::tests::source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery ... ok
+test store::tests::source_replay_and_gap_are_preserved_when_projection_is_updated ... ok
+test store::tests::strict_transport_gap_and_private_metadata_refuse_without_an_ack ... ok
+test store::tests::unresolved_run_keeps_a_proven_child_exit_separate_from_unknown_outcome ... ok
+test store::tests::unsafe_store_paths_and_oversized_events_are_refused ... ok
+test store::tests::verification_detects_projection_drift_and_recovery_rebuilds_it ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/ouro_ledger-8e45f31d4c7b1b31)
+
+running 3 tests
+test doctor_does_not_start_a_session_writer ...      Running tests/cli_local.rs (target/debug/deps/cli_local-556d4fc61ddd818e)
+ok
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+     Running tests/evidence_reader.rs (target/debug/deps/evidence_reader-f846a2353738e33b)
+
+running 5 tests
+test closed_export_sink_exits_nonzero_without_finished_success ... ok
+test export_keeps_large_canonical_record_bytes_out_of_status_metadata ... ok
+test incomplete_history_exports_only_verified_prefix_and_exits_nonzero ... ok
+test live_writer_detects_unexpected_tail_before_export ... ok
+test query_filters_paginate_exact_attribution_and_refuse_cursor_rebinding ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.94s
+
+
+running 15 tests
+test an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever ...      Running tests/launch_linux.rs (target/debug/deps/launch_linux-d4a00f320024a1a5)
+ok
+test contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer ... ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling version_check v0.9.5
+   Compiling unicode-ident v1.0.26
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling utf8parse v0.2.2
+   Compiling serde_core v1.0.229
+   Compiling anstyle-parse v1.0.0
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling zmij v1.0.23
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling anstream v1.0.0
+   Compiling serde v1.0.229
+   Compiling syn v3.0.6
+   Compiling heck v0.5.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling serde_json v1.0.151
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.1
+   Compiling libc v0.2.189
+   Compiling clap_builder v4.6.7
+   Compiling digest v0.10.7
+   Compiling cpufeatures v0.2.17
+   Compiling cfg-if v1.0.5
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling sha2 v0.10.9
+   Compiling clap_derive v4.6.7
+   Compiling serde_derive v1.0.229
+   Compiling clap v4.6.7
+   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-fixture)
+rustc-LLVM ERROR: IO failure on output stream: Disk quota exceeded
+error: could not compile `ouro-fixture` (lib)
+
+Caused by:
+  Disk quota exceeded (os error 122)
+
+Caused by:
+  failed to parse process output: `/home/ouro-ci/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/rustc --crate-name ouro_fixture --edition=2024 crates/ouro-fixture/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 '--deny=clippy::all' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=bc7f8d38f46dface -C extra-filename=-9d5a8b758e0274b4 --out-dir /tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/deps -C incremental=/tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/incremental -L dependency=/tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/deps --extern clap=/tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/deps/libclap-f5316f564218cbb4.rmeta --extern libc=/tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/deps/liblibc-9cd8a66bfd45f04e.rmeta --extern serde=/tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/deps/libserde-55a74ca88a3778e4.rmeta --extern serde_json=/tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/deps/libserde_json-407d1e11c108080b.rmeta --extern sha2=/tmp/ouro-fixture-harness-de7b6f931ec5d081/target-ouro-fixture/debug/deps/libsha2-4b737fbbeaa970c2.rmeta` (exit status: 101)
+
+thread 'contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer' (2723588) panicked at crates/ouro-fixture/src/harness/mod.rs:233:17:
+ouro-fixture not found: set OURO_FIXTURE_BIN to an executable path, or run `cargo build -p ouro-fixture`
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test detached_cancel_requests_stop_then_waits_for_verified_settlement ... 
+thread 'detached_cancel_requests_stop_then_waits_for_verified_settlement' (2724378) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-cancel: Disk quota exceeded (os error 122); inspect or replay this same request id, never invent a replacement
+
+FAILED
+test detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt ... FAILED
+test detached_mode_refuses_a_session_bound_existing_writer ... 
+thread 'detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt' (2724414) panicked at crates/ouro-ledger/tests/launch_linux.rs:892:5:
+assertion `left == right` failed
+  left: "outcome_unknown"
+ right: "settled"
+ok
+test detached_owner_death_stops_tree_and_replay_preserves_unknown ... 
+thread 'detached_owner_death_stops_tree_and_replay_preserves_unknown' (2724496) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-owner-loss: Disk quota exceeded (os error 122); inspect or replay this same request id, never invent a replacement
+
+FAILED
+test detached_submitter_exit_preserves_owner_output_and_one_execution ... 
+thread 'detached_submitter_exit_preserves_owner_output_and_one_execution' (2724528) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-one-execution: Disk quota exceeded (os error 122); inspect or replay this same request id, never invent a replacement
+
+FAILED
+test detached_writer_death_fails_closed_without_starting_a_session_writer ... 
+thread 'detached_writer_death_fails_closed_without_starting_a_session_writer' (2724556) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: detached request detached-writer-loss: Disk quota exceeded (os error 122); inspect or replay this same request id, never invent a replacement
+
+FAILED
+test durable_admission_precedes_real_exec_and_replay_never_executes_twice ... 
+thread 'durable_admission_precedes_real_exec_and_replay_never_executes_twice' (2724591) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: Disk quota exceeded (os error 122)
+
+FAILED
+test explicit_none_profile_remains_unprotected_after_real_launch_and_verification ... 
+thread 'explicit_none_profile_remains_unprotected_after_real_launch_and_verification' (2724658) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: Disk quota exceeded (os error 122)
+
+FAILED
+test failed_exec_retains_corroborated_error_without_a_second_attempt ... 
+thread 'failed_exec_retains_corroborated_error_without_a_second_attempt' (2724674) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: Disk quota exceeded (os error 122)
+
+FAILED
+test invalid_inherited_stdout_is_denied_before_admission_and_never_executes ... 
+thread 'invalid_inherited_stdout_is_denied_before_admission_and_never_executes' (2724690) panicked at crates/ouro-ledger/tests/launch_linux.rs:584:5:
+assertion `left == right` failed
+  left: Some(1)
+ right: Some(125)
+FAILED
+test opted_capture_stops_storing_at_the_cap_and_keeps_draining_the_real_child ... 
+thread 'opted_capture_stops_storing_at_the_cap_and_keeps_draining_the_real_child' (2724704) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: Disk quota exceeded (os error 122)
+
+FAILED
+test owner_death_is_reconciled_as_unknown_and_never_relaunched ... 
+thread 'owner_death_is_reconciled_as_unknown_and_never_relaunched' (2724723) panicked at crates/ouro-ledger/tests/launch_linux.rs:276:17:
+launch exited before its target marker: exit status: 1 stdout  stderr ouro-ledger: Disk quota exceeded (os error 122)
+
+FAILED
+test writer_death_stops_the_owner_and_recovery_remains_unknown ... 
+thread 'writer_death_stops_the_owner_and_recovery_remains_unknown' (2724738) panicked at crates/ouro-ledger/tests/launch_linux.rs:276:17:
+launch exited before its target marker: exit status: 1 stdout  stderr ouro-ledger: Disk quota exceeded (os error 122)
+
+FAILED
+
+failures:
+
+failures:
+    contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer
+    detached_cancel_requests_stop_then_waits_for_verified_settlement
+    detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt
+    detached_owner_death_stops_tree_and_replay_preserves_unknown
+    detached_submitter_exit_preserves_owner_output_and_one_execution
+    detached_writer_death_fails_closed_without_starting_a_session_writer
+    durable_admission_precedes_real_exec_and_replay_never_executes_twice
+    explicit_none_profile_remains_unprotected_after_real_launch_and_verification
+    failed_exec_retains_corroborated_error_without_a_second_attempt
+    invalid_inherited_stdout_is_denied_before_admission_and_never_executes
+    opted_capture_stops_storing_at_the_cap_and_keeps_draining_the_real_child
+    owner_death_is_reconciled_as_unknown_and_never_relaunched
+    writer_death_stops_the_owner_and_recovery_remains_unknown
+
+test result: FAILED. 2 passed; 13 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.94s
+
+error: test failed, to rerun pass `-p ouro-ledger --test launch_linux`

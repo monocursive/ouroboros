@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use ouro_ledger::{
     daemon,
     protocol::{LedgerError, ReadFilter, ReadRequest, ReadSelector, ReadStage, Result},
-    runner,
+    runner, service,
 };
 use serde_json::{Value, json};
 
@@ -47,6 +47,27 @@ enum Action {
     },
     /// Resolve, reserve, durably admit and launch one jail attempt.
     Run(Box<RunArgs>),
+    /// Wait for a run's durable terminal record; disconnecting does not cancel it.
+    Wait {
+        run_id: String,
+        #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..=86400))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request cancellation of a detached owner; wait separately for settlement.
+    Cancel {
+        run_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(name = "__owner", hide = true)]
+    Owner {
+        #[arg(long)]
+        bootstrap: PathBuf,
+        #[arg(long)]
+        unit: String,
+    },
     /// List durable runs.
     Runs {
         #[arg(long)]
@@ -160,6 +181,9 @@ struct RunArgs {
     evidence: String,
     #[arg(long,value_parser=["foreground","batch"],default_value="foreground")]
     io: String,
+    /// Start an independent user service and return its durable run identity.
+    #[arg(long)]
+    detach: bool,
     #[arg(long,value_parser=["stdout","stderr"])]
     capture: Vec<String>,
     #[arg(long, default_value_t = 1_048_576)]
@@ -382,7 +406,53 @@ fn execute(cli: Cli) -> Result<i32> {
             daemon::serve(&data)?;
             Ok(0)
         }
+        Action::Owner { bootstrap, unit } => {
+            // SAFETY: this hidden entry point has not created any threads.
+            unsafe {
+                service::serve(&bootstrap, &unit)?;
+            }
+            Ok(0)
+        }
+        Action::Wait {
+            run_id,
+            timeout,
+            json,
+        } => {
+            let record = service::wait(&data, &run_id, std::time::Duration::from_secs(timeout))?;
+            output(&serde_json::to_value(&record)?, json)?;
+            Ok(runner::record_exit(&record))
+        }
+        Action::Cancel { run_id, json } => {
+            output(&service::cancel(&data, &run_id)?, json)?;
+            Ok(0)
+        }
+        Action::Doctor { json } => {
+            // A readiness read must not create a session-bound writer which
+            // would subsequently prevent independent service ownership.
+            let detached_owner = service::probe();
+            let mut client = match daemon::Client::connect(&data) {
+                Ok(client) => client,
+                Err(error) => {
+                    output(
+                        &json!({"component":"ouro-ledger","ready":false,"writer":"unreachable","reason":error.to_string(),"store":null,"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+                        json,
+                    )?;
+                    return Ok(1);
+                }
+            };
+            client.ping()?;
+            let reports = client.verify(None)?;
+            let ready = reports.iter().all(|r| r.local_consistency);
+            output(
+                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":reports,"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+                json,
+            )?;
+            Ok(if ready { 0 } else { 1 })
+        }
         Action::Run(args) => {
+            if args.detach && args.io != "batch" {
+                return Err(LedgerError("--detach requires --io batch".into()));
+            }
             if args.json && args.io != "batch" {
                 return Err(LedgerError(
                     "run --json requires --io batch so child output has an independent sink".into(),
@@ -422,7 +492,7 @@ fn execute(cli: Cli) -> Result<i32> {
                     policy.push(value.into());
                 }
             }
-            let result = runner::run(&runner::RunOptions {
+            let options = runner::RunOptions {
                 data,
                 jail: runner::jail_binary(args.jail_bin)?,
                 request_id: args
@@ -432,10 +502,20 @@ fn execute(cli: Cli) -> Result<i32> {
                 policy_args: policy,
                 argv: args.argv,
                 batch: args.io == "batch",
+                detached: args.detach,
                 captures: args.capture,
                 capture_limit: args.capture_limit,
                 best_effort: args.evidence == "best-effort",
-            })?;
+            };
+            if args.detach {
+                let record = service::launch(&options).map_err(|error| LedgerError(format!(
+                    "detached request {}: {}; inspect or replay this same request id, never invent a replacement",
+                    options.request_id, error
+                )))?;
+                output(&serde_json::to_value(&record)?, args.json)?;
+                return Ok(0);
+            }
+            let result = runner::run(&options)?;
             if args.json {
                 output(&serde_json::to_value(&result.record)?, true)?;
             } else {
@@ -485,17 +565,13 @@ fn execute(cli: Cli) -> Result<i32> {
                 Action::SettleOrphans { json } => {
                     output(&serde_json::to_value(client.settle_orphans()?)?, json)?
                 }
-                Action::Doctor { json } => {
-                    client.ping()?;
-                    let reports = client.verify(None)?;
-                    let ready = reports.iter().all(|r| r.local_consistency);
-                    output(
-                        &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":reports,"execution_platform":"linux","managed_authorization":"not_implemented"}),
-                        json,
-                    )?;
-                    return Ok(if ready { 0 } else { 1 });
-                }
-                Action::Serve | Action::Run(_) | Action::Version { .. } => unreachable!(),
+                Action::Serve
+                | Action::Run(_)
+                | Action::Doctor { .. }
+                | Action::Version { .. }
+                | Action::Owner { .. }
+                | Action::Wait { .. }
+                | Action::Cancel { .. } => unreachable!(),
             }
             Ok(0)
         }

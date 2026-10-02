@@ -1,0 +1,64 @@
+{
+  "attempt_id": "att_4d316bcb-f8fa-4886-9379-f8c4cb264c98",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "state": "not_captured"
+    },
+    "stdout": {
+      "state": "not_captured"
+    }
+  },
+  "chain": {
+    "head_digest": "sha256:ba1c0d887da11ded36635679967ba22d606522b19a3bb40b5b12338d12344c66",
+    "head_seq": 2
+  },
+  "child_protection": "unprotected",
+  "coverage": {
+    "status": "unobserved"
+  },
+  "outcome": null,
+  "owner": {
+    "birth": "boot:47a3956e-f44b-4139-a8fc-45418c38243f:start:92611578",
+    "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+    "pid": 2725442,
+    "uid": 1001
+  },
+  "payload": {
+    "argv_digest": "sha256:36b1e36c4e14e107690ee1cb9eb54f0e6d383b99548f675476fbc73859eab26c",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout",
+        "stderr"
+      ]
+    },
+    "evidence": "strict",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:d79e9ebe44bedf0b80f979991415d71ba01aa619ec065d6c8de1660b02050550",
+    "owner_lifetime": "systemd_user_service",
+    "policy_digest": "sha256:fad1616032f7d25dc29fed09c4ecf958b2e906de4318fa1a1e4603227683cc8f",
+    "profile": "tool",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "receipts": [],
+  "request_id": "ssh-disconnect-001",
+  "run_id": "run_d2079ef1483d4d36a53cca13093334ff",
+  "schema": "ouro.ledger.run/1",
+  "settlement": "pending",
+  "state": "prepared"
+}

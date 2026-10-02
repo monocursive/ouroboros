@@ -1,0 +1,20 @@
+{
+  "fixture": "/home/ouro-ci/od-y_m8il0n",
+  "request_id": "ssh-disconnect-001",
+  "run_id": "run_d2079ef1483d4d36a53cca13093334ff",
+  "ssh_killed_after_ownership_reply": true,
+  "same_owner_after_reconnect": true,
+  "submission_seconds": 1.468,
+  "total_seconds": 11.158,
+  "artifacts": {
+    "executions": 1,
+    "finished": true,
+    "capture_bytes": 64,
+    "writer_service": "ouro-ledger-writer-e56148257ee77e511937a4cc4c8d6da0.service",
+    "binary_sha256": {
+      "ouro-ledger": "0136563abb0a08d6181edc8ca43b5f983369d1f7162f66896a347f1f9b8bb9db",
+      "ouro-jail": "d79e9ebe44bedf0b80f979991415d71ba01aa619ec065d6c8de1660b02050550"
+    }
+  },
+  "real_agent": false
+}
