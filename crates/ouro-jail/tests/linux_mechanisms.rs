@@ -734,7 +734,16 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
 
     let mut checked = 0usize;
     for (name, nr) in seccomp::DENY_EPERM {
-        assert_eq!(table.get(*name), Some(nr), "{name} has the wrong number");
+        let Some(actual) = table.get(*name) else {
+            // Generic runners may ship headers older than the reference ABI.
+            // Record precisely what they cannot check; the reference-host lane
+            // still fails here because OURO_CONFORMANCE forbids every skip.
+            ouro_fixture::harness::skip_or_fail(&format!(
+                "{HEADER} does not declare {name}; its syscall number was not checked"
+            ));
+            continue;
+        };
+        assert_eq!(actual, nr, "{name} has the wrong number");
         checked += 1;
     }
     for (name, nr) in [
