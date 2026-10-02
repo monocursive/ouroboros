@@ -19,6 +19,45 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+// Measure live requested allocation bytes independently of the observer's own
+// queue accounting. RSS includes thread stacks, allocator arenas and retained
+// freed pages, so it cannot establish a live event-queue allocation bound.
+struct CountingAllocator;
+static LIVE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+// SAFETY: every allocation operation is forwarded unchanged to System; the
+// counter neither dereferences nor changes the returned allocation.
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let ptr = unsafe { std::alloc::System.alloc(layout) };
+        if !ptr.is_null() {
+            LIVE_BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
+        }
+        ptr
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let ptr = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            LIVE_BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
+        }
+        ptr
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) };
+        LIVE_BYTES.fetch_sub(layout.size(), std::sync::atomic::Ordering::Relaxed);
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        let next = unsafe { std::alloc::System.realloc(ptr, layout, size) };
+        if !next.is_null() {
+            LIVE_BYTES.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+            LIVE_BYTES.fetch_sub(layout.size(), std::sync::atomic::Ordering::Relaxed);
+        }
+        next
+    }
+}
+
 use ouro_fixture::harness;
 use ouro_jail::platform::linux::seccomp;
 use ouro_jail::platform::linux::tracer::{
@@ -1517,6 +1556,7 @@ fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
     let base = work.base();
     let n = N.to_string();
     let rss_before = rss_kib();
+    let allocated_before = LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
     let mut run = launch(&work, &[&helper, "bigpaths", &n, &base]);
     let tracer = attach(run.pid, TracerConfig::default());
     run.release();
@@ -1524,11 +1564,14 @@ fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
     let mut line = String::new();
     run.output.read_line(&mut line).expect("the fixture report");
     let peak = rss_kib();
+    let allocated_delta = LIVE_BYTES
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_sub(allocated_before);
     let observed = collect(tracer, Duration::from_secs(120));
     let delta_mib = (peak - rss_before) as f64 / 1024.0;
     println!(
         "r10: {N} two-path events queued, supervisor RSS delta {delta_mib:.2} MiB, \
-         observer peak {:.2} MiB, dropped {}",
+         live allocations {allocated_delta} bytes, observer peak {:.2} MiB, dropped {}",
         observed.summary.queue_bytes_peak as f64 / (1024.0 * 1024.0),
         observed.summary.loss.queue_dropped
     );
@@ -1542,9 +1585,9 @@ fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
         observed.summary.queue_bytes_peak
     );
     assert!(
-        delta_mib < 4.0,
-        "jail-v1 §11.4 budgets a 4 MiB user-space event queue; the observer held \
-         {delta_mib:.2} MiB"
+        allocated_delta < 4 * 1024 * 1024,
+        "jail-v1 §11.4 budgets a 4 MiB user-space event queue; live allocations grew by \
+         {allocated_delta} bytes"
     );
     assert!(
         observed.summary.loss.queue_dropped > 0,

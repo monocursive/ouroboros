@@ -243,11 +243,12 @@ pub fn provenance_problems(doctor: &Value, revision: &str) -> Vec<String> {
 
 /// The remote I02 vendor-name scan (jail-v1 §15 row I02).
 ///
-/// Nothing ran it before, so a vendor name in the execution core landed green.
+/// Use the already built driver: invoking cargo here changes dependency feature
+/// and provenance fingerprints between precompilation and execution of the suite.
 #[must_use]
 pub fn i02_command(run_dir: &str) -> String {
     format!(
-        "cd {} && {REMOTE_CARGO} run --release -p xtask -- i02-scan",
+        "cd {} && ./target/release/xtask i02-scan",
         run_path(run_dir)
     )
 }
@@ -2997,13 +2998,11 @@ smoke doctor 0
     }
 
     #[test]
-    fn the_remote_scan_runs_before_the_suite_and_uses_the_account_cargo() {
+    fn the_remote_scan_uses_the_precompiled_driver_without_rebuilding() {
         let c = i02_command("d");
-        assert!(
-            c.contains("$HOME/.cargo/bin/cargo run --release -p xtask -- i02-scan"),
-            "{c}"
-        );
+        assert!(c.contains("./target/release/xtask i02-scan"), "{c}");
         assert!(c.starts_with("cd $HOME/ouro-ci/runs/d &&"), "{c}");
+        assert!(!c.contains("cargo"), "{c}");
     }
 
     #[test]
