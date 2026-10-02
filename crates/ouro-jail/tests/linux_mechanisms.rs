@@ -733,6 +733,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
     assert!(table.len() > 300, "only {} syscalls parsed", table.len());
 
     let mut checked = 0usize;
+    let mut absent = 0usize;
     for (name, nr) in seccomp::DENY_EPERM {
         let Some(actual) = table.get(*name) else {
             // Generic runners may ship headers older than the reference ABI.
@@ -741,6 +742,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
             ouro_fixture::harness::skip_or_fail(&format!(
                 "{HEADER} does not declare {name}; its syscall number was not checked"
             ));
+            absent += 1;
             continue;
         };
         assert_eq!(actual, nr, "{name} has the wrong number");
@@ -824,7 +826,7 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
     );
     checked += expected.len();
     assert_eq!(
-        checked,
+        checked + absent,
         seccomp::DENY_EPERM.len() + 6 + CLOSED_SET_NAMES.len() + 3
     );
 }
