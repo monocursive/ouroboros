@@ -1,0 +1,20 @@
+   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.44s
+     Running tests/observer_regression_linux.rs (target/debug/deps/observer_regression_linux-ba0ad610cc21ce55)
+
+running 1 test
+test r10_the_queue_bound_is_the_four_mib_of_the_spec ... r10: 16000 two-path events queued, supervisor RSS delta 7.05 MiB, live allocations 7295632 bytes, observer peak 3.94 MiB, dropped 15500
+FAILED
+
+failures:
+
+failures:
+    r10_the_queue_bound_is_the_four_mib_of_the_spec
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 6.41s
+
+
+thread 'r10_the_queue_bound_is_the_four_mib_of_the_spec' (2738633) panicked at crates/ouro-jail/tests/observer_regression_linux.rs:1592:5:
+jail-v1 §11.4 budgets a 4 MiB user-space event queue; live allocations grew by 7295632 bytes
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p ouro-jail --test observer_regression_linux`

@@ -141,18 +141,20 @@ pub const EVENT_FIXED_BYTES: usize = 256;
 /// exempt from every bound (J4 D6).
 const LIFECYCLE_RESERVE: usize = 64 * 1024;
 
-/// What an event costs the queue budget: its snapshots plus
+/// What an event costs the queue budget: its retained allocation capacities plus
 /// [`EVENT_FIXED_BYTES`]. The tracer charges it when an event is buffered
 /// or handed over, and [`Events`] gives it back when the consumer takes it.
+/// Path reads grow in page-bounded chunks; capacity can exceed visible length.
 fn event_bytes(event: &TracerEvent) -> usize {
     let snapshots = match event {
         TracerEvent::Syscall { args, .. } => {
-            args.path.as_ref().map_or(0, |p| p.bytes.len())
-                + args.path2.as_ref().map_or(0, |p| p.bytes.len())
-                + args
-                    .command
-                    .as_ref()
-                    .map_or(0, |hit| hit.pattern.len() + hit.digest.len())
+            args.path.as_ref().map_or(0, |p| p.bytes.capacity())
+                + args.path2.as_ref().map_or(0, |p| p.bytes.capacity())
+                + args.command.as_ref().map_or(0, |hit| {
+                    size_of::<crate::commands::Hit>()
+                        + hit.pattern.capacity()
+                        + hit.digest.capacity()
+                })
         }
         TracerEvent::Exec {
             path,
@@ -160,15 +162,18 @@ fn event_bytes(event: &TracerEvent) -> usize {
             command,
             ..
         } => {
-            path.as_ref().map_or(0, |p| p.bytes.len())
-                + command
-                    .as_ref()
-                    .map_or(0, |hit| hit.pattern.len() + hit.digest.len())
+            path.as_ref().map_or(0, |p| p.bytes.capacity())
+                + command.as_ref().map_or(0, |hit| {
+                    size_of::<crate::commands::Hit>()
+                        + hit.pattern.capacity()
+                        + hit.digest.capacity()
+                })
                 + kernel_image.as_ref().map_or(0, |k| {
-                    k.path.len()
+                    k.path.capacity()
+                        + k.candidates.capacity() * size_of::<CandidateImage>()
                         + k.candidates
                             .iter()
-                            .map(|candidate| candidate.path.len() + size_of::<CandidateImage>())
+                            .map(|candidate| candidate.path.capacity())
                             .sum::<usize>()
                 })
         }
@@ -1217,6 +1222,50 @@ impl fmt::Debug for Tracer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_queue_charge_includes_reserved_paths_candidates_and_boxed_rule() {
+        let mut path = Vec::with_capacity(1024);
+        path.push(b'x');
+        let mut candidate_path = Vec::with_capacity(2048);
+        candidate_path.push(b'y');
+        let mut candidates = Vec::with_capacity(32);
+        candidates.push(CandidateImage {
+            path: candidate_path,
+            identity: None,
+        });
+        let kernel = KernelImage {
+            path: Vec::with_capacity(4096),
+            identity: None,
+            candidates,
+        };
+        let command = crate::commands::Hit {
+            pattern: String::with_capacity(8192),
+            digest: String::with_capacity(128),
+            forbidden: false,
+        };
+        let allocated = path.capacity()
+            + kernel.path.capacity()
+            + kernel.candidates.capacity() * size_of::<CandidateImage>()
+            + kernel.candidates[0].path.capacity()
+            + size_of::<crate::commands::Hit>()
+            + command.pattern.capacity()
+            + command.digest.capacity();
+        let event = TracerEvent::Exec {
+            pid: 1,
+            start_ticks: None,
+            syscall: Some("execve"),
+            path: Some(PathSnapshot {
+                bytes: path,
+                complete: true,
+            }),
+            kernel_image: Some(kernel),
+            dirfd: None,
+            command: Some(Box::new(command)),
+            monotonic_ns: 0,
+        };
+        assert!(event_bytes(&event) >= allocated + size_of::<TracerEvent>());
+    }
 
     #[test]
     fn the_default_config_is_the_spec_bound() {

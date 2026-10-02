@@ -32,6 +32,19 @@ RSS remains diagnostic. `queue-live-allocation-debug.log` records 4,127,632 live
 bytes on the reference host, with 15,500 dropped results. This test change does
 not alter the jail runtime or its frozen build inputs.
 
+That initial reference measurement did not close the issue: the independent
+allocator check subsequently caught 7,055,628 live bytes on hosted Linux.
+Page-aligned fixture strings then reproduced **7,295,632 bytes** on the VPS.
+`event_bytes` charged vector lengths rather than retained capacities; path
+snapshots that grow across a page boundary can reserve almost twice their
+visible length. The runtime now charges capacities, including nested executable
+candidates and boxed command-rule allocations. The same deterministic fixture
+then retains **4,121,232 bytes**, dropping 15,718 results within the existing
+budget (`queue-aligned-before.log`, `queue-aligned-after.log`). The stronger test
+keeps process RSS as a diagnostic and independently enforces the live allocation
+bound. This runtime correction changes the build inputs and requires a new
+conformance run and tested freeze; the original baseline above remains historical.
+
 The conformance driver's I02 scan now invokes the precompiled driver, avoiding
 an unnecessary feature/provenance rebuild between suite preparation and execution.
 The full baseline here precedes detached ledger ownership. That feature has its

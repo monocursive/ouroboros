@@ -1,0 +1,19 @@
+   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.90s
+     Running tests/observer_regression_linux.rs (target/debug/deps/observer_regression_linux-ba0ad610cc21ce55)
+
+running 1 test
+test r10_the_queue_bound_is_the_four_mib_of_the_spec ... r10: 16000 two-path events queued, supervisor RSS delta 4.08 MiB, live allocations 4121232 bytes, observer peak 3.92 MiB, dropped 15718
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 6.19s
+
+   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-owner-20261002-aceed908/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.92s
+     Running unittests src/lib.rs (target/debug/deps/ouro_jail-23f425323f5d1fe8)
+
+running 1 test
+test platform::linux::tracer::tests::exec_queue_charge_includes_reserved_paths_candidates_and_boxed_rule ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 507 filtered out; finished in 0.00s
+

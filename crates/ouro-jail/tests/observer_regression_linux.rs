@@ -412,12 +412,17 @@ static int mode_openhow(int argc, char **argv) {
 
 static int mode_bigpaths(int argc, char **argv) {
     long n, i;
-    char *a, *b;
+    char *a, *b, *mapping;
     size_t len = 4000;
     if (argc < 4) return 2;
     n = atol(argv[2]);
-    a = malloc(len + 1);
-    b = malloc(len + 1);
+    /* Force snapshots across a page boundary after a large second read.
+       A growing Vec can retain nearly twice the pathname length here. */
+    mapping = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapping == MAP_FAILED) return 3;
+    a = mapping + 512;
+    b = mapping + 2 * 4096 + 512;
     memset(a, 'a', len); a[len] = 0;
     memset(b, 'b', len); b[len] = 0;
     memcpy(a, argv[3], strlen(argv[3]));
