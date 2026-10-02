@@ -1,0 +1,38 @@
+# Reviewed pagination homonyms: repository-relative path<TAB>exact trimmed source.
+# Only the cursor token is exempt. Updating a line requires reviewing its meaning.
+crates/ouro-ledger/src/main.rs	/// Resume with the same run and filters using the returned cursor.
+crates/ouro-ledger/src/main.rs	cursor: Option<String>,
+crates/ouro-ledger/src/main.rs	/// Resume the original snapshot using a previously returned cursor.
+crates/ouro-ledger/src/main.rs	cursor: args.cursor,
+crates/ouro-ledger/src/main.rs	"next_cursor": null,
+crates/ouro-ledger/src/main.rs	let cursor = page
+crates/ouro-ledger/src/main.rs	.next_cursor
+crates/ouro-ledger/src/main.rs	.ok_or_else(|| LedgerError("unfinished export has no continuation cursor".into()))?;
+crates/ouro-ledger/src/main.rs	if request.cursor.as_ref() == Some(&cursor) {
+crates/ouro-ledger/src/main.rs	return Err(LedgerError("export cursor made no progress".into()));
+crates/ouro-ledger/src/main.rs	"next_cursor": cursor,
+crates/ouro-ledger/src/main.rs	"ouro-ledger: export checkpoint after {bytes_written} bytes; protection {}; stream {}; local consistency {}; cursor {cursor}",
+crates/ouro-ledger/src/main.rs	request.cursor = Some(cursor);
+crates/ouro-ledger/src/protocol.rs	pub cursor: Option<String>,
+crates/ouro-ledger/src/protocol.rs	pub next_cursor: Option<String>,
+crates/ouro-ledger/src/reader.rs	//! Bounded readers of the original canonical stream. Cursors confer no authority.
+crates/ouro-ledger/src/reader.rs	let (id, token) = if let Some(cursor) = &request.cursor {
+crates/ouro-ledger/src/reader.rs	if cursor.len() != 64
+crates/ouro-ledger/src/reader.rs	|| !cursor
+crates/ouro-ledger/src/reader.rs	return Err(LedgerError("invalid reader cursor".into()));
+crates/ouro-ledger/src/reader.rs	(cursor[..32].to_owned(), cursor[32..].to_owned())
+crates/ouro-ledger/src/reader.rs	next_cursor: None,
+crates/ouro-ledger/src/reader.rs	"reader cursor expired or daemon restarted; start a new snapshot, do not append it to an old export".into()))?;
+crates/ouro-ledger/src/reader.rs	"reader cursor run, filter or limit mismatch".into(),
+crates/ouro-ledger/src/reader.rs	"reader cursor position is stale or forged".into(),
+crates/ouro-ledger/src/reader.rs	page.next_cursor = Some(format!("{id}{token}"));
+crates/ouro-ledger/src/reader.rs	page.next_cursor = Some(format!("{id}{next}"));
+crates/ouro-ledger/src/store.rs	cursor: None,
+crates/ouro-ledger/src/store.rs	request.cursor = page.next_cursor.clone();
+crates/ouro-ledger/src/store.rs	request.cursor = first.next_cursor.clone();
+crates/ouro-ledger/src/store.rs	request.cursor = second.next_cursor.clone();
+crates/ouro-ledger/src/store.rs	request.cursor = page.next_cursor;
+crates/ouro-ledger/src/store.rs	assert!(request.cursor.is_some());
+crates/ouro-ledger/src/store.rs	fn reader_cursor_cannot_change_scope_and_expires_explicitly_after_restart() {
+crates/ouro-ledger/src/store.rs	resumed.cursor = page.next_cursor;
+crates/ouro-ledger/src/store.rs	wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");

@@ -14,6 +14,10 @@
 //! token split across lines or across `concat!`, a Unicode look-alike
 //! (Cyrillic `а` in `clаude`), and a `\u{..}` escape. Those are deliberate
 //! evasions, not accidents; the scan is a guard against the accident.
+//!
+//! Pagination uses a homonym of one vendor name. Only reviewed exact source
+//! lines in named files are exempt for that token; new uses, executable names,
+//! dependencies and other vendor tokens on the same line still fail.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +46,16 @@ pub const ROOTS: &[&str] = &[
     "crates/ouro-ledger/Cargo.toml",
     "crates/ouro-ledger/build.rs",
 ];
+
+const CURSOR_HOMONYMS: &str = include_str!("i02-cursor-homonyms.tsv");
+
+fn reviewed_cursor_homonym(path: &Path, line: &[u8]) -> bool {
+    CURSOR_HOMONYMS.lines().any(|entry| {
+        entry.split_once('\t').is_some_and(|(file, source)| {
+            path.ends_with(file) && line.trim_ascii() == source.as_bytes()
+        })
+    })
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Hit {
@@ -81,6 +95,9 @@ pub fn scan_bytes(path: &Path, bytes: &[u8]) -> Vec<Hit> {
     for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
         let lower: Vec<u8> = line.iter().map(u8::to_ascii_lowercase).collect();
         for token in FORBIDDEN {
+            if *token == "cursor" && reviewed_cursor_homonym(path, line) {
+                continue;
+            }
             if lower.windows(token.len()).any(|w| w == token.as_bytes()) {
                 hits.push(Hit {
                     path: path.to_path_buf(),
@@ -146,6 +163,38 @@ pub fn scan_roots(base: &Path, roots: &[&str]) -> std::io::Result<Scan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pagination_exceptions_are_exact_and_file_scoped() {
+        for entry in CURSOR_HOMONYMS.lines().filter(|s| !s.starts_with('#')) {
+            let Some((file, source)) = entry.split_once('\t') else {
+                continue;
+            };
+            assert!(scan_bytes(Path::new(file), source.as_bytes()).is_empty());
+            assert!(!scan_bytes(Path::new("unreviewed.rs"), source.as_bytes()).is_empty());
+            for suffix in [" // cursor", " // codex"] {
+                assert!(
+                    !scan_bytes(Path::new(file), format!("{source}{suffix}").as_bytes()).is_empty()
+                );
+            }
+        }
+        let path = Path::new("crates/ouro-ledger/src/main.rs");
+        for source in [
+            "Command::new(\"cursor\");",
+            "const VENDOR: &str = \"Cursor\";",
+            "let cursor_vendor = 1;",
+        ] {
+            assert_eq!(scan_bytes(path, source.as_bytes()).len(), 1);
+        }
+        assert_eq!(
+            scan_bytes(
+                Path::new("crates/ouro-ledger/Cargo.toml"),
+                b"cursor-protocol = \"1\""
+            )
+            .len(),
+            1
+        );
+    }
 
     #[test]
     fn every_forbidden_token_is_found_in_any_case() {
