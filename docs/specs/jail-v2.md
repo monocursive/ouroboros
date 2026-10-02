@@ -691,6 +691,14 @@ custodian-death trials left five workload processes alive beyond two seconds,
 including detached and double-fork descendants. Thus this prototype does not
 meet the lifetime contract. SIP-enabled, Apple-approved trials remain pending;
 entitlement approval alone will not resolve the demonstrated custody failure.
+The [2026-09-30 reciprocal-custody experiment](../benchmarks/jail/macos-reciprocal-custody.md)
+adds two independently scoped clients. Two 100-case VM series cleaned up the
+seven known fixture processes after either custodian died or stalled, including
+spawn group/session children. Simultaneous client death left all seven running
+and allowed new exec even with fail-closed AUTH_EXEC configured. This improves
+single-failure handling but does not select a production lifetime mechanism or
+open J11's execution gate. Actual event loss, concurrent forks, complete final
+drain and normal-protection proof remain required.
 
 The following are not sufficient evidence of tree containment:
 

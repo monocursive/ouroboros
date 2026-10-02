@@ -39,7 +39,7 @@ that would let a child modify its executable.
 
 `doctor` checks whether your host can run the selected profile. Read its
 report before continuing. A required control must be available; a preferred
-limit may be left unapplied and reported as such. Explicit PID, memory, and
+limit may be left unapplied and reported as such. Explicit PID, memory, swap, and
 CPU limits require a delegated cgroup v2 scope. The
 [host setup reference](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
 explains that setup and its effect on process cleanup.
@@ -114,6 +114,42 @@ installed dependencies. For a build, keep source inputs read-only and give
 the compiler a separate writable output directory. Toolchains installed in
 your home directory may need explicit paths; your usual home and environment
 are not automatically inherited.
+
+### Bound RAM, swap and writable storage
+
+RAM and swap have separate ceilings. Combine `--limit mem=512MiB` with
+`--limit swap=0` to cap charged RAM and disable swap, or use a positive swap
+budget such as `--limit swap=128MiB`. An omitted swap limit is not implied by
+the memory limit.
+
+`--limit storage=64MiB --limit inodes=4096` requires operator-provisioned
+bounded tmpfs volumes or ext4/XFS filesystems with enforced **user hard
+quotas**. Their combined capacity must fit those ceilings. The workspace,
+explicit `--scratch PATH`, extra writable grants and agent state all count;
+aliases of the same filesystem count once. Existing files and concurrent
+users of the same budget consume capacity too. The jail does not provision
+volumes or copy the workspace automatically.
+
+For disk storage, use a dedicated non-root worker account and a filesystem
+with user quota accounting and enforcement already enabled. For example,
+on a prepared quota filesystem, an operator with `quota-tools` can set a
+64 MiB block hard limit and 4096-inode hard limit with
+`sudo setquota -u WORKER 0 65536 0 4096 /WORKER_VOLUME` (block limits are KiB).
+Put both workspace and scratch there, owned by `WORKER`. Ouroboros queries
+the kernel as that user before releasing the target. Soft limits alone,
+disabled enforcement, foreign-owned writable files, idmapped writable mounts
+and XFS realtime volumes refuse. This budget covers that uid across the filesystem, including
+files outside the granted directories; it is not a per-run reservation.
+
+For storage-bounded runs, `/dev/shm` is read-only and new hard links return
+`EPERM`. The hard-link restriction prevents importing another user's inode
+into the writable tree; these seccomp denials have no observer event. Existing
+hard links within the admitted ownership rules remain usable. The storage ceiling covers
+allocated file data; use `mem` to bound charged RAM as well. A storage
+receipt's `hit=null` means saturation was not established, not that the limit
+was never reached. The [limit specification](specs/jail-v1.md#64-limits-and-errors)
+defines the scope and remaining backend limitations. Project quotas and
+automatic volume provisioning are not implemented.
 
 ## Run an existing agent
 

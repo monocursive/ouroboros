@@ -1,0 +1,138 @@
+{
+  "trials": 100,
+  "auth_exec_fail_closed": false,
+  "cases": {
+    "wall": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 85.00043749999797,
+        "p95_ms": 101.55216700000125
+      },
+      "independent_observation": {
+        "p50_ms": 2795.3964585000012,
+        "p95_ms": 2835.8033330000003
+      }
+    },
+    "cancel": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 63.413500000000454,
+        "p95_ms": 96.91704100000109
+      },
+      "independent_observation": {
+        "p50_ms": 42.70570850000155,
+        "p95_ms": 132.24900000000162
+      }
+    },
+    "root_death": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 43.08174999999981,
+        "p95_ms": 96.22945799999627
+      },
+      "independent_observation": {
+        "p50_ms": 365.48241600000165,
+        "p95_ms": 474.9343330000002
+      }
+    },
+    "guardian_death": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 50.839166999998575,
+        "p95_ms": 93.2752499999907
+      },
+      "independent_observation": {
+        "p50_ms": 131.08812549999627,
+        "p95_ms": 212.52104200000588
+      }
+    },
+    "ward_death": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 50.91093699999982,
+        "p95_ms": 108.2182920000001
+      },
+      "independent_observation": {
+        "p50_ms": 129.3402704999984,
+        "p95_ms": 168.96312499999055
+      }
+    },
+    "guardian_stop": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 71.30591700000011,
+        "p95_ms": 101.214959
+      },
+      "independent_observation": {
+        "p50_ms": 830.6752499999988,
+        "p95_ms": 954.66725
+      }
+    },
+    "ward_stop": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 38.49749999999963,
+        "p95_ms": 93.76704200000319
+      },
+      "independent_observation": {
+        "p50_ms": 874.2322705000004,
+        "p95_ms": 931.8705000000023
+      }
+    },
+    "guardian_gap": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 92.52787499999826,
+        "p95_ms": 107.22962500000222
+      },
+      "independent_observation": {
+        "p50_ms": 41.08704199999735,
+        "p95_ms": 44.670000000010646
+      }
+    },
+    "ward_gap": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 50.41912499999768,
+        "p95_ms": 104.78566700000158
+      },
+      "independent_observation": {
+        "p50_ms": 43.59241650000012,
+        "p95_ms": 207.7902079999987
+      }
+    },
+    "both_death": {
+      "trials": 10,
+      "known_fixture_empty": 0,
+      "ready": {
+        "p50_ms": 73.99439650000161,
+        "p95_ms": 96.50129100000271
+      },
+      "independent_observation": {
+        "p50_ms": 583.462770999997,
+        "p95_ms": 684.0728330000019
+      }
+    }
+  },
+  "scope": "known controlled fixture processes in a development VM",
+  "lifetime_contract_verified": false,
+  "native_execution_ready": false,
+  "remaining_gates": [
+    "simultaneous custodian loss",
+    "unobserved forks and real event loss",
+    "complete final tree drain",
+    "actual PID reuse",
+    "normal SIP with Apple-approved signature",
+    "filesystem, Mach, descriptor and agent compatibility conformance"
+  ],
+  "results_sha256": "114d165e325e5591f38e5613376063cf1d3034f960d54e6896aae402212f69da"
+}

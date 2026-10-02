@@ -1,0 +1,134 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_0a3ecb3c-76b4-4a6c-af32-afcbcd22bd0a",
+  "revision": 1,
+  "phase": "refused",
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "Linux 7.0.0-31-generic"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": null,
+    "backend_version": null
+  },
+  "policy": {
+    "name": "tool",
+    "digest": "sha256:4067c39f2bfc1b0bcfd27f8c3dcfb25fdd63e5b3c65a908b5e2ae4021244a779",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall",
+      "limit:storage",
+      "limit:inodes"
+    ],
+    "grants": []
+  },
+  "containment": "pending",
+  "child_protection": "pending",
+  "exec_observed": false,
+  "argv_digest": "sha256:d3c9915b7ff43f83b7f2cea2ee7fde6872f9d86e59ab368f367e02e187c2b5bd",
+  "applied": {
+    "filesystem": null,
+    "network": {
+      "mode": "pending",
+      "mechanism": null,
+      "allowed_hosts": []
+    },
+    "syscalls": null,
+    "limits": [],
+    "environment_names": [],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": null,
+  "lifetime": {
+    "boundary": "pending",
+    "native": null,
+    "tree_empty": null,
+    "verified_at": null,
+    "verification_scope": null,
+    "integrity": "pending"
+  },
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "missing_capability",
+      "stage": "preparing",
+      "message": "storage ceiling unavailable: writable filesystem has no hard ceiling for a requested resource",
+      "remediation_category": "host_setup"
+    }
+  },
+  "state_cleanup": "not_needed",
+  "cleanup_error": null,
+  "created_at": "2026-10-01T20:04:55Z",
+  "updated_at": "2026-10-01T20:04:55Z",
+  "errors": [
+    {
+      "code": "missing_capability",
+      "stage": "preparing",
+      "message": "storage ceiling unavailable: writable filesystem has no hard ceiling for a requested resource",
+      "remediation_category": "host_setup"
+    }
+  ],
+  "credentials": []
+}

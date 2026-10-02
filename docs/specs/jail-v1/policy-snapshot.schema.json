@@ -424,6 +424,78 @@
               "additionalProperties": false
             }
           ]
+        },
+        "swap": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)$"
+                },
+                "required": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "value",
+                "required"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "storage": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "required": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "value",
+                "required"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "inodes": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "required": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "value",
+                "required"
+              ],
+              "additionalProperties": false
+            }
+          ]
         }
       },
       "required": [

@@ -1,0 +1,28 @@
+{
+  "filesystem": {
+    "denyRead": [
+      "/Users",
+      "/home",
+      "/tmp",
+      "/private/tmp"
+    ],
+    "allowRead": [
+      "/private/tmp/ouro-sandbox-20260930/work",
+      "/private/tmp/ouro-sandbox-20260930/private/read-only",
+      "/private/tmp/ouro-sandbox-20260930/srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp"
+    ],
+    "allowWrite": [
+      "/private/tmp/ouro-sandbox-20260930/work"
+    ],
+    "denyWrite": [
+      "/private/tmp/ouro-sandbox-20260930/private/read-only"
+    ]
+  },
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": [],
+    "allowLocalBinding": false
+  },
+  "enableWeakerNestedSandbox": false,
+  "enableWeakerNetworkIsolation": false
+}

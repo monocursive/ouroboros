@@ -1,0 +1,267 @@
+{
+  "valid": true,
+  "problems": [],
+  "available": {
+    "direct": true,
+    "ouro-jail": true,
+    "greywall": true,
+    "srt": false
+  },
+  "rows": [
+    {
+      "tool": "direct",
+      "workload": "cpu",
+      "n": 30,
+      "median_ms": 25.406987,
+      "p95_ms": 27.095017,
+      "payload_median_ms": 24.271968,
+      "load1_max": 1.2568359375,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "git",
+      "n": 30,
+      "median_ms": 42.4029325,
+      "p95_ms": 53.689396,
+      "payload_median_ms": 3.889466,
+      "load1_max": 1.3037109375,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "noop",
+      "n": 30,
+      "median_ms": 1.003393,
+      "p95_ms": 1.999155,
+      "payload_median_ms": 0.00019500000000000002,
+      "load1_max": 1.3037109375,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "python",
+      "n": 30,
+      "median_ms": 38.395012,
+      "p95_ms": 41.624513,
+      "payload_median_ms": 0.0011345,
+      "load1_max": 1.3037109375,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "reads",
+      "n": 30,
+      "median_ms": 5.51868,
+      "p95_ms": 6.752966,
+      "payload_median_ms": 4.4856065,
+      "load1_max": 1.279296875,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "spawn",
+      "n": 30,
+      "median_ms": 72.554554,
+      "p95_ms": 78.885019,
+      "payload_median_ms": 71.08285699999999,
+      "load1_max": 1.3037109375,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "writes",
+      "n": 30,
+      "median_ms": 9.6698185,
+      "p95_ms": 11.427986,
+      "payload_median_ms": 8.6309145,
+      "load1_max": 1.3037109375,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "greywall",
+      "workload": "cpu",
+      "n": 30,
+      "median_ms": 1101.7515835,
+      "p95_ms": 1132.518808,
+      "payload_median_ms": 24.2609425,
+      "load1_max": 1.3037109375,
+      "over_direct": 43.36411804752763
+    },
+    {
+      "tool": "greywall",
+      "workload": "git",
+      "n": 30,
+      "median_ms": 1119.119953,
+      "p95_ms": 1151.560739,
+      "payload_median_ms": 5.586361,
+      "load1_max": 1.3037109375,
+      "over_direct": 26.392513135736543
+    },
+    {
+      "tool": "greywall",
+      "workload": "noop",
+      "n": 30,
+      "median_ms": 1079.139001,
+      "p95_ms": 1109.427341,
+      "payload_median_ms": 0.0002155,
+      "load1_max": 1.279296875,
+      "over_direct": 1075.489863891815
+    },
+    {
+      "tool": "greywall",
+      "workload": "python",
+      "n": 30,
+      "median_ms": 1115.143765,
+      "p95_ms": 1156.120949,
+      "payload_median_ms": 0.00126,
+      "load1_max": 1.3037109375,
+      "over_direct": 29.043974904865248
+    },
+    {
+      "tool": "greywall",
+      "workload": "reads",
+      "n": 30,
+      "median_ms": 1080.143924,
+      "p95_ms": 1130.200519,
+      "payload_median_ms": 5.9016845,
+      "load1_max": 1.279296875,
+      "over_direct": 195.72505091797314
+    },
+    {
+      "tool": "greywall",
+      "workload": "spawn",
+      "n": 30,
+      "median_ms": 1149.901735,
+      "p95_ms": 1179.783822,
+      "payload_median_ms": 75.9815715,
+      "load1_max": 1.2568359375,
+      "over_direct": 15.848787865197268
+    },
+    {
+      "tool": "greywall",
+      "workload": "writes",
+      "n": 30,
+      "median_ms": 1087.33897,
+      "p95_ms": 1116.026667,
+      "payload_median_ms": 11.428311,
+      "load1_max": 1.279296875,
+      "over_direct": 112.44667829080764
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "cpu",
+      "n": 30,
+      "median_ms": 137.3428915,
+      "p95_ms": 155.423757,
+      "payload_median_ms": 24.356904,
+      "load1_max": 1.3037109375,
+      "over_direct": 5.405713455908802
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "git",
+      "n": 30,
+      "median_ms": 164.37307950000002,
+      "p95_ms": 183.988166,
+      "payload_median_ms": 7.327843,
+      "load1_max": 1.3037109375,
+      "over_direct": 3.876455466847724
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "noop",
+      "n": 30,
+      "median_ms": 110.606423,
+      "p95_ms": 139.649865,
+      "payload_median_ms": 0.0001895,
+      "load1_max": 1.3037109375,
+      "over_direct": 110.2324044516954
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "python",
+      "n": 30,
+      "median_ms": 150.325183,
+      "p95_ms": 168.040217,
+      "payload_median_ms": 0.00123,
+      "load1_max": 1.3037109375,
+      "over_direct": 3.915226878949797
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "reads",
+      "n": 30,
+      "median_ms": 138.8213515,
+      "p95_ms": 150.11633,
+      "payload_median_ms": 24.3458485,
+      "load1_max": 1.3037109375,
+      "over_direct": 25.15481084244783
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "spawn",
+      "n": 30,
+      "median_ms": 227.0884405,
+      "p95_ms": 254.593394,
+      "payload_median_ms": 118.56117549999999,
+      "load1_max": 1.3037109375,
+      "over_direct": 3.1298991997111583
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "writes",
+      "n": 30,
+      "median_ms": 183.8251525,
+      "p95_ms": 202.312168,
+      "payload_median_ms": 68.6829515,
+      "load1_max": 1.3037109375,
+      "over_direct": 19.01019677877098
+    }
+  ],
+  "comparisons": [
+    {
+      "competitor": "greywall",
+      "workload": "cpu",
+      "competitor_over_ouro_median": 8.021904675714504,
+      "competitor_over_ouro_p95": 7.28665185979258
+    },
+    {
+      "competitor": "greywall",
+      "workload": "git",
+      "competitor_over_ouro_median": 6.808413861954809,
+      "competitor_over_ouro_p95": 6.258884818711655
+    },
+    {
+      "competitor": "greywall",
+      "workload": "noop",
+      "competitor_over_ouro_median": 9.756567220332222,
+      "competitor_over_ouro_p95": 7.944349541619679
+    },
+    {
+      "competitor": "greywall",
+      "workload": "python",
+      "competitor_over_ouro_median": 7.4182099282726295,
+      "competitor_over_ouro_p95": 6.8800253275083545
+    },
+    {
+      "competitor": "greywall",
+      "workload": "reads",
+      "competitor_over_ouro_median": 7.780819825832052,
+      "competitor_over_ouro_p95": 7.52883126705802
+    },
+    {
+      "competitor": "greywall",
+      "workload": "spawn",
+      "competitor_over_ouro_median": 5.063673573468395,
+      "competitor_over_ouro_p95": 4.633992278684183
+    },
+    {
+      "competitor": "greywall",
+      "workload": "writes",
+      "competitor_over_ouro_median": 5.915071769082307,
+      "competitor_over_ouro_p95": 5.516359584461573
+    }
+  ],
+  "scope": "same-host CLI elapsed time; no cross-host speed comparison; unavailable arms are not wins"
+}

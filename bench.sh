@@ -1,5 +1,7 @@
 #!/bin/sh
 # ouro-jail vs greywall vs baseline — hyperfine suite, reference host.
+# Historical 2026-09-28 driver; the current completion-validated, interleaved
+# suite and results are in docs/benchmarks/sandboxes/README.md.
 export PATH=$HOME/.local/bin:$PATH
 cd "$HOME/benchws" || exit 1
 mkdir -p fsdir

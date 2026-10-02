@@ -2,6 +2,10 @@
 
 Date: 2026-09-29. This is mechanism research, not a completed macOS backend.
 
+Follow-up: [reciprocal ES custody, 2026-09-30](macos-reciprocal-custody.md)
+cleans up the known fixture after either custodian fails, but both-client loss
+still permits ongoing execution. The production lifetime gate remains open.
+
 There are stronger native primitives than process groups. The most promising
 supported direction is **Seatbelt plus macOS 27's descendant-scoped Endpoint
 Security client and audit-token signalling**. It still needs an entitled binary

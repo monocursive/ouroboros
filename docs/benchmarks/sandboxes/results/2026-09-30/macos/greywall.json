@@ -1,0 +1,22 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/private/tmp/ouro-sandbox-20260930/private/read-only"
+    ],
+    "allowWrite": [
+      "/private/tmp/ouro-sandbox-20260930/work"
+    ],
+    "denyRead": [
+      "/private/tmp/ouro-sandbox-20260930/private/read-canary"
+    ],
+    "denyWrite": [
+      "/private/tmp/ouro-sandbox-20260930/private/read-only"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:61340",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

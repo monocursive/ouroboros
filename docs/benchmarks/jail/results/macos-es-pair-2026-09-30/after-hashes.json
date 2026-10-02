@@ -1,0 +1,24 @@
+{
+  "notify": {
+    "helper_sha256": "1c72841ae1fd296d7249c291083bce83a005485143661a541a4b18d4043c6c88",
+    "tested_sources_sha256": {
+      "macos_es_pair.py": "53d3843591462bcff0932ca982f7cadf7e31f7cef671468120e320a314d4159a",
+      "macos_es_pair.c": "ff950f572b65d3148fb82c0e6b1141b01697ed054367a53d97c550413b768bad",
+      "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+      "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0",
+      "macos_es.c": "2b25c70d8d02c97f585cb66ddfb54d3d7fb064ab4851a185f57b56d6073e179d",
+      "macos_native.c": "6154039f618a28a72c4ca61354649d813101c2a53a1c73877b8240cbdce8cfd9"
+    }
+  },
+  "auth": {
+    "helper_sha256": "19aebfdaefadfb1dc6cf5dd2c2787af51c64491b6342788e4573204b46335a9b",
+    "tested_sources_sha256": {
+      "macos_es_pair.py": "5795261dd5776d0e527dca2fc8f70f75e47160b38e3fd4dba87d89ea547e0f71",
+      "macos_es_pair.c": "8199bcc2b71576d7b788eb2a1555a34b04e551d0dcf9bd06b2f772b5045ebf0c",
+      "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+      "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0",
+      "macos_es.c": "2b25c70d8d02c97f585cb66ddfb54d3d7fb064ab4851a185f57b56d6073e179d",
+      "macos_native.c": "adc081414284414824be45471fd13e805093d9f00c99307d22f14be86b1777d1"
+    }
+  }
+}

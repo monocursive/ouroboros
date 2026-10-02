@@ -120,7 +120,12 @@ const SCOPE: &str = "registered_boundary";
 fn never_applied(requirement: &str) -> bool {
     matches!(
         requirement,
-        REQ_FILESYSTEM_CONTAINMENT | REQ_SYSCALL_FILTER | REQ_NETWORK_NONE | REQ_NETWORK_PROXY
+        REQ_FILESYSTEM_CONTAINMENT
+            | REQ_SYSCALL_FILTER
+            | REQ_NETWORK_NONE
+            | REQ_NETWORK_PROXY
+            | "limit:storage"
+            | "limit:inodes"
     ) || requirement.starts_with("protected_coverage:")
 }
 
@@ -818,6 +823,7 @@ impl Uncontained {
             ("wall", self.snapshot.limits.wall.as_ref()),
             ("pids", self.snapshot.limits.pids.as_ref()),
             ("mem", self.snapshot.limits.mem.as_ref()),
+            ("swap", self.snapshot.limits.swap.as_ref()),
             ("cpu", self.snapshot.limits.cpu.as_ref()),
         ] {
             let Some(ceiling) = ceiling else { continue };

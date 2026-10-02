@@ -1,0 +1,38 @@
+{
+  "command": [
+    "/tmp/ouro-resource-20261001/src/target/release/ouro-jail",
+    "run",
+    "--profile",
+    "tool",
+    "--workspace",
+    "/home/ouro-ci/ouro-storage-refusal-tedkmg4g",
+    "--scratch",
+    "/tmp/ouro-resource-20261001/volume/scratch",
+    "--limit",
+    "storage=8MiB",
+    "--limit",
+    "inodes=64",
+    "--receipt",
+    "/tmp/ouro-resource-20261001/disk-refusal.receipt.json",
+    "--",
+    "/usr/bin/printf",
+    "TARGET_RAN"
+  ],
+  "exit": 125,
+  "stdout": "",
+  "stderr": "ouro-jail: error missing_capability at preparing [host_setup]: storage ceiling unavailable: writable mount /home/ouro-ci/ouro-storage-refusal-tedkmg4g is not a bounded tmpfs; provision bounded volumes for every writable grant and --scratch\n",
+  "receipt": "disk-refusal.receipt.json",
+  "filesystem": "ext4",
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "missing_capability",
+      "stage": "preparing",
+      "message": "storage ceiling unavailable: writable mount /home/ouro-ci/ouro-storage-refusal-tedkmg4g is not a bounded tmpfs; provision bounded volumes for every writable grant and --scratch",
+      "remediation_category": "host_setup"
+    }
+  }
+}

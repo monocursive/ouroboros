@@ -329,6 +329,8 @@ fn probes_for(requirement: &str) -> &'static [&'static str] {
         "limit:wall" => &[],
         "limit:pids" => &["cgroup_pids"],
         "limit:mem" => &["cgroup_memory"],
+        "limit:swap" => &["cgroup_swap"],
+        "limit:storage" | "limit:inodes" => &["mount_readonly_bind", "seccomp_filter_load"],
         "limit:cpu" => &["cgroup_cpu"],
         other if other.starts_with("limit:") => &["cgroup_delegated_leaf"],
         other => inputs_for(other).map_or(&[], |(probes, _, _)| probes),
@@ -360,7 +362,11 @@ fn capability_for(requirement: &str, results: &[ProbeResult], measured_at: &str)
         return capability_from(
             requirement,
             probes_for(requirement),
-            "cgroup-v2-delegated",
+            if matches!(requirement, "limit:storage" | "limit:inodes") {
+                "filesystem-capacity-or-user-quota"
+            } else {
+                "cgroup-v2-delegated"
+            },
             CapabilityScope::Tree,
             results,
             measured_at,
@@ -639,6 +645,7 @@ struct Boundary {
     trace_data: u16,
     ns_ids: identity::NsIds,
     cgroup: Option<ExecutionCgroup>,
+    storage: Option<super::storage::Storage>,
     cgroup_lost: bool,
     /// Why no execution cgroup exists, when preferred ceilings run unenforced.
     cgroup_unavailable: Option<String>,
@@ -747,6 +754,7 @@ impl Boundary {
         let cgroup_required = [
             &snapshot.limits.pids,
             &snapshot.limits.mem,
+            &snapshot.limits.swap,
             &snapshot.limits.cpu,
         ]
         .into_iter()
@@ -800,6 +808,7 @@ impl Boundary {
         }
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
+        bplan.bounded_storage = super::storage::requested(&snapshot.limits);
         bplan.workspace_access = None;
         if snapshot.filesystem.read_write.iter().any(|reference| {
             host_path_of(reference, &plan.workspace, &scratch)
@@ -997,9 +1006,21 @@ impl Boundary {
 
         // J3-agent begin: `agent` loads its own baseline, in the variant the
         // measured nested-namespace capability selected (§9.2)
+        if bplan.bounded_storage
+            && agent
+                .as_ref()
+                .is_some_and(|agent| agent.variant() == seccomp::AgentVariant::NamespaceInner)
+        {
+            return Err(preparing(
+                ErrorCode::MissingCapability,
+                "storage ceilings require a profile that cannot create new mounts",
+            ));
+        }
         let filter = match agent.as_ref() {
-            Some(agent) => seccomp::agent_baseline(agent.variant()),
-            None => seccomp::tool_baseline(),
+            Some(agent) => {
+                seccomp::agent_baseline_with_storage(agent.variant(), bplan.bounded_storage)
+            }
+            None => seccomp::tool_baseline_with_storage(bplan.bounded_storage),
         }
         // J3-agent end
         .map_err(|err| {
@@ -1036,6 +1057,11 @@ impl Boundary {
             trace_data.map(|_| TRACE_DATA_FD),
             &target,
         );
+        if observe_on && !snapshot.observation.learning {
+            bplan
+                .inner
+                .insert(2, OsString::from("--read-open-fast-path"));
+        }
         // J3-agent end
         bplan.seccomp_fd = Some(SECCOMP_FD);
         bplan.json_status_fd = Some(STATUS_FD);
@@ -1320,6 +1346,7 @@ impl Boundary {
             cgroup,
             cgroup_lost: false,
             cgroup_unavailable,
+            storage: None,
             watcher,
             // J3-agent begin
             agent: agent.take(),
@@ -1340,6 +1367,7 @@ impl Boundary {
             for (key, ceiling) in [
                 ("pids", &boundary.snapshot.limits.pids),
                 ("mem", &boundary.snapshot.limits.mem),
+                ("swap", &boundary.snapshot.limits.swap),
                 ("cpu", &boundary.snapshot.limits.cpu),
             ] {
                 if ceiling.is_some() {
@@ -1605,6 +1633,18 @@ impl Boundary {
             .map(|version| version.raw)
             .unwrap_or_default();
 
+        if super::storage::requested(&self.snapshot.limits) {
+            self.storage = Some(
+                super::storage::Storage::admit(launcher, &self.snapshot.limits, deadline).map_err(
+                    |err| {
+                        preparing(
+                            ErrorCode::MissingCapability,
+                            format!("storage ceiling unavailable: {err}"),
+                        )
+                    },
+                )?,
+            );
+        }
         self.applied = self.read_applied(launcher, filter_digest, scan);
         Ok(())
     }
@@ -1651,10 +1691,14 @@ impl Boundary {
         let mounts = read_mount_table(launcher);
         let environment_names = read_environment_names(launcher);
         let mut limits = Vec::new();
+        if let Some(storage) = &self.storage {
+            limits.extend(storage.limits());
+        }
         for (key, ceiling) in [
             ("wall", self.snapshot.limits.wall.as_ref()),
             ("pids", self.snapshot.limits.pids.as_ref()),
             ("mem", self.snapshot.limits.mem.as_ref()),
+            ("swap", self.snapshot.limits.swap.as_ref()),
             ("cpu", self.snapshot.limits.cpu.as_ref()),
         ] {
             let Some(ceiling) = ceiling else { continue };
@@ -2055,6 +2099,13 @@ impl Boundary {
             "bwrap_pid".to_owned(),
             Value::from(i64::from(self.bwrap_pid)),
         );
+        if let Some(storage) = &self.storage {
+            details.insert("storage_ceiling".to_owned(), storage.evidence());
+        }
+        details.insert(
+            "readonly_open_fast_path".to_owned(),
+            Value::from(self.observe_on && !self.snapshot.observation.learning),
+        );
         details.insert(
             "namespace_init_pid".to_owned(),
             Value::from(i64::from(self.init_pid)),
@@ -2084,7 +2135,10 @@ impl Boundary {
         details.insert(
             "narrowing_filter_digest_installed".to_owned(),
             if self.observe_on {
-                Value::from(super::tracer::narrowing_filter_digest_with(self.trace_data))
+                Value::from(super::tracer::filter::narrowing_filter_digest_for(
+                    self.trace_data,
+                    self.snapshot.observation.learning,
+                ))
             } else {
                 Value::Null
             },
@@ -2504,7 +2558,7 @@ fn parse_mount_table(raw: &[u8]) -> Vec<AppliedMount> {
 }
 
 /// `mountinfo` escapes space, tab, newline and backslash as octal.
-fn decode_mountinfo_path(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn decode_mountinfo_path(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
@@ -3174,6 +3228,10 @@ impl PreparedExecution for LinuxPrepared {
         let mut boundary = self.boundary;
         if boundary.watcher.ended()
             || boundary
+                .storage
+                .as_mut()
+                .is_some_and(|storage| storage.sample().is_err())
+            || boundary
                 .cgroup
                 .as_ref()
                 .is_some_and(|leaf| leaf.verify().is_err())
@@ -3284,6 +3342,19 @@ impl LinuxRunning {
             return;
         }
         self.sampled_at_ns = now;
+        if let Some(storage) = self.boundary.storage.as_mut() {
+            match storage.sample() {
+                Ok(hits) => {
+                    for _ in hits {
+                        self.boundary.audit.record_limit_hit();
+                    }
+                }
+                Err(_) => {
+                    self.hard_kill();
+                    return;
+                }
+            }
+        }
         let Some(leaf) = self.boundary.cgroup.as_mut() else {
             return;
         };
@@ -3709,13 +3780,26 @@ impl RunningExecution for LinuxRunning {
     }
 
     fn final_limits(&self) -> Vec<AppliedLimit> {
-        self.boundary
+        let mut limits = self
+            .boundary
             .cgroup
             .as_ref()
-            .map_or_else(Vec::new, ExecutionCgroup::limits)
+            .map_or_else(Vec::new, ExecutionCgroup::limits);
+        if let Some(storage) = &self.boundary.storage {
+            limits.extend(storage.limits());
+        }
+        limits
     }
 
     fn limit_cause(&self) -> Option<String> {
+        if self
+            .boundary
+            .storage
+            .as_ref()
+            .is_some_and(super::storage::Storage::lost)
+        {
+            return Some("storage_enforcement_lost".to_owned());
+        }
         self.boundary
             .cgroup
             .as_ref()
@@ -3726,6 +3810,9 @@ impl RunningExecution for LinuxRunning {
     // J3-agent begin: the bridge's counts, once it and the mediator stopped
     fn final_native_details(&self) -> serde_json::Map<String, Value> {
         let mut details = serde_json::Map::new();
+        if let Some(storage) = &self.boundary.storage {
+            details.insert("storage_ceiling".to_owned(), storage.evidence());
+        }
         if let Some(agent) = self.boundary.agent.as_ref() {
             details.insert("helpers".to_owned(), agent.details().1);
         }

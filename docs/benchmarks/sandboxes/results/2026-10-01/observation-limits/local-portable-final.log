@@ -1,0 +1,84 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/portable_freeze.rs (target/debug/deps/portable_freeze-b6d4375b75296c4d)
+
+running 12 tests
+test a_recorded_tested_run_is_the_milestone_run ... ok
+test the_contained_mount_baselines_are_the_frozen_ones ... ok
+test the_contained_environment_is_the_frozen_one ... ok
+test the_toolchain_is_the_frozen_one ... ok
+test the_freeze_names_itself ... ok
+test the_closed_set_is_the_frozen_one ... ok
+test the_filter_digests_are_the_frozen_ones ... ok
+test the_built_in_baselines_are_the_frozen_ones ... ok
+test the_manifests_are_the_frozen_ones ... ok
+test the_bundled_launch_profiles_are_the_frozen_ones ... ok
+test the_frozen_schemas_are_the_frozen_ones ... ok
+test the_lock_file_is_the_frozen_one ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/portable_policy.rs (target/debug/deps/portable_policy-5b3b247951a05466)
+
+running 32 tests
+test p02_a_project_file_may_not_select_a_profile_or_extend_one ... ok
+test p02_a_project_file_cannot_add_credentials_launch_executable_or_backend ... ok
+test p02_a_case_variation_is_caught_by_identity_on_a_case_folding_volume ... ok
+test p02_a_symlink_component_refuses_because_its_target_is_the_childs_choice ... ok
+test p02_adding_a_path_grant_refuses_with_its_key_path ... ok
+test p02_a_symlink_component_and_a_case_variation_refuse_with_the_key_path ... ok
+test p02_a_denied_subtree_cannot_be_re_granted_by_any_spelling ... ok
+test p02_a_host_the_ruleset_cannot_normalize_refuses_as_an_unknown_subset ... ok
+test p02_a_trusted_layer_is_not_held_to_the_identity_rule ... ok
+test p02_a_denial_is_never_a_widening_however_it_is_spelled ... ok
+test p02_a_trusted_operator_layer_may_still_grant_and_is_recorded ... ok
+test a_cli_tilde_path_is_cwd_relative_not_home_relative ... ok
+test p02_an_absent_path_refuses_as_a_grant_and_narrows_as_a_denial ... ok
+test p02_a_grant_beneath_a_denied_subtree_refuses_at_any_depth ... ok
+test p02_a_credential_in_the_project_file_refuses_with_its_key_path ... ok
+test p02_adding_a_host_grant_refuses_and_wildcards_are_label_sets ... ok
+test pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology ... ok
+test p02_an_object_that_does_not_exist_is_an_unknown_subset ... ok
+test p02_every_narrowing_category_is_allowed ... ok
+test p02_raising_mem_or_cpu_refuses_with_that_limit_key ... ok
+test p02_raising_a_ceiling_refuses_with_that_limit_key ... ok
+test p02_widening_the_network_mode_refuses ... ok
+test p02_weakening_coverage_evidence_or_observation_refuses ... ok
+test p02_none_cannot_be_selected_through_a_project_or_profile_file ... ok
+test p02_path_prefix_confusion_refuses ... ok
+test p02_the_workspace_root_itself_is_a_real_directory ... ok
+test project_host_narrowing_replaces_the_base_set_including_empty ... ok
+test i02_launch_reads_only_the_operators_configuration ... ok
+test p02_raising_mem_or_cpu_through_the_project_file_refuses_with_the_limit_key ... ok
+test project_cannot_relax_swap_storage_or_inode_ceilings ... ok
+test p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_digest ... ok
+test p02_widening_through_a_launch_profile_refuses_with_its_key_path ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/portable_records.rs (target/debug/deps/portable_records-eaf5f22d1f54400c)
+
+running 21 tests
+test an_internal_setup_refusal_has_a_different_status_from_a_running_failure ... ok
+test rfc3339_matches_known_epoch_values ... ok
+test a_receipt_always_announces_the_schema_identifier ... ok
+test plain_and_multibyte_error_text_passes_through_unchanged ... ok
+test an_osc52_payload_in_an_error_is_rendered_without_raw_esc_or_bel ... ok
+test embedded_line_breaks_cannot_forge_a_second_error_line ... ok
+test r01_every_event_kind_has_an_example ... ok
+test r01_the_schema_loader_refuses_two_files_with_one_id ... ok
+test r01_every_example_round_trips_through_the_rust_types ... ok
+test x02_the_gate_frame_corpus_gets_the_verdicts_it_expects ... ok
+test tuple_none_preparation_complete_is_still_unprotected ... ok
+test tuple_verified_settlement ... ok
+test tuple_refusal_after_setup_or_proved_exec_error ... ok
+test tuple_refusal_before_boundary_creation ... ok
+test tuple_contained_preparation_complete ... ok
+test r01_the_semantic_checks_reject_what_the_schema_accepts ... ok
+test rfc3339_output_satisfies_the_schema_date_time_format ... ok
+test m02_the_hypothetical_macos_receipt_validates_without_linux_fields ... ok
+test r01_every_example_validates_against_its_schema ... ok
+test r01_every_validation_case_gets_the_verdict_the_corpus_expects ... ok
+test r01_the_semantic_corpus_gets_the_verdicts_it_expects ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+

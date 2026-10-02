@@ -1,0 +1,45 @@
+{
+  "available": {
+    "direct": true,
+    "ouro-jail": true,
+    "srt-unix-compat": true
+  },
+  "invalid_sequences": [],
+  "reference": {
+    "noop": {
+      "workload": "noop",
+      "count": 1,
+      "checksum": 0
+    },
+    "python": {
+      "workload": "python",
+      "count": 1,
+      "checksum": 0
+    },
+    "git": {
+      "workload": "git",
+      "count": 1003,
+      "checksum": "c7daa5d1c7985955db91200781f171ab3a66a5a1ace3358a9fcdc54e513383aa"
+    },
+    "reads": {
+      "workload": "reads",
+      "count": 1000,
+      "checksum": 491520000
+    },
+    "writes": {
+      "workload": "writes",
+      "count": 1000,
+      "checksum": 1024000
+    },
+    "spawn": {
+      "workload": "spawn",
+      "count": 100,
+      "checksum": 0
+    },
+    "cpu": {
+      "workload": "cpu",
+      "count": 20000000,
+      "checksum": 15910230868747444993
+    }
+  }
+}

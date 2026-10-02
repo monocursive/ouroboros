@@ -1,0 +1,120 @@
+[
+  {
+    "tool": "direct",
+    "resource": "wall",
+    "requested_ceiling": null,
+    "sequence": 2,
+    "exit": 0,
+    "elapsed_ms": 2075.441167,
+    "records": [
+      {
+        "resource": "wall",
+        "started": true
+      },
+      {
+        "resource": "wall",
+        "completed": true
+      }
+    ],
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "pids",
+    "requested_ceiling": null,
+    "sequence": 3,
+    "exit": 0,
+    "elapsed_ms": 1092.840917,
+    "records": [
+      {
+        "resource": "pids",
+        "children": 32,
+        "denied_errno": null
+      }
+    ],
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "memory",
+    "requested_ceiling": null,
+    "sequence": 4,
+    "exit": 0,
+    "elapsed_ms": 59.804083,
+    "records": [
+      {
+        "resource": "memory",
+        "started": true
+      },
+      {
+        "resource": "memory",
+        "bytes_touched": 83886080,
+        "completed": true
+      }
+    ],
+    "receipt": null
+  },
+  {
+    "tool": "ouro-jail",
+    "status": "unavailable"
+  },
+  {
+    "tool": "greywall",
+    "status": "unavailable"
+  },
+  {
+    "tool": "srt",
+    "resource": "wall",
+    "requested_ceiling": null,
+    "sequence": 8,
+    "exit": 0,
+    "elapsed_ms": 2202.118125,
+    "records": [
+      {
+        "resource": "wall",
+        "started": true
+      },
+      {
+        "resource": "wall",
+        "completed": true
+      }
+    ],
+    "receipt": null
+  },
+  {
+    "tool": "srt",
+    "resource": "pids",
+    "requested_ceiling": null,
+    "sequence": 9,
+    "exit": 0,
+    "elapsed_ms": 1232.877042,
+    "records": [
+      {
+        "resource": "pids",
+        "children": 32,
+        "denied_errno": null
+      }
+    ],
+    "receipt": null
+  },
+  {
+    "tool": "srt",
+    "resource": "memory",
+    "requested_ceiling": null,
+    "sequence": 10,
+    "exit": 0,
+    "elapsed_ms": 201.763542,
+    "records": [
+      {
+        "resource": "memory",
+        "started": true
+      },
+      {
+        "resource": "memory",
+        "bytes_touched": 83886080,
+        "completed": true
+      }
+    ],
+    "receipt": null
+  }
+]

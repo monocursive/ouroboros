@@ -1,0 +1,227 @@
+[
+  {
+    "tool": "direct",
+    "probe": "private_read",
+    "sequence": 474,
+    "status": "allowed",
+    "detail": {
+      "probe": "read",
+      "allowed": true,
+      "bytes": 20
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "private_write",
+    "sequence": 475,
+    "status": "allowed",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "readonly_write",
+    "sequence": 476,
+    "status": "allowed",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "symlink_read",
+    "sequence": 477,
+    "status": "allowed",
+    "detail": {
+      "probe": "read",
+      "allowed": true,
+      "bytes": 20
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "symlink_write",
+    "sequence": 478,
+    "status": "allowed",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "hardlink_read",
+    "sequence": 479,
+    "status": "allowed",
+    "detail": {
+      "probe": "link",
+      "allowed": true,
+      "bytes": 20
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "host_tcp",
+    "sequence": 480,
+    "status": "allowed",
+    "detail": {
+      "probe": "tcp",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "host_unix_socket",
+    "sequence": 481,
+    "status": "allowed",
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "host_signal",
+    "sequence": 482,
+    "status": "allowed",
+    "detail": {
+      "probe": "signal",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "detached_after_root_exit",
+    "sequence": 483,
+    "status": "survived",
+    "bytes_at_return": 9,
+    "bytes_after_300ms": 68
+  },
+  {
+    "tool": "ouro-jail",
+    "status": "unavailable"
+  },
+  {
+    "tool": "greywall",
+    "status": "unavailable"
+  },
+  {
+    "tool": "srt",
+    "probe": "private_read",
+    "sequence": 484,
+    "status": "denied",
+    "detail": {
+      "probe": "read",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted: '/private/tmp/ouro-sandbox-20260930/private/read-canary'"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "private_write",
+    "sequence": 485,
+    "status": "denied",
+    "detail": {
+      "probe": "write",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted: '/private/tmp/ouro-sandbox-20260930/private/write-canary'"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "readonly_write",
+    "sequence": 486,
+    "status": "denied",
+    "detail": {
+      "probe": "write",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted: '/private/tmp/ouro-sandbox-20260930/private/read-only'"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "symlink_read",
+    "sequence": 487,
+    "status": "denied",
+    "detail": {
+      "probe": "read",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted: '/private/tmp/ouro-sandbox-20260930/work/read-link'"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "symlink_write",
+    "sequence": 488,
+    "status": "denied",
+    "detail": {
+      "probe": "write",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted: '/private/tmp/ouro-sandbox-20260930/work/write-link'"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "hardlink_read",
+    "sequence": 489,
+    "status": "denied",
+    "detail": {
+      "probe": "link",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted: '/private/tmp/ouro-sandbox-20260930/private/read-canary' -> '/private/tmp/ouro-sandbox-20260930/work/link-copy'"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "host_tcp",
+    "sequence": 490,
+    "status": "denied",
+    "detail": {
+      "probe": "tcp",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "host_unix_socket",
+    "sequence": 491,
+    "status": "denied",
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "host_signal",
+    "sequence": 492,
+    "status": "denied",
+    "detail": {
+      "probe": "signal",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    }
+  },
+  {
+    "tool": "srt",
+    "probe": "detached_after_root_exit",
+    "sequence": 493,
+    "status": "survived",
+    "bytes_at_return": 9,
+    "bytes_after_300ms": 59
+  }
+]

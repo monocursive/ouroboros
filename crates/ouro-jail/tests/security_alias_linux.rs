@@ -39,8 +39,16 @@ fn guarded_aliases_are_detected_across_devices_and_below_mountpoints() {
         .arg("--ro-bind")
         .arg(submount.path())
         .arg("/tmp/visible/cache")
-        .args(["--proc", "/proc", "--"])
+        // The build directory may itself be under the hidden host /tmp.
+        .arg("--ro-bind")
         .arg(std::env::current_exe().unwrap())
+        .args([
+            "/tmp/ouro-alias-test",
+            "--proc",
+            "/proc",
+            "--",
+            "/tmp/ouro-alias-test",
+        ])
         .args([
             "--ignored",
             "--exact",

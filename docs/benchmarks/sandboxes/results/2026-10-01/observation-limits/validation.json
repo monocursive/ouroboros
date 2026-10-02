@@ -1,0 +1,50 @@
+{
+  "base_revision": "56c8ccbbaa65747798389e96c99232248d63b6ea",
+  "working_tree_dirty": true,
+  "runtime_inputs": "sha256:7663f80d23066163f3c304636d0b3b0ae2f5fed20e5dbd691578ff257e5505f0",
+  "local_workspace": {
+    "passed": 1075,
+    "failed": 0,
+    "ignored": 7
+  },
+  "local_portable_final": {
+    "passed": 65,
+    "failed": 0,
+    "ignored": 0
+  },
+  "linux_workspace": {
+    "passed": 1807,
+    "failed": 1,
+    "ignored": 16,
+    "command": "OURO_CONFORMANCE=1 OURO_JAIL_BIN=$PWD/target/release/ouro-jail OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture cargo test --release --workspace -j2 --no-fail-fast -- --test-threads=1",
+    "path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "scope": "ouro-resource-20261001-tests-v2.scope"
+  },
+  "linux_corrected_fixture": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 1,
+    "command": "cargo test --release -p ouro-jail --test security_alias_linux -- --test-threads=1",
+    "same_conformance_environment": true,
+    "runtime_changed_after_workspace_run": false
+  },
+  "strict_clippy": {
+    "linux": "passed",
+    "macos": "passed",
+    "command": "cargo clippy --workspace --all-targets -- -D warnings",
+    "linux_profile": "release"
+  },
+  "resource_probes": {
+    "runner": 10,
+    "ext4_refusal": 1,
+    "all_passed": true
+  },
+  "release_freeze": "not certified: no clean committed tested run for these changes",
+  "cleanup": {
+    "test_mount": "/tmp/ouro-resource-20261001/volume",
+    "unmounted": true,
+    "mountpoint_check_exit": 1,
+    "ext4_test_workspace_removed": true,
+    "source_binaries_results_retained": true
+  }
+}

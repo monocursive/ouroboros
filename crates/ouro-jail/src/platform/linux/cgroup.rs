@@ -419,6 +419,7 @@ pub struct ExecutionCgroup {
 struct Counters {
     pids: u64,
     memory: u64,
+    swap: u64,
     oom: u64,
     cpu: u64,
 }
@@ -640,12 +641,14 @@ impl ExecutionCgroup {
         for (key, ceiling, control) in [
             ("pids", limits.pids.as_ref(), "pids.max"),
             ("mem", limits.mem.as_ref(), "memory.max"),
+            ("swap", limits.swap.as_ref(), "memory.swap.max"),
             ("cpu", limits.cpu.as_ref(), "cpu.max"),
         ] {
             let Some(ceiling) = ceiling else { continue };
             let value = match key {
                 "cpu" => cpu_max(&ceiling.value)?,
                 "mem" => memory_max(&ceiling.value)?,
+                "swap" => swap_max(&ceiling.value)?,
                 _ => ceiling.value.clone(),
             };
             let applied = match leaf.write(control, &value) {
@@ -766,6 +769,9 @@ impl ExecutionCgroup {
                     out.oom = counter(&events, "oom_kill")?;
                 }
                 "cpu" => out.cpu = counter(&self.read("cpu.stat")?, "nr_throttled")?,
+                // `fail` also counts global swap exhaustion. Only `max`
+                // attributes a refusal to this cgroup's configured ceiling.
+                "swap" => out.swap = counter(&self.read("memory.swap.events")?, "max")?,
                 _ => {}
             }
         }
@@ -782,6 +788,7 @@ impl ExecutionCgroup {
             let hit = match limit.key.as_str() {
                 "pids" => now.pids > self.baseline.pids,
                 "mem" => now.memory > self.baseline.memory || self.oom_killed,
+                "swap" => now.swap > self.baseline.swap,
                 "cpu" => now.cpu > self.baseline.cpu,
                 _ => false,
             };
@@ -823,6 +830,9 @@ impl ExecutionCgroup {
                 wall: None,
                 pids: None,
                 mem: None,
+                swap: None,
+                storage: None,
+                inodes: None,
                 cpu: None,
             },
         )
@@ -905,6 +915,12 @@ fn memory_max(value: &str) -> io::Result<String> {
     Ok(effective.to_string())
 }
 
+fn swap_max(value: &str) -> io::Result<String> {
+    let bytes: u64 = value.parse().map_err(io::Error::other)?;
+    // Rounding down preserves an upper bound, including sub-page ceilings.
+    Ok((bytes - bytes % page_size()).to_string())
+}
+
 fn page_size() -> u64 {
     // SAFETY: sysconf takes one scalar and dereferences nothing.
     u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
@@ -927,6 +943,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn swap_ceiling_and_attributed_hits_are_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, value) in [
+            ("cgroup.kill", ""),
+            ("cgroup.procs", ""),
+            ("cgroup.events", "populated 0\n"),
+            ("memory.swap.events", "high 0\nmax 4\nfail 8\n"),
+            ("memory.swap.max", ""),
+        ] {
+            fs::write(dir.path().join(name), value).unwrap();
+        }
+        let limits = crate::policy::LimitsSnapshot {
+            wall: None,
+            pids: None,
+            mem: None,
+            cpu: None,
+            storage: None,
+            inodes: None,
+            swap: Some(crate::policy::LimitCeiling {
+                value: "0".into(),
+                required: true,
+            }),
+        };
+        let mut leaf = ExecutionCgroup::open_created(dir.path(), &limits).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("memory.swap.max")).unwrap(),
+            "0"
+        );
+        assert_eq!(leaf.limits()[0].hit, Some(false));
+        fs::write(
+            dir.path().join("memory.swap.events"),
+            "high 0\nmax 4\nfail 9\n",
+        )
+        .unwrap();
+        assert_eq!(
+            leaf.sample().unwrap(),
+            0,
+            "global exhaustion is not our ceiling"
+        );
+        fs::write(
+            dir.path().join("memory.swap.events"),
+            "high 0\nmax 5\nfail 10\n",
+        )
+        .unwrap();
+        assert_eq!(leaf.sample().unwrap(), 1);
+        assert_eq!(leaf.sample().unwrap(), 0);
+        assert_eq!(leaf.limits()[0].hit, Some(true));
+        fs::remove_file(dir.path().join("memory.swap.max")).unwrap();
+        assert!(ExecutionCgroup::open_created(dir.path(), &limits).is_err());
+        assert_eq!(swap_max("0").unwrap(), "0");
+        assert_eq!(
+            swap_max(&(page_size() + 1).to_string()).unwrap(),
+            page_size().to_string()
+        );
+    }
+
+    #[test]
     fn required_and_preferred_missing_controllers_are_distinct() {
         let dir = tempfile::tempdir().unwrap();
         for (name, value) in [
@@ -939,6 +1012,9 @@ mod tests {
         let mut limits = crate::policy::LimitsSnapshot {
             wall: None,
             mem: None,
+            swap: None,
+            storage: None,
+            inodes: None,
             cpu: None,
             pids: Some(crate::policy::LimitCeiling {
                 value: "256".into(),
@@ -968,6 +1044,9 @@ mod tests {
             wall: None,
             pids: None,
             mem: None,
+            swap: None,
+            storage: None,
+            inodes: None,
             cpu: None,
         };
         let mut leaf = ExecutionCgroup::open_created(&path, &limits).unwrap();
@@ -1083,6 +1162,9 @@ mod tests {
             wall: None,
             pids: None,
             mem: None,
+            swap: None,
+            storage: None,
+            inodes: None,
             cpu: None,
         };
         let leaf = ExecutionCgroup::open_created(&path, &limits).unwrap();

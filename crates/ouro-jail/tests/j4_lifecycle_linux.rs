@@ -93,6 +93,9 @@ impl Stand {
             wall: None,
             pids: None,
             mem: None,
+            swap: None,
+            storage: None,
+            inodes: None,
             cpu: None,
         };
         let leaf = ExecutionCgroup::create(&limits).expect("a leaf in the delegated scope");

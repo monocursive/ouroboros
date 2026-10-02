@@ -1,0 +1,63 @@
+round -3 complete
+round -2 complete
+round -1 complete
+round 0 complete
+round 1 complete
+round 2 complete
+round 3 complete
+round 4 complete
+round 5 complete
+round 6 complete
+round 7 complete
+round 8 complete
+round 9 complete
+round 10 complete
+round 11 complete
+round 12 complete
+round 13 complete
+round 14 complete
+round 15 complete
+round 16 complete
+round 17 complete
+round 18 complete
+round 19 complete
+round 20 complete
+round 21 complete
+round 22 complete
+round 23 complete
+round 24 complete
+round 25 complete
+round 26 complete
+round 27 complete
+round 28 complete
+round 29 complete
+{
+  "reads": {
+    "direct": {
+      "elapsed_ms": 5.208694,
+      "payload_ms": 4.199635
+    },
+    "before": {
+      "elapsed_ms": 149.9507435,
+      "payload_ms": 24.5253375
+    },
+    "after": {
+      "elapsed_ms": 130.375636,
+      "payload_ms": 6.104784
+    }
+  },
+  "writes": {
+    "direct": {
+      "elapsed_ms": 9.6669675,
+      "payload_ms": 8.5747295
+    },
+    "before": {
+      "elapsed_ms": 195.74264,
+      "payload_ms": 66.28738849999999
+    },
+    "after": {
+      "elapsed_ms": 195.9710015,
+      "payload_ms": 67.24877599999999
+    }
+  }
+}

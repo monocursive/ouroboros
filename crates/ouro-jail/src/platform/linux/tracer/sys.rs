@@ -147,6 +147,8 @@ pub const SECCOMP_DATA_ARCH: u32 = 4;
 pub const SECCOMP_DATA_ARG0_LOW: u32 = 16;
 /// The low word of `args[1]` on a little-endian host.
 pub const SECCOMP_DATA_ARG1_LOW: u32 = 24;
+/// The low word of `args[2]` on a little-endian host.
+pub const SECCOMP_DATA_ARG2_LOW: u32 = 32;
 /// `SECCOMP_RET_ERRNO`, with the errno in the data bits.
 pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 /// Linux `ENOSYS`, spelled out because the filter targets the Linux ABI.

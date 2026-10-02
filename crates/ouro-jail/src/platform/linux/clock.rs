@@ -165,6 +165,9 @@ mod tests {
             wall: None,
             pids: None,
             mem: None,
+            swap: None,
+            storage: None,
+            inodes: None,
             cpu: None,
         };
         assert!(wall_deadline(&none).unwrap().is_none());

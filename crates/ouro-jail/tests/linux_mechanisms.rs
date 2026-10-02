@@ -1696,6 +1696,7 @@ fn the_probes_report_the_statuses_this_host_warrants() {
         ("cgroup_delegated_leaf", cgroup_status),
         ("cgroup_pids", cgroup_status),
         ("cgroup_memory", cgroup_status),
+        ("cgroup_swap", cgroup_status),
         ("cgroup_cpu", cgroup_status),
         // `available` here means the restriction is on.
         ("apparmor_userns_restriction", ProbeStatus::Available),

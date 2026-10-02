@@ -280,8 +280,18 @@ struct Shape {
 /// Returns [`BpfError`] only if the table grows past what classic BPF can
 /// encode; with the current table it cannot fail, and a test asserts that.
 pub fn tool_baseline() -> Result<Program, BpfError> {
+    tool_baseline_with_storage(false)
+}
+
+pub(crate) fn tool_baseline_with_storage(storage: bool) -> Result<Program, BpfError> {
+    let mut deny = DENY_EPERM.to_vec();
+    if storage {
+        // A new hard link could import a foreign-owned inode from a read-only
+        // grant into the writable tree and charge a different user's quota.
+        deny.extend([("link", 86), ("linkat", 265)]);
+    }
     build(&Shape {
-        deny: DENY_EPERM.to_vec(),
+        deny,
         clone_namespaces_denied: true,
         af_unix_denied: true,
         netlink_protocols: &[],
@@ -474,7 +484,14 @@ pub const NAMESPACE_SETUP: [(&str, u32); 5] = [
 /// [`BpfError`] only if the table outgrows classic BPF; a test asserts it
 /// cannot with the current tables.
 pub fn agent_baseline(variant: AgentVariant) -> Result<Program, BpfError> {
-    let deny = match variant {
+    agent_baseline_with_storage(variant, false)
+}
+
+pub(crate) fn agent_baseline_with_storage(
+    variant: AgentVariant,
+    storage: bool,
+) -> Result<Program, BpfError> {
+    let mut deny = match variant {
         AgentVariant::UnprivilegedInner => DENY_EPERM.to_vec(),
         AgentVariant::NamespaceInner => DENY_EPERM
             .iter()
@@ -482,6 +499,9 @@ pub fn agent_baseline(variant: AgentVariant) -> Result<Program, BpfError> {
             .copied()
             .collect(),
     };
+    if storage {
+        deny.extend([("link", 86), ("linkat", 265)]);
+    }
     build(&Shape {
         deny,
         clone_namespaces_denied: variant == AgentVariant::UnprivilegedInner,
@@ -866,6 +886,35 @@ mod tests {
         let prog = tool_baseline().expect("the table fits classic BPF");
         assert!(prog.len() > DENY_EPERM.len());
         assert!(prog.len() < 4096);
+    }
+
+    #[test]
+    fn storage_baselines_deny_importing_inodes_through_hard_links() {
+        for (plain, bounded) in [
+            (
+                tool_baseline().unwrap(),
+                tool_baseline_with_storage(true).unwrap(),
+            ),
+            (
+                agent_baseline(AgentVariant::UnprivilegedInner).unwrap(),
+                agent_baseline_with_storage(AgentVariant::UnprivilegedInner, true).unwrap(),
+            ),
+        ] {
+            for nr in [86, 265] {
+                assert_eq!(run(&plain, X86, nr, [0; 2]), SECCOMP_RET_ALLOW);
+                assert_eq!(run(&bounded, X86, nr, [0; 2]), EPERM);
+                assert_eq!(run(&bounded, X86, nr | X32_SYSCALL_BIT, [0; 2]), EPERM);
+                for arch in FOREIGN {
+                    assert_eq!(run(&bounded, arch, nr, [0; 2]), EPERM);
+                }
+            }
+            // Unrelated calls retain their verdicts, including write-open,
+            // directory creation, rename and already-forbidden quota changes.
+            for nr in [1, 2, 82, 83, 179, 257, 443] {
+                assert_eq!(run(&bounded, X86, nr, [0; 2]), run(&plain, X86, nr, [0; 2]));
+            }
+            assert_ne!(plain.digest(), bounded.digest());
+        }
     }
 
     #[test]

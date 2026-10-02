@@ -97,6 +97,12 @@ pub struct LimitsSection {
     pub pids: Option<Scalar>,
     /// `limits.mem`.
     pub mem: Option<Scalar>,
+    /// `limits.swap` (zero disables swapping).
+    pub swap: Option<Scalar>,
+    /// `limits.storage`.
+    pub storage: Option<Scalar>,
+    /// `limits.inodes`.
+    pub inodes: Option<Scalar>,
     /// `limits.cpu`.
     pub cpu: Option<Scalar>,
 }
@@ -325,6 +331,9 @@ pub fn ceilings_from_section(
         (LimitKey::Wall, &limits.wall),
         (LimitKey::Pids, &limits.pids),
         (LimitKey::Mem, &limits.mem),
+        (LimitKey::Swap, &limits.swap),
+        (LimitKey::Storage, &limits.storage),
+        (LimitKey::Inodes, &limits.inodes),
         (LimitKey::Cpu, &limits.cpu),
     ] {
         let Some(scalar) = scalar else { continue };
@@ -340,6 +349,9 @@ pub fn ceilings_from_section(
             LimitKey::Wall => out.wall = ceiling,
             LimitKey::Pids => out.pids = ceiling,
             LimitKey::Mem => out.mem = ceiling,
+            LimitKey::Swap => out.swap = ceiling,
+            LimitKey::Storage => out.storage = ceiling,
+            LimitKey::Inodes => out.inodes = ceiling,
             LimitKey::Cpu => out.cpu = ceiling,
         }
     }
@@ -363,7 +375,9 @@ pub fn ceilings_from_cli(arguments: &[String]) -> Result<Ceilings, JailError> {
         let Some(limit) = LimitKey::parse(key) else {
             return Err(invalid(
                 "--limit",
-                format!("unknown limit key `{key}`; expected wall, pids, mem or cpu"),
+                format!(
+                    "unknown limit key `{key}`; expected wall, pids, mem, swap, storage, inodes or cpu"
+                ),
             ));
         };
         if !seen.insert(limit.as_str()) {
@@ -383,6 +397,9 @@ pub fn ceilings_from_cli(arguments: &[String]) -> Result<Ceilings, JailError> {
             LimitKey::Wall => out.wall = ceiling,
             LimitKey::Pids => out.pids = ceiling,
             LimitKey::Mem => out.mem = ceiling,
+            LimitKey::Swap => out.swap = ceiling,
+            LimitKey::Storage => out.storage = ceiling,
+            LimitKey::Inodes => out.inodes = ceiling,
             LimitKey::Cpu => out.cpu = ceiling,
         }
     }
@@ -402,7 +419,8 @@ pub fn parse_limit_value(key_path: &str, key: LimitKey, text: &str) -> Result<u6
             &[("ms", 1), ("s", 1000), ("m", 60_000), ("h", 3_600_000)],
             true,
         ),
-        LimitKey::Mem => parse_scaled(
+        LimitKey::Swap if matches!(text, "0" | "0KiB" | "0MiB" | "0GiB") => Ok(0),
+        LimitKey::Mem | LimitKey::Swap | LimitKey::Storage => parse_scaled(
             key_path,
             text,
             &[
@@ -412,7 +430,9 @@ pub fn parse_limit_value(key_path: &str, key: LimitKey, text: &str) -> Result<u6
             ],
             false,
         ),
-        LimitKey::Pids | LimitKey::Cpu => parse_scaled(key_path, text, &[], false),
+        LimitKey::Pids | LimitKey::Cpu | LimitKey::Inodes => {
+            parse_scaled(key_path, text, &[], false)
+        }
     }
 }
 
@@ -658,6 +678,21 @@ mod tests {
         );
         assert!(parse_limit_value("k", LimitKey::Mem, "18446744073709551615GiB").is_err());
         assert!(parse_limit_value("k", LimitKey::Mem, "0KiB").is_err());
+    }
+
+    #[test]
+    fn swap_is_independent_and_allows_an_explicit_zero() {
+        for zero in ["0", "0KiB", "0MiB", "0GiB"] {
+            assert_eq!(parse_limit_value("swap", LimitKey::Swap, zero).unwrap(), 0);
+            assert!(parse_limit_value("mem", LimitKey::Mem, zero).is_err());
+        }
+        for bad in ["00", "-1", "max", " 0", "0 ", "18446744073709551615GiB"] {
+            assert!(parse_limit_value("swap", LimitKey::Swap, bad).is_err());
+        }
+        let limits = ceilings_from_cli(&["mem=64MiB".into(), "swap=0".into()]).unwrap();
+        assert_eq!(limits.mem.unwrap().value, 64 * 1024 * 1024);
+        assert_eq!(limits.swap.unwrap().value, 0);
+        assert!(ceilings_from_cli(&["swap=0".into(), "swap=1MiB".into()]).is_err());
     }
 
     #[test]

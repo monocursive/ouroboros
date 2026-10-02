@@ -57,6 +57,15 @@ shows a substantial observation cost on file-heavy work. We'll keep reporting
 startup and workload overhead separately, refresh the measurements against
 a committed build, and add results from actual agent workflows.
 
+The [October 1 working-tree follow-up](benchmarks/sandboxes/observation-and-limits-2026-10-01.md)
+reduces read workload time from 24.53 ms to 6.10 ms on the reference VPS;
+write workload cost remains high. The
+[write and disk-quota follow-up](benchmarks/sandboxes/write-observation-and-disk-quotas-2026-10-01.md)
+reduces paired write workload time by 3.6% and verifies ext4/XFS user hard
+quotas with 41 live checks. Explicit swap and bounded tmpfs ceilings also have
+live checks. Project quotas, automatic volume provisioning and a new committed
+conformance freeze remain pending.
+
 The release checks also include the full test suite, Linux conformance,
 security review, and unresolved findings. Documentation and a successful
 demo help people evaluate the tool; they do not replace those checks.
@@ -67,10 +76,14 @@ We want the same local workflow on a Mac. The current blocker is making sure
 the entire process tree stops when its supervisor or privileged helper dies,
 including children that have detached from their parent.
 
-The Endpoint Security prototype cleans up while its custodian stays alive.
-In development VM tests, killing that custodian left workloads running.
-Apple's entitlement approval is also pending, but approval alone will not
-fix the process-lifetime problem.
+The first Endpoint Security prototype cleans up while its custodian stays alive;
+killing that custodian left workloads running. A
+[reciprocal-custody prototype](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/macos-reciprocal-custody.md) now
+uses two independent clients. In 200 development VM trials, either one could
+fail and the surviving client cleaned up the known fixture. Killing both left
+every known fixture process running, and fail-closed exec authorization did
+not prevent new execution after both clients disappeared. Apple's entitlement
+approval is also pending; approval alone will not fix that lifetime gap.
 
 Native execution will stay disabled until cleanup works under normal macOS
 security settings and passes the failure tests. Inspection commands remain

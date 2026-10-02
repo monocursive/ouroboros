@@ -1,0 +1,1 @@
+PASS: 143 live receipt schemas and semantics; all 180 measurement samples; recomputed medians; harness and binary provenance; doctor schema.

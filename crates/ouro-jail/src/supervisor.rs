@@ -3236,6 +3236,9 @@ pub fn requested_limits(plan: &Plan) -> Vec<AppliedLimit> {
             LimitKey::Wall => &plan.resolved.ceilings.wall,
             LimitKey::Pids => &plan.resolved.ceilings.pids,
             LimitKey::Mem => &plan.resolved.ceilings.mem,
+            LimitKey::Swap => &plan.resolved.ceilings.swap,
+            LimitKey::Storage => &plan.resolved.ceilings.storage,
+            LimitKey::Inodes => &plan.resolved.ceilings.inodes,
             LimitKey::Cpu => &plan.resolved.ceilings.cpu,
         };
         if let Some(ceiling) = ceiling {

@@ -1,0 +1,21 @@
+{
+  "local_tests": {
+    "passed": 1076,
+    "failed": 0,
+    "ignored": 7
+  },
+  "linux_tests": {
+    "passed": 1812,
+    "failed": 0,
+    "ignored": 16
+  },
+  "disk_quota_checks": 41,
+  "resource_regressions": 10,
+  "measured_performance_samples": 360,
+  "warmup_samples": 18,
+  "validated_receipts": 303,
+  "clippy": "passed on macOS and Linux",
+  "freeze": "pending: no recorded tested freeze",
+  "runtime_inputs": "sha256:f5a3d1816d5ae070fc9af25c51075ab11ecf22fde57d80696f6a98c976150f94",
+  "binary_sha256": "8b3d8356398b229614bc7227a6c44bd51c2bb69c5e429785d0e7aada04d55a0f"
+}

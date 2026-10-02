@@ -1,0 +1,266 @@
+{
+  "valid": true,
+  "problems": [],
+  "available": {
+    "direct": true,
+    "ouro-jail": true,
+    "srt-unix-compat": true
+  },
+  "rows": [
+    {
+      "tool": "direct",
+      "workload": "cpu",
+      "n": 30,
+      "median_ms": 25.41057,
+      "p95_ms": 26.546069,
+      "payload_median_ms": 24.303955000000002,
+      "load1_max": 1.51220703125,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "git",
+      "n": 30,
+      "median_ms": 42.071937500000004,
+      "p95_ms": 47.306145,
+      "payload_median_ms": 3.8102685000000003,
+      "load1_max": 1.51220703125,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "noop",
+      "n": 30,
+      "median_ms": 0.9864975,
+      "p95_ms": 1.279577,
+      "payload_median_ms": 0.0001805,
+      "load1_max": 1.51220703125,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "python",
+      "n": 30,
+      "median_ms": 38.345890999999995,
+      "p95_ms": 44.179074,
+      "payload_median_ms": 0.00115,
+      "load1_max": 1.51220703125,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "reads",
+      "n": 30,
+      "median_ms": 5.2368065,
+      "p95_ms": 6.039278,
+      "payload_median_ms": 4.2758045,
+      "load1_max": 1.51220703125,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "spawn",
+      "n": 30,
+      "median_ms": 70.9668975,
+      "p95_ms": 75.908821,
+      "payload_median_ms": 69.9207985,
+      "load1_max": 1.51220703125,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "direct",
+      "workload": "writes",
+      "n": 30,
+      "median_ms": 9.294034,
+      "p95_ms": 12.076225,
+      "payload_median_ms": 8.2820465,
+      "load1_max": 1.51220703125,
+      "over_direct": 1.0
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "cpu",
+      "n": 30,
+      "median_ms": 134.1229695,
+      "p95_ms": 147.11058,
+      "payload_median_ms": 24.183454,
+      "load1_max": 1.51220703125,
+      "over_direct": 5.278235376065945
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "git",
+      "n": 30,
+      "median_ms": 162.523478,
+      "p95_ms": 187.385306,
+      "payload_median_ms": 6.8936275,
+      "load1_max": 1.51220703125,
+      "over_direct": 3.862990098803983
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "noop",
+      "n": 30,
+      "median_ms": 108.9832135,
+      "p95_ms": 126.002,
+      "payload_median_ms": 0.0001805,
+      "load1_max": 1.51220703125,
+      "over_direct": 110.47490084870971
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "python",
+      "n": 30,
+      "median_ms": 156.9468605,
+      "p95_ms": 177.094434,
+      "payload_median_ms": 0.0012755,
+      "load1_max": 1.51220703125,
+      "over_direct": 4.092925119408492
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "reads",
+      "n": 30,
+      "median_ms": 135.97009350000002,
+      "p95_ms": 150.686175,
+      "payload_median_ms": 23.970497,
+      "load1_max": 1.51220703125,
+      "over_direct": 25.96431498853357
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "spawn",
+      "n": 30,
+      "median_ms": 222.393647,
+      "p95_ms": 240.056168,
+      "payload_median_ms": 114.3451465,
+      "load1_max": 1.51220703125,
+      "over_direct": 3.1337659505264406
+    },
+    {
+      "tool": "ouro-jail",
+      "workload": "writes",
+      "n": 30,
+      "median_ms": 181.486345,
+      "p95_ms": 195.809613,
+      "payload_median_ms": 67.01681149999999,
+      "load1_max": 1.51220703125,
+      "over_direct": 19.527187548485404
+    },
+    {
+      "tool": "srt-unix-compat",
+      "workload": "cpu",
+      "n": 30,
+      "median_ms": 340.108459,
+      "p95_ms": 354.280678,
+      "payload_median_ms": 24.24731,
+      "load1_max": 1.51220703125,
+      "over_direct": 13.384526950792523
+    },
+    {
+      "tool": "srt-unix-compat",
+      "workload": "git",
+      "n": 30,
+      "median_ms": 275.9688825,
+      "p95_ms": 381.591328,
+      "payload_median_ms": 5.3487235,
+      "load1_max": 1.51220703125,
+      "over_direct": 6.5594526636668435
+    },
+    {
+      "tool": "srt-unix-compat",
+      "workload": "noop",
+      "n": 30,
+      "median_ms": 310.74627799999996,
+      "p95_ms": 333.361962,
+      "payload_median_ms": 0.0001855,
+      "load1_max": 1.51220703125,
+      "over_direct": 314.9995595528625
+    },
+    {
+      "tool": "srt-unix-compat",
+      "workload": "python",
+      "n": 30,
+      "median_ms": 313.6380735,
+      "p95_ms": 376.050137,
+      "payload_median_ms": 0.00125,
+      "load1_max": 1.51220703125,
+      "over_direct": 8.179183357611903
+    },
+    {
+      "tool": "srt-unix-compat",
+      "workload": "reads",
+      "n": 30,
+      "median_ms": 321.45521499999995,
+      "p95_ms": 342.512688,
+      "payload_median_ms": 5.8099595,
+      "load1_max": 1.51220703125,
+      "over_direct": 61.38382523776656
+    },
+    {
+      "tool": "srt-unix-compat",
+      "workload": "spawn",
+      "n": 30,
+      "median_ms": 316.9834225,
+      "p95_ms": 415.458112,
+      "payload_median_ms": 75.2550865,
+      "load1_max": 1.51220703125,
+      "over_direct": 4.4666377376860815
+    },
+    {
+      "tool": "srt-unix-compat",
+      "workload": "writes",
+      "n": 30,
+      "median_ms": 328.1637655,
+      "p95_ms": 347.805847,
+      "payload_median_ms": 10.991036000000001,
+      "load1_max": 1.51220703125,
+      "over_direct": 35.30907736081017
+    }
+  ],
+  "comparisons": [
+    {
+      "competitor": "srt-unix-compat",
+      "workload": "cpu",
+      "competitor_over_ouro_median": 2.5357957721030027,
+      "competitor_over_ouro_p95": 2.4082610373774616
+    },
+    {
+      "competitor": "srt-unix-compat",
+      "workload": "git",
+      "competitor_over_ouro_median": 1.6980247155429444,
+      "competitor_over_ouro_p95": 2.036399417572261
+    },
+    {
+      "competitor": "srt-unix-compat",
+      "workload": "noop",
+      "competitor_over_ouro_median": 2.8513224011329044,
+      "competitor_over_ouro_p95": 2.6456878620974273
+    },
+    {
+      "competitor": "srt-unix-compat",
+      "workload": "python",
+      "competitor_over_ouro_median": 1.9983711206507377,
+      "competitor_over_ouro_p95": 2.1234441337665078
+    },
+    {
+      "competitor": "srt-unix-compat",
+      "workload": "reads",
+      "competitor_over_ouro_median": 2.3641611675438017,
+      "competitor_over_ouro_p95": 2.2730199900554915
+    },
+    {
+      "competitor": "srt-unix-compat",
+      "workload": "spawn",
+      "competitor_over_ouro_median": 1.425325888468388,
+      "competitor_over_ouro_p95": 1.7306704320965416
+    },
+    {
+      "competitor": "srt-unix-compat",
+      "workload": "writes",
+      "competitor_over_ouro_median": 1.8082008621640377,
+      "competitor_over_ouro_p95": 1.7762450048864558
+    }
+  ],
+  "scope": "same-host CLI elapsed time; no cross-host speed comparison; unavailable arms are not wins"
+}

@@ -1,0 +1,59 @@
+{
+  "host": {
+    "system": "Darwin",
+    "node": "monocursives-macbook-pro.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "uid": 501,
+  "started_unix": 1790779397.7859242,
+  "signing": {
+    "bundle_id": "com.monocursive.ouroboros.jail",
+    "identity": "-",
+    "development_vm": false,
+    "profile_supplied": false,
+    "entitlements": {},
+    "compile_argv": [
+      "cc",
+      "-O2",
+      "-fblocks",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_es.c",
+      "-lEndpointSecurity",
+      "-lbsm",
+      "-o",
+      "/private/tmp/ouro-es-original-refusal-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research"
+    ],
+    "codesign": "Executable=/private/tmp/ouro-es-original-refusal-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research\nIdentifier=com.monocursive.ouroboros.jail\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=479 flags=0x10002(adhoc,runtime) hashes=4+7 location=embedded\nSignature=adhoc\nInfo.plist entries=7\nTeamIdentifier=not set\nRuntime Version=27.0.0\nSealed Resources version=2 rules=13 files=0\nInternal requirements count=0 size=12\nwarning: Specifying ':' in the path is deprecated and will not work in a future release\nTotal signatures=1\nChosen signature=1\n",
+    "signed_entitlements": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict></dict></plist>\n"
+  },
+  "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428\n",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+  "xcode": "Xcode 27.0\nBuild version 27A266a\n",
+  "sdk": "27.0",
+  "development": null,
+  "source_sha256": "2b25c70d8d02c97f585cb66ddfb54d3d7fb064ab4851a185f57b56d6073e179d",
+  "runner_sha256": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0",
+  "fixture_sha256": "6154039f618a28a72c4ca61354649d813101c2a53a1c73877b8240cbdce8cfd9",
+  "fixture_runner_sha256": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+  "binary_sha256": "26892c65c4ff8491e616581a1353b3687703b986e79c2621a6207bd3d1b23af6",
+  "cases": [],
+  "fixture_cleanup_verified": false,
+  "capability": {
+    "exit": 125,
+    "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+    "stderr": ""
+  },
+  "refusal_test": {
+    "exit": 125,
+    "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+    "marker_created": false
+  },
+  "status": "blocked_missing_entitlement",
+  "finished_unix": 1790779398.0928798,
+  "lifetime_contract_verified": false
+}

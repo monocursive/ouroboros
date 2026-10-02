@@ -1,0 +1,63 @@
+    Checking serde_core v1.0.229
+    Checking linux-raw-sys v0.12.1
+    Checking bitflags v2.13.2
+    Checking rustix v1.1.5
+    Checking fastrand v2.5.0
+    Checking serde v1.0.229
+    Checking serde_json v1.0.151
+    Checking foldhash v0.2.0
+    Checking allocator-api2 v0.2.21
+    Checking hashbrown v0.17.1
+    Checking ouro-fixture v0.1.0 (/tmp/ouro-resource-20261001/src/crates/ouro-fixture)
+    Checking tempfile v3.27.0
+    Checking num-traits v0.2.19
+    Checking num-integer v0.1.47
+    Checking num-bigint v0.4.8
+    Checking regex-syntax v0.8.11
+    Checking num-rational v0.4.2
+    Checking getrandom v0.3.4
+    Checking zerocopy v0.8.57
+    Checking ouro-records v0.1.0 (/tmp/ouro-resource-20261001/src/crates/ouro-records)
+    Checking num-iter v0.1.46
+    Checking num-complex v0.4.6
+    Checking aho-corasick v1.1.5
+    Checking scopeguard v1.2.0
+    Checking smallvec v1.16.1
+    Checking parking_lot_core v0.9.12
+    Checking lock_api v0.4.14
+    Checking ahash v0.8.12
+    Checking ref-cast v1.0.27
+    Checking regex-automata v0.4.18
+    Checking num v0.4.3
+    Checking bit-vec v0.8.0
+    Checking borrow-or-share v0.2.4
+    Checking fluent-uri v0.4.1
+    Checking bit-set v0.8.0
+    Checking fraction v0.17.0
+    Checking parking_lot v0.12.5
+    Checking num-cmp v0.1.0
+    Checking outref v0.5.2
+    Checking micromap v0.3.0
+    Checking percent-encoding v2.3.2
+    Checking vsimd v0.8.0
+    Checking bytecount v0.6.9
+    Checking jsonschema-value v0.57.0
+    Checking fancy-regex v0.19.2
+    Checking regex v1.13.1
+    Checking uuid-simd v0.8.0
+    Checking referencing v0.57.0
+    Checking strum v0.28.0
+    Checking unicode-general-category v1.1.0
+    Checking jsonschema-regex v0.57.0
+    Checking email_address v0.2.9
+    Checking data-encoding v2.11.1
+    Checking indexmap v2.14.2
+    Checking jsonschema v0.57.0
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking toml_edit v0.22.27
+   Compiling ouro-jail v0.1.0 (/tmp/ouro-resource-20261001/src/crates/ouro-jail)
+    Checking toml v0.8.23
+    Checking ouro-ledger v0.1.0 (/tmp/ouro-resource-20261001/src/crates/ouro-ledger)
+    Checking xtask v0.1.0 (/tmp/ouro-resource-20261001/src/crates/xtask)
+    Finished `release` profile [optimized] target(s) in 35.18s

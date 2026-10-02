@@ -1,0 +1,106 @@
+{
+  "reads": {
+    "direct": {
+      "payload_ns": {
+        "median_ms": 4.543547500000001,
+        "p95_ms": 6.157489
+      },
+      "elapsed_ns": {
+        "median_ms": 5.833519,
+        "p95_ms": 7.659457
+      }
+    },
+    "before": {
+      "payload_ns": {
+        "median_ms": 6.7291055,
+        "p95_ms": 8.472948
+      },
+      "elapsed_ns": {
+        "median_ms": 148.520582,
+        "p95_ms": 165.314526
+      }
+    },
+    "after": {
+      "payload_ns": {
+        "median_ms": 6.8998425,
+        "p95_ms": 9.355569
+      },
+      "elapsed_ns": {
+        "median_ms": 147.4758145,
+        "p95_ms": 166.929284
+      }
+    },
+    "payload_ns_paired_ratio": {
+      "median": 1.029385582401722,
+      "bootstrap_95pct": [
+        0.9647083950454457,
+        1.1041692926712168
+      ],
+      "pairs": 60
+    },
+    "elapsed_ns_paired_ratio": {
+      "median": 1.0026723889837497,
+      "bootstrap_95pct": [
+        0.9677873275965134,
+        1.0275275453361825
+      ],
+      "pairs": 60
+    }
+  },
+  "writes": {
+    "direct": {
+      "payload_ns": {
+        "median_ms": 9.1731915,
+        "p95_ms": 12.182125
+      },
+      "elapsed_ns": {
+        "median_ms": 10.397487,
+        "p95_ms": 13.566632
+      }
+    },
+    "before": {
+      "payload_ns": {
+        "median_ms": 77.4087855,
+        "p95_ms": 91.987556
+      },
+      "elapsed_ns": {
+        "median_ms": 216.9772395,
+        "p95_ms": 241.644153
+      }
+    },
+    "after": {
+      "payload_ns": {
+        "median_ms": 74.6098305,
+        "p95_ms": 90.70237
+      },
+      "elapsed_ns": {
+        "median_ms": 215.5137305,
+        "p95_ms": 241.388508
+      }
+    },
+    "payload_ns_paired_ratio": {
+      "median": 0.9669707112190564,
+      "bootstrap_95pct": [
+        0.9503381864979772,
+        0.9933841442870691
+      ],
+      "pairs": 60
+    },
+    "elapsed_ns_paired_ratio": {
+      "median": 0.9934292108540157,
+      "bootstrap_95pct": [
+        0.9605332586028605,
+        1.0329678836066156
+      ],
+      "pairs": 60
+    }
+  },
+  "max_sampled_load1": 1.77587890625,
+  "bootstrap": {
+    "seed": 20261001,
+    "resamples": 10000,
+    "unit": "round",
+    "statistic": "median paired after/before ratio",
+    "interval": "percentile"
+  }
+}

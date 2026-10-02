@@ -1,0 +1,22 @@
+{
+  "schema": "sandbox-comparison-cleanup/1",
+  "root": "/private/tmp/ouro-sandbox-20260930",
+  "owned_processes": [],
+  "removed": [
+    "downloads",
+    "node",
+    "srt",
+    "npm-cache",
+    "fixture-home",
+    "install-home",
+    "private",
+    "data",
+    "config",
+    "work",
+    "greywall"
+  ],
+  "retained_products": {
+    "ouro-jail": "c19cd1fa716e0ac545d2077902f70edb45cba73ae718c59d9af861dac87a3f3e"
+  },
+  "status": "complete"
+}

@@ -118,6 +118,27 @@ fn ceiling(value: u64, requested: &str) -> Option<Ceiling> {
 }
 
 #[test]
+fn project_cannot_relax_swap_storage_or_inode_ceilings() {
+    for key in ["swap", "storage", "inodes"] {
+        let workspace = Workspace::new();
+        let value = if key == "swap" { "0" } else { "4096" };
+        let inherited = ouro_jail::config::ceilings_from_cli(&[format!("{key}={value}")]).unwrap();
+        let delta = PolicyDelta {
+            limits: ouro_jail::config::ceilings_from_cli(&[format!("{key}=8192")]).unwrap(),
+            ..PolicyDelta::default()
+        };
+        expect_widening(
+            workspace.resolve_project(
+                ProfileName::Tool,
+                |baseline| baseline.limits = inherited,
+                delta,
+            ),
+            &format!("jail.limits.{key}"),
+        );
+    }
+}
+
+#[test]
 fn project_host_narrowing_replaces_the_base_set_including_empty() {
     let workspace = Workspace::new();
     for allow in [vec!["api.example.com:443".to_owned()], Vec::new()] {

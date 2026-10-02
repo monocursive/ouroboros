@@ -35,7 +35,7 @@ pub mod agent;
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
 /// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 19] = [
+pub const PROBE_NAMES: [&str; 20] = [
     "bwrap_present",
     "user_namespace",
     "pid_namespace",
@@ -50,6 +50,7 @@ pub const PROBE_NAMES: [&str; 19] = [
     "cgroup_delegated_leaf",
     "cgroup_pids",
     "cgroup_memory",
+    "cgroup_swap",
     "cgroup_cpu",
     "apparmor_userns_restriction",
     "nested_user_namespace",
@@ -291,6 +292,7 @@ pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) 
         "cgroup_delegated_leaf" => probe_cgroup_leaf("cgroup_delegated_leaf", None),
         "cgroup_pids" => probe_cgroup_leaf("cgroup_pids", Some("pids")),
         "cgroup_memory" => probe_cgroup_leaf("cgroup_memory", Some("mem")),
+        "cgroup_swap" => probe_cgroup_leaf("cgroup_swap", Some("swap")),
         "cgroup_cpu" => probe_cgroup_leaf("cgroup_cpu", Some("cpu")),
         "apparmor_userns_restriction" => probe_apparmor(),
         "nested_user_namespace" => probe_nested_userns(jail_exe, bwrap),
@@ -927,6 +929,9 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
         wall: None,
         pids: None,
         mem: None,
+        swap: None,
+        storage: None,
+        inodes: None,
         cpu: None,
     };
     let ceiling = |value: &str| {
@@ -938,6 +943,7 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
     match controller {
         Some("pids") => limits.pids = ceiling("16"),
         Some("mem") => limits.mem = ceiling("67108864"),
+        Some("swap") => limits.swap = ceiling("0"),
         Some("cpu") => limits.cpu = ceiling("100"),
         _ => {}
     }

@@ -1,5 +1,10 @@
 # Endpoint Security development before approval
 
+Follow-up: the [2026-09-30 reciprocal-custody experiment](macos-reciprocal-custody.md)
+measured independent clients surviving either custodian's failure. Simultaneous
+loss still leaves workloads running, including with fail-closed AUTH_EXEC.
+The original single-client results below remain historical evidence.
+
 Apple's [system extension guidance](https://developer.apple.com/system-extensions/)
 explicitly permits testing while an entitlement request is under review by
 temporarily disabling System Integrity Protection. There is no automatically

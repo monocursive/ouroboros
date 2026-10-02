@@ -1,0 +1,144 @@
+[
+  {
+    "tool": "direct",
+    "repetition": 0,
+    "status": "allowed",
+    "sequence": 2,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "direct",
+    "repetition": 1,
+    "status": "allowed",
+    "sequence": 3,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "direct",
+    "repetition": 2,
+    "status": "allowed",
+    "sequence": 4,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "ouro-jail",
+    "repetition": 0,
+    "status": "denied",
+    "sequence": 6,
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    },
+    "host_accepts": 0
+  },
+  {
+    "tool": "ouro-jail",
+    "repetition": 1,
+    "status": "denied",
+    "sequence": 7,
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    },
+    "host_accepts": 0
+  },
+  {
+    "tool": "ouro-jail",
+    "repetition": 2,
+    "status": "denied",
+    "sequence": 8,
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    },
+    "host_accepts": 0
+  },
+  {
+    "tool": "greywall",
+    "repetition": 0,
+    "status": "allowed",
+    "sequence": 10,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "greywall",
+    "repetition": 1,
+    "status": "allowed",
+    "sequence": 11,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "greywall",
+    "repetition": 2,
+    "status": "allowed",
+    "sequence": 12,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "srt",
+    "status": "unavailable"
+  },
+  {
+    "tool": "srt-unix-compat",
+    "repetition": 0,
+    "status": "allowed",
+    "sequence": 15,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "srt-unix-compat",
+    "repetition": 1,
+    "status": "allowed",
+    "sequence": 16,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "srt-unix-compat",
+    "repetition": 2,
+    "status": "allowed",
+    "sequence": 17,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  }
+]

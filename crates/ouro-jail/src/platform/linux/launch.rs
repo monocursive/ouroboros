@@ -63,6 +63,8 @@ pub struct LaunchArgs {
     pub error_fd: RawFd,
     /// Whether to install the narrowing filter before releasing.
     pub narrow: bool,
+    /// Skip register-sourced read-only opens when policy learning is off.
+    pub read_open_fast_path: bool,
     /// Audit 2026-09-25-2, S14: descriptor holding this attempt's narrowing
     /// `SECCOMP_RET_DATA` (two bytes, written by the supervisor before the
     /// spawn). The value travels by pipe because the launcher's whole argv —
@@ -137,6 +139,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     let mut release_fd: Option<RawFd> = None;
     let mut error_fd: Option<RawFd> = None;
     let mut narrow = false;
+    let mut read_open_fast_path = false;
     let mut trace_data_fd: Option<RawFd> = None;
     let mut mediate: Option<(RawFd, RawFd)> = None;
     let mut bridge: Option<RawFd> = None;
@@ -162,6 +165,10 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
             }
             "--narrow" => {
                 narrow = true;
+                index += 1;
+            }
+            "--read-open-fast-path" => {
+                read_open_fast_path = true;
                 index += 1;
             }
             "--trace-data-fd" => {
@@ -220,6 +227,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         release_fd: release_fd.ok_or(LaunchUsage::Missing("--release-fd"))?,
         error_fd: error_fd.ok_or(LaunchUsage::Missing("--error-fd"))?,
         narrow,
+        read_open_fast_path,
         trace_data_fd,
         mediate,
         bridge,
@@ -368,7 +376,10 @@ pub fn launch_main(args: &[OsString]) -> ! {
         // The observer's own filter, so the numbers the launcher narrows to
         // and the numbers the tracer expects to be stopped on are one table.
         // It sets no_new_privs and loads the program without allocating.
-        if let Err(errno) = super::tracer::filter::install_narrowing_filter_with(trace_data) {
+        if let Err(errno) = super::tracer::filter::install_narrowing_filter_for(
+            trace_data,
+            !parsed.read_open_fast_path,
+        ) {
             report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
         }
     }

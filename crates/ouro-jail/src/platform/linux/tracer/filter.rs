@@ -76,7 +76,7 @@ pub const I386_CLONE_SYSCALL: u32 = 120;
 /// Instruction count: architecture check (2), x32 check (2), one comparison
 /// per closed-set number, the listener check (3), the untraced-clone check
 /// (3), the `clone3` check (1) and the three returns.
-const FILTER_LEN: usize = CLOSED_SET.len() + 17;
+const FILTER_LEN: usize = CLOSED_SET.len() + 21;
 
 const ZERO: libc::sock_filter = libc::sock_filter {
     code: 0,
@@ -105,14 +105,16 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 /// Audit 2026-09-25-2, S14: `data` is the per-attempt `SECCOMP_RET_DATA`
 /// the tracer expects; the canonical builder below keeps the frozen
 /// evidence value.
-fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16) -> usize {
+fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bool) -> usize {
     let n = CLOSED_SET.len();
     let listener = n + 7;
     let clone = n + 10;
     let clone3 = n + 13;
-    let allow = n + 14;
-    let trace = n + 15;
-    let enosys = n + 16;
+    let open = n + 14;
+    let openat = open + 2;
+    let allow = n + 14 + if learning { 0 } else { 4 };
+    let trace = allow + 1;
+    let enosys = allow + 2;
     debug_assert!(n <= 235);
     // clone3's flags live behind a pointer on native, i386 and x32 alike.
     // Refuse it before the architecture branch, including the x32 spelling.
@@ -129,7 +131,17 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16) -> usize {
     out[5] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_NR);
     out[6] = jump(sys::BPF_JSET_K, sys::X32_SYSCALL_BIT, (trace - 7) as u8, 0);
     for (i, entry) in CLOSED_SET.iter().enumerate() {
-        out[7 + i] = jump(sys::BPF_JEQ_K, entry.nr as u32, (trace - 8 - i) as u8, 0);
+        let destination = match (learning, entry.nr) {
+            (false, 2) => open,
+            (false, 257) => openat,
+            _ => trace,
+        };
+        out[7 + i] = jump(
+            sys::BPF_JEQ_K,
+            entry.nr as u32,
+            (destination - 8 - i) as u8,
+            0,
+        );
     }
     // seccomp(2) asking for a notification listener. Its flags are an
     // `unsigned int`, so the low word of the second argument is all of them.
@@ -168,18 +180,40 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16) -> usize {
         sys::BPF_JEQ_K,
         CLONE3_SYSCALL.1,
         (enosys - clone3 - 1) as u8,
-        0,
+        (allow - clone3 - 1) as u8,
     );
+    if !learning {
+        // open/openat flags are int arguments copied into seccomp_data by
+        // the kernel. Unlike openat2's mutable open_how, there is no tracee
+        // memory to race. Keep every write/create/truncate/tmpfile intent,
+        // including invalid combinations. O_DIRECTORY alone is read-only.
+        let writes = (libc::O_ACCMODE
+            | libc::O_CREAT
+            | libc::O_TRUNC
+            | (libc::O_TMPFILE & !libc::O_DIRECTORY)) as u32;
+        for (offset, arg) in [
+            (open, sys::SECCOMP_DATA_ARG1_LOW),
+            (openat, sys::SECCOMP_DATA_ARG2_LOW),
+        ] {
+            out[offset] = stmt(sys::BPF_LD_W_ABS, arg);
+            out[offset + 1] = jump(
+                sys::BPF_JSET_K,
+                writes,
+                (trace - offset - 2) as u8,
+                (allow - offset - 2) as u8,
+            );
+        }
+    }
     out[allow] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ALLOW);
     out[trace] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_TRACE | u32::from(data));
     out[enosys] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ERRNO | sys::LINUX_ENOSYS);
-    FILTER_LEN
+    enosys + 1
 }
 
 /// The narrowing filter, as classic BPF.
 ///
-/// The launcher installs exactly these instructions; the digest below names
-/// exactly these bytes.
+/// Canonical full-observation (learning) program. Normal contained runs use
+/// the read-only-open fast path; their receipt records the installed digest.
 #[must_use]
 pub fn narrowing_filter() -> Vec<libc::sock_filter> {
     narrowing_filter_with(NARROWING_TRACE_DATA)
@@ -190,8 +224,15 @@ pub fn narrowing_filter() -> Vec<libc::sock_filter> {
 /// evidence table and the freeze digest name.
 #[must_use]
 pub fn narrowing_filter_with(data: u16) -> Vec<libc::sock_filter> {
+    narrowing_filter_for(data, true)
+}
+
+/// The installed program for a particular observation mode. Learning keeps
+/// read-only opens; ordinary observation handles them entirely in the kernel.
+#[must_use]
+pub fn narrowing_filter_for(data: u16, learning: bool) -> Vec<libc::sock_filter> {
     let mut prog = [ZERO; FILTER_LEN];
-    let len = build_into(&mut prog, data);
+    let len = build_into(&mut prog, data, learning);
     prog[..len].to_vec()
 }
 
@@ -242,6 +283,18 @@ pub fn narrowing_filter_digest_with(data: u16) -> String {
     format!("sha256:{}", sha256_hex(&narrowing_filter_bytes_with(data)))
 }
 
+/// Digest of the exact mode-specific installed instructions.
+#[must_use]
+pub fn narrowing_filter_digest_for(data: u16, learning: bool) -> String {
+    let mut bytes = Vec::new();
+    for insn in narrowing_filter_for(data, learning) {
+        bytes.extend_from_slice(&insn.code.to_le_bytes());
+        bytes.extend_from_slice(&[insn.jt, insn.jf]);
+        bytes.extend_from_slice(&insn.k.to_le_bytes());
+    }
+    format!("sha256:{}", sha256_hex(&bytes))
+}
+
 /// Install the narrowing filter on the calling thread group.
 ///
 /// Async-signal-safe: it allocates nothing, takes no lock and touches no
@@ -271,8 +324,16 @@ pub fn install_narrowing_filter() -> Result<(), i32> {
 /// # Errors
 /// The `errno` of whichever of the two calls failed.
 pub fn install_narrowing_filter_with(data: u16) -> Result<(), i32> {
+    install_narrowing_filter_for(data, true)
+}
+
+/// Install the mode-specific filter without allocating after fork.
+///
+/// # Errors
+/// Returns the errno of the failed no_new_privs or seccomp call.
+pub fn install_narrowing_filter_for(data: u16, learning: bool) -> Result<(), i32> {
     let mut prog = [ZERO; FILTER_LEN];
-    let len = build_into(&mut prog, data);
+    let len = build_into(&mut prog, data, learning);
     let fprog = libc::sock_fprog {
         len: len as u16,
         filter: prog.as_mut_ptr(),
@@ -340,8 +401,12 @@ mod tests {
     /// jump arithmetic rather than restating it. `arg0` and `arg1` are the
     /// low words of the first two arguments; the filter may read the second.
     fn interpret_full(arch: u32, nr: u32, arg0: u32, arg1: u32) -> u32 {
+        interpret_mode(arch, nr, [arg0, arg1, 0], true)
+    }
+
+    fn interpret_mode(arch: u32, nr: u32, args: [u32; 3], learning: bool) -> u32 {
         const ARG0_LOW: u32 = 16;
-        let prog = narrowing_filter();
+        let prog = narrowing_filter_for(NARROWING_TRACE_DATA, learning);
         let mut pc = 0usize;
         let mut acc: u32 = 0;
         for _ in 0..4096 {
@@ -353,9 +418,11 @@ mod tests {
                     } else if insn.k == sys::SECCOMP_DATA_ARCH {
                         arch
                     } else if insn.k == ARG0_LOW {
-                        arg0
+                        args[0]
                     } else if insn.k == sys::SECCOMP_DATA_ARG1_LOW {
-                        arg1
+                        args[1]
+                    } else if insn.k == 32 {
+                        args[2]
                     } else {
                         panic!(
                             "the filter must only read nr, arch and the second argument, not offset {}",
@@ -387,6 +454,70 @@ mod tests {
     }
 
     const TRACE: u32 = sys::SECCOMP_RET_TRACE | NARROWING_TRACE_DATA as u32;
+
+    #[test]
+    fn fast_path_only_skips_register_sourced_read_only_opens() {
+        let arch = sys::AUDIT_ARCH_X86_64;
+        for nr in [2, 257] {
+            for flags in [
+                0,
+                libc::O_CLOEXEC,
+                libc::O_DIRECTORY,
+                libc::O_PATH | libc::O_DIRECTORY,
+                libc::O_NONBLOCK | libc::O_NOFOLLOW,
+            ] {
+                let args = if nr == 2 {
+                    [0, flags as u32, 0]
+                } else {
+                    [0, 0, flags as u32]
+                };
+                assert_eq!(
+                    interpret_mode(arch, nr, args, false),
+                    sys::SECCOMP_RET_ALLOW
+                );
+                assert_eq!(interpret_mode(arch, nr, args, true), TRACE);
+            }
+            for flags in [
+                libc::O_WRONLY,
+                libc::O_RDWR,
+                libc::O_CREAT,
+                libc::O_TRUNC,
+                libc::O_TMPFILE,
+                libc::O_ACCMODE,
+                libc::O_PATH | libc::O_CREAT,
+            ] {
+                let args = if nr == 2 {
+                    [0, flags as u32, 0]
+                } else {
+                    [0, 0, flags as u32]
+                };
+                assert_eq!(interpret_mode(arch, nr, args, false), TRACE);
+            }
+        }
+        // Every other number and every ABI/gap path keeps its old verdict.
+        for arch in [arch, 0x4000_0003] {
+            for nr in (0..1024).chain((0..1024).map(|nr| nr | sys::X32_SYSCALL_BIT)) {
+                if arch == sys::AUDIT_ARCH_X86_64 && [2, 257].contains(&nr) {
+                    continue;
+                }
+                for args in [[0; 3], [u32::MAX; 3]] {
+                    assert_eq!(
+                        interpret_mode(arch, nr, args, false),
+                        interpret_mode(arch, nr, args, true),
+                        "nr {nr}"
+                    );
+                }
+            }
+        }
+        assert_ne!(
+            narrowing_filter_digest_for(42, false),
+            narrowing_filter_digest_for(42, true)
+        );
+        assert_eq!(
+            narrowing_filter_digest_for(42, true),
+            narrowing_filter_digest_with(42)
+        );
+    }
 
     /// J4 D2: without a containment baseline (`none`) nothing else refuses
     /// another ABI, so the narrowing filter stops on every syscall under a

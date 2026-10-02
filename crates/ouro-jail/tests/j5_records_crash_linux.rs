@@ -1419,6 +1419,9 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
         wall: None,
         pids: None,
         mem: None,
+        swap: None,
+        storage: None,
+        inodes: None,
         cpu: None,
     };
     let created = state::with_persist_io(io.clone(), || {

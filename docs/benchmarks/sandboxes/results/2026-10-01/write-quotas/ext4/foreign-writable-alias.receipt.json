@@ -1,0 +1,140 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_a87901ed-b940-459e-bde8-50786a9396ec",
+  "revision": 1,
+  "phase": "refused",
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "Linux 7.0.0-31-generic"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": null,
+    "backend_version": null
+  },
+  "policy": {
+    "name": "tool",
+    "digest": "sha256:bfe12686008b06419e3510c5aabb4e3a0e970f68577695312207c61697d49ab2",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall",
+      "limit:storage",
+      "limit:inodes"
+    ],
+    "grants": [
+      {
+        "kind": "read_write",
+        "value": "/var/tmp/ouro-quota-20261001/ext4/foreign",
+        "by": "operator"
+      }
+    ]
+  },
+  "containment": "pending",
+  "child_protection": "pending",
+  "exec_observed": false,
+  "argv_digest": "sha256:d3c9915b7ff43f83b7f2cea2ee7fde6872f9d86e59ab368f367e02e187c2b5bd",
+  "applied": {
+    "filesystem": null,
+    "network": {
+      "mode": "pending",
+      "mechanism": null,
+      "allowed_hosts": []
+    },
+    "syscalls": null,
+    "limits": [],
+    "environment_names": [],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": null,
+  "lifetime": {
+    "boundary": "pending",
+    "native": null,
+    "tree_empty": null,
+    "verified_at": null,
+    "verification_scope": null,
+    "integrity": "pending"
+  },
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "missing_capability",
+      "stage": "preparing",
+      "message": "storage ceiling unavailable: writable disk inode is owned by a different quota identity",
+      "remediation_category": "host_setup"
+    }
+  },
+  "state_cleanup": "not_needed",
+  "cleanup_error": null,
+  "created_at": "2026-10-01T20:04:51Z",
+  "updated_at": "2026-10-01T20:04:52Z",
+  "errors": [
+    {
+      "code": "missing_capability",
+      "stage": "preparing",
+      "message": "storage ceiling unavailable: writable disk inode is owned by a different quota identity",
+      "remediation_category": "host_setup"
+    }
+  ],
+  "credentials": []
+}

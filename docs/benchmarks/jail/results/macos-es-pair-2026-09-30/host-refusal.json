@@ -1,0 +1,64 @@
+{
+  "host": {
+    "system": "Darwin",
+    "node": "monocursives-macbook-pro.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428\n",
+  "sdk": "27.0",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+  "uid": 501,
+  "started_unix": 1790780159.528575,
+  "signing": {
+    "bundle_id": "com.monocursive.ouroboros.jail",
+    "identity": "-",
+    "development_vm": false,
+    "profile_supplied": false,
+    "entitlements": {},
+    "compile_argv": [
+      "cc",
+      "-O2",
+      "-fblocks",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_es_pair.c",
+      "-lEndpointSecurity",
+      "-lbsm",
+      "-o",
+      "/private/tmp/ouro-es-pair-host-latest-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research"
+    ],
+    "codesign": "Executable=/private/tmp/ouro-es-pair-host-latest-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research\nIdentifier=com.monocursive.ouroboros.jail\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=479 flags=0x10002(adhoc,runtime) hashes=4+7 location=embedded\nSignature=adhoc\nInfo.plist entries=7\nTeamIdentifier=not set\nRuntime Version=27.0.0\nSealed Resources version=2 rules=13 files=0\nInternal requirements count=0 size=12\nwarning: Specifying ':' in the path is deprecated and will not work in a future release\nTotal signatures=1\nChosen signature=1\n",
+    "signed_entitlements": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict></dict></plist>\n"
+  },
+  "development": null,
+  "source_sha256": {
+    "macos_es_pair.c": "8199bcc2b71576d7b788eb2a1555a34b04e551d0dcf9bd06b2f772b5045ebf0c",
+    "macos_es_pair.py": "5795261dd5776d0e527dca2fc8f70f75e47160b38e3fd4dba87d89ea547e0f71",
+    "macos_es.c": "2b25c70d8d02c97f585cb66ddfb54d3d7fb064ab4851a185f57b56d6073e179d",
+    "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0",
+    "macos_native.c": "adc081414284414824be45471fd13e805093d9f00c99307d22f14be86b1777d1",
+    "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc"
+  },
+  "binary_sha256": "e59a5d86c8c95ab92c0bacd6aef36d0a7586c9535c0de9aabd05190bf547a748",
+  "cases": [],
+  "lifetime_contract_verified": false,
+  "production_execution_enabled": false,
+  "auth_exec_fail_closed": true,
+  "fixture_cleanup_verified": false,
+  "capability": {
+    "exit": 125,
+    "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+    "stderr": ""
+  },
+  "refusal_test": {
+    "exit": 125,
+    "stdout": "{\"kind\":\"capability\",\"result\":3,\"workload_released\":false}\n",
+    "stderr": "",
+    "marker_created": false
+  },
+  "status": "not_entitled_refused_before_spawn"
+}

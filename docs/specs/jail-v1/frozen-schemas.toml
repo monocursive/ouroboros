@@ -25,14 +25,14 @@ sha256 = "08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137"
 file = "jail-receipt.schema.json"
 id = "urn:ouro:schema:jail-receipt:1"
 identifier = "ouro.jail.receipt/1"
-sha256 = "cd6763cb112e70d16896323cd5724d2bfdef5e69d009f1936ec1e04fcc8d3477"
+sha256 = "4730590de3a2f16ae98d2fa8db169fc2ee4bd44bafbabd7803b1f206d93cdf7d"
 
 # §6.3, canonicalization.md: the canonical policy snapshot
 [[frozen]]
 file = "policy-snapshot.schema.json"
 id = "urn:ouro:schema:jail-policy-snapshot:1"
 identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "2c6e264b3c15e9b8e91df6f9b48fa0626108a2f89f6c25c5535b13439aaaa2d0"
+sha256 = "a16062e73454096513e5987b258a8aa0f5537cb1b6aeabe84f287f2e4abaa26f"
 
 # §8.2: the managed gate release frame
 [[frozen]]

@@ -76,6 +76,9 @@ supervisor_scope = "available"
 cgroup_delegated_leaf = "available"
 cgroup_pids = "available"
 cgroup_memory = "available"
+# 2026-10-01: an owned leaf accepted/read back memory.swap.max=0,
+# exposed memory.swap.events, killed its fixture and was removed.
+cgroup_swap = "available"
 cgroup_cpu = "available"
 
 # Informational, and deliberately phrased so `available` means THE RESTRICTION

@@ -117,7 +117,7 @@ pub fn closed_set_table() -> String {
     out.push_str("ouro-jail observer closed set `linux-closed-v1` (x86_64, ptrace backend)\n");
     out.push_str(
         "jail-v1 §11.2, §11.4; generated from the observer's CLOSED_SET and the narrowing\n\
-         filter the launcher installs (every verdict below is the program's own, run on\n\
+         canonical learning filter (every verdict below is the program's own, run on\n\
          that input)\n\n",
     );
     let _ = writeln!(

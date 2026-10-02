@@ -74,6 +74,8 @@ fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
                 "--limit",
                 "mem=64MiB",
                 "--limit",
+                "swap=0",
+                "--limit",
                 "cpu=50",
             ])
             .gate()
@@ -112,6 +114,12 @@ fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
             "67108864"
         );
         assert_eq!(
+            std::fs::read_to_string(leaf.join("memory.swap.max"))
+                .unwrap()
+                .trim(),
+            "0"
+        );
+        assert_eq!(
             std::fs::read_to_string(leaf.join("cpu.max"))
                 .unwrap()
                 .trim(),
@@ -129,7 +137,7 @@ fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
         let run = spawned.wait().unwrap();
         assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
         let receipt = settled(&run);
-        for key in ["pids", "mem", "cpu"] {
+        for key in ["pids", "mem", "swap", "cpu"] {
             assert_eq!(limit(&receipt, key)["applied"], true);
             assert_eq!(limit(&receipt, key)["required"], true);
             assert_eq!(limit(&receipt, key)["scope"], "tree");
@@ -436,6 +444,9 @@ fn l03_a_real_leaf_without_pids_refuses_required_but_runs_preferred() {
     let mut limits = LimitsSnapshot {
         wall: None,
         mem: None,
+        swap: None,
+        storage: None,
+        inodes: None,
         cpu: None,
         pids: Some(LimitCeiling {
             value: "256".into(),

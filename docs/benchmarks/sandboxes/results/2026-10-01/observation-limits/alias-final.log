@@ -1,0 +1,10 @@
+   Compiling ouro-jail v0.1.0 (/tmp/ouro-resource-20261001/src/crates/ouro-jail)
+    Finished `release` profile [optimized] target(s) in 0.61s
+     Running tests/security_alias_linux.rs (target/release/deps/security_alias_linux-0deddbd01e6f7a79)
+
+running 2 tests
+test guarded_aliases_are_detected_across_devices_and_below_mountpoints ... ok
+test private_mount_alias_fixture ... ignored, private mount namespace helper
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

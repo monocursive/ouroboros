@@ -1,5 +1,10 @@
 # ouro-jail vs greywall — benchmark and posture comparison, 2026-09-28
 
+Historical run. The [2026-09-30 comparison](benchmarks/sandboxes/README.md)
+retains current same-host samples, work-phase costs, a separately labelled
+Anthropic compatibility lane and native Mac results. In particular, similar
+no-op timings do not establish that observation is free for file-heavy work.
+
 Same host, same workloads, same day: `ouro-jail` at HEAD `2c8f28dc`
 (binary SHA-256 `af47af46…`, rebuilt on-host) against greywall v0.3.7
 (release tarball, checksum-verified, commit `5581056d`) with greyproxy

@@ -1,0 +1,8397 @@
+{
+  "host": {
+    "system": "Darwin",
+    "node": "Manageds-Virtual-Machine.local",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:00:07 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_VMAPPLE",
+    "machine": "arm64"
+  },
+  "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428\n",
+  "sdk": "27.0",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "uid": 501,
+  "started_unix": 1790779867.8959382,
+  "signing": {
+    "bundle_id": "com.monocursive.ouroboros.jail",
+    "identity": "-",
+    "development_vm": true,
+    "profile_supplied": false,
+    "entitlements": {
+      "com.apple.developer.endpoint-security.client": true
+    },
+    "compile_argv": [
+      "cc",
+      "-O2",
+      "-fblocks",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/private/tmp/ouro-es-pair-source-20260930/macos_es_pair.c",
+      "-lEndpointSecurity",
+      "-lbsm",
+      "-o",
+      "/private/tmp/ouro-es-pair-auth-final-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research"
+    ],
+    "codesign": "Executable=/private/tmp/ouro-es-pair-auth-final-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research\nIdentifier=com.monocursive.ouroboros.jail\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=479 flags=0x10002(adhoc,runtime) hashes=4+7 location=embedded\nSignature=adhoc\nInfo.plist entries=7\nTeamIdentifier=not set\nRuntime Version=27.0.0\nSealed Resources version=2 rules=13 files=0\nInternal requirements count=0 size=12\nwarning: Specifying ':' in the path is deprecated and will not work in a future release\nTotal signatures=1\nChosen signature=1\n",
+    "signed_entitlements": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>com.apple.developer.endpoint-security.client</key><true/></dict></plist>\n"
+  },
+  "development": {
+    "virtualized": true,
+    "sip": "System Integrity Protection status: disabled.",
+    "approved_entitlement": false,
+    "authenticated_root": "Authenticated Root status: enabled",
+    "boot_args": "boot-args"
+  },
+  "source_sha256": {
+    "macos_es_pair.c": "8199bcc2b71576d7b788eb2a1555a34b04e551d0dcf9bd06b2f772b5045ebf0c",
+    "macos_es_pair.py": "43961d9129ae5a21b39c595b44ff79cae87408b7d0780946f0f6365eacc4130b",
+    "macos_es.c": "2b25c70d8d02c97f585cb66ddfb54d3d7fb064ab4851a185f57b56d6073e179d",
+    "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0",
+    "macos_native.c": "adc081414284414824be45471fd13e805093d9f00c99307d22f14be86b1777d1",
+    "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc"
+  },
+  "binary_sha256": "19aebfdaefadfb1dc6cf5dd2c2787af51c64491b6342788e4573204b46335a9b",
+  "cases": [
+    {
+      "case": "wall",
+      "argv": [
+        "/private/tmp/ouro-es-pair-auth-final-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "--guardian",
+        "3",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-wall/workload.jsonl",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-wall/ward.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/native-fixture",
+        "tree-spawn",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-wall"
+      ],
+      "ready_ms": 21.571125000000023,
+      "observation_ms": 3057.4063749999996,
+      "guardian_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14688
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7212,
+            100002,
+            14687
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14688
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14688
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "guardian",
+          "custodian_pid": 7212,
+          "child_pid": 7213,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7212,
+            100002,
+            14687
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14690
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14690
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14690
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7215,
+            100002,
+            14693
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7216,
+            100002,
+            14694
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7218,
+            100002,
+            14696
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7219,
+            100002,
+            14697
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14698
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14699
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14698
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14699
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14698
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 17,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14700
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 18,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14701
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14700
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 19,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14701
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14700
+          ]
+        },
+        {
+          "kind": "stopping",
+          "reason": "wall_expiry"
+        },
+        {
+          "kind": "exit",
+          "sequence": 20,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 21,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7218,
+            100002,
+            14696
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7218,
+            100002,
+            14696
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 22,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 23,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7219,
+            100002,
+            14697
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7219,
+            100002,
+            14697
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 24,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7216,
+            100002,
+            14694
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7216,
+            100002,
+            14694
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 25,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7215,
+            100002,
+            14693
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7215,
+            100002,
+            14693
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 26,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14699
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14699
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 27,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14701
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14701
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 3.03,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "ward_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14690
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14690
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14690
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "ward",
+          "custodian_pid": 7213,
+          "child_pid": 7214,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14691
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7215,
+            100002,
+            14693
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7216,
+            100002,
+            14694
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7218,
+            100002,
+            14696
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7217,
+            100002,
+            14695
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7219,
+            100002,
+            14697
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14698
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14699
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14698
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14699
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14698
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14700
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14701
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14700
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14701
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14700
+          ]
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 7214,
+          "ppid": 7213,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7214,
+          "pidversion": 14692,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7214,
+            100002,
+            14692
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 7215,
+          "ppid": 7214,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7215,
+          "pidversion": 14693,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7215,
+            100002,
+            14693
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 7216,
+          "ppid": 7214,
+          "pgid": 7216,
+          "sid": 7216,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7216,
+          "pidversion": 14694,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7216,
+            100002,
+            14694
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 7218,
+          "ppid": 1,
+          "pgid": 7217,
+          "sid": 7217,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7218,
+          "pidversion": 14696,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7218,
+            100002,
+            14696
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 7219,
+          "ppid": 7214,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7219,
+          "pidversion": 14697,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7219,
+            100002,
+            14697
+          ]
+        },
+        {
+          "role": "spawn-group",
+          "pid": 7220,
+          "ppid": 7214,
+          "pgid": 7220,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7220,
+          "pidversion": 14699,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7220,
+            100002,
+            14699
+          ]
+        },
+        {
+          "role": "spawn-session",
+          "pid": 7221,
+          "ppid": 7214,
+          "pgid": 7221,
+          "sid": 7221,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7221,
+          "pidversion": 14701,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7221,
+            100002,
+            14701
+          ]
+        }
+      ],
+      "custodians": {
+        "guardian": {
+          "role": "snapshot",
+          "pid": 7212,
+          "ppid": 7193,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7212,
+          "pidversion": 14687,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7212,
+            100002,
+            14687
+          ]
+        },
+        "ward": {
+          "role": "snapshot",
+          "pid": 7213,
+          "ppid": 7212,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7213,
+          "pidversion": 14689,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7213,
+            100002,
+            14689
+          ]
+        }
+      },
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 7214,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 7215,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 7216,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 7218,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 7219,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-group": {
+          "role": "snapshot",
+          "pid": 7220,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-session": {
+          "role": "snapshot",
+          "pid": 7221,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "custodian_signal_attacks": [
+        {
+          "probe": "custodian_signal",
+          "target": 7212,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7212,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7213,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7213,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        }
+      ],
+      "auth_exec_fail_closed": true,
+      "exec_probe": null,
+      "heartbeat_before": {
+        "spawn-group": 1,
+        "setsid": 1,
+        "stubborn": 1,
+        "plain": 1,
+        "spawn-session": 1,
+        "double-fork": 1
+      },
+      "heartbeat_after": {
+        "spawn-group": 52,
+        "setsid": 62,
+        "stubborn": 52,
+        "plain": 51,
+        "spawn-session": 49,
+        "double-fork": 52
+      },
+      "guardian_exit_at_snapshot": 0,
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "intact_custodian_settlement": true,
+      "expected_mechanism_outcome": true,
+      "lifetime_contract_verified": false,
+      "sample": 1
+    },
+    {
+      "case": "cancel",
+      "argv": [
+        "/private/tmp/ouro-es-pair-auth-final-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "--guardian",
+        "3",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-cancel/workload.jsonl",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-cancel/ward.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/native-fixture",
+        "tree-spawn",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-cancel"
+      ],
+      "ready_ms": 75.33391600000039,
+      "observation_ms": 28.55683299999967,
+      "guardian_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14846
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7293,
+            100002,
+            14845
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14846
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14846
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "guardian",
+          "custodian_pid": 7293,
+          "child_pid": 7294,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7293,
+            100002,
+            14845
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14848
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14848
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14848
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7296,
+            100002,
+            14851
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7297,
+            100002,
+            14852
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7299,
+            100002,
+            14854
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7300,
+            100002,
+            14855
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14856
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14857
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14856
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14857
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14856
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 17,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14858
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 18,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14859
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14858
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 19,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14859
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14858
+          ]
+        },
+        {
+          "kind": "stopping",
+          "reason": "cancelled"
+        },
+        {
+          "kind": "exit",
+          "sequence": 20,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7299,
+            100002,
+            14854
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7299,
+            100002,
+            14854
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 21,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 22,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 23,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14857
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14857
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 24,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7296,
+            100002,
+            14851
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7296,
+            100002,
+            14851
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 25,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7300,
+            100002,
+            14855
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7300,
+            100002,
+            14855
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 26,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14859
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14859
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 27,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7297,
+            100002,
+            14852
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7297,
+            100002,
+            14852
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 0.919,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "ward_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14848
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14848
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14848
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "ward",
+          "custodian_pid": 7294,
+          "child_pid": 7295,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14849
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7296,
+            100002,
+            14851
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7297,
+            100002,
+            14852
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7299,
+            100002,
+            14854
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7298,
+            100002,
+            14853
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7300,
+            100002,
+            14855
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14856
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14857
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14856
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14857
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14856
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14858
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14859
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14858
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14859
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14858
+          ]
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 7295,
+          "ppid": 7294,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7295,
+          "pidversion": 14850,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7295,
+            100002,
+            14850
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 7296,
+          "ppid": 7295,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7296,
+          "pidversion": 14851,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7296,
+            100002,
+            14851
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 7297,
+          "ppid": 7295,
+          "pgid": 7297,
+          "sid": 7297,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7297,
+          "pidversion": 14852,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7297,
+            100002,
+            14852
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 7299,
+          "ppid": 1,
+          "pgid": 7298,
+          "sid": 7298,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7299,
+          "pidversion": 14854,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7299,
+            100002,
+            14854
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 7300,
+          "ppid": 7295,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7300,
+          "pidversion": 14855,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7300,
+            100002,
+            14855
+          ]
+        },
+        {
+          "role": "spawn-group",
+          "pid": 7301,
+          "ppid": 7295,
+          "pgid": 7301,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7301,
+          "pidversion": 14857,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7301,
+            100002,
+            14857
+          ]
+        },
+        {
+          "role": "spawn-session",
+          "pid": 7302,
+          "ppid": 7295,
+          "pgid": 7302,
+          "sid": 7302,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7302,
+          "pidversion": 14859,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7302,
+            100002,
+            14859
+          ]
+        }
+      ],
+      "custodians": {
+        "guardian": {
+          "role": "snapshot",
+          "pid": 7293,
+          "ppid": 7193,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7293,
+          "pidversion": 14845,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7293,
+            100002,
+            14845
+          ]
+        },
+        "ward": {
+          "role": "snapshot",
+          "pid": 7294,
+          "ppid": 7293,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7294,
+          "pidversion": 14847,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7294,
+            100002,
+            14847
+          ]
+        }
+      },
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 7295,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 7296,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 7297,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 7299,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 7300,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-group": {
+          "role": "snapshot",
+          "pid": 7301,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-session": {
+          "role": "snapshot",
+          "pid": 7302,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "custodian_signal_attacks": [
+        {
+          "probe": "custodian_signal",
+          "target": 7293,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7293,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7294,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7294,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        }
+      ],
+      "auth_exec_fail_closed": true,
+      "exec_probe": null,
+      "heartbeat_before": {
+        "spawn-group": 2,
+        "setsid": 1,
+        "stubborn": 2,
+        "plain": 1,
+        "spawn-session": 1,
+        "double-fork": 2
+      },
+      "heartbeat_after": {
+        "spawn-group": 2,
+        "setsid": 1,
+        "stubborn": 2,
+        "plain": 1,
+        "spawn-session": 1,
+        "double-fork": 2
+      },
+      "guardian_exit_at_snapshot": 0,
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "intact_custodian_settlement": true,
+      "expected_mechanism_outcome": true,
+      "lifetime_contract_verified": false,
+      "sample": 1
+    },
+    {
+      "case": "root_death",
+      "argv": [
+        "/private/tmp/ouro-es-pair-auth-final-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "--guardian",
+        "3",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-root_death/workload.jsonl",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-root_death/ward.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/native-fixture",
+        "tree-spawn",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-root_death"
+      ],
+      "ready_ms": 42.81408300000011,
+      "observation_ms": 315.1803339999999,
+      "guardian_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14912
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7328,
+            100002,
+            14911
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14912
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14912
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "guardian",
+          "custodian_pid": 7328,
+          "child_pid": 7329,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7328,
+            100002,
+            14911
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14914
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14914
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14914
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7331,
+            100002,
+            14917
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7332,
+            100002,
+            14918
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7334,
+            100002,
+            14920
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7335,
+            100002,
+            14921
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14922
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14922
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14922
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 17,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14924
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 18,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14924
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 19,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14924
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 20,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "stopping",
+          "reason": "peer_eof"
+        },
+        {
+          "kind": "exit",
+          "sequence": 21,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7332,
+            100002,
+            14918
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7332,
+            100002,
+            14918
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 22,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7335,
+            100002,
+            14921
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7335,
+            100002,
+            14921
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 23,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7334,
+            100002,
+            14920
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7334,
+            100002,
+            14920
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 24,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7331,
+            100002,
+            14917
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7331,
+            100002,
+            14917
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 25,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 26,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 27,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 0.563,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "ward_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14914
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14914
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14914
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "ward",
+          "custodian_pid": 7329,
+          "child_pid": 7330,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14915
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7331,
+            100002,
+            14917
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7332,
+            100002,
+            14918
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7334,
+            100002,
+            14920
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7333,
+            100002,
+            14919
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7335,
+            100002,
+            14921
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14922
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14922
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14922
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14924
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14924
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14924
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 17,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "kind": "stopping",
+          "reason": "child_exit"
+        },
+        {
+          "kind": "exit",
+          "sequence": 18,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7332,
+            100002,
+            14918
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7332,
+            100002,
+            14918
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 19,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7331,
+            100002,
+            14917
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7331,
+            100002,
+            14917
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 20,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7335,
+            100002,
+            14921
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7335,
+            100002,
+            14921
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 21,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7334,
+            100002,
+            14920
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7334,
+            100002,
+            14920
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 22,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 23,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 1.236,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 7330,
+          "ppid": 7329,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7330,
+          "pidversion": 14916,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7330,
+            100002,
+            14916
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 7331,
+          "ppid": 7330,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7331,
+          "pidversion": 14917,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7331,
+            100002,
+            14917
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 7332,
+          "ppid": 7330,
+          "pgid": 7332,
+          "sid": 7332,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7332,
+          "pidversion": 14918,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7332,
+            100002,
+            14918
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 7334,
+          "ppid": 1,
+          "pgid": 7333,
+          "sid": 7333,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7334,
+          "pidversion": 14920,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7334,
+            100002,
+            14920
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 7335,
+          "ppid": 7330,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7335,
+          "pidversion": 14921,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7335,
+            100002,
+            14921
+          ]
+        },
+        {
+          "role": "spawn-group",
+          "pid": 7336,
+          "ppid": 7330,
+          "pgid": 7336,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7336,
+          "pidversion": 14923,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7336,
+            100002,
+            14923
+          ]
+        },
+        {
+          "role": "spawn-session",
+          "pid": 7337,
+          "ppid": 7330,
+          "pgid": 7337,
+          "sid": 7337,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7337,
+          "pidversion": 14925,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7337,
+            100002,
+            14925
+          ]
+        }
+      ],
+      "custodians": {
+        "guardian": {
+          "role": "snapshot",
+          "pid": 7328,
+          "ppid": 7193,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7328,
+          "pidversion": 14911,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7328,
+            100002,
+            14911
+          ]
+        },
+        "ward": {
+          "role": "snapshot",
+          "pid": 7329,
+          "ppid": 7328,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7329,
+          "pidversion": 14913,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7329,
+            100002,
+            14913
+          ]
+        }
+      },
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 7330,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 7331,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 7332,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 7334,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 7335,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-group": {
+          "role": "snapshot",
+          "pid": 7336,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-session": {
+          "role": "snapshot",
+          "pid": 7337,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "custodian_signal_attacks": [
+        {
+          "probe": "custodian_signal",
+          "target": 7328,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7328,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7329,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7329,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        }
+      ],
+      "auth_exec_fail_closed": true,
+      "exec_probe": null,
+      "heartbeat_before": {
+        "spawn-group": 2,
+        "setsid": 2,
+        "stubborn": 2,
+        "plain": 2,
+        "spawn-session": 1,
+        "double-fork": 1
+      },
+      "heartbeat_after": {
+        "spawn-group": 8,
+        "setsid": 7,
+        "stubborn": 9,
+        "plain": 6,
+        "spawn-session": 5,
+        "double-fork": 5
+      },
+      "guardian_exit_at_snapshot": 125,
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "intact_custodian_settlement": true,
+      "expected_mechanism_outcome": true,
+      "lifetime_contract_verified": false,
+      "sample": 1
+    },
+    {
+      "case": "guardian_death",
+      "argv": [
+        "/private/tmp/ouro-es-pair-auth-final-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "--guardian",
+        "3",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-guardian_death/workload.jsonl",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-guardian_death/ward.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/native-fixture",
+        "tree-spawn",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-guardian_death"
+      ],
+      "ready_ms": 61.26562499999988,
+      "observation_ms": 147.0978749999996,
+      "guardian_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14994
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7371,
+            100002,
+            14993
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14995
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14994
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14995
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14994
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "guardian",
+          "custodian_pid": 7371,
+          "child_pid": 7372,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7371,
+            100002,
+            14993
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14996
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14995
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14996
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14996
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7374,
+            100002,
+            14999
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7375,
+            100002,
+            15000
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7377,
+            100002,
+            15002
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7378,
+            100002,
+            15003
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15004
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15005
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15004
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15005
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15004
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 17,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15006
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 18,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15007
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15006
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 19,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15007
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15006
+          ]
+        }
+      ],
+      "ward_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14996
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14995
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14996
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14996
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "ward",
+          "custodian_pid": 7372,
+          "child_pid": 7373,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14995
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14997
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7374,
+            100002,
+            14999
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7375,
+            100002,
+            15000
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7377,
+            100002,
+            15002
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7376,
+            100002,
+            15001
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7378,
+            100002,
+            15003
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15004
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15005
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15004
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15005
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15004
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15006
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15007
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15006
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15007
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15006
+          ]
+        },
+        {
+          "kind": "stopping",
+          "reason": "peer_eof"
+        },
+        {
+          "kind": "exit",
+          "sequence": 17,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7377,
+            100002,
+            15002
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7377,
+            100002,
+            15002
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 18,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 19,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7374,
+            100002,
+            14999
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7374,
+            100002,
+            14999
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 20,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7375,
+            100002,
+            15000
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7375,
+            100002,
+            15000
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 21,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7378,
+            100002,
+            15003
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7378,
+            100002,
+            15003
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 22,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15005
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15005
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 23,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15007
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15007
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 1.101,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 7373,
+          "ppid": 7372,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7373,
+          "pidversion": 14998,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7373,
+            100002,
+            14998
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 7374,
+          "ppid": 7373,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7374,
+          "pidversion": 14999,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7374,
+            100002,
+            14999
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 7375,
+          "ppid": 7373,
+          "pgid": 7375,
+          "sid": 7375,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7375,
+          "pidversion": 15000,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7375,
+            100002,
+            15000
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 7377,
+          "ppid": 1,
+          "pgid": 7376,
+          "sid": 7376,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7377,
+          "pidversion": 15002,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7377,
+            100002,
+            15002
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 7378,
+          "ppid": 7373,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7378,
+          "pidversion": 15003,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7378,
+            100002,
+            15003
+          ]
+        },
+        {
+          "role": "spawn-group",
+          "pid": 7379,
+          "ppid": 7373,
+          "pgid": 7379,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7379,
+          "pidversion": 15005,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7379,
+            100002,
+            15005
+          ]
+        },
+        {
+          "role": "spawn-session",
+          "pid": 7380,
+          "ppid": 7373,
+          "pgid": 7380,
+          "sid": 7380,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7380,
+          "pidversion": 15007,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7380,
+            100002,
+            15007
+          ]
+        }
+      ],
+      "custodians": {
+        "guardian": {
+          "role": "snapshot",
+          "pid": 7371,
+          "ppid": 7193,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7371,
+          "pidversion": 14993,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7371,
+            100002,
+            14993
+          ]
+        },
+        "ward": {
+          "role": "snapshot",
+          "pid": 7372,
+          "ppid": 7371,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7372,
+          "pidversion": 14995,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7372,
+            100002,
+            14995
+          ]
+        }
+      },
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 7373,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 7374,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 7375,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 7377,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 7378,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-group": {
+          "role": "snapshot",
+          "pid": 7379,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-session": {
+          "role": "snapshot",
+          "pid": 7380,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "custodian_signal_attacks": [
+        {
+          "probe": "custodian_signal",
+          "target": 7371,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7371,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7372,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7372,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        }
+      ],
+      "auth_exec_fail_closed": true,
+      "exec_probe": null,
+      "heartbeat_before": {
+        "spawn-group": 2,
+        "setsid": 1,
+        "stubborn": 1,
+        "plain": 1,
+        "spawn-session": 2,
+        "double-fork": 2
+      },
+      "heartbeat_after": {
+        "spawn-group": 3,
+        "setsid": 3,
+        "stubborn": 2,
+        "plain": 3,
+        "spawn-session": 3,
+        "double-fork": 3
+      },
+      "guardian_exit_at_snapshot": -9,
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "intact_custodian_settlement": true,
+      "expected_mechanism_outcome": true,
+      "lifetime_contract_verified": false,
+      "sample": 1
+    },
+    {
+      "case": "ward_death",
+      "argv": [
+        "/private/tmp/ouro-es-pair-auth-final-20260930/OuroJailResearch.app/Contents/MacOS/ouro-jail-research",
+        "--guardian",
+        "3",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-ward_death/workload.jsonl",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-ward_death/ward.jsonl",
+        "--",
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny signal)(allow signal (target same-sandbox))",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/native-fixture",
+        "tree-spawn",
+        "/private/tmp/ouro-es-pair-auth-final-20260930/trial-01-ward_death"
+      ],
+      "ready_ms": 58.16129199999942,
+      "observation_ms": 157.51166600000045,
+      "guardian_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15064
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7408,
+            100002,
+            15063
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15064
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15064
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "guardian",
+          "custodian_pid": 7408,
+          "child_pid": 7409,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7408,
+            100002,
+            15063
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15066
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15066
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15066
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7411,
+            100002,
+            15069
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7412,
+            100002,
+            15070
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7414,
+            100002,
+            15072
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7415,
+            100002,
+            15073
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15074
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15075
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15074
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15075
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15074
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 17,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15076
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 18,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15077
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15076
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 19,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15077
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15076
+          ]
+        },
+        {
+          "kind": "stopping",
+          "reason": "peer_eof"
+        },
+        {
+          "kind": "exit",
+          "sequence": 20,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 21,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7414,
+            100002,
+            15072
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7414,
+            100002,
+            15072
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 22,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 23,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7412,
+            100002,
+            15070
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7412,
+            100002,
+            15070
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 24,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7411,
+            100002,
+            15069
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7411,
+            100002,
+            15069
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 25,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7415,
+            100002,
+            15073
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7415,
+            100002,
+            15073
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 26,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15075
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15075
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 27,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15077
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15077
+          ]
+        },
+        {
+          "kind": "settled",
+          "observed_live_members": 0,
+          "gap": false,
+          "synced": true,
+          "root_reaped": true,
+          "termination_ms": 1.079,
+          "lifetime_contract_verified": false
+        }
+      ],
+      "ward_events": [
+        {
+          "kind": "capability",
+          "result": 0,
+          "workload_released": false
+        },
+        {
+          "kind": "auth_config",
+          "fail_closed": true,
+          "deadline_max_ms": 250,
+          "cache": false
+        },
+        {
+          "kind": "fork",
+          "sequence": 0,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15066
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 1,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15066
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 2,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15066
+          ]
+        },
+        {
+          "kind": "release",
+          "custodian": "ward",
+          "custodian_pid": 7409,
+          "child_pid": 7410,
+          "released": true,
+          "custodian_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 3,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 4,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15067
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 5,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7411,
+            100002,
+            15069
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 6,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7412,
+            100002,
+            15070
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 7,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 8,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7414,
+            100002,
+            15072
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ]
+        },
+        {
+          "kind": "exit",
+          "sequence": 9,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7413,
+            100002,
+            15071
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 10,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7415,
+            100002,
+            15073
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 11,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15074
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 12,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15075
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15074
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 13,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15075
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15074
+          ]
+        },
+        {
+          "kind": "fork",
+          "sequence": 14,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15076
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "kind": "auth_exec",
+          "sequence": 15,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15077
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15076
+          ],
+          "authorized": true,
+          "cache": false
+        },
+        {
+          "kind": "exec",
+          "sequence": 16,
+          "token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15077
+          ],
+          "actor_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15076
+          ]
+        }
+      ],
+      "stderr": "",
+      "fixture_processes": [
+        {
+          "role": "root",
+          "pid": 7410,
+          "ppid": 7409,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7410,
+          "pidversion": 15068,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7410,
+            100002,
+            15068
+          ]
+        },
+        {
+          "role": "plain",
+          "pid": 7411,
+          "ppid": 7410,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7411,
+          "pidversion": 15069,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7411,
+            100002,
+            15069
+          ]
+        },
+        {
+          "role": "setsid",
+          "pid": 7412,
+          "ppid": 7410,
+          "pgid": 7412,
+          "sid": 7412,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7412,
+          "pidversion": 15070,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7412,
+            100002,
+            15070
+          ]
+        },
+        {
+          "role": "double-fork",
+          "pid": 7414,
+          "ppid": 1,
+          "pgid": 7413,
+          "sid": 7413,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7414,
+          "pidversion": 15072,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7414,
+            100002,
+            15072
+          ]
+        },
+        {
+          "role": "stubborn",
+          "pid": 7415,
+          "ppid": 7410,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7415,
+          "pidversion": 15073,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7415,
+            100002,
+            15073
+          ]
+        },
+        {
+          "role": "spawn-group",
+          "pid": 7416,
+          "ppid": 7410,
+          "pgid": 7416,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7416,
+          "pidversion": 15075,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7416,
+            100002,
+            15075
+          ]
+        },
+        {
+          "role": "spawn-session",
+          "pid": 7417,
+          "ppid": 7410,
+          "pgid": 7417,
+          "sid": 7417,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7417,
+          "pidversion": 15077,
+          "coalitions": [
+            605,
+            606
+          ],
+          "custody_fds_open": false,
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7417,
+            100002,
+            15077
+          ]
+        }
+      ],
+      "custodians": {
+        "guardian": {
+          "role": "snapshot",
+          "pid": 7408,
+          "ppid": 7193,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7408,
+          "pidversion": 15063,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7408,
+            100002,
+            15063
+          ]
+        },
+        "ward": {
+          "role": "snapshot",
+          "pid": 7409,
+          "ppid": 7408,
+          "pgid": 7193,
+          "sid": 1,
+          "status": 2,
+          "bsd_bytes": 136,
+          "unique_bytes": 56,
+          "coalition_bytes": 40,
+          "uniqueid": 7409,
+          "pidversion": 15065,
+          "coalitions": [
+            605,
+            606
+          ],
+          "audit_token": [
+            501,
+            501,
+            20,
+            501,
+            20,
+            7409,
+            100002,
+            15065
+          ]
+        }
+      },
+      "after": {
+        "root": {
+          "role": "snapshot",
+          "pid": 7410,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "plain": {
+          "role": "snapshot",
+          "pid": 7411,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "setsid": {
+          "role": "snapshot",
+          "pid": 7412,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "double-fork": {
+          "role": "snapshot",
+          "pid": 7414,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "stubborn": {
+          "role": "snapshot",
+          "pid": 7415,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-group": {
+          "role": "snapshot",
+          "pid": 7416,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        },
+        "spawn-session": {
+          "role": "snapshot",
+          "pid": 7417,
+          "ppid": 0,
+          "pgid": 0,
+          "sid": -1,
+          "status": 0,
+          "bsd_bytes": 0,
+          "unique_bytes": 0,
+          "coalition_bytes": 0,
+          "uniqueid": 0,
+          "pidversion": 0,
+          "coalitions": [
+            0,
+            0
+          ],
+          "same_process": false,
+          "alive": false
+        }
+      },
+      "custodian_signal_attacks": [
+        {
+          "probe": "custodian_signal",
+          "target": 7408,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7408,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7409,
+          "signal": 15,
+          "rc": -1,
+          "errno": 1
+        },
+        {
+          "probe": "custodian_signal",
+          "target": 7409,
+          "signal": 9,
+          "rc": -1,
+          "errno": 1
+        }
+      ],
+      "auth_exec_fail_closed": true,
+      "exec_probe": null,
+      "heartbeat_before": {
+        "spawn-group": 3,
+        "setsid": 2,
+        "stubborn": 4,
+        "plain": 2,
+        "spawn-session": 1,
+        "double-fork": 3
+      },
+      "heartbeat_after": {
+        "spawn-group": 4,
+        "setsid": 3,
+        "stubborn": 6,
+        "plain": 3,
+        "spawn-session": 2,
+        "double-fork": 5
+      },
+      "guardian_exit_at_snapshot": 125,
+      "fixture_tree_empty_before_runner_cleanup": true,
+      "intact_custodian_settlement": true,
+      "expected_mechanism_outcome": true,
+      "lifetime_contract_verified": false,
+      "sample": 1
+    }
+  ],
+  "lifetime_contract_verified": false,
+  "production_execution_enabled": false,
+  "auth_exec_fail_closed": true,
+  "fixture_cleanup_verified": false,
+  "capability": {
+    "exit": 0,
+    "stdout": "{\"kind\":\"capability\",\"result\":0,\"workload_released\":false}\n",
+    "stderr": ""
+  },
+  "status": "experiment_failed",
+  "failed_case": {
+    "sample": 1,
+    "case": "guardian_stop"
+  }
+}

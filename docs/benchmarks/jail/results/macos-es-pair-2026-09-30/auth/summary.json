@@ -1,0 +1,162 @@
+{
+  "trials": 100,
+  "auth_exec_fail_closed": true,
+  "cases": {
+    "wall": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 46.04279149999879,
+        "p95_ms": 102.92458300000007
+      },
+      "independent_observation": {
+        "p50_ms": 3071.9481664999994,
+        "p95_ms": 3164.406749999998
+      }
+    },
+    "cancel": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 43.143895999999685,
+        "p95_ms": 106.01162500000072
+      },
+      "independent_observation": {
+        "p50_ms": 30.894936999999345,
+        "p95_ms": 32.07291600000062
+      }
+    },
+    "root_death": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 55.422812500001584,
+        "p95_ms": 112.39641599999572
+      },
+      "independent_observation": {
+        "p50_ms": 310.7631665000028,
+        "p95_ms": 457.135042
+      }
+    },
+    "guardian_death": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 27.70893749999992,
+        "p95_ms": 96.28791699999795
+      },
+      "independent_observation": {
+        "p50_ms": 126.66929200000254,
+        "p95_ms": 139.6614170000001
+      }
+    },
+    "ward_death": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 33.45956299999742,
+        "p95_ms": 107.1084159999991
+      },
+      "independent_observation": {
+        "p50_ms": 121.34610400000057,
+        "p95_ms": 137.0592080000037
+      }
+    },
+    "guardian_stop": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 62.060271,
+        "p95_ms": 112.59225000000228
+      },
+      "independent_observation": {
+        "p50_ms": 815.6894165000006,
+        "p95_ms": 893.1928749999969
+      },
+      "exec_probe": {
+        "trials": 10,
+        "markers_created": 0,
+        "observation": {
+          "p50_ms": 350.43785399999905,
+          "p95_ms": 391.04650000000163
+        }
+      }
+    },
+    "ward_stop": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 32.3791670000011,
+        "p95_ms": 111.81233399999968
+      },
+      "independent_observation": {
+        "p50_ms": 861.4909375000002,
+        "p95_ms": 963.9784999999961
+      },
+      "exec_probe": {
+        "trials": 10,
+        "markers_created": 0,
+        "observation": {
+          "p50_ms": 346.93581249999636,
+          "p95_ms": 436.26212499999895
+        }
+      }
+    },
+    "guardian_gap": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 43.25545800000263,
+        "p95_ms": 94.9976659999976
+      },
+      "independent_observation": {
+        "p50_ms": 30.564937499999445,
+        "p95_ms": 34.59929199999934
+      }
+    },
+    "ward_gap": {
+      "trials": 10,
+      "known_fixture_empty": 10,
+      "ready": {
+        "p50_ms": 91.8035625,
+        "p95_ms": 112.4849999999995
+      },
+      "independent_observation": {
+        "p50_ms": 36.82031249999973,
+        "p95_ms": 135.44620799999763
+      }
+    },
+    "both_death": {
+      "trials": 10,
+      "known_fixture_empty": 0,
+      "ready": {
+        "p50_ms": 53.545041999999654,
+        "p95_ms": 107.9228330000035
+      },
+      "independent_observation": {
+        "p50_ms": 706.7045625000023,
+        "p95_ms": 767.5376660000027
+      },
+      "exec_probe": {
+        "trials": 10,
+        "markers_created": 10,
+        "observation": {
+          "p50_ms": 83.67783350000036,
+          "p95_ms": 129.1958330000007
+        }
+      }
+    }
+  },
+  "scope": "known controlled fixture processes in a development VM",
+  "lifetime_contract_verified": false,
+  "native_execution_ready": false,
+  "remaining_gates": [
+    "simultaneous custodian loss",
+    "unobserved forks and real event loss",
+    "complete final tree drain",
+    "actual PID reuse",
+    "normal SIP with Apple-approved signature",
+    "filesystem, Mach, descriptor and agent compatibility conformance"
+  ],
+  "results_sha256": "e995485267f588554041fec02cdf1cc8aa5fcca1fa8bb122feac0ee28df0c00f"
+}

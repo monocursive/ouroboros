@@ -298,6 +298,9 @@
                   "wall",
                   "pids",
                   "mem",
+                  "swap",
+                  "storage",
+                  "inodes",
                   "cpu"
                 ]
               },
@@ -396,7 +399,7 @@
               }
             ]
           },
-          "maxItems": 4
+          "maxItems": 7
         },
         "environment_names": {
           "type": "array",

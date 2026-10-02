@@ -51,6 +51,8 @@ pub mod observed;
 pub mod platform;
 #[cfg(target_os = "linux")]
 pub mod probe;
+#[cfg(target_os = "linux")]
+mod storage;
 // J4-G begin: `gc` reconciliation of a dead supervisor's execution cgroup
 #[cfg(target_os = "linux")]
 pub mod reconcile;

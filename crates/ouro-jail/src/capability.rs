@@ -151,13 +151,19 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
             LimitKey::Wall => &snapshot.limits.wall,
             LimitKey::Pids => &snapshot.limits.pids,
             LimitKey::Mem => &snapshot.limits.mem,
+            LimitKey::Swap => &snapshot.limits.swap,
+            LimitKey::Storage => &snapshot.limits.storage,
+            LimitKey::Inodes => &snapshot.limits.inodes,
             LimitKey::Cpu => &snapshot.limits.cpu,
         };
         if let Some(ceiling) = ceiling
             && ceiling.required
         {
             out.push(format!("limit:{}", key.as_str()));
-            if key != LimitKey::Wall {
+            if matches!(
+                key,
+                LimitKey::Pids | LimitKey::Mem | LimitKey::Swap | LimitKey::Cpu
+            ) {
                 needs_cgroup = true;
             }
         }

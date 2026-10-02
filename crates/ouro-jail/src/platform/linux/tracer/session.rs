@@ -149,10 +149,10 @@ pub(super) trait ProcView: Send {
     }
     /// The raw `/proc/<tid>/fd/<fd>` link bytes (audit 6 N1).
     fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
-        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::ffi::OsStringExt as _;
         std::fs::read_link(format!("/proc/{tid}/fd/{fd}"))
             .ok()
-            .map(|link| link.as_os_str().as_bytes().to_vec())
+            .map(|link| link.into_os_string().into_vec())
     }
 }
 
@@ -570,7 +570,7 @@ fn path_has_marker(snapshot: Option<&PathSnapshot>, marker: &[u8]) -> bool {
 
 /// The named components of a raw pathname: empty components (`//`, a
 /// trailing `/`) and `.` name nothing and are dropped.
-fn components(path: &[u8]) -> impl Iterator<Item = &[u8]> {
+fn components(path: &[u8]) -> impl DoubleEndedIterator<Item = &[u8]> {
     path.split(|byte| *byte == b'/')
         .filter(|component| !component.is_empty() && *component != b".")
 }
@@ -600,22 +600,25 @@ fn path_corroborated(snapshot: &[u8], resolved: &[u8], tmpfile: bool) -> bool {
     if !resolved.starts_with(b"/") {
         return false;
     }
-    let mut resolved: Vec<&[u8]> = components(resolved).collect();
-    if tmpfile {
-        if !resolved.last().is_some_and(|name| name.starts_with(b"#")) {
+    // Compare from the tail without allocating component vectors.
+    let mut resolved = components(resolved).rev();
+    if tmpfile && !resolved.next().is_some_and(|name| name.starts_with(b"#")) {
+        return false;
+    }
+    let mut matched = false;
+    for component in components(snapshot).rev() {
+        if component == b".." {
+            return matched;
+        }
+        if resolved.next() != Some(component) {
             return false;
         }
-        resolved.pop();
-    }
-    let claimed: Vec<&[u8]> = components(snapshot).collect();
-    if let Some(up) = claimed.iter().rposition(|component| *component == b"..") {
-        let tail = &claimed[up + 1..];
-        return !tail.is_empty() && resolved.ends_with(tail);
+        matched = true;
     }
     if snapshot.starts_with(b"/") {
-        resolved == claimed
+        resolved.next().is_none()
     } else {
-        !claimed.is_empty() && resolved.ends_with(&claimed)
+        matched
     }
 }
 
@@ -2187,9 +2190,8 @@ impl Session {
                 // and no complete snapshot was ever read from a null pointer.
                 continue;
             }
-            match self.reread_path(tid, raw[index as usize]) {
-                Some(bytes) if bytes == snapshot.bytes => {}
-                _ => return false,
+            if !self.path_unchanged(tid, raw[index as usize], &snapshot.bytes) {
+                return false;
             }
         }
         if let Some((ptr, _len)) = pending.entry.sockaddr
@@ -2208,37 +2210,35 @@ impl Session {
         true
     }
 
-    /// A quiet pathname re-read for [`Self::arguments_stable`]: the same
-    /// bounded, NUL-terminated walk as [`Self::read_path`] without touching
-    /// the loss counters, so verifying a snapshot cannot be mistaken for
-    /// observing a truncated one. `None` when the memory cannot be read or
-    /// no NUL arrives within `path_snapshot_max`.
-    fn reread_path(&mut self, tid: pid_t, addr: u64) -> Option<Vec<u8>> {
-        if addr == 0 {
-            return None;
+    /// Compare exactly the captured bytes and their terminating NUL. No
+    /// allocation or read of unrelated bytes beyond that terminator is needed.
+    /// Partial reads are retried; an unreadable byte or changed terminator is
+    /// still instability, including a formerly empty pathname becoming nonempty.
+    fn path_unchanged(&mut self, tid: pid_t, addr: u64, expected: &[u8]) -> bool {
+        if addr == 0 || expected.len() >= self.config.path_snapshot_max {
+            return false;
         }
-        let max = self.config.path_snapshot_max;
-        let mut bytes: Vec<u8> = Vec::new();
-        while bytes.len() < max {
-            let offset = bytes.len();
-            let want = (max - offset).min(self.scratch.len());
-            let at = addr.wrapping_add(offset as u64);
-            let mut read = sys::read_remote(tid, at, &mut self.scratch[..want]);
+        let length = expected.len() + 1;
+        let mut offset = 0;
+        while offset < length {
+            let Some(at) = addr.checked_add(offset as u64) else {
+                return false;
+            };
+            let want = (length - offset)
+                .min(self.scratch.len())
+                .min(4096 - (at % 4096) as usize);
+            let read = sys::read_remote(tid, at, &mut self.scratch[..want]);
             if read == 0 {
-                let page = 4096u64;
-                let to_page = (page - (at % page)) as usize;
-                if to_page < want {
-                    read = sys::read_remote(tid, at, &mut self.scratch[..to_page]);
+                return false;
+            }
+            for (index, byte) in self.scratch[..read].iter().enumerate() {
+                if *byte != expected.get(offset + index).copied().unwrap_or(0) {
+                    return false;
                 }
             }
-            let chunk = self.scratch.get(..read).filter(|c| !c.is_empty())?;
-            if let Some(end) = chunk.iter().position(|b| *b == 0) {
-                bytes.extend_from_slice(&chunk[..end]);
-                return Some(bytes);
-            }
-            bytes.extend_from_slice(chunk);
+            offset += read;
         }
-        None
+        true
     }
 
     // ------------------------------------------------ restart decisions (O-2)
@@ -2674,18 +2674,12 @@ impl Session {
         let mut bytes: Vec<u8> = Vec::new();
         while bytes.len() < max {
             let offset = bytes.len();
-            let want = (max - offset).min(self.scratch.len());
             let at = addr.wrapping_add(offset as u64);
-            let mut read = sys::read_remote(tid, at, &mut self.scratch[..want]);
-            if read == 0 {
-                // The range may cross into an unmapped page. Retry bounded to
-                // the end of the page the address is in.
-                let page = 4096u64;
-                let to_page = (page - (at % page)) as usize;
-                if to_page < want {
-                    read = sys::read_remote(tid, at, &mut self.scratch[..to_page]);
-                }
-            }
+            let chunk_size = if offset == 0 { 256 } else { self.scratch.len() };
+            let want = (max - offset)
+                .min(chunk_size)
+                .min(4096 - (at % 4096) as usize);
+            let read = sys::read_remote(tid, at, &mut self.scratch[..want]);
             if read == 0 {
                 if bytes.is_empty() {
                     return (
@@ -2870,6 +2864,66 @@ mod tests {
             Session::new(config, tx, Arc::default(), 0, Box::new(LiveProc)),
             rx,
         )
+    }
+
+    #[test]
+    fn path_reads_preserve_page_boundaries_long_names_and_terminator_checks() {
+        let (mut session, _rx) = stalled_session();
+        let pid = std::process::id() as pid_t;
+        // Page-aligned, live memory followed by a deliberately unreadable page.
+        // SAFETY: anonymous mapping; every access below stays in its first page.
+        let memory = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                8192,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(memory, libc::MAP_FAILED);
+        struct Mapping(*mut libc::c_void);
+        impl Drop for Mapping {
+            fn drop(&mut self) {
+                // SAFETY: this test owns the entire mapping until drop.
+                unsafe {
+                    libc::munmap(self.0, 8192);
+                }
+            }
+        }
+        let mapping = Mapping(memory);
+        // SAFETY: the second page is inside the mapping and has no Rust refs.
+        assert_eq!(
+            unsafe { libc::mprotect(memory.add(4096), 4096, libc::PROT_NONE) },
+            0
+        );
+        // SAFETY: the first page remains writable and is exclusively owned.
+        let page = unsafe { std::slice::from_raw_parts_mut(mapping.0.cast::<u8>(), 4096) };
+        for length in [0, 1, 255, 256, 257, 1024, 4095] {
+            let start = 4095 - length;
+            page[start..4095].fill(b'x');
+            page[4095] = 0;
+            let addr = page[start..].as_ptr() as u64;
+            let expected = vec![b'x'; length];
+            let (snapshot, unreadable) = session.read_path(pid, addr);
+            let snapshot = snapshot.unwrap();
+            assert!(!unreadable && snapshot.complete);
+            assert_eq!(snapshot.bytes, expected);
+            assert!(session.path_unchanged(pid, addr, &expected));
+            page[4095] = b'y';
+            assert!(
+                !session.path_unchanged(pid, addr, &expected),
+                "changed NUL at length {length}"
+            );
+            let (snapshot, _) = session.read_path(pid, addr);
+            assert!(
+                !snapshot.unwrap().complete,
+                "no terminator before unreadable memory"
+            );
+        }
+        assert!(!session.path_unchanged(pid, 0, b""));
+        assert!(!session.path_unchanged(pid, u64::MAX, b"x"));
     }
 
     /// Security 2026-09-25 (audit F1): the exit re-read of pointed

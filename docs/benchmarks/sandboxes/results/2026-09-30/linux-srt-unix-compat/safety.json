@@ -1,0 +1,501 @@
+[
+  {
+    "tool": "direct",
+    "probe": "private_read",
+    "sequence": 704,
+    "status": "allowed",
+    "detail": {
+      "probe": "read",
+      "allowed": true,
+      "bytes": 20
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "private_write",
+    "sequence": 705,
+    "status": "allowed",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "readonly_write",
+    "sequence": 706,
+    "status": "allowed",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "symlink_read",
+    "sequence": 707,
+    "status": "allowed",
+    "detail": {
+      "probe": "read",
+      "allowed": true,
+      "bytes": 20
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "symlink_write",
+    "sequence": 708,
+    "status": "allowed",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "hardlink_read",
+    "sequence": 709,
+    "status": "allowed",
+    "detail": {
+      "probe": "link",
+      "allowed": true,
+      "bytes": 20
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "host_tcp",
+    "sequence": 710,
+    "status": "allowed",
+    "detail": {
+      "probe": "tcp",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "host_unix_socket",
+    "sequence": 711,
+    "status": "allowed",
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "host_signal",
+    "sequence": 712,
+    "status": "allowed",
+    "detail": {
+      "probe": "signal",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "direct",
+    "probe": "detached_after_root_exit",
+    "sequence": 713,
+    "status": "survived",
+    "bytes_at_return": 16,
+    "bytes_after_300ms": 112
+  },
+  {
+    "tool": "direct",
+    "probe": "syscall_surface",
+    "sequence": 714,
+    "status": "observed",
+    "records": [
+      {
+        "syscall": "unshare_userns",
+        "return": 0,
+        "errno": 0
+      },
+      {
+        "syscall": "ptrace_traceme",
+        "return": 0,
+        "errno": 0
+      },
+      {
+        "syscall": "mount",
+        "return": -1,
+        "errno": 14
+      },
+      {
+        "syscall": "clone3",
+        "return": -1,
+        "errno": 22
+      },
+      {
+        "syscall": "process_vm_readv",
+        "return": 0,
+        "errno": 0
+      },
+      {
+        "syscall": "pidfd_getfd",
+        "return": -1,
+        "errno": 9
+      },
+      {
+        "syscall": "io_uring_setup",
+        "return": -1,
+        "errno": 14
+      },
+      {
+        "syscall": "bpf",
+        "return": -1,
+        "errno": 22
+      },
+      {
+        "syscall": "keyctl",
+        "return": -1,
+        "errno": 95
+      },
+      {
+        "syscall": "setns",
+        "return": -1,
+        "errno": 9
+      }
+    ]
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "private_read",
+    "sequence": 715,
+    "status": "denied",
+    "detail": {
+      "probe": "read",
+      "allowed": false,
+      "errno": 2,
+      "error": "[Errno 2] No such file or directory: '/tmp/ouro-sandbox-20260930/private/read-canary'"
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "private_write",
+    "sequence": 716,
+    "status": "isolated",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "readonly_write",
+    "sequence": 717,
+    "status": "denied",
+    "detail": {
+      "probe": "write",
+      "allowed": false,
+      "errno": 30,
+      "error": "[Errno 30] Read-only file system: '/tmp/ouro-sandbox-20260930/private/read-only'"
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "symlink_read",
+    "sequence": 718,
+    "status": "denied",
+    "detail": {
+      "probe": "read",
+      "allowed": false,
+      "errno": 2,
+      "error": "[Errno 2] No such file or directory: '/tmp/ouro-sandbox-20260930/work/read-link'"
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "symlink_write",
+    "sequence": 719,
+    "status": "isolated",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "hardlink_read",
+    "sequence": 720,
+    "status": "denied",
+    "detail": {
+      "probe": "link",
+      "allowed": false,
+      "errno": 2,
+      "error": "[Errno 2] No such file or directory: '/tmp/ouro-sandbox-20260930/private/read-canary' -> '/tmp/ouro-sandbox-20260930/work/link-copy'"
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "host_tcp",
+    "sequence": 721,
+    "status": "denied",
+    "detail": {
+      "probe": "tcp",
+      "allowed": false,
+      "errno": 111,
+      "error": "[Errno 111] Connection refused"
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "host_unix_socket",
+    "sequence": 722,
+    "status": "denied",
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "host_signal",
+    "sequence": 723,
+    "status": "denied",
+    "detail": {
+      "probe": "signal",
+      "allowed": false,
+      "errno": 3,
+      "error": "[Errno 3] No such process"
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "detached_after_root_exit",
+    "sequence": 724,
+    "status": "stopped",
+    "bytes_at_return": 16,
+    "bytes_after_300ms": 16
+  },
+  {
+    "tool": "ouro-jail",
+    "probe": "syscall_surface",
+    "sequence": 725,
+    "status": "observed",
+    "records": [
+      {
+        "syscall": "unshare_userns",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "ptrace_traceme",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "mount",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "clone3",
+        "return": -1,
+        "errno": 38
+      },
+      {
+        "syscall": "process_vm_readv",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "pidfd_getfd",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "io_uring_setup",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "bpf",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "keyctl",
+        "return": -1,
+        "errno": 1
+      },
+      {
+        "syscall": "setns",
+        "return": -1,
+        "errno": 1
+      }
+    ]
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "private_read",
+    "sequence": 726,
+    "status": "denied",
+    "detail": {
+      "probe": "read",
+      "allowed": false,
+      "errno": 2,
+      "error": "[Errno 2] No such file or directory: '/tmp/ouro-sandbox-20260930/private/read-canary'"
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "private_write",
+    "sequence": 727,
+    "status": "isolated",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "readonly_write",
+    "sequence": 728,
+    "status": "denied",
+    "detail": {
+      "probe": "write",
+      "allowed": false,
+      "errno": 30,
+      "error": "[Errno 30] Read-only file system: '/tmp/ouro-sandbox-20260930/private/read-only'"
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "symlink_read",
+    "sequence": 729,
+    "status": "denied",
+    "detail": {
+      "probe": "read",
+      "allowed": false,
+      "errno": 2,
+      "error": "[Errno 2] No such file or directory: '/tmp/ouro-sandbox-20260930/work/read-link'"
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "symlink_write",
+    "sequence": 730,
+    "status": "isolated",
+    "detail": {
+      "probe": "write",
+      "allowed": true
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "hardlink_read",
+    "sequence": 731,
+    "status": "denied",
+    "detail": {
+      "probe": "link",
+      "allowed": false,
+      "errno": 2,
+      "error": "[Errno 2] No such file or directory: '/tmp/ouro-sandbox-20260930/private/read-canary' -> '/tmp/ouro-sandbox-20260930/work/link-copy'"
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "host_tcp",
+    "sequence": 732,
+    "status": "denied",
+    "detail": {
+      "probe": "tcp",
+      "allowed": false,
+      "errno": 111,
+      "error": "[Errno 111] Connection refused"
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "host_unix_socket",
+    "sequence": 733,
+    "status": "denied",
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 2,
+      "error": "[Errno 2] No such file or directory"
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "host_signal",
+    "sequence": 734,
+    "status": "denied",
+    "detail": {
+      "probe": "signal",
+      "allowed": false,
+      "errno": 3,
+      "error": "[Errno 3] No such process"
+    }
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "detached_after_root_exit",
+    "sequence": 735,
+    "status": "stopped",
+    "bytes_at_return": 16,
+    "bytes_after_300ms": 16
+  },
+  {
+    "tool": "srt-unix-compat",
+    "probe": "syscall_surface",
+    "sequence": 736,
+    "status": "observed",
+    "records": [
+      {
+        "syscall": "unshare_userns",
+        "return": 0,
+        "errno": 0
+      },
+      {
+        "syscall": "ptrace_traceme",
+        "return": 0,
+        "errno": 0
+      },
+      {
+        "syscall": "mount",
+        "return": -1,
+        "errno": 14
+      },
+      {
+        "syscall": "clone3",
+        "return": -1,
+        "errno": 22
+      },
+      {
+        "syscall": "process_vm_readv",
+        "return": 0,
+        "errno": 0
+      },
+      {
+        "syscall": "pidfd_getfd",
+        "return": -1,
+        "errno": 9
+      },
+      {
+        "syscall": "io_uring_setup",
+        "return": -1,
+        "errno": 14
+      },
+      {
+        "syscall": "bpf",
+        "return": -1,
+        "errno": 22
+      },
+      {
+        "syscall": "keyctl",
+        "return": -1,
+        "errno": 95
+      },
+      {
+        "syscall": "setns",
+        "return": -1,
+        "errno": 9
+      }
+    ]
+  }
+]

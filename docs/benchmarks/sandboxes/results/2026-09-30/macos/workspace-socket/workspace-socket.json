@@ -1,0 +1,82 @@
+[
+  {
+    "tool": "direct",
+    "repetition": 0,
+    "status": "allowed",
+    "sequence": 2,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "direct",
+    "repetition": 1,
+    "status": "allowed",
+    "sequence": 3,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "direct",
+    "repetition": 2,
+    "status": "allowed",
+    "sequence": 4,
+    "detail": {
+      "probe": "unix",
+      "allowed": true
+    },
+    "host_accepts": 1
+  },
+  {
+    "tool": "ouro-jail",
+    "status": "unavailable"
+  },
+  {
+    "tool": "greywall",
+    "status": "unavailable"
+  },
+  {
+    "tool": "srt",
+    "repetition": 0,
+    "status": "denied",
+    "sequence": 8,
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    },
+    "host_accepts": 0
+  },
+  {
+    "tool": "srt",
+    "repetition": 1,
+    "status": "denied",
+    "sequence": 9,
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    },
+    "host_accepts": 0
+  },
+  {
+    "tool": "srt",
+    "repetition": 2,
+    "status": "denied",
+    "sequence": 10,
+    "detail": {
+      "probe": "unix",
+      "allowed": false,
+      "errno": 1,
+      "error": "[Errno 1] Operation not permitted"
+    },
+    "host_accepts": 0
+  }
+]

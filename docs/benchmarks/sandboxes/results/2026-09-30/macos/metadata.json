@@ -1,0 +1,70 @@
+{
+  "schema": "sandbox-comparison/1",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64"
+  },
+  "cpu_count": 10,
+  "started_utc": "2026-09-30T13:14:01Z",
+  "samples": 30,
+  "warmup": 3,
+  "seed": 20260930,
+  "install": {
+    "schema": "sandbox-comparison-install/1",
+    "versions": {
+      "node": "24.21.0",
+      "greywall": "0.3.7",
+      "srt": "0.0.78"
+    },
+    "artifacts": [
+      {
+        "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-arm64.tar.gz",
+        "sha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057"
+      },
+      {
+        "url": "https://github.com/GreyhavenHQ/greywall/releases/download/v0.3.7/greywall_0.3.7_Darwin_arm64.tar.gz",
+        "sha256": "57f29622c47990d8fe7440bed6cf126b29641a564bcf3ebd5f8e90c9e16c235e"
+      }
+    ],
+    "lock_sha256": "9631b8e9d832735a7d84acee29fdd9b415f31c7e4c9240d8693d90e6f8fdef7c",
+    "greywall_binary_sha256": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c",
+    "node_binary_sha256": "e4b5a3af0e05c75de2eae013904145f40fe7fc2a6e6f17510128bf45cca4e79b"
+  },
+  "hashes": {
+    "bin/ouro-jail": "c19cd1fa716e0ac545d2077902f70edb45cba73ae718c59d9af861dac87a3f3e",
+    "work/workload": "382a5e216cfb62251027e8194c6637df1b0b0b43e2695e33d733789aaf6cee2c",
+    "work/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "greywall.json": "c7d545a6b749d096c6e193545327bf3828c91f46773b525252c9304984ab0c9e",
+    "srt.json": "b2107e8af05772d8d352092667571b0366255c3dab1e1f596c8b6c1c102bd687",
+    "harness/compare.py": "91d242e9b02a527391b52e4cdfd554fb4ae177841f7741a2523b07cc7449893b",
+    "harness/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "harness/setup.py": "f14baab8208aed72bc429e3ac54f1f9e3f3d9045486fdae0730686567dc89e1b",
+    "harness/syscalls.c": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+    "harness/workload.c": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02"
+  },
+  "versions": {
+    "ouro_version": {
+      "exit": 0,
+      "output": "{\n  \"build\": {\n    \"debug_assertions\": false,\n    \"dirty\": null,\n    \"inputs\": \"sha256:aff986001cf72b911bb2bdc8fa85bca0056069ae7a9bafadca76e7878739d79c\",\n    \"opt_level\": \"3\",\n    \"revision\": null,\n    \"rustc\": \"rustc 1.98.1 (48a229cea 2026-09-01)\",\n    \"target\": \"aarch64-apple-darwin\"\n  },\n  \"component\": \"ouro-jail\",\n  \"frozen\": true,\n  \"observation\": {\n    \"closed_set\": null\n  },\n  \"platform\": {\n    \"arch\": \"aarch64\",\n    \"kernel\": \"Darwin 27.0.0\",\n    \"os\": \"macos\"\n  },\n  \"schemas\": {\n    \"control\": \"ouro.jail.control/1\",\n    \"doctor\": \"ouro.jail.doctor/1\",\n    \"event\": \"ouro.event/1\",\n    \"gate\": \"ouro.jail.gate/1\",\n    \"learned_policy\": \"ouro.jail.learned-policy/1\",\n    \"network\": \"ouro.jail.network/1\",\n    \"policy\": \"ouro.jail.policy/1\",\n    \"policy_file\": \"ouro.jail.policy-file/1\",\n    \"policy_snapshot\": \"ouro.jail.policy-snapshot/1\",\n    \"receipt\": \"ouro.jail.receipt/1\"\n  },\n  \"version\": \"0.1.0\"\n}\n"
+    },
+    "greywall_version": {
+      "exit": 0,
+      "output": "greywall - lightweight, container-free sandbox for running untrusted commands\n  Version: 0.3.7\n  Built:   2026-06-01T15:01:40Z\n  Commit:  5581056d0523bfa244d8061008744ed9f72a0361\nPlatform: macOS\n\nChecking system capabilities:\n  \u2713 sandbox-exec (Seatbelt)\n"
+    },
+    "node_version": {
+      "exit": 0,
+      "output": "v24.21.0\n"
+    },
+    "python_version": {
+      "exit": 0,
+      "output": "Python 3.9.6\n"
+    },
+    "os": {
+      "exit": 0,
+      "output": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n"
+    }
+  }
+}

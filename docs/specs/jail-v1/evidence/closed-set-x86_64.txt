@@ -1,6 +1,6 @@
 ouro-jail observer closed set `linux-closed-v1` (x86_64, ptrace backend)
 jail-v1 §11.2, §11.4; generated from the observer's CLOSED_SET and the narrowing
-filter the launcher installs (every verdict below is the program's own, run on
+canonical learning filter (every verdict below is the program's own, run on
 that input)
 
 precondition                 verdict  meaning

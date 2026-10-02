@@ -1,0 +1,41 @@
+[
+  {
+    "label": "realtime",
+    "command": [
+      "runuser",
+      "-u",
+      "ouro-ci",
+      "--",
+      "env",
+      "XDG_DATA_HOME=/tmp/ouro-resource-20261001/xfs-realtime-final/data",
+      "XDG_CONFIG_HOME=/tmp/ouro-resource-20261001/xfs-realtime-final/config",
+      "/tmp/ouro-resource-20261001/src/target/release/ouro-jail",
+      "run",
+      "--profile",
+      "tool",
+      "--workspace",
+      "/var/tmp/ouro-quota-20261001/xfs-rt/workspace",
+      "--scratch",
+      "/var/tmp/ouro-quota-20261001/xfs-rt/scratch",
+      "--observe",
+      "on",
+      "--receipt",
+      "/tmp/ouro-resource-20261001/xfs-realtime-final/realtime.receipt.json",
+      "--limit",
+      "wall=10s",
+      "--limit",
+      "storage=8MiB",
+      "--limit",
+      "inodes=64",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "open('TARGET_RAN','w').close();print('TARGET_RAN')"
+    ],
+    "exit": 125,
+    "stdout": "",
+    "stderr": "ouro-jail: error missing_capability at preparing [host_setup]: storage ceiling unavailable: writable disk mount /tmp needs an enforced user hard quota: XFS realtime storage quotas are not supported\n",
+    "elapsed_ns": 133574813,
+    "receipt": "realtime.receipt.json"
+  }
+]

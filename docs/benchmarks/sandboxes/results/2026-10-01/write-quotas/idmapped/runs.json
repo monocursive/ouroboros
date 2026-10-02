@@ -1,0 +1,41 @@
+[
+  {
+    "label": "idmapped",
+    "command": [
+      "runuser",
+      "-u",
+      "ouro-ci",
+      "--",
+      "env",
+      "XDG_DATA_HOME=/tmp/ouro-resource-20261001/idmapped-final-v2/data",
+      "XDG_CONFIG_HOME=/tmp/ouro-resource-20261001/idmapped-final-v2/config",
+      "/tmp/ouro-resource-20261001/src/target/release/ouro-jail",
+      "run",
+      "--profile",
+      "tool",
+      "--workspace",
+      "/var/tmp/ouro-quota-20261001/idmap/workspace",
+      "--scratch",
+      "/var/tmp/ouro-quota-20261001/idmap/scratch",
+      "--observe",
+      "on",
+      "--receipt",
+      "/tmp/ouro-resource-20261001/idmapped-final-v2/idmapped.receipt.json",
+      "--limit",
+      "wall=10s",
+      "--limit",
+      "storage=8MiB",
+      "--limit",
+      "inodes=64",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "open('TARGET_RAN','w').close();print('TARGET_RAN')"
+    ],
+    "exit": 125,
+    "stdout": "",
+    "stderr": "ouro-jail: error missing_capability at preparing [host_setup]: storage ceiling unavailable: storage ceilings do not support idmapped writable mounts\n",
+    "elapsed_ns": 138091739,
+    "receipt": "idmapped.receipt.json"
+  }
+]

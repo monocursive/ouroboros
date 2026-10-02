@@ -1,0 +1,30 @@
+{
+  "reads": {
+    "direct": {
+      "elapsed_ms": 5.833519,
+      "payload_ms": 4.543547500000001
+    },
+    "before": {
+      "elapsed_ms": 148.520582,
+      "payload_ms": 6.7291055
+    },
+    "after": {
+      "elapsed_ms": 147.4758145,
+      "payload_ms": 6.8998425
+    }
+  },
+  "writes": {
+    "direct": {
+      "elapsed_ms": 10.397487,
+      "payload_ms": 9.1731915
+    },
+    "before": {
+      "elapsed_ms": 216.9772395,
+      "payload_ms": 77.4087855
+    },
+    "after": {
+      "elapsed_ms": 215.5137305,
+      "payload_ms": 74.6098305
+    }
+  }
+}

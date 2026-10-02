@@ -1,5 +1,9 @@
 # Greywall gap analysis and plan — 2026-09-28
 
+Historical plan; several features below have since been implemented. Use the
+[2026-09-30 measured comparison and next targets](benchmarks/sandboxes/README.md)
+for current competitive evidence and [the roadmap](roadmap.md) for status.
+
 Companion to [the benchmark](benchmark-2026-09-28-greywall.md). Objective:
 close every gap where greywall 0.3.7 leads, keep the gaps where we lead,
 and make the comparison unambiguous.

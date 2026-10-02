@@ -255,6 +255,15 @@ pub struct LimitsSnapshot {
     pub pids: Option<LimitCeiling>,
     /// Memory, bytes.
     pub mem: Option<LimitCeiling>,
+    /// Swap bytes, separate from RAM. Zero disables swap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap: Option<LimitCeiling>,
+    /// Aggregate writable filesystem capacity in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<LimitCeiling>,
+    /// Aggregate writable filesystem inode capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inodes: Option<LimitCeiling>,
     /// CPU bandwidth, percent where 100 is one core.
     pub cpu: Option<LimitCeiling>,
 }
@@ -485,7 +494,7 @@ pub struct Ceiling {
     pub required: bool,
 }
 
-/// The four ceilings, each present or absent.
+/// The resource ceilings, each present or absent.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Ceilings {
     /// Wall clock in milliseconds.
@@ -494,6 +503,12 @@ pub struct Ceilings {
     pub pids: Option<Ceiling>,
     /// Memory in bytes.
     pub mem: Option<Ceiling>,
+    /// Swap bytes; zero disables swap.
+    pub swap: Option<Ceiling>,
+    /// Aggregate writable filesystem capacity in bytes.
+    pub storage: Option<Ceiling>,
+    /// Aggregate writable filesystem inode capacity.
+    pub inodes: Option<Ceiling>,
     /// CPU percentage.
     pub cpu: Option<Ceiling>,
 }
@@ -504,6 +519,9 @@ impl Ceilings {
             LimitKey::Wall => &self.wall,
             LimitKey::Pids => &self.pids,
             LimitKey::Mem => &self.mem,
+            LimitKey::Swap => &self.swap,
+            LimitKey::Storage => &self.storage,
+            LimitKey::Inodes => &self.inodes,
             LimitKey::Cpu => &self.cpu,
         }
     }
@@ -513,12 +531,15 @@ impl Ceilings {
             LimitKey::Wall => self.wall = ceiling,
             LimitKey::Pids => self.pids = ceiling,
             LimitKey::Mem => self.mem = ceiling,
+            LimitKey::Swap => self.swap = ceiling,
+            LimitKey::Storage => self.storage = ceiling,
+            LimitKey::Inodes => self.inodes = ceiling,
             LimitKey::Cpu => self.cpu = ceiling,
         }
     }
 }
 
-/// The four supported limit keys (§6.4).
+/// The supported limit keys (§6.4).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum LimitKey {
     /// Wall-clock deadline.
@@ -527,13 +548,27 @@ pub enum LimitKey {
     Pids,
     /// Memory ceiling.
     Mem,
+    /// Swap ceiling, independent of RAM.
+    Swap,
+    /// Aggregate allocated filesystem bytes.
+    Storage,
+    /// Filesystem inode capacity.
+    Inodes,
     /// CPU bandwidth ceiling.
     Cpu,
 }
 
 impl LimitKey {
     /// Every key, in a stable order.
-    pub const ALL: [LimitKey; 4] = [LimitKey::Wall, LimitKey::Pids, LimitKey::Mem, LimitKey::Cpu];
+    pub const ALL: [LimitKey; 7] = [
+        LimitKey::Wall,
+        LimitKey::Pids,
+        LimitKey::Mem,
+        LimitKey::Swap,
+        LimitKey::Storage,
+        LimitKey::Inodes,
+        LimitKey::Cpu,
+    ];
 
     /// The wire spelling.
     #[must_use]
@@ -542,6 +577,9 @@ impl LimitKey {
             LimitKey::Wall => "wall",
             LimitKey::Pids => "pids",
             LimitKey::Mem => "mem",
+            LimitKey::Swap => "swap",
+            LimitKey::Storage => "storage",
+            LimitKey::Inodes => "inodes",
             LimitKey::Cpu => "cpu",
         }
     }
@@ -553,6 +591,9 @@ impl LimitKey {
             "wall" => Some(LimitKey::Wall),
             "pids" => Some(LimitKey::Pids),
             "mem" => Some(LimitKey::Mem),
+            "swap" => Some(LimitKey::Swap),
+            "storage" => Some(LimitKey::Storage),
+            "inodes" => Some(LimitKey::Inodes),
             "cpu" => Some(LimitKey::Cpu),
             _ => None,
         }
@@ -1601,6 +1642,9 @@ fn build_snapshot(
             wall: ceiling(&authority.limits.wall),
             pids: ceiling(&authority.limits.pids),
             mem: ceiling(&authority.limits.mem),
+            swap: ceiling(&authority.limits.swap),
+            storage: ceiling(&authority.limits.storage),
+            inodes: ceiling(&authority.limits.inodes),
             cpu: ceiling(&authority.limits.cpu),
         },
         observation: authority.observation,

@@ -77,7 +77,7 @@ pub struct PolicyArgs {
     /// Allow a proxied destination.
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
-    /// Set a ceiling: `wall`, `pids`, `mem` or `cpu`.
+    /// Set a ceiling: `wall`, `pids`, `mem`, `swap`, `storage`, `inodes` or `cpu`.
     #[arg(long = "limit", value_name = "KEY=VALUE")]
     pub limit: Vec<String>,
     /// Observation mode; the default is `on`.

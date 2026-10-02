@@ -183,10 +183,9 @@ its local invocation, so the jail alone cannot enforce company-wide usage.
 | I11 | A child-visible policy edit cannot widen a running attempt. |
 | I12 | GC acts only on registered, identity-checked attempt resources and never follows child-created links out of them. |
 
-Named limits from the north star remain limits. Writable workspaces and
-managed scratch have no storage ceiling: the limits of §6.4 are pids, memory,
-cpu and wall, so a contained child can fill the host filesystem, including
-the jail's own state store. Writable workspaces can contain
+Named limits from the north star remain limits. Without explicit storage
+and inode ceilings under §6.4, a contained child can fill writable host
+filesystems, including the jail's own state store. Writable workspaces can contain
 shared inodes or Git alternates. The jail does not turn them into private
 repositories. `none` cannot protect same-UID evidence or guarantee cleanup after
 its supervisor dies. Removing vendor state unlinks managed files; it neither
@@ -871,7 +870,8 @@ evidence = "strict"
 
 File keys: `schema`, `extends`, `filesystem.read_write`, `filesystem.read_only`,
 `filesystem.deny_read`, `filesystem.protected_coverage`, `network.mode`,
-`network.allow`, `limits.wall`, `limits.pids`, `limits.mem`, `limits.cpu`,
+`network.allow`, `limits.wall`, `limits.pids`, `limits.mem`, `limits.swap`,
+`limits.storage`, `limits.inodes`, `limits.cpu`,
 `observation.mode`, and `observation.evidence`.
 `extends` is required for custom profiles, forbidden in project config;
 project fields live under `[jail]` with the same subordinate tables.
@@ -883,7 +883,7 @@ command fragments and arbitrary environment entries are not policy keys.
 | Remove writable/visible authority or make a writable subtree read-only | Allow |
 | Add a denied subtree | Allow |
 | Require stronger protected-path coverage | Allow; refuse at capability check if unsupported |
-| Lower a wall, pids, mem or CPU ceiling | Allow |
+| Lower a wall, pids, mem, swap, storage, inodes or CPU ceiling | Allow |
 | Add a previously absent finite limit | Allow, and require its enforcement |
 | Change proxy network to none, or shrink its allowed host set | Allow |
 | Enable observation or change best-effort to strict | Allow |
@@ -920,26 +920,83 @@ cannot be guessed. P01 must use the checked-in expected bytes and digests.
 
 ### 6.4 Limits and errors
 
-Supported `--limit` keys are `wall`, `pids`, `mem`, `cpu`. CLI duplicates refuse.
+Supported `--limit` keys are `wall`, `pids`, `mem`, `swap`, `storage`,
+`inodes`, `cpu`. CLI duplicates refuse.
 `wall` is a positive integer with `ms`, `s`, `m` or `h`; `pids` a positive
 integer; `mem` positive bytes with optional `KiB`, `MiB`, `GiB`; `cpu` a positive
 integer percentage where 100 means one core of aggregate execution capacity.
 Integer parsing and unit multiplication check overflow. A zero, negative,
-unbounded or unknown value is usage error. CPU is a bandwidth ceiling, not a
+unbounded or unknown value is usage error, except that `swap=0` explicitly
+disables swap. `swap` and `storage` use the byte grammar; `inodes` is a
+positive integer. CPU is a bandwidth ceiling, not a
 CPU-seconds timeout. Wall always exists.
+
+`mem` continues to mean RAM charged to the execution cgroup, independently of
+swap. Linux applies an explicit `swap` through `memory.swap.max`, rounding
+down to the kernel page size (including zero). The control must exist, accept
+the write and read back exactly before release. Missing support refuses.
+`memory.swap.events:max` supplies cumulative limit-hit evidence; `fail` alone
+does not, because it also counts exhaustion of host swap. No omitted swap
+ceiling is implied by `mem`.
+
+`storage` bounds aggregate allocated file-data capacity, not apparent file
+length, write throughput, anonymous memory/memfd allocations, external services
+or operator-owned output sinks. Tmpfs metadata memory still needs a RAM
+ceiling. `inodes` separately bounds filesystem inode capacity, not the number
+of hard-link directory entries. Linux admits operator-provisioned bounded
+tmpfs volumes and ext4/XFS filesystems with enforced user hard quotas.
+Before release it inspects every writable mount in the actual child
+namespace, pins the filesystems and sums each distinct filesystem's total
+tmpfs capacity or caller-uid hard quota once. Workspace, explicit scratch,
+extra writable grants and vendor state must all fit. Existing data and other
+users of a shared budget consume capacity too. For a user quota, this includes
+all files charged to that uid on the filesystem, even outside the granted
+directories. This is not a reservation or a per-directory quota. Oversized,
+unlimited or unsupported writable filesystems refuse before target exec.
+The runtime does not mount, resize or copy host workspaces to satisfy the request.
+
+Disk quota admission requires a non-root caller, active user accounting
+**and enforcement**, and a nonzero hard limit for every requested dimension.
+`quotactl_fd` reads the kernel's quota state and `Q_GETQUOTA` limits through
+a pinned mount descriptor; soft limits never establish a ceiling. Every
+writable disk inode must belong to the caller uid, including directories.
+Admission walks each writable grant without following symlinks, at most
+100000 entries across grants and 128 directory levels, within the preparation
+deadline; an incomplete walk refuses.
+Read-only submounts are exempt and other writable filesystems are checked
+separately. Idmapped writable mounts and XFS realtime volumes (whose block
+quotas use a separate accounting domain) refuse. Storage-bounded baselines deny
+`link` and `linkat` with `EPERM` so a target cannot import a foreign-owned
+inode from a read-only grant and evade the uid budget. These kernel seccomp
+denials precede ptrace and produce no observer event; native storage details
+declare that exclusion. Existing admitted hard links still charge the same uid.
+
+For these limits `/dev` and its `/dev/shm` directory are read-only; the usual
+null/zero/random/tty device bindings remain usable. Proc metadata and ptys do
+not count as file-data storage. `none` and an agent variant that permits new
+mounts refuse storage/inode ceilings. Filesystem allocation is constrained by
+the kernel even with observation off. Receipts name `bounded-tmpfs-capacity`
+or `filesystem-user-quota` (including mixed tmpfs/disk runs) and report total
+bytes, inodes, filesystem count and each volume's mechanism/uid in native
+details. Quota state is re-read while running; unavailable enforcement or
+changed hard limits cause fail-closed tree teardown. Neither backend provides
+a cumulative allocation-refusal counter here: `hit=true` means saturation
+of at least one admitted volume budget was sampled, while `hit=null` means unknown, never a claim that no limit was
+hit. A transient full condition can be missed. Disk-backed project quotas and
+automatic volume provisioning remain unimplemented.
 
 This table is authoritative for initial defaults and requirements:
 
 | Profile | wall (required) | pids (preferred) | mem | cpu | Execution boundary |
 |---|---|---|---|---|---|
-| agent | 2h | 512 | Absent unless explicit | Absent unless explicit | Required by an explicit tree limit; the ptrace observer needs none |
-| tool | 30m | 256 | Absent unless explicit | Absent unless explicit | Required by an explicit tree limit; the ptrace observer needs none |
+| agent | 2h | 512 | Absent unless explicit | Absent unless explicit | Required by an explicit cgroup limit; the ptrace observer needs none |
+| tool | 30m | 256 | Absent unless explicit | Absent unless explicit | Required by an explicit cgroup limit; the ptrace observer needs none |
 | build | 1h | 512 | Explicit ceiling required | Absent unless explicit | Required for memory |
 | none | 2h | Absent unless explicit | Absent unless explicit | Absent unless explicit | Required for lifetime, including observe off |
 
 The requirement `execution_boundary` names a tree the supervisor can place the
 target in, bound resources on, kill as a whole and verify empty. `none` needs
-it for lifetime (observation on or off), and every explicit pids, memory or
+it for lifetime (observation on or off), and every explicit pids, memory, swap or
 CPU ceiling needs it. It names the semantic, not a mechanism (§3.1): the Linux
 plan satisfies it with a delegated cgroup v2 leaf, and a platform without one
 reports it `unsupported`. Linux-private state and native details keep their
@@ -956,7 +1013,7 @@ with `required=false`, `applied=false`, null mechanism/hit/scope and
 an explanatory wrapper note. Missing a preferred controller alone never refuses.
 Lifetime requirements can require an execution boundary without requiring its
 pids controller. `none` may enforce explicit cgroup limits but still cannot protect
-them against same-UID interference. No unspecified memory/CPU ceiling is implied.
+them against same-UID interference. No unspecified memory, swap, storage, inode or CPU ceiling is implied.
 
 Linux measures execution wall, preparation/gate/stop budgets and event elapsed
 time using `CLOCK_BOOTTIME`: suspend counts, wall-clock adjustments do not.
@@ -966,7 +1023,7 @@ waits on the same deadline. Waits that bound I/O or a race rather than the
 attempt (the watcher's grace, `gc`'s own verification, trace and persistence
 progress, the scope step's wait, proxy deadlines, the observer's internal
 waits) may use the monotonic clock; a suspend lengthens them. Later macOS uses
-a native continuous clock with the same suspend semantics. Pids, memory and CPU use their separate cgroup mechanisms.
+a native continuous clock with the same suspend semantics. Pids, memory, swap and CPU use their separate cgroup mechanisms.
 
 Exit codes: child's code on a completed execution; `128 + signal` for a
 signal-terminated child; 1 for a tool failure; 2 for invalid CLI/config syntax;
@@ -1807,6 +1864,10 @@ result under `fs.deny`, not `net`. This classification does not lose the event.
 A failed open that requested no mutation is outside the set and produces no
 event: read denials are excluded, not merely uncounted, and a consumer must
 not read the absence of an `fs.deny` as the absence of a read denial.
+With explicit storage/inode ceilings, `link` and `linkat` are refused by the
+seccomp baseline before ptrace (§6.4). Those attempts are also outside the
+observed result stream; `lifetime.native.details.storage_ceiling` names this
+exclusion. No successful hard-link creation is possible in that mode.
 Audit `decision` is always null: errno alone cannot identify DAC, LSM, seccomp
 or a particular jail policy decision.
 
@@ -1910,6 +1971,16 @@ traced one layer down with host pids and matching births; a pid namespace
 inside a contained profile is refused by the host and not claimed.
 
 ### 11.4 Loss and coverage
+
+Normal contained runs filter register-sourced read-only `open`/`openat`
+calls in seccomp before a ptrace stop. Their flags are copied by the kernel;
+write, create, truncate and temporary-file intent still stops. Learning keeps
+all opens. `openat2` remains observed because its flags live in mutable tracee
+memory. The canonical closed-set table describes the learning filter;
+`narrowing_filter_digest_installed` and `readonly_open_fast_path` identify the
+actual per-attempt program. `filtered_readonly_opens` counts only skips seen
+by the tracer, not opens filtered entirely in the kernel. The closed-set
+event coverage, ABI checks and strict gap behavior are unchanged.
 
 For `agent`, `connect` results come from the unix-peer mediator, not a ptrace
 stop (`fields.observation = seccomp_user_notification`), and count under the

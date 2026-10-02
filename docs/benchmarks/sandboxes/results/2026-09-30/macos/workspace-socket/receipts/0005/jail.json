@@ -1,0 +1,138 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_862f4dc4-2843-45d5-b14c-6c0bdc6ec16f",
+  "revision": 1,
+  "phase": "refused",
+  "platform": {
+    "os": "macos",
+    "arch": "aarch64",
+    "kernel": "Darwin 27.0.0"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": null,
+    "backend_version": null
+  },
+  "policy": {
+    "name": "tool",
+    "digest": "sha256:17881580e25ba4066ac4418dc665c8ef80ed195bd236ddb6c6e2fa454c96a2b1",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "grants": [
+      {
+        "kind": "read_only",
+        "value": "/private/tmp/ouro-sandbox-20260930/private/read-only",
+        "by": "operator"
+      }
+    ]
+  },
+  "containment": "pending",
+  "child_protection": "pending",
+  "exec_observed": false,
+  "argv_digest": "sha256:29bbe987fb0bd2da41a608795cd574884cd1915261fc0aa9c1dd149c75701baf",
+  "applied": {
+    "filesystem": null,
+    "network": {
+      "mode": "pending",
+      "mechanism": null,
+      "allowed_hosts": []
+    },
+    "syscalls": null,
+    "limits": [],
+    "environment_names": [],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": null,
+  "lifetime": {
+    "boundary": "pending",
+    "native": null,
+    "tree_empty": null,
+    "verified_at": null,
+    "verification_scope": null,
+    "integrity": "pending"
+  },
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "unsupported_platform",
+      "stage": "probing",
+      "message": "execution is not implemented for this platform",
+      "remediation_category": "unsupported"
+    }
+  },
+  "state_cleanup": "not_needed",
+  "cleanup_error": null,
+  "created_at": "2026-09-30T13:34:53Z",
+  "updated_at": "2026-09-30T13:34:53Z",
+  "errors": [
+    {
+      "code": "unsupported_platform",
+      "stage": "probing",
+      "message": "execution is not implemented for this platform",
+      "remediation_category": "unsupported"
+    }
+  ],
+  "credentials": []
+}

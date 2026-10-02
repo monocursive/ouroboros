@@ -1,0 +1,25 @@
+{
+  "macos_platform_unit_tests": {
+    "passed": 2,
+    "failed": 0
+  },
+  "evidence_regression_tests": {
+    "passed": 11,
+    "failed": 0
+  },
+  "document_contract": {
+    "documents": 42,
+    "broken_links": 0
+  },
+  "linux_milestone_1_frozen_inputs": "unchanged_verified",
+  "whitespace_check": "passed",
+  "normal_protected_mac_controls": {
+    "local": "ERR_NOT_ENTITLED_3_before_spawn",
+    "supplied_mac": "ERR_NOT_ENTITLED_3_before_spawn"
+  },
+  "host_development_mode": "refused_before_output_directory",
+  "remote_temporary_directory": "removed_verified",
+  "development_vm": "stopped_verified",
+  "host_sip": "enabled_verified",
+  "production_native_execution_enabled": false
+}

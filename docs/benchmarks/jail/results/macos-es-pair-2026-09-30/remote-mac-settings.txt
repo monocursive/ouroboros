@@ -1,0 +1,4 @@
+System Integrity Protection status: enabled.
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434

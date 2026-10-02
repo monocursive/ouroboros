@@ -596,6 +596,8 @@ pub struct BwrapPlan {
     pub workspace_access: Option<bool>,
     /// The scratch directory, mounted at `/tmp` inside.
     pub scratch: PathBuf,
+    /// Seal /dev, including /dev/shm, against filesystem allocation.
+    pub bounded_storage: bool,
     /// Source descriptors for each row of `mount_table`, populated by preparation.
     /// Each mount owns a distinct descriptor: bubblewrap closes it after binding.
     pub mount_fds: Vec<Option<RawFd>>,
@@ -789,6 +791,7 @@ impl BwrapPlan {
             workspace: workspace.to_owned(),
             workspace_access: Some(true),
             scratch: scratch.to_owned(),
+            bounded_storage: false,
             mount_fds: Vec::new(),
             env: vec![
                 (
@@ -1111,6 +1114,9 @@ impl BwrapPlan {
                 push(&[OsStr::new("--remount-ro"), self.workspace.as_os_str()]);
             }
             push(&[OsStr::new("--remount-ro"), OsStr::new("/")]);
+            if self.bounded_storage {
+                push(&[OsStr::new("--remount-ro"), OsStr::new("/dev")]);
+            }
             push(&[OsStr::new("--chdir"), self.workspace.as_os_str()]);
             if let Some(fd) = self.seccomp_fd {
                 push(&[OsStr::new("--seccomp"), OsStr::new(&fd.to_string())]);
