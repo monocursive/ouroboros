@@ -141,6 +141,7 @@ impl Drop for Process {
 struct Fixture {
     _temp: tempfile::TempDir,
     data: PathBuf,
+    config: PathBuf,
     workspace: PathBuf,
     jail: PathBuf,
     writer: Process,
@@ -169,7 +170,10 @@ impl Fixture {
             .tempdir()
             .unwrap();
         let data = temp.path().join("data");
+        let config = temp.path().join("config");
         let workspace = temp.path().join("workspace");
+        fs::create_dir(&config).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(&workspace).unwrap();
         // A development build may be group writable. Install the exact bytes privately
         // so the launcher's executable-permission guard is exercised honestly.
@@ -180,6 +184,7 @@ impl Fixture {
         Self {
             _temp: temp,
             data,
+            config,
             workspace,
             jail: pinned,
             writer,
@@ -212,6 +217,9 @@ impl Fixture {
 
     fn command_with_profile(&self, request: &str, batch: bool, profile: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
+        // Real launches must use this fixture's operator configuration. In
+        // particular, `none` correctly refuses ambient trusted launch profiles.
+        command.env("OURO_CONFIG_DIR", &self.config);
         command
             .arg("--data-dir")
             .arg(&self.data)

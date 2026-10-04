@@ -2238,8 +2238,8 @@ fn n04_descriptor_exhaustion_is_reported_truthfully() {
     // Three free: the tunnel works, with no extra descriptor.
     assert_eq!(helper_value(&stdout, "free3_status"), "200");
     assert_eq!(helper_value(&stdout, "free3_relayed"), "hi");
-    // One free: the accept itself fails; once descriptors return, the
-    // pending connection is served.
+    // One free: the accept itself fails. Linux retains the queued connection;
+    // Darwin closes it on EMFILE, so a fresh client retries after descriptors return.
     assert_eq!(helper_value(&stdout, "free1_status"), "200");
     assert_eq!(server.join().expect("the server ran"), 2);
 }
@@ -2373,11 +2373,55 @@ fn proxy_limits_helper() {
             // Give descriptors back once the proxy has seen the pending
             // connection and failed to accept it; it then serves it.
             drop(files);
+            #[cfg(target_os = "macos")]
+            let status = {
+                let mut head = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match client.read(&mut byte) {
+                        Ok(0) if head.is_empty() => break,
+                        Ok(1) => head.push(byte[0]),
+                        Ok(_) => panic!("EOF within a response head: {head:?}"),
+                        Err(error) => panic!("reading a response head: {error}"),
+                    }
+                    assert!(head.len() < 8192, "an oversized response head");
+                }
+                if head.is_empty() {
+                    // Darwin's failed accept discarded this client. Only an
+                    // empty EOF permits a new request; malformed replies fail.
+                    drop(client);
+                    client = helper_connect(&path).expect("reconnects after EMFILE");
+                    client
+                        .write_all(connect.as_bytes())
+                        .expect("retries CONNECT");
+                    let (status, head) = read_head(&mut client);
+                    assert!(head.starts_with("HTTP/1.1 "), "an HTTP/1.1 response");
+                    status
+                } else {
+                    let text = String::from_utf8(head).expect("an ASCII response head");
+                    text.strip_prefix("HTTP/1.1 ")
+                        .expect("an HTTP/1.1 response")
+                        .split(' ')
+                        .next()
+                        .and_then(|code| code.parse::<u16>().ok())
+                        .expect("a status code")
+                }
+            };
+            #[cfg(not(target_os = "macos"))]
             let (status, _) = read_head(&mut client);
             println!("HELPER free1_status={status}");
             client.shutdown(Shutdown::Write).expect("half-closes");
             read_to_eof(&mut client);
             sink.wait_for(3);
+            #[cfg(target_os = "macos")]
+            {
+                let results = sink.snapshot();
+                let result = results.last().expect("the recovered request settled");
+                assert_eq!(result.decision, ProxyDecision::Allow);
+                assert_eq!(result.reason, Reason::Relayed);
+                assert!(result.connected.is_some());
+                assert_eq!(result.connect_errno, None);
+            }
             let _ = handle.stop(WAIT);
         }
         "fds" => {

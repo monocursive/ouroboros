@@ -129,7 +129,11 @@ fn plan(options: &RunOptions, image: &File) -> Result<Value> {
         .stderr(Stdio::inherit());
     // Capture is bounded even if an operator-selected executable is defective.
     command.stdout(Stdio::piped());
-    let mut child = OwnedChild(command.spawn()?);
+    let mut child = OwnedChild(
+        command
+            .spawn()
+            .map_err(|e| error(format!("starting pinned jail policy resolution: {e}")))?,
+    );
     let mut pipe = child
         .0
         .stdout
@@ -220,7 +224,8 @@ fn pinned_image(path: &Path) -> Result<File> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
+        .open(path)
+        .map_err(|e| error(format!("opening pinned jail image {}: {e}", path.display())))?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.mode() & 0o111 == 0 || meta.mode() & 0o022 != 0 {
         return Err(error(
@@ -332,11 +337,17 @@ impl Frames {
 }
 
 #[cfg(target_os = "linux")]
-fn read_receipt(path: &Path) -> Result<Value> {
+fn read_receipt(path: &Path, phase: &str) -> Result<Value> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
+        .open(path)
+        .map_err(|e| {
+            error(format!(
+                "opening {phase} canonical jail receipt {}: {e}",
+                path.display()
+            ))
+        })?;
     if !file.metadata()?.is_file() {
         return Err(error("receipt is not a regular file"));
     }
@@ -873,11 +884,17 @@ fn run_owned(
                         if admitted {
                             return Err(error("duplicate prepared control"));
                         }
-                        let receipt = read_receipt(&receipt_path)?;
+                        let receipt = read_receipt(&receipt_path, "prepared")?;
                         let typed = check_prepared(&receipt, &message, run)?;
                         // Native Linux exec holds the executing inode against writes
                         // (ETXTBSY). Bind the actual live jail image before durable admission.
-                        let executing = File::open(format!("/proc/{}/exe", child.0.id()))?;
+                        let executing =
+                            File::open(format!("/proc/{}/exe", child.0.id())).map_err(|e| {
+                                error(format!(
+                                    "binding prepared jail image for pid {}: {e}",
+                                    child.0.id()
+                                ))
+                            })?;
                         if image_digest(&executing)? != expected_image {
                             return Err(error(
                                 "executing jail image differs from the prepared image digest",
@@ -998,7 +1015,7 @@ fn run_owned(
         return Err(problem);
     }
     let finalized: Result<_> = (|| {
-        let receipt = read_receipt(&receipt_path)?;
+        let receipt = read_receipt(&receipt_path, "terminal")?;
         let typed: Receipt = serde_json::from_value(receipt.clone())?;
         let digest =
             records::semantic::receipt_digest(&receipt).map_err(|e| error(e.to_string()))?;
