@@ -1,0 +1,3 @@
+Removed only task-owned /home/ubuntu/ouro-ledger-storage-20261004-r1/target after evidence copy. Source, logs, and diagnostic binary retained. No target executable in use; owned scopes inactive.
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        77G   73G  3.8G  96% /

@@ -173,6 +173,17 @@ impl Fixture {
         assert!(output.stderr.is_empty());
         serde_json::from_slice(&output.stdout).unwrap()
     }
+
+    fn restart(&mut self) {
+        drop(self.writer.take());
+        self.start_writer();
+    }
+
+    fn checkpoint(&self, cursor: &str) -> PathBuf {
+        self.data
+            .join("ledger/readers")
+            .join(format!("{}.json", &cursor[..32]))
+    }
 }
 
 fn records() -> Vec<Value> {
@@ -246,15 +257,205 @@ fn query_filters_paginate_exact_attribution_and_refuse_cursor_rebinding() {
     }
     drop(fixture.writer.take());
     fixture.start_writer();
-    let expired = fixture.run(&[
-        "query", "--run", RUN, "--execs", "--limit", "1", "--cursor", &cursor, "--json",
-    ]);
-    assert!(!expired.status.success());
-    assert!(expired.stdout.is_empty());
+    assert_eq!(
+        fixture.query(&["--limit", "1", "--cursor", &cursor]),
+        second
+    );
     assert_eq!(
         fs::read(&fixture.stream).unwrap(),
         fixture.bytes,
         "readers must not rewrite canonical history"
+    );
+}
+
+#[test]
+fn daemon_restart_preserves_query_progress_and_rejects_forged_or_corrupt_cursors() {
+    let mut records = records();
+    for index in 1..4 {
+        let mut source = records[4].clone();
+        source["source_seq"] = json!(index + 1);
+        source["request_id"] = json!(format!("source:audit:{}", index + 1));
+        records.insert(4 + index, source);
+    }
+    let mut fixture = Fixture::new(records);
+    let first = fixture.query(&["--limit", "1"]);
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    fixture.restart();
+    let second = fixture.query(&["--limit", "1", "--cursor", &cursor]);
+    assert_eq!(second["snapshot"], first["snapshot"]);
+    assert_eq!(second["records"], json!([fixture.records[5].clone()]));
+    fixture.restart();
+    assert_eq!(
+        fixture.query(&["--limit", "1", "--cursor", &cursor]),
+        second
+    );
+    let next = second["next_cursor"].as_str().unwrap();
+    let third = fixture.query(&["--limit", "1", "--cursor", next]);
+    assert_eq!(third["records"], json!([fixture.records[6].clone()]));
+
+    let mut forged = cursor.clone();
+    forged.pop();
+    forged.push(if cursor.ends_with('a') { 'b' } else { 'a' });
+    let forged_output = fixture.run(&[
+        "query", "--run", RUN, "--execs", "--limit", "1", "--cursor", &forged, "--json",
+    ]);
+    assert!(!forged_output.status.success());
+    assert!(forged_output.stdout.is_empty());
+
+    let checkpoint = fixture.checkpoint(next);
+    let mut corrupt: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    corrupt["checkpoint"]["current"] = json!("0".repeat(32));
+    fs::write(&checkpoint, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+    fixture.restart();
+    let corrupt_output = fixture.run(&[
+        "query", "--run", RUN, "--execs", "--limit", "1", "--cursor", next, "--json",
+    ]);
+    assert!(!corrupt_output.status.success());
+    assert!(corrupt_output.stdout.is_empty());
+    assert_eq!(fs::read(&fixture.stream).unwrap(), fixture.bytes);
+}
+
+#[test]
+fn dropped_socket_reply_replays_the_checkpointed_page_after_restart() {
+    use ouro_ledger::{
+        daemon::write_frame,
+        protocol::{ReadFilter, ReadRequest, ReadSelector, Request},
+    };
+    let mut records = records();
+    let mut source = records[4].clone();
+    source["source_seq"] = json!(2);
+    source["request_id"] = json!("source:audit:2");
+    records.insert(5, source);
+    let mut fixture = Fixture::new(records);
+    let first = fixture.query(&["--limit", "1"]);
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    let mut socket = UnixStream::connect(fixture.data.join("ledger/serve.sock")).unwrap();
+    write_frame(
+        &mut socket,
+        &Request::Read {
+            request: ReadRequest {
+                run_id: RUN.into(),
+                filter: ReadFilter {
+                    selector: ReadSelector::Execs,
+                    stage: None,
+                    since: None,
+                    until: None,
+                },
+                cursor: Some(cursor.clone()),
+                limit: 1,
+            },
+        },
+    )
+    .unwrap();
+    // Keep the socket open but unread until the durable checkpoint proves the
+    // daemon accepted the request. Closing before accept races peer attribution.
+    let checkpoint = fixture.checkpoint(&cursor);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let durable: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+        if durable["checkpoint"]["prior"]["token"] == cursor[32..] {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "lost reply checkpoint was not persisted"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Drop the reply without receiving any page, then recover the accepted advance.
+    drop(socket);
+    fixture.restart();
+    let second = fixture.query(&["--limit", "1", "--cursor", &cursor]);
+    assert_eq!(second["snapshot"], first["snapshot"]);
+    assert_eq!(second["records"], json!([fixture.records[5].clone()]));
+    assert_eq!(
+        fixture.query(&["--limit", "1", "--cursor", &cursor]),
+        second
+    );
+    assert_eq!(fs::read(&fixture.stream).unwrap(), fixture.bytes);
+}
+
+#[test]
+fn daemon_restart_refuses_public_symlinked_and_hardlinked_checkpoint_files() {
+    for unsafe_kind in ["public", "symlink", "hardlink"] {
+        let mut fixture = Fixture::new(records());
+        let first = fixture.query(&["--limit", "1"]);
+        let cursor = first["next_cursor"].as_str().unwrap();
+        let checkpoint = fixture.checkpoint(cursor);
+        drop(fixture.writer.take());
+        match unsafe_kind {
+            "public" => {
+                fs::set_permissions(&checkpoint, fs::Permissions::from_mode(0o644)).unwrap()
+            }
+            "symlink" => {
+                let original = fixture.temp.path().join("original-checkpoint");
+                fs::rename(&checkpoint, &original).unwrap();
+                std::os::unix::fs::symlink(original, &checkpoint).unwrap();
+            }
+            "hardlink" => {
+                fs::hard_link(&checkpoint, fixture.temp.path().join("linked-checkpoint")).unwrap()
+            }
+            _ => unreachable!(),
+        }
+        fixture.start_writer();
+        let output = fixture.run(&[
+            "query", "--run", RUN, "--execs", "--limit", "1", "--cursor", cursor, "--json",
+        ]);
+        assert!(
+            !output.status.success(),
+            "accepted {unsafe_kind} checkpoint"
+        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(fs::read(&fixture.stream).unwrap(), fixture.bytes);
+    }
+}
+
+#[test]
+fn durable_session_capacity_and_expiry_survive_daemon_restart() {
+    let mut fixture = Fixture::new(records());
+    let mut cursors = Vec::new();
+    for _ in 0..32 {
+        cursors.push(
+            fixture.query(&["--limit", "1"])["next_cursor"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    fixture.restart();
+    let full = fixture.run(&["query", "--run", RUN, "--execs", "--limit", "1", "--json"]);
+    assert!(!full.status.success());
+    assert!(full.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&full.stderr).contains("session limit"));
+    let checkpoint = fixture.checkpoint(&cursors[0]);
+    let mut expired: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    expired["checkpoint"]["created"] = json!(0);
+    expired["digest"] = json!(sha256_prefixed(&to_jcs(&expired["checkpoint"]).unwrap()));
+    fs::write(&checkpoint, serde_json::to_vec(&expired).unwrap()).unwrap();
+    fixture.restart();
+    let expired_cursor = fixture.run(&[
+        "query",
+        "--run",
+        RUN,
+        "--execs",
+        "--limit",
+        "1",
+        "--cursor",
+        &cursors[0],
+        "--json",
+    ]);
+    assert!(!expired_cursor.status.success());
+    assert!(expired_cursor.stdout.is_empty());
+    assert!(!checkpoint.exists());
+    assert_eq!(
+        fixture.query(&["--limit", "1"])["records"],
+        json!([fixture.records[4].clone()])
+    );
+    assert_eq!(
+        fs::read_dir(fixture.data.join("ledger/readers"))
+            .unwrap()
+            .count(),
+        32
     );
 }
 
@@ -294,6 +495,8 @@ fn export_keeps_large_canonical_record_bytes_out_of_status_metadata() {
         .expect("large export needs a checkpoint");
     let prefix = checkpoint["bytes_written"].as_u64().unwrap() as usize;
     let cursor = checkpoint["next_cursor"].as_str().unwrap();
+    drop(fixture.writer.take());
+    fixture.start_writer();
     let resumed = fixture.run(&["export", RUN, "--ndjson", "--json", "--cursor", cursor]);
     assert!(
         resumed.status.success(),

@@ -1,0 +1,16 @@
+Before-fix output captured from review tool results against the initially reviewed working tree. A source hash was not captured for the before run; the after source hash record binds the current run only.
+
+Sync fault reproduction (the expected-refusal assertion failed):
+INJECTED EIO on reader directory sync(/private/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/.tmpOOaCHY/data/ledger/readers)
+checkpoint persist result: Some(LedgerError("Input/output error (os error 5)"))
+retry while readers fsync still fails: true
+BUG: checkpoint retry acknowledged without a successful namespace sync
+
+Safe checkpoint corruption reproduction:
+fresh snapshot after unrelated checkpoint corruption: Err(LedgerError("reader checkpoint checksum or identity is corrupt"))
+
+Same-user checkpoint label forgery reproduction:
+real canonical protection: unprotected
+restored protection: enforced, state: settled, local consistency: true
+
+The label forgery requires existing write access to a private same-user checkpoint and a recomputed checksum. This is a local metadata corroboration finding, not evidence of external custody or managed authorization.

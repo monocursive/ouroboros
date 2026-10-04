@@ -1,0 +1,16 @@
+{
+  "passed": 86,
+  "failed": 0,
+  "ignored": 0,
+  "skipped_markers": 0,
+  "launch_linux": {
+    "passed": 15,
+    "failed": 0,
+    "ignored": 0
+  },
+  "source_files": 359,
+  "build_exit": 0,
+  "ledger_exit": 0,
+  "doctor_exit": 0,
+  "validation_exit": 0
+}

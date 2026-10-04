@@ -36,3 +36,28 @@ crates/ouro-ledger/src/store.rs	assert!(request.cursor.is_some());
 crates/ouro-ledger/src/store.rs	fn reader_cursor_cannot_change_scope_and_expires_explicitly_after_restart() {
 crates/ouro-ledger/src/store.rs	resumed.cursor = page.next_cursor;
 crates/ouro-ledger/src/store.rs	wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
+crates/ouro-ledger/src/reader.rs	next_cursor: Option<String>,
+crates/ouro-ledger/src/reader.rs	|| checkpoint.request.cursor.is_some()
+crates/ouro-ledger/src/reader.rs	|| checkpoint.template.next_cursor.is_some()
+crates/ouro-ledger/src/reader.rs	/// Interrupted atomic writes have no issued cursor and can be safely removed.
+crates/ouro-ledger/src/reader.rs	let id = cursor[..32].to_owned();
+crates/ouro-ledger/src/reader.rs	&cursor[32..],
+crates/ouro-ledger/src/reader.rs	(id, cursor[32..].to_owned())
+crates/ouro-ledger/src/reader.rs	"reader cursor expired or is unknown; start a new snapshot, do not append it to an old export".into()))?;
+crates/ouro-ledger/src/reader.rs	request.cursor = None;
+crates/ouro-ledger/src/reader.rs	next_cursor: page.next_cursor.clone(),
+crates/ouro-ledger/src/reader.rs	// Advancing the saved current cursor does not need to replay the
+crates/ouro-ledger/src/reader.rs	page.next_cursor = checkpoint.prior.next_cursor;
+crates/ouro-ledger/src/reader.rs	|| page.next_cursor.as_ref().is_some_and(|cursor| {
+crates/ouro-ledger/src/reader.rs	cursor != &format!("{}{}", checkpoint.id, session.current)
+crates/ouro-ledger/src/reader.rs	&& cursor == &format!("{}{}", checkpoint.id, checkpoint.prior.token))
+crates/ouro-ledger/src/store.rs	fn reader_cursor_cannot_change_scope_and_survives_restart() {
+crates/ouro-ledger/src/reader.rs	// filesystem timestamp expires; their cursors refuse independently.
+crates/ouro-ledger/src/store.rs	request.cursor = first.next_cursor;
+crates/ouro-ledger/src/store.rs	let cursor = request.cursor.as_ref().unwrap();
+crates/ouro-ledger/src/store.rs	.join(format!("{}.json", &cursor[..32]));
+crates/ouro-ledger/src/store.rs	request.cursor = second.next_cursor;
+crates/ouro-ledger/src/store.rs	assert_eq!(envelope["checkpoint"]["prior"]["token"], cursor[32..]);
+crates/ouro-ledger/src/store.rs	corrupt_request.cursor = initial.next_cursor;
+crates/ouro-ledger/src/store.rs	let cursor = corrupt_request.cursor.as_ref().unwrap();
+crates/ouro-ledger/src/store.rs	let checkpoint_path = directory.join(format!("{}.json", &cursor[..32]));

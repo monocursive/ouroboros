@@ -1,0 +1,7 @@
+Host: muetdhiver.tail826b0.ts.net
+Darwin 27.0.0 arm64
+Probe: private AF_UNIX listener; process RLIMIT_NOFILE=(64,64); exhaust /dev/null descriptors; free one descriptor for client; connect; accept under exhaustion; free eight descriptors; accept and read original client.
+No host configuration or source files changed. Temporary socket directories removed.
+attempt=1 initial_accept_errno=24 (EMFILE) accept_after_release_errno=35 (EAGAIN) original_client_received=empty EOF
+attempt=2 initial_accept_errno=24 (EMFILE) accept_after_release_errno=35 (EAGAIN) original_client_received=empty EOF
+attempt=3 initial_accept_errno=24 (EMFILE) accept_after_release_errno=35 (EAGAIN) original_client_received=empty EOF

@@ -1,0 +1,13 @@
+{
+  "passed": 80,
+  "failed": 0,
+  "ignored": 0,
+  "skipped_markers": 0,
+  "launch_linux": {
+    "passed": 15,
+    "failed": 0,
+    "total": 15
+  },
+  "native_other_tests": 65,
+  "source_files": 261
+}

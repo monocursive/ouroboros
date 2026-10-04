@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ouroboros.monocursive.com/schemas/ledger-v1/segments",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "attempt_id", "segment", "replay_digest"],
+  "properties": {
+    "schema": {"const": "ouro.ledger.segments/1"},
+    "run_id": {"type": "string", "pattern": "^run_[0-9a-f]{32}$"},
+    "attempt_id": {"type": "string", "pattern": "^att_[0-9a-f-]{36}$"},
+    "replay_digest": {"$ref": "#/$defs/digest"},
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "first_seq", "last_seq", "bytes", "digest", "head_digest"],
+      "properties": {
+        "name": {"const": "events-0001.ndjson"},
+        "first_seq": {"const": 1},
+        "last_seq": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "digest": {"$ref": "#/$defs/digest"},
+        "head_digest": {"$ref": "#/$defs/digest"}
+      }
+    }
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+}

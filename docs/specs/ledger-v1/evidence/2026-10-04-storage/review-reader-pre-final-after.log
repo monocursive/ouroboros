@@ -1,0 +1,46 @@
+External reader recovery validation, 2026-10-04T11:45:28Z
+Darwin 27.0.0 arm64
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+Directory sync fault, then fault removal:
+INJECTED EIO on reader directory sync(/private/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/.tmpYtuZm8/data/ledger/readers)
+checkpoint persist result: Some(LedgerError("Input/output error (os error 5)"))
+INJECTED EIO on reader directory sync(/private/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/.tmpYtuZm8/data/ledger/readers)
+retry while readers fsync still fails: false
+retry after disabling sync fault succeeds: true
+successful recovered reply retries identically: true
+Reader-directory creation parent sync fault, then fault removal:
+INJECTED EIO on reader directory sync(/private/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/.tmpQmA1mo/data/ledger)
+reader-directory creation with parent sync fault refuses: true
+INJECTED EIO on reader directory sync(/private/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/.tmpQmA1mo/data/ledger)
+existing reader directory with parent sync fault still refuses: true
+fresh snapshot after parent sync fault removed succeeds: true
+Safe checkpoint corruption:
+fresh snapshot after unrelated checkpoint corruption succeeds: true
+corrupt checkpoint cursor still refuses: true
+Same-user label forgery with recomputed checksum:
+real canonical protection: unprotected
+forged labels metadata refuses: true (Some(LedgerError("reader checkpoint position or canonical snapshot is corrupt")))
+real canonical protection: unprotected
+forged state metadata refuses: true (Some(LedgerError("reader checkpoint position or canonical snapshot is corrupt")))
+real canonical protection: unprotected
+forged coverage metadata refuses: true (Some(LedgerError("reader checkpoint position or canonical snapshot is corrupt")))
+real canonical protection: unprotected
+forged empty metadata refuses: true (Some(LedgerError("reader checkpoint position or canonical snapshot is corrupt")))
+Caveat: label forgery requires private same-user checkpoint write access; no external custody or managed authorization claim.
+Current library source hashes:
+Cargo.lock: OK
+Cargo.toml: OK
+crates/ouro-ledger/Cargo.toml: OK
+crates/ouro-ledger/src/daemon.rs: OK
+crates/ouro-ledger/src/lib.rs: OK
+crates/ouro-ledger/src/main.rs: OK
+crates/ouro-ledger/src/manifest.rs: OK
+crates/ouro-ledger/src/projection.rs: OK
+crates/ouro-ledger/src/protocol.rs: OK
+crates/ouro-ledger/src/reader.rs: OK
+crates/ouro-ledger/src/runner.rs: OK
+crates/ouro-ledger/src/service.rs: OK
+crates/ouro-ledger/src/store.rs: OK
+crates/ouro-records/src/canonical.rs: OK
+crates/ouro-records/src/lib.rs: OK
+crates/ouro-records/src/records.rs: OK

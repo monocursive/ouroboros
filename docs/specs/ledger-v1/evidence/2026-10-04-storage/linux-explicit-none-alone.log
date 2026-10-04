@@ -1,0 +1,20 @@
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/ouro-ledger-storage-20261004-r1/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 27.18s
+     Running tests/launch_linux.rs (target/release/deps/launch_linux-5598e6079ce8f285)
+
+running 1 test
+test explicit_none_profile_remains_unprotected_after_real_launch_and_verification ... 
+thread 'explicit_none_profile_remains_unprotected_after_real_launch_and_verification' (3149902) panicked at crates/ouro-ledger/tests/launch_linux.rs:235:13:
+run did not return a record (EOF while parsing a value at line 1 column 0): status exit status: 1 stderr ouro-ledger: opening canonical jail receipt /tmp/.tmpZK9wau/data/attempts/att_eba34567-21a1-4258-a02e-9e4d3a40c9d0/jail.json: No such file or directory (os error 2)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    explicit_none_profile_remains_unprotected_after_real_launch_and_verification
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.39s
+
+error: test failed, to rerun pass `-p ouro-ledger --test launch_linux`

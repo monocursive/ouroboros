@@ -1,0 +1,5 @@
+INJECTED EIO on reader directory sync(/private/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/.tmpJmPVAs/data/ledger)
+reader-directory creation with parent sync fault refuses: true
+INJECTED EIO on reader directory sync(/private/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/.tmpJmPVAs/data/ledger)
+existing reader directory with parent sync fault still refuses: true
+fresh snapshot after parent sync fault removed succeeds: true

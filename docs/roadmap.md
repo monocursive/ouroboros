@@ -113,6 +113,10 @@ limits. The complete milestone remains open: cross-run queries, comparisons,
 retention, signed bundles, best-effort recovery and managed project authorization
 are still planned. A plain local export does not establish external custody.
 
+The storage/recovery slice adds durable segment and replay anchors, a rebuildable
+SQLite run index and reader cursors that survive writer restart. It keeps one
+canonical segment per run; segment rotation and retention remain pending.
+
 ## Later: submit work to a team worker
 
 A managed worker would let a developer submit a task to a company-controlled

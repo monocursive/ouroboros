@@ -1,0 +1,7 @@
+Removed only /home/ubuntu/ouro-ledger-storage-20261004-r1/target
+Before:
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        77G   74G  3.3G  96% /
+After:
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        77G   73G  3.8G  96% /

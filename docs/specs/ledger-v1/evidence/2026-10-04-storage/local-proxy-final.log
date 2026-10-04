@@ -1,0 +1,58 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/portable_proxy.rs (target/debug/deps/portable_proxy-e498a0560d7b574a)
+
+running 51 tests
+test a_named_tls_mismatch_never_connects_upstream ... ok
+test n02_a_half_closed_tunnel_still_delivers_the_response ... ok
+test n02_a_pipelined_second_request_is_discarded_and_stated ... ok
+test n02_a_resource_failure_event_is_truthful ... ok
+test n02_allowed_connect_tunnel_yields_one_allow_result_at_close ... ok
+test n02_chunked_body_is_forwarded_exactly_and_nothing_after_it ... ok
+test n02_connect_early_data_is_forwarded_in_order_and_counted ... ok
+test n02_denied_request_yields_one_deny_result_before_the_response ... ok
+test n02_plain_http_forwards_exactly_the_framed_request_without_proxy_credentials ... ok
+test n02_results_are_valid_distinct_proxy_source_events ... ok
+test n02_the_proxy_writes_no_log ... ok
+test n03_a_connect_host_without_a_port_means_the_connect_port ... ok
+test n03_host_and_absolute_uri_disagreement_refuses_before_resolution ... ok
+test n03_ipv6_loopback_is_reachable_only_through_its_grant ... ok
+test n03_mixed_answers_refuse_and_nothing_connects ... ok
+test n03_numeric_requests_need_an_exact_grant_and_are_never_resolved ... ok
+test n03_private_addresses_behind_an_allowed_name_are_denied ... ok
+test n03_rebinding_connects_only_to_the_single_checked_answer ... ok
+test n04_a_closed_client_with_a_silent_destination_releases_its_slot ... ok
+test n04_a_drain_cut_short_reports_the_missing_result ... ok
+test n04_a_panicking_handler_settles_answers_and_closes ... ok
+test n04_a_result_after_the_seal_is_not_delivered ... ok
+test n04_a_tunnel_holds_two_descriptors ... ok
+test n04_backpressure_bounds_buffering_of_a_response_the_client_does_not_read ... ok
+test n04_budgets_default_to_section_10 ... ok
+test n04_connect_falls_back_across_approved_answers_only ... ok
+test n04_descriptor_exhaustion_is_reported_truthfully ... ok
+test n04_header_overflow_refuses_at_the_32_kib_budget ... ok
+test n04_hosts_that_cost_quadratic_idna_work_refuse_fast ... ok
+test n04_malformed_and_unsupported_requests_are_refused_without_connecting ... ok
+test n04_no_upstream_connect_after_stop_began ... ok
+test n04_resolver_deadline_bounds_the_request ... ok
+test n04_resolver_overload_is_reported_as_such ... ok
+test n04_saturation_refuses_with_overload_then_recovers ... ok
+test n04_slow_headers_end_at_the_absolute_deadline_even_while_bytes_trickle ... ok
+test n04_start_raises_the_soft_descriptor_limit_to_the_hard_limit ... ok
+test n04_start_refuses_a_descriptor_budget_that_does_not_fit_and_names_it ... ok
+test n04_stop_closes_a_tunnel_to_a_silent_destination ... ok
+test n04_stop_closes_every_connection_and_accounts_for_each ... ok
+test n04_stop_closes_the_listener_after_its_path_was_removed ... ok
+test n04_stop_ends_a_relay_blocked_writing_to_the_destination ... ok
+test n04_stop_with_the_largest_budget_does_not_panic ... ok
+test n04_system_resolver_is_bounded_absolute_and_refuses_what_is_not_a_name ... ok
+test n04_system_resolver_looks_up_the_absolute_name_and_keeps_its_deadline ... ok
+test n04_the_slot_is_free_before_the_result_is_delivered ... ok
+test n04_unusable_budgets_refuse_to_start ... ok
+test n04_upstream_death_mid_tunnel_closes_the_client_and_is_reported ... ok
+test named_first_flight_refusals_are_bounded_and_never_connect ... ok
+test proxy_limits_helper ... ignored, child helper invoked by the n04 descriptor tests
+test socks_named_tls_uses_the_same_origin_gate_and_relay ... ok
+test socks_udp_and_bind_are_explicitly_unsupported ... ok
+
+test result: ok. 50 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.68s
+

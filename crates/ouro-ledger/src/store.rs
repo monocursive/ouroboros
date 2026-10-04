@@ -18,6 +18,7 @@ use ouro_records::{
     records,
 };
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::protocol::{
@@ -25,12 +26,19 @@ use crate::protocol::{
     RunRecord, VerifyReport,
 };
 
-const STREAM: &str = "events-0001.ndjson";
+use crate::manifest::STREAM;
 
 #[derive(Clone)]
 struct Replay {
     digest: String,
     receipt: AppendReceipt,
+}
+
+struct Anchor {
+    bytes: u64,
+    digest: String,
+    state: &'static str,
+    labels_digest: String,
 }
 
 struct Stream {
@@ -43,6 +51,9 @@ struct Stream {
     first_loss: Option<Value>,
     receipt_phase: Option<String>,
     poisoned: Vec<String>,
+    segment_hash: Sha256,
+    replay_hash: Sha256,
+    anchors: BTreeMap<u64, Anchor>,
 }
 
 pub struct Store {
@@ -52,6 +63,9 @@ pub struct Store {
     preparations: BTreeMap<String, (String, String)>,
     recovery_ambiguous: bool,
     readers: crate::reader::Readers,
+    index: Option<crate::projection::Projection>,
+    index_error: Option<String>,
+    index_pending: BTreeMap<String, RunRecord>,
     #[cfg(test)]
     fault: Option<Fault>,
 }
@@ -63,6 +77,7 @@ enum Fault {
     PartialWrite,
     EventSync,
     Projection,
+    Manifest,
     DirectorySync,
 }
 
@@ -356,6 +371,13 @@ fn initial_run(run_id: &str, request_id: &str, attempt_id: &str, payload: Value)
 
 impl Store {
     pub fn open(data: &Path) -> Result<Self> {
+        Self::open_with_recovery_sync(data, File::sync_all)
+    }
+
+    fn open_with_recovery_sync(
+        data: &Path,
+        recovery_sync: impl Fn(&File) -> std::io::Result<()>,
+    ) -> Result<Self> {
         private_directory(data)?;
         let root = data.join("ledger");
         private_directory(&root)?;
@@ -372,6 +394,9 @@ impl Store {
             preparations: BTreeMap::new(),
             recovery_ambiguous: false,
             readers: crate::reader::Readers::default(),
+            index: None,
+            index_error: None,
+            index_pending: BTreeMap::new(),
             #[cfg(test)]
             fault: None,
         };
@@ -386,7 +411,7 @@ impl Store {
             }
             check_run_id(&name)?;
             private_directory(&entry.path())?;
-            let (stream, _) = store.load_stream(&name)?;
+            let (stream, _, file) = store.load_stream(&name)?;
             if !stream.poisoned.is_empty() {
                 store.recovery_ambiguous = true;
             }
@@ -403,9 +428,21 @@ impl Store {
                 ));
             }
             if stream.poisoned.is_empty() {
+                // A complete unacknowledged tail may only be in the page cache
+                // after an interrupted append or failed sync. Flush the same
+                // descriptor we verified before publishing recovered receipts.
+                recovery_sync(file.as_ref().expect("verified canonical stream"))?;
                 store.write_projection(&stream.run)?;
+                crate::manifest::write(&store.root.join(&name), &stream.manifest())?;
             }
             store.streams.insert(name, stream);
+        }
+        match crate::projection::Projection::open(&store.root).and_then(|mut index| {
+            index.rebuild(&store.runs())?;
+            Ok(index)
+        }) {
+            Ok(index) => store.index = Some(index),
+            Err(error) => store.index_error = Some(error.to_string()),
         }
         Ok(store)
     }
@@ -452,6 +489,9 @@ impl Store {
                 first_loss: None,
                 receipt_phase: None,
                 poisoned: vec![],
+                segment_hash: Sha256::new(),
+                replay_hash: Sha256::new(),
+                anchors: BTreeMap::new(),
             },
         );
         self.preparations
@@ -717,17 +757,27 @@ impl Store {
             payload_digest.into(),
         )?;
         stream.accepted_bytes += (bytes.len() + 1) as u64;
+        stream.hash_record(bytes, record, receipt, payload_digest)?;
         let run = stream.run.clone();
+        let manifest = stream.manifest();
         #[cfg(test)]
         if matches!(self.fault, Some(Fault::Projection)) {
             return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
         }
         self.write_projection(&run)?;
         #[cfg(test)]
+        if matches!(self.fault, Some(Fault::Manifest)) {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
+        }
+        crate::manifest::write(&self.root.join(run_id), &manifest)?;
+        #[cfg(test)]
         if matches!(self.fault, Some(Fault::DirectorySync)) {
             return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
         }
         File::open(self.root.join(run_id))?.sync_all()?;
+        if self.index.is_some() {
+            self.index_pending.insert(run_id.into(), run);
+        }
         Ok(())
     }
 
@@ -770,6 +820,26 @@ impl Store {
             .collect()
     }
 
+    pub fn index_status(&self) -> Value {
+        json!({"state":if self.index.is_some() {"ready"} else {"unavailable"},
+            "authoritative":false,"rebuild":"writer_restart","pending_runs":self.index_pending.len(),"error":self.index_error})
+    }
+
+    /// Dispatch has already handed the durable response to the connection handler.
+    /// Index failures cannot change that acknowledgement or canonical stream.
+    pub fn flush_index(&mut self) {
+        let pending = std::mem::take(&mut self.index_pending);
+        if let Some(index) = &mut self.index {
+            for run in pending.values() {
+                if let Err(error) = index.upsert(run) {
+                    self.index_error = Some(error.to_string());
+                    self.index = None;
+                    break;
+                }
+            }
+        }
+    }
+
     pub fn read(&mut self, request: &ReadRequest) -> Result<ReadPage> {
         check_run_id(&request.run_id)?;
         let stream = self
@@ -782,7 +852,40 @@ impl Store {
             &stream.run,
             &stream.poisoned,
             stream.accepted_bytes,
-            |key| stream.replay.get(key).map(|r| r.receipt.clone()),
+            (
+                |key: &str| stream.replay.get(key).map(|r| r.receipt.clone()),
+                |seq, digest: &str, bytes, page: Option<&ReadPage>| {
+                    if seq == 0 {
+                        // A clean empty snapshot never restores: streams open
+                        // at durable preparation and empty or broken streams
+                        // stay poisoned, so seq 0 corroborates only genuine
+                        // canonical emptiness.
+                        return bytes == 0
+                            && digest.is_empty()
+                            && stream.run.chain.head_seq == 0
+                            && stream.accepted_bytes == 0
+                            && stream.poisoned.is_empty();
+                    }
+                    !stream
+                        .poisoned
+                        .iter()
+                        .any(|problem| problem.contains("manifest"))
+                        && stream.anchors.get(&seq).is_some_and(|anchor| {
+                            anchor.bytes == bytes
+                                && anchor.digest == digest
+                                && page.is_none_or(|page| {
+                                    (page.state == anchor.state
+                                        || (!page.local_consistency
+                                            && page.state == "outcome_unknown"))
+                                        && crate::reader::snapshot_labels_digest(
+                                            &page.child_protection,
+                                            &page.coverage,
+                                        )
+                                        .is_ok_and(|digest| digest == anchor.labels_digest)
+                                })
+                        })
+                },
+            ),
         )
     }
 
@@ -827,7 +930,7 @@ impl Store {
         };
         ids.iter()
             .map(|id| {
-                let (stream, events) = self.load_stream(id)?;
+                let (stream, events, _) = self.load_stream(id)?;
                 let mut problems = stream.poisoned.clone();
                 if stream.poisoned.is_empty() {
                     let projection = (|| -> Result<Value> {
@@ -874,7 +977,7 @@ impl Store {
             .collect()
     }
 
-    fn load_stream(&self, run_id: &str) -> Result<(Stream, u64)> {
+    fn load_stream(&self, run_id: &str) -> Result<(Stream, u64, Option<File>)> {
         let placeholder = initial_run(run_id, "", "", json!({}));
         let mut stream = Stream {
             run: placeholder,
@@ -886,14 +989,28 @@ impl Store {
             first_loss: None,
             receipt_phase: None,
             poisoned: vec![],
+            segment_hash: Sha256::new(),
+            replay_hash: Sha256::new(),
+            anchors: BTreeMap::new(),
         };
+        let directory = self.root.join(run_id);
+        let manifest = match crate::manifest::read(&directory, run_id) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                stream
+                    .poisoned
+                    .push(format!("invalid segment manifest: {error}"));
+                None
+            }
+        };
+        let mut anchored = manifest.is_none();
         let file = match private_file(&self.root.join(run_id).join(STREAM), false, false) {
             Ok(file) => file,
             Err(error) => {
                 stream
                     .poisoned
                     .push(format!("missing or unsafe canonical stream: {error}"));
-                return Ok((stream, 0));
+                return Ok((stream, 0, None));
             }
         };
         let mut reader = BufReader::new(file);
@@ -1006,8 +1123,8 @@ impl Store {
                     apply_record(
                         &mut stream,
                         &original_payload(&decoded),
-                        receipt,
-                        payload_digest,
+                        receipt.clone(),
+                        payload_digest.clone(),
                     )
                 })
             {
@@ -1016,11 +1133,87 @@ impl Store {
             }
             events += 1;
             stream.accepted_bytes += (bytes.len() + 1) as u64;
+            stream.hash_record(&bytes, &decoded, &receipt, &payload_digest)?;
+            if let Some(manifest) = &manifest
+                && events == manifest.segment.last_seq
+            {
+                anchored = true;
+                if stream.manifest() != *manifest {
+                    stream
+                        .poisoned
+                        .push("segment manifest committed prefix mismatch".into());
+                    break;
+                }
+            }
+        }
+        if !anchored {
+            stream
+                .poisoned
+                .push("canonical stream truncated before its segment manifest anchor".into());
         }
         if events == 0 && stream.poisoned.is_empty() {
             stream.poisoned.push("empty canonical stream".into());
         }
-        Ok((stream, events))
+        Ok((stream, events, Some(reader.into_inner())))
+    }
+}
+
+impl Stream {
+    fn hash_record(
+        &mut self,
+        bytes: &[u8],
+        record: &Value,
+        receipt: &AppendReceipt,
+        payload_digest: &str,
+    ) -> Result<()> {
+        self.segment_hash.update(bytes);
+        self.segment_hash.update(b"\n");
+        let identity = canonical(&json!({"request_id":record["request_id"],
+            "effect_id":record.get("effect_id"),"payload_digest":payload_digest,
+            "seq":receipt.seq,"digest":receipt.digest}))?;
+        self.replay_hash
+            .update((identity.len() as u64).to_le_bytes());
+        self.replay_hash.update(identity);
+        let state = match self.run.state.as_str() {
+            "prepared" => "prepared",
+            "admitted" => "admitted",
+            "denied" => "denied",
+            "settled" => "settled",
+            "outcome_unknown" => "outcome_unknown",
+            _ => return Err(LedgerError("unsupported canonical run state".into())),
+        };
+        let labels_digest = crate::reader::snapshot_labels_digest(
+            &self.run.child_protection,
+            &crate::reader::coverage_summary(&self.run.coverage),
+        )?;
+        self.anchors.insert(
+            receipt.seq,
+            Anchor {
+                bytes: self.accepted_bytes,
+                digest: receipt.digest.clone(),
+                state,
+                labels_digest,
+            },
+        );
+        Ok(())
+    }
+
+    fn manifest(&self) -> crate::manifest::Manifest {
+        let hash = |h: &Sha256| -> String { format!("sha256:{:x}", h.clone().finalize()) };
+        crate::manifest::Manifest {
+            schema: "ouro.ledger.segments/1".into(),
+            run_id: self.run.run_id.clone(),
+            attempt_id: self.run.attempt_id.clone(),
+            segment: crate::manifest::Segment {
+                name: STREAM.into(),
+                first_seq: 1,
+                last_seq: self.run.chain.head_seq,
+                bytes: self.accepted_bytes,
+                digest: hash(&self.segment_hash),
+                head_digest: self.run.chain.head_digest.clone().unwrap_or_default(),
+            },
+            replay_digest: hash(&self.replay_hash),
+        }
     }
 }
 
@@ -1744,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_cursor_cannot_change_scope_and_expires_explicitly_after_restart() {
+    fn reader_cursor_cannot_change_scope_and_survives_restart() {
         let (temp, mut store, run) = create();
         for n in 0..40 {
             note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
@@ -1764,7 +1957,7 @@ mod tests {
         assert!(store.read(&wrong).is_err());
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
-        assert!(recovered.read(&resumed).unwrap_err().0.contains("expired"));
+        assert!(recovered.read(&resumed).unwrap().local_consistency);
         for _ in 0..40 {
             assert!(
                 read_all(
@@ -1777,6 +1970,296 @@ mod tests {
                 .done
             );
         }
+    }
+
+    #[test]
+    fn durable_reader_refuses_rechecksummed_forged_snapshot_labels() {
+        for field in ["state", "child_protection", "coverage", "zero_head"] {
+            let temp = tempfile::tempdir().unwrap();
+            let data = temp.path().join("data");
+            let mut store = Store::open(&data).unwrap();
+            let mut plan = payload();
+            plan["profile"] = json!("none");
+            let run = store.prepare("none-reader", &plan, &peer()).unwrap();
+            store.claim_owner(&run.run_id, &peer()).unwrap();
+            for n in 0..40 {
+                note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
+            }
+            let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+            let first = store.read(&request).unwrap();
+            assert_eq!(first.state, "prepared");
+            assert_eq!(first.child_protection, "unprotected");
+            request.cursor = first.next_cursor;
+            let cursor = request.cursor.as_ref().unwrap();
+            let checkpoint_path = store
+                .root
+                .join("readers")
+                .join(format!("{}.json", &cursor[..32]));
+            let canonical_path = store.root.join(&run.run_id).join(STREAM);
+            let original = fs::read(&canonical_path).unwrap();
+            drop(store);
+
+            let mut envelope: Value =
+                serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
+            let template = &mut envelope["checkpoint"]["template"];
+            match field {
+                "state" => {
+                    template["state"] = json!("settled");
+                    template["stream_status"] = json!("complete");
+                }
+                "child_protection" => template["child_protection"] = json!("enforced"),
+                "coverage" => template["coverage"]["status"] = json!("active"),
+                "zero_head" => {
+                    template["snapshot"] = json!({"head_seq":0,"head_digest":null});
+                    template["state"] = json!("settled");
+                    template["child_protection"] = json!("enforced");
+                    template["stream_status"] = json!("complete");
+                    envelope["checkpoint"]["accepted_bytes"] = json!(0);
+                    envelope["checkpoint"]["position"] = json!({
+                        "offset":0,"frame_start":0,"pending_bytes":0,
+                        "ready_emitted":null,"next_seq":1,"previous_digest":null,"verified":0
+                    });
+                }
+                _ => unreachable!(),
+            }
+            envelope["digest"] = json!(digest(&envelope["checkpoint"]).unwrap());
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&checkpoint_path)
+                .unwrap();
+            file.write_all(&canonical(&envelope).unwrap()).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            let mut recovered = Store::open(&data).unwrap();
+            let error = recovered.read(&request).unwrap_err();
+            assert!(error.0.contains("snapshot"), "forged {field}: {}", error.0);
+            assert!(recovered.verify(None).unwrap()[0].local_consistency);
+            let canonical_run = recovered.show(&run.run_id).unwrap();
+            assert_eq!(canonical_run.state, "prepared");
+            assert_eq!(canonical_run.child_protection, "unprotected");
+            assert_eq!(fs::read(&canonical_path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn durable_reader_preserves_snapshot_labels_after_a_later_state_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let mut store = Store::open(&data).unwrap();
+        let mut plan = payload();
+        plan["profile"] = json!("none");
+        let run = store.prepare("none-reader", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        for n in 0..40 {
+            note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
+        }
+        let original = fs::read_to_string(store.root.join(&run.run_id).join(STREAM)).unwrap();
+        let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+        let first = store.read(&request).unwrap();
+        request.cursor = first.next_cursor.clone();
+        assert!(request.cursor.is_some());
+        store
+            .append_owner(
+                &run.run_id,
+                "later-state",
+                "outcome_unknown",
+                None,
+                &json!({"coverage":{"status":"degraded"}}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        drop(store);
+
+        let mut recovered = Store::open(&data).unwrap();
+        assert_eq!(
+            recovered.show(&run.run_id).unwrap().state,
+            "outcome_unknown"
+        );
+        let second = recovered.read(&request).unwrap();
+        assert_eq!(recovered.read(&request).unwrap(), second);
+        let mut pages = vec![second.clone()];
+        let mut exported = format!("{}{}", first.ndjson, second.ndjson);
+        if !second.done {
+            request.cursor = second.next_cursor;
+            let (remaining, bytes) = read_all(&mut recovered, request);
+            pages.extend(remaining);
+            exported.push_str(&bytes);
+        }
+        for page in &pages {
+            assert!(page.local_consistency);
+            assert_eq!(page.snapshot, first.snapshot);
+            assert_eq!(page.state, "prepared");
+            assert_eq!(page.child_protection, "unprotected");
+            assert_eq!(page.coverage, first.coverage);
+        }
+        assert!(pages.last().unwrap().done);
+        assert_eq!(exported, original);
+    }
+
+    #[test]
+    fn durable_reader_sync_failure_refuses_retries_until_recovery_barrier_succeeds() {
+        let (_temp, mut store, run) = create();
+        for n in 0..40 {
+            note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
+        }
+        let canonical_path = store.root.join(&run.run_id).join(STREAM);
+        let original = fs::read_to_string(&canonical_path).unwrap();
+        let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+        let first = store.read(&request).unwrap();
+        request.cursor = first.next_cursor.clone();
+        let cursor = request.cursor.as_ref().unwrap();
+        let checkpoint_path = store
+            .root
+            .join("readers")
+            .join(format!("{}.json", &cursor[..32]));
+        let initial_checkpoint = fs::read(&checkpoint_path).unwrap();
+
+        store.readers.fail_directory_sync = true;
+        assert!(store.read(&request).is_err());
+        let failed_checkpoint = fs::read(&checkpoint_path).unwrap();
+        assert_ne!(failed_checkpoint, initial_checkpoint);
+        let envelope: Value = serde_json::from_slice(&failed_checkpoint).unwrap();
+        assert_eq!(envelope["checkpoint"]["prior"]["token"], cursor[32..]);
+        assert!(store.read(&request).is_err());
+        assert_eq!(fs::read(&checkpoint_path).unwrap(), failed_checkpoint);
+        assert_eq!(fs::read_to_string(&canonical_path).unwrap(), original);
+
+        store.readers.fail_directory_sync = false;
+        let second = store.read(&request).unwrap();
+        assert_eq!(
+            json!(digest(&serde_json::to_value(&second).unwrap()).unwrap()),
+            envelope["checkpoint"]["prior"]["response_digest"]
+        );
+        assert_eq!(store.read(&request).unwrap(), second);
+        assert_eq!(fs::read(&checkpoint_path).unwrap(), failed_checkpoint);
+        let mut exported = format!("{}{}", first.ndjson, second.ndjson);
+        if !second.done {
+            request.cursor = second.next_cursor;
+            let (_, remaining) = read_all(&mut store, request);
+            exported.push_str(&remaining);
+        }
+        assert_eq!(exported, original);
+        assert_eq!(fs::read_to_string(&canonical_path).unwrap(), original);
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn corrupt_reader_checkpoint_is_isolated_bounded_and_expires() {
+        let (_temp, mut store, run) = create();
+        for n in 0..40 {
+            note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
+        }
+        let canonical_path = store.root.join(&run.run_id).join(STREAM);
+        let original = fs::read(&canonical_path).unwrap();
+        let fresh = read_request(&run, crate::protocol::ReadSelector::All);
+        let initial = store.read(&fresh).unwrap();
+        assert!(!initial.done);
+        let mut corrupt_request = fresh.clone();
+        corrupt_request.cursor = initial.next_cursor;
+        let cursor = corrupt_request.cursor.as_ref().unwrap();
+        let directory = store.root.join("readers");
+        let checkpoint_path = directory.join(format!("{}.json", &cursor[..32]));
+        let mut envelope: Value =
+            serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
+        envelope["digest"] = json!(format!("sha256:{}", "0".repeat(64)));
+        let altered = canonical(&envelope).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&checkpoint_path)
+            .unwrap();
+        file.write_all(&altered).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        assert!(store.read(&corrupt_request).is_err());
+        for _ in 0..31 {
+            let unrelated = store.read(&fresh).unwrap();
+            assert!(!unrelated.done);
+            assert!(unrelated.local_consistency);
+            assert_eq!(unrelated.snapshot, initial.snapshot);
+        }
+        assert_eq!(fs::read(&checkpoint_path).unwrap(), altered);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 32);
+        assert!(store.read(&fresh).unwrap_err().0.contains("session limit"));
+        assert!(store.read(&corrupt_request).is_err());
+
+        File::open(&checkpoint_path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(SystemTime::now() - std::time::Duration::from_secs(601)),
+            )
+            .unwrap();
+        let after_expiry = store.read(&fresh).unwrap();
+        assert!(after_expiry.local_consistency);
+        assert_eq!(after_expiry.snapshot, initial.snapshot);
+        assert!(!checkpoint_path.exists());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 32);
+        assert!(store.read(&corrupt_request).is_err());
+        assert_eq!(fs::read(&canonical_path).unwrap(), original);
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn durable_reader_refuses_a_rechecksummed_empty_snapshot_template() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let mut store = Store::open(&data).unwrap();
+        let mut plan = payload();
+        plan["profile"] = json!("none");
+        let run = store.prepare("none-reader", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        for n in 0..40 {
+            note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
+        }
+        let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+        let first = store.read(&request).unwrap();
+        request.cursor = first.next_cursor;
+        let cursor = request.cursor.as_ref().unwrap();
+        let checkpoint_path = store
+            .root
+            .join("readers")
+            .join(format!("{}.json", &cursor[..32]));
+        let canonical_path = store.root.join(&run.run_id).join(STREAM);
+        let original = fs::read(&canonical_path).unwrap();
+        drop(store);
+
+        // A clean empty snapshot cannot exist: every restorable stream opens
+        // at durable preparation, so the zero-record claim must corroborate
+        // the canonical accepted state instead of passing vacuously.
+        let mut envelope: Value =
+            serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
+        envelope["checkpoint"]["template"]["snapshot"] = json!({"head_seq":0,"head_digest":null});
+        envelope["checkpoint"]["template"]["state"] = json!("settled");
+        envelope["checkpoint"]["template"]["stream_status"] = json!("complete");
+        envelope["checkpoint"]["template"]["child_protection"] = json!("enforced");
+        envelope["checkpoint"]["accepted_bytes"] = json!(0);
+        envelope["checkpoint"]["position"] = json!({
+            "offset":0,"frame_start":0,"pending_bytes":0,"ready_emitted":null,
+            "next_seq":1,"previous_digest":null,"verified":0});
+        envelope["digest"] = json!(digest(&envelope["checkpoint"]).unwrap());
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&checkpoint_path)
+            .unwrap();
+        file.write_all(&canonical(&envelope).unwrap()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let mut recovered = Store::open(&data).unwrap();
+        let error = recovered.read(&request).unwrap_err();
+        assert!(error.0.contains("corrupt"), "forged empty: {error}");
+        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+        let canonical_run = recovered.show(&run.run_id).unwrap();
+        assert_eq!(canonical_run.state, "prepared");
+        assert_eq!(canonical_run.child_protection, "unprotected");
+        assert_eq!(canonical_run.chain.head_seq, first.snapshot.head_seq);
+        assert_eq!(fs::read(&canonical_path).unwrap(), original);
     }
 
     #[test]
@@ -1922,6 +2405,7 @@ mod tests {
             Fault::BeforeWrite,
             Fault::EventSync,
             Fault::Projection,
+            Fault::Manifest,
             Fault::DirectorySync,
         ] {
             let (temp, mut store, run) = create();
@@ -1936,6 +2420,79 @@ mod tests {
             assert!(acknowledgement.seq > 2);
             assert!(recovered.verify(None).unwrap()[0].local_consistency);
         }
+    }
+
+    #[test]
+    fn recovery_sync_failure_cannot_publish_or_acknowledge_an_unflushed_tail() {
+        let (temp, mut store, run) = create();
+        let directory = store.root.join(&run.run_id);
+        let stream_path = directory.join(STREAM);
+        let manifest_path = directory.join("segments.json");
+        let projection_path = directory.join("run.json");
+        let old_manifest = fs::read(&manifest_path).unwrap();
+        let old_projection = fs::read(&projection_path).unwrap();
+        store.fault = Some(Fault::EventSync);
+        let body = json!({"v":"written without successful sync"});
+        assert!(note(&mut store, &run, "unflushed", body.clone()).is_err());
+        let unflushed = fs::read(&stream_path).unwrap();
+        let last_frame = unflushed
+            .split(|byte| *byte == b'\n')
+            .rfind(|frame| !frame.is_empty())
+            .unwrap();
+        let record: Value = serde_json::from_slice(last_frame).unwrap();
+        let original_receipt = AppendReceipt {
+            seq: record["seq"].as_u64().unwrap(),
+            digest: sha256_prefixed(last_frame),
+        };
+        drop(store);
+
+        let syncs = std::cell::Cell::new(0);
+        let data = temp.path().join("data");
+        let failed = Store::open_with_recovery_sync(&data, |_| {
+            syncs.set(syncs.get() + 1);
+            assert_eq!(fs::read(&manifest_path).unwrap(), old_manifest);
+            assert_eq!(fs::read(&projection_path).unwrap(), old_projection);
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        });
+        assert!(failed.is_err());
+        assert_eq!(syncs.get(), 1);
+        assert_eq!(fs::read(&manifest_path).unwrap(), old_manifest);
+        assert_eq!(fs::read(&projection_path).unwrap(), old_projection);
+        assert_eq!(fs::read(&stream_path).unwrap(), unflushed);
+
+        let mut recovered = Store::open_with_recovery_sync(&data, |file| {
+            syncs.set(syncs.get() + 1);
+            assert_eq!(fs::read(&manifest_path).unwrap(), old_manifest);
+            assert_eq!(fs::read(&projection_path).unwrap(), old_projection);
+            file.sync_all()
+        })
+        .unwrap();
+        assert_eq!(syncs.get(), 2);
+        assert_eq!(
+            note(&mut recovered, &run, "unflushed", body).unwrap(),
+            original_receipt
+        );
+        assert_eq!(fs::read(&stream_path).unwrap(), unflushed);
+        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn index_failure_after_acknowledgement_does_not_poison_or_reexecute() {
+        let (temp, mut store, run) = create();
+        let external = temp.path().join("outside-index");
+        fs::write(&external, b"must stay unchanged").unwrap();
+        let index = store.root.join("index.sqlite");
+        fs::remove_file(&index).unwrap();
+        std::os::unix::fs::symlink(&external, &index).unwrap();
+        let receipt = note(&mut store, &run, "durable-without-index", json!({"v":1})).unwrap();
+        store.flush_index();
+        assert_eq!(store.index_status()["state"], "unavailable");
+        assert_eq!(fs::read(external).unwrap(), b"must stay unchanged");
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+        assert_eq!(
+            note(&mut store, &run, "durable-without-index", json!({"v":1})).unwrap(),
+            receipt
+        );
     }
 
     #[test]

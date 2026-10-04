@@ -1,0 +1,3 @@
+OURO_CONFIG_DIR=<unset>
+launch/opencode.toml
+launch/opencode-zai.toml

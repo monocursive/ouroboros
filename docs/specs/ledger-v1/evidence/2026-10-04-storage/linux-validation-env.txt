@@ -1,0 +1,4 @@
+ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ouro-suite-revision=63d3ede641b7e8c3fc920053da3ac1d698f6b2d1
+ouro-suite-conformance=1
+ouro-suite-dirty=true

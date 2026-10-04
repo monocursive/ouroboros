@@ -249,6 +249,7 @@ pub fn serve(data: &Path) -> Result<()> {
         };
         // A dropped reply never rolls back a persisted request or its receipt.
         let _ = message.reply.try_send(response);
+        store.flush_index();
     }
     Ok(())
 }
@@ -340,7 +341,7 @@ fn dispatch(
         Request::Verify { run_id } => Ok(serde_json::to_value(store.verify(run_id.as_deref())?)?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
-            json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false}),
+            json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status()}),
         ),
         Request::SettleOrphans => Ok(serde_json::to_value(
             store.settle_orphans(peer, peer_alive)?,

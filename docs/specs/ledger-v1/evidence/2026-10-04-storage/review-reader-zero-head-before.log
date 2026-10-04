@@ -1,0 +1,10 @@
+Additional same-user template corroboration bypass discovered after the first fix. The current library used for this run is bound by review-reader-zero-head-before-source.sha256 (copied from the immediately preceding successful source verification).
+
+The modifier starts with an issued current cursor, replaces only its checkpoint snapshot/position/template metadata, and recomputes the checksum. The canonical file remains unchanged and nonempty.
+
+real canonical protection: unprotected
+forged empty metadata refuses: false (None)
+accepted forged empty snapshot: protection=enforced, state=settled, consistency=true, head_seq=0, done=true
+assertion failed: page.is_err()
+
+The bypass relies on private same-user checkpoint write access. It establishes a local metadata proof gap, not external custody or managed authorization.

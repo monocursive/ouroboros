@@ -1,0 +1,7 @@
+ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ouro-suite-revision=63d3ede641b7e8c3fc920053da3ac1d698f6b2d1
+ouro-suite-conformance=1
+ouro-suite-dirty=true
+ouro-suite-toolchain=/home/ubuntu/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin
+ouro-suite-fixture-config=isolated-by-fixture
+SigIgn:	0000000000000004

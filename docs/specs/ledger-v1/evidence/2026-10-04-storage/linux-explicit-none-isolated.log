@@ -1,0 +1,14 @@
+ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ouro-suite-revision=63d3ede641b7e8c3fc920053da3ac1d698f6b2d1
+ouro-suite-conformance=1
+ouro-suite-dirty=true
+SigIgn:	0000000000000000
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/ouro-ledger-storage-20261004-r1/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 26.12s
+     Running tests/launch_linux.rs (target/release/deps/launch_linux-5598e6079ce8f285)
+
+running 1 test
+test explicit_none_profile_remains_unprotected_after_real_launch_and_verification ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.43s
+

@@ -1,0 +1,22 @@
+    Checking ouro-ledger v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-ledger)
+error: called `filter(..).next_back()` on an `DoubleEndedIterator`
+    --> crates/ouro-ledger/src/store.rs:2101:26
+     |
+2101 |           let last_frame = unflushed
+     |  __________________________^
+2102 | |             .split(|byte| *byte == b'\n')
+2103 | |             .filter(|frame| !frame.is_empty())
+2104 | |             .next_back()
+     | |________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#filter_next
+     = note: `-D clippy::filter-next` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::filter_next)]`
+help: use `.rfind(..)` instead
+     |
+2101 ~         let last_frame = unflushed
+2102 +             .split(|byte| *byte == b'\n').rfind(|frame| !frame.is_empty())
+     |
+
+error: could not compile `ouro-ledger` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

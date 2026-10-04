@@ -1,0 +1,3 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running `target/debug/xtask freeze --check`
+xtask freeze --check: no tested run is recorded ("# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---" is absent): record the milestone conformance run with `cargo xtask freeze --doctor <run>/doctor.json`

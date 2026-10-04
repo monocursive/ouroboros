@@ -10,8 +10,9 @@ The current slice provides a single local writer, stable preparation identities,
 one birth-identified launch owner, durable admission before gate release,
 authenticated event ingestion, canonical settlement, opt-in bounded captures,
 inspection, local chain verification, conservative orphan reconciliation,
-bounded single-run evidence queries, exact canonical NDJSON export, and optional
-detached batch ownership on a provisioned Linux systemd user manager.
+bounded single-run evidence queries, exact canonical NDJSON export, optional
+detached batch ownership on a provisioned Linux systemd user manager, durable
+segment/replay anchors, a rebuildable SQLite projection and restartable reader cursors.
 Linux execution is the acceptance target. macOS clients can read the local
 protocol and verify stores, but native launch ownership currently refuses because
 its birth-identity mechanism has not been implemented.
@@ -191,8 +192,8 @@ artifact transfer and the managed submission client remain separate work.
 
 ## 4. Store and canonical record
 
-The first slice uses one nonrotating `events-0001.ndjson` stream per run and an
-atomic `run.json` projection. Preparation and owner bookkeeping records have
+The store uses one nonrotating `events-0001.ndjson` stream per run, a durable
+`segments.json` manifest and an atomic `run.json` projection. Preparation and owner bookkeeping records have
 `schema: ouro.ledger.event/1`, `run_id`, `attempt_id`, `seq`, `prev`,
 `received_at`, `provenance`, `kind`, `request_id`, `body` and, for owner intents,
 `effect_id`. Canonical source records retain `schema: ouro.event/1` and every
@@ -221,8 +222,27 @@ effect id cannot silently be rebound to another request or payload.
 owner, current state/outcome, coverage, selected capture status, receipt values
 and chain head. It is rebuilt from verified canonical records at daemon startup.
 The current implementation embeds receipt values in canonical records rather
-than separately storing mutable receipt pointers. A SQLite query index,
-rotating segment manifests and signed bundles are deferred.
+than separately storing mutable receipt pointers.
+
+`segments.json` anchors the committed byte length, first and last sequence,
+SHA-256 over the exact stream bytes including LF delimiters, last record digest,
+and an ordered replay-identity digest. The replay preimage is a length-prefixed
+canonical record containing request/effect identity, immutable payload digest
+and the original append receipt. Recovery checks that prefix before promoting
+complete unacknowledged tails. A shorter or changed prefix poisons the stream;
+historical bytes are never truncated or rewritten. Existing streams without a
+manifest are verified and migrated at startup. Deleting both history and its
+same-user anchor has no external witness; manifests do not upgrade `none` protection.
+The [segment schema](ledger-v1/segments.schema.json) fixes the manifest encoding.
+
+`<data>/ledger/index.sqlite` is a disposable SQLite projection of run metadata.
+The writer rebuilds it from recovered canonical streams at startup and updates
+it after handing off the durable response. Index errors are reported separately
+by `doctor`; they cannot authorize execution, poison a sound canonical stream
+or revoke a durable append receipt. SQLite lock contention fails immediately,
+so an unavailable projection does not stall the next writer request.
+Segment rotation, retention-pruned replay
+identities and signed bundles remain deferred.
 
 The owner reads the jail's canonical receipt at
 `<data>/attempts/<attempt_id>/jail.json`. It does not request another receipt copy
@@ -239,7 +259,8 @@ Every successful mutation follows this order:
 3. `fsync` the stream.
 4. Write a new private projection, `fsync` it, rename to `run.json`, and `fsync`
    the containing directory.
-5. Synchronize the run directory before returning `{seq, digest}`.
+5. Atomically write and synchronize the segment/replay manifest and run directory
+   before returning `{seq, digest}`. Update the disposable SQLite projection separately.
 
 The parent ledger directory is synchronized when a run directory is created.
 No index is in the acknowledgement path. A persistence error, including ENOSPC,
@@ -253,11 +274,13 @@ It does not truncate a partial tail or rewrite historical bytes to manufacture
 a valid chain. An incomplete, oversized, malformed or conflicting stream stays
 poisoned with a verification finding. Ambiguous preparation identity also blocks
 new preparations. Complete records surviving a crash rebuild the original replay
-receipt and the projection; a retry is synchronized before acknowledgement.
+receipt. Startup synchronizes the same verified canonical file descriptor before
+publishing the repaired projection or promoted manifest. A recovery sync failure
+refuses startup; no recovered retry can be acknowledged before that barrier.
 
 `verify` reports `local_consistency`, `coverage` and `child_protection` separately.
-A valid chain is local consistency only: deletion of a complete terminal suffix
-by an uncontained same-user attacker has no external witness in this slice.
+A valid chain is local consistency only: deleting both history and its same-user
+manifest anchor has no external witness in this slice.
 Source gaps remain explicit even when the hash chain is consistent.
 
 ## 6. Captures and privacy
@@ -331,9 +354,26 @@ cursor can be retried for the identical page; older positions refuse rather than
 retaining an unbounded page cache. Cursors are opaque reader positions, not
 bearer authorization.
 The writer retains at most 32 reader sessions, with a ten-minute expiry. Reader
-sessions are memory-only: restarting the writer or using an expired cursor
-refuses explicitly. Starting again creates a fresh snapshot; do not append that
-output to a partial export from the old snapshot.
+positions persist as bounded private checksummed checkpoints under
+`<data>/ledger/readers/`. A checkpoint is synchronized before its page is returned.
+Restoration synchronizes the validated checkpoint descriptor and its directory
+again before acknowledging a retry, including after an earlier rename whose
+directory synchronization failed.
+Restarting the writer preserves the snapshot and the most recent page retry,
+including partially exported records. Checkpoints retain positions and response
+digests, not copies of event payloads or captured output. An expired, corrupt
+or unsafe checkpoint, replaced canonical inode, or changed pinned history refuses
+explicitly. Starting again creates a fresh snapshot; do not append that output
+to a partial export from the old snapshot.
+Safe corrupt checkpoint files consume bounded session capacity until their
+filesystem timestamp expires, but do not block fresh snapshots or other cursors.
+Unsafe files or an overfull checkpoint directory still refuse housekeeping.
+Restoring a cursor uses canonical boundaries already verified during writer
+recovery, reconstructs at most one existing 1 MiB frame, and replays one ordinary
+bounded page to corroborate the prior response. Snapshot state, protection and
+bounded coverage labels must also match their canonical sequence anchor; the
+selection label is derived from that coverage. It does not rescan the history.
+Checkpoints are at most 32 KiB each and the checkpoint directory scan is bounded.
 
 `export RUN --ndjson` reads all records, including preparation and owner intents.
 It writes the exact stored canonical UTF-8 bytes and LF delimiters to stdout,
@@ -375,6 +415,9 @@ owner-loss reconciliation; safe final paths and frame limits; and the persistent
 unprotected label for `none`. Protocol tests cover forged role/attempt/peer
 capabilities, caller identity fields, and interrupted or oversized transport.
 These are deterministic fault injections, not a physical full-disk experiment.
+The [October 4 storage/recovery record](ledger-v1/evidence/2026-10-04-storage/README.md)
+documents manifest/replay anchors, disposable index recovery and durable cursor
+restart/retry tests, with working-tree source hashes and platform limits.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
@@ -392,7 +435,7 @@ and fixtures only; it makes no runtime or custody claim.
 Milestone 2 is still gated on the full North Star durability suite and these
 unimplemented verbs/features: `append` for independent operator intents,
 `tail`, cross-run query and comparison, `diff`, `bundle`, `hold`, `release`, `gc`,
-retained deduplication/chain anchors, durable reader resume, segment manifests, SQLite projection,
+retention-pruned deduplication/chain anchors, segment rotation,
 best-effort outage reconciliation, capture retention, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,

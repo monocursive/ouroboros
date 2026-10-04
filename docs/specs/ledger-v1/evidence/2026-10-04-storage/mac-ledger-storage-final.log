@@ -1,0 +1,212 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling libc v0.2.189
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.5
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling serde v1.0.229
+   Compiling memchr v2.8.3
+   Compiling zmij v1.0.23
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling num-traits v0.2.19
+   Compiling serde_json v1.0.151
+   Compiling getrandom v0.3.4
+   Compiling heck v0.5.0
+   Compiling zerocopy v0.8.57
+   Compiling itoa v1.0.18
+   Compiling ahash v0.8.12
+   Compiling once_cell v1.21.4
+   Compiling equivalent v1.0.2
+   Compiling shlex v2.0.1
+   Compiling ref-cast v1.0.27
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling regex-syntax v0.8.11
+   Compiling find-msvc-tools v0.1.14
+   Compiling parking_lot_core v0.9.12
+   Compiling syn v3.0.6
+   Compiling smallvec v1.16.1
+   Compiling utf8parse v0.2.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling anstyle-parse v1.0.0
+   Compiling hashbrown v0.17.1
+   Compiling cc v1.5.1
+   Compiling aho-corasick v1.1.5
+   Compiling num-integer v0.1.47
+   Compiling num-complex v0.4.6
+   Compiling vcpkg v0.2.15
+   Compiling num-bigint v0.4.8
+   Compiling num-iter v0.1.46
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling scopeguard v1.2.0
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling pkg-config v0.3.34
+   Compiling getrandom v0.4.3
+   Compiling regex-automata v0.4.18
+   Compiling anstream v1.0.0
+   Compiling libsqlite3-sys v0.38.2
+   Compiling num-rational v0.4.2
+   Compiling lock_api v0.4.14
+   Compiling digest v0.10.7
+   Compiling syn v2.0.119
+   Compiling cpufeatures v0.2.17
+   Compiling num v0.4.3
+   Compiling borrow-or-share v0.2.4
+   Compiling clap_lex v1.1.1
+   Compiling unicode-general-category v1.1.0
+   Compiling bitflags v2.13.2
+   Compiling bit-vec v0.8.0
+   Compiling strsim v0.11.1
+   Compiling fraction v0.17.0
+   Compiling sha2 v0.10.9
+   Compiling parking_lot v0.12.5
+   Compiling bit-set v0.8.0
+   Compiling clap_builder v4.6.7
+   Compiling num-cmp v0.1.0
+   Compiling percent-encoding v2.3.2
+   Compiling outref v0.5.2
+   Compiling bytecount v0.6.9
+   Compiling micromap v0.3.0
+   Compiling vsimd v0.8.0
+   Compiling jsonschema-regex v0.57.0
+   Compiling hashlink v0.12.2
+   Compiling fallible-iterator v0.3.0
+   Compiling serde_derive v1.0.229
+   Compiling ref-cast-impl v1.0.27
+   Compiling clap_derive v4.6.7
+   Compiling regex v1.13.1
+   Compiling fancy-regex v0.19.2
+   Compiling uuid-simd v0.8.0
+   Compiling rustix v1.1.5
+   Compiling data-encoding v2.11.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling strum_macros v0.28.0
+   Compiling base64 v0.22.1
+   Compiling uuid v1.26.1
+   Compiling errno v0.3.14
+   Compiling fastrand v2.5.0
+   Compiling clap v4.6.7
+   Compiling strum v0.28.0
+   Compiling rusqlite v0.40.2
+   Compiling tempfile v3.27.0
+   Compiling fluent-uri v0.4.1
+   Compiling email_address v0.2.9
+   Compiling ouro-records v0.1.0 (/Users/monocursive/ouro-ledger-storage-20261004/crates/ouro-records)
+   Compiling ouro-fixture v0.1.0 (/Users/monocursive/ouro-ledger-storage-20261004/crates/ouro-fixture)
+   Compiling jsonschema-value v0.57.0
+   Compiling referencing v0.57.0
+   Compiling jsonschema v0.57.0
+   Compiling ouro-ledger v0.1.0 (/Users/monocursive/ouro-ledger-storage-20261004/crates/ouro-ledger)
+    Finished `test` profile [unoptimized] target(s) in 10.96s
+     Running unittests src/lib.rs (target/debug/deps/ouro_ledger-d5d6cd22336d1c96)
+
+running 43 tests
+test daemon::tests::forged_producer_role_attempt_and_peer_are_all_refused ... ok
+test daemon::tests::frame_roundtrip_handles_interrupted_transport_without_accepting_partial_json ... ok
+test reader::tests::summaries_are_bounded_even_for_arbitrary_owner_coverage_and_keep_gaps_unknown ... ok
+test reader::tests::time_filters_reject_invalid_dates_offsets_fractional_times_and_non_ascii ... ok
+test runner::tests::prepared_gate_compares_each_identity_and_receipt_digest ... ok
+test daemon::tests::protocol_refuses_caller_claimed_roles_and_oversized_frames ... ok
+test projection::tests::rebuild_and_upsert_survive_reopen_with_truthful_labels_and_u64_sequence ... ok
+test projection::tests::replacing_the_root_and_growing_sidecars_prevents_updates ... ok
+test projection::tests::replacing_or_linking_an_open_index_prevents_further_updates ... ok
+test projection::tests::corrupt_or_missing_index_is_disposable_and_does_not_touch_canonical_bytes ... ok
+test projection::tests::unsafe_database_and_sidecars_are_refused_without_following_targets ... ok
+test projection::tests::oversized_payload_rolls_back_rebuild_and_keeps_the_previous_projection ... ok
+test store::tests::detached_request_lifetime_is_validated_and_cannot_rebind_a_request ... ok
+test store::tests::admission_cannot_change_reserved_policy_or_argv ... ok
+test store::tests::different_payload_cannot_rebind_prepare_or_effect_identity ... ok
+test store::tests::full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state ... ok
+test store::tests::flattened_source_is_the_original_frozen_envelope_plus_writer_fields ... ok
+test store::tests::index_failure_after_acknowledgement_does_not_poison_or_reexecute ... ok
+test store::tests::admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt ... ok
+test store::tests::lifetime_lock_refuses_a_second_writer ... ok
+test store::tests::interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery ... ok
+test projection::tests::foreign_identity_schema_and_extra_triggers_are_discarded ... ok
+test store::tests::none_verify_retains_unprotected_even_if_receipt_claims_enforced ... ok
+test store::tests::lost_replies_replay_same_run_and_exact_receipt_after_recovery ... ok
+test store::tests::owner_death_records_unknown_without_restart_or_tree_claim ... ok
+test store::tests::recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain ... ok
+test store::tests::recovery_sync_failure_cannot_publish_or_acknowledge_an_unflushed_tail ... ok
+test store::tests::reader_refuses_filtered_corruption_and_reports_extra_tails_without_mutation ... ok
+test store::tests::reader_new_page_refuses_truncation_of_a_previously_verified_cached_large_frame ... ok
+test store::tests::reader_filters_original_source_operations_stage_and_writer_time ... ok
+test store::tests::refused_receipt_requires_the_same_attempt_and_final_source_note ... ok
+test store::tests::reader_large_utf8_records_are_fully_verified_before_chunks_and_query_block_replays ... ok
+test store::tests::settlement_requires_matching_final_receipt_and_trace_and_closes_observations ... ok
+test store::tests::source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery ... ok
+test store::tests::source_replay_and_gap_are_preserved_when_projection_is_updated ... ok
+test store::tests::strict_transport_gap_and_private_metadata_refuse_without_an_ack ... ok
+test store::tests::unresolved_run_keeps_a_proven_child_exit_separate_from_unknown_outcome ... ok
+test store::tests::admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_loss ... ok
+test store::tests::every_persistence_failure_stops_acknowledgements_until_recovery ... ok
+test store::tests::verification_detects_projection_drift_and_recovery_rebuilds_it ... ok
+test store::tests::unsafe_store_paths_and_oversized_events_are_refused ... ok
+test store::tests::reader_snapshot_export_is_exact_bounded_and_retries_the_identical_prior_page ... ok
+test store::tests::reader_cursor_cannot_change_scope_and_survives_restart ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.51s
+
+     Running unittests src/main.rs (target/debug/deps/ouro_ledger-b17941c8fed83598)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_local.rs (target/debug/deps/cli_local-d9e68bcb62e3a7f2)
+
+running 3 tests
+test doctor_does_not_start_a_session_writer ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/evidence_reader.rs (target/debug/deps/evidence_reader-da8c06032f097e26)
+
+running 9 tests
+test live_writer_detects_unexpected_tail_before_export ... ok
+test incomplete_history_exports_only_verified_prefix_and_exits_nonzero ... ok
+test dropped_socket_reply_replays_the_checkpointed_page_after_restart ... ok
+test export_keeps_large_canonical_record_bytes_out_of_status_metadata ... ok
+test query_filters_paginate_exact_attribution_and_refuse_cursor_rebinding ... ok
+test daemon_restart_preserves_query_progress_and_rejects_forged_or_corrupt_cursors ... ok
+test closed_export_sink_exits_nonzero_without_finished_success ... ok
+test daemon_restart_refuses_public_symlinked_and_hardlinked_checkpoint_files ... ok
+test durable_session_capacity_and_expiry_survive_daemon_restart ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.40s
+
+     Running tests/launch_linux.rs (target/debug/deps/launch_linux-7bbd880e7605a543)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/storage_recovery.rs (target/debug/deps/storage_recovery-24d74ccff388fae1)
+
+running 9 tests
+test recomputing_a_valid_local_chain_cannot_override_durable_manifest_history ... ok
+test incomplete_tail_is_retained_and_does_not_rewrite_committed_manifest ... ok
+test valid_prefix_truncation_below_manifest_refuses_replay_and_new_preparations ... ok
+test complete_unacknowledged_tail_promotes_manifest_and_replays_original_receipt ... ok
+test legacy_stream_without_manifest_migrates_without_duplicating_history ... ok
+test poisoned_durable_snapshot_cannot_resume_with_clean_consistency_labels ... ok
+test durable_cursor_retry_keeps_original_page_and_snapshot_after_restart_and_append ... ok
+test disposable_projections_rebuild_without_rebinding_owner_requests_or_effects ... ok
+test durable_cursor_refuses_changed_checkpoint_and_replaced_canonical_inode ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+
+   Doc-tests ouro_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

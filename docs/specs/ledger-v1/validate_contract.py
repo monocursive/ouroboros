@@ -140,6 +140,35 @@ def main():
     assert run["chain"] == {"head_seq": len(records), "head_digest": previous}
     assert read("digests.json") == {"prepared": digest(prepared), "owner": digest(owner), "canonical_source": digest(canonical_source)}
 
+    # A manifest anchors canonical bytes and ordered immutable replay receipts.
+    replay_hash = hashlib.sha256()
+    for record in records:
+        if record["kind"] == "source":
+            original = {"kind": "source", "request_id": record["request_id"],
+                        "body": {k: v for k, v in record.items() if k not in writer_keys}}
+        else:
+            original = {k: v for k, v in record.items()
+                        if k not in {"schema", "run_id", "attempt_id", "seq", "prev", "received_at", "provenance"}}
+        identity = rfc8785.dumps({"request_id": record["request_id"],
+                                 "effect_id": record.get("effect_id"),
+                                 "payload_digest": digest(original),
+                                 "seq": record["seq"], "digest": digest(record)})
+        replay_hash.update(len(identity).to_bytes(8, "little"))
+        replay_hash.update(identity)
+    manifest = {"schema": "ouro.ledger.segments/1", "run_id": run["run_id"],
+                "attempt_id": run["attempt_id"],
+                "segment": {"name": "events-0001.ndjson", "first_seq": 1,
+                            "last_seq": len(records), "bytes": len(bytes_expected),
+                            "digest": "sha256:" + hashlib.sha256(bytes_expected).hexdigest(),
+                            "head_digest": previous},
+                "replay_digest": "sha256:" + replay_hash.hexdigest()}
+    validators["segments"].validate(manifest)
+    for key, value in [("name", "../escape"), ("first_seq", 0),
+                       ("digest", "sha256:invalid"), ("last_seq", 0)]:
+        altered = copy.deepcopy(manifest)
+        altered["segment"][key] = value
+        expect_invalid(validators["segments"], altered, "unsafe segment anchor")
+
     # Ledger admission can end in a proved native exec failure while preserving
     # the jail's refused phase. The run settles failure, never success or denial.
     failure = read("settled-exec-failure.json")

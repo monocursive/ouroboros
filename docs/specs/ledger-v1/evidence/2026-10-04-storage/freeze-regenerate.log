@@ -1,0 +1,7 @@
+   Compiling ouro-jail v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-jail)
+   Compiling xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.09s
+     Running `target/debug/xtask freeze`
+xtask freeze: note: the recorded tested run no longer validates against this tree and was dropped; record the next conformance run with --doctor
+xtask freeze: note: no tested run is recorded (`freeze --check` fails until one is)
+xtask freeze: wrote /Users/monocursive/code/ouroboros/docs/specs/jail-v1/milestone-1-freeze.toml

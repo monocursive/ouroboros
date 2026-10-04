@@ -274,6 +274,53 @@ fn preparation_replay_and_inspection_survive_writer_restart() {
 }
 
 #[test]
+fn locked_disposable_index_does_not_delay_the_next_daemon_request() {
+    let mut cli = LocalCli::new();
+    let _writer = cli.start_writer();
+    let mut client = ouro_ledger::daemon::Client::connect(&cli.data).unwrap();
+    assert_eq!(client.ping().unwrap()["index"]["state"], "ready");
+
+    let index = rusqlite::Connection::open(cli.data.join("ledger/index.sqlite")).unwrap();
+    index.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let payload = fixture_request();
+    let original = client.prepare("locked-index-request", &payload).unwrap();
+    let stream = cli
+        .data
+        .join("ledger")
+        .join(&original.run_id)
+        .join("events-0001.ndjson");
+    let canonical = fs::read(&stream).unwrap();
+
+    // This request uses the real client's existing two-second timeout. The
+    // writer must stop trying the disposable index while another connection
+    // retains its write lock, so the next request still reaches dispatch.
+    let status = client
+        .ping()
+        .expect("index contention must not stall the writer");
+    assert_eq!(status["index"]["state"], "unavailable");
+    assert!(
+        status["index"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("database is locked")
+    );
+    assert_eq!(
+        serde_json::to_value(client.prepare("locked-index-request", &payload).unwrap()).unwrap(),
+        serde_json::to_value(&original).unwrap(),
+        "retry keeps the original identities and receipt while the index stays locked"
+    );
+    assert_eq!(
+        serde_json::to_value(client.runs().unwrap()).unwrap(),
+        json!([original])
+    );
+    assert_eq!(original.chain.head_seq, 1);
+    let report = serde_json::to_value(client.verify(Some(&original.run_id)).unwrap()).unwrap();
+    assert_consistent_unlaunched_report(&report, &original.run_id);
+    assert_eq!(fs::read(stream).unwrap(), canonical);
+    index.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 fn prepare_cli_refuses_raw_metadata_without_persisting_it() {
     const SENTINEL: &str = "portable-raw-argv-must-never-enter-the-store";
     let mut cli = LocalCli::new();
