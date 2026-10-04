@@ -1,8 +1,9 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 20.** Written 2026-09-21, revised 2026-10-02. Revision 20
-records tested detached Linux batch ownership; the rest of milestone 2 and managed
-submission remain open. Revision 19
+Status: **specification, revision 21.** Written 2026-09-21, revised 2026-10-03. Revision 21
+adds NVIDIA's OpenShell to the §0 competitor list; no mechanism or milestone changes.
+Revision 20 records tested detached Linux batch ownership; the rest of milestone 2 and
+managed submission remain open. Revision 19
 records the first local ledger slice and measured clean-VM onboarding; milestone 2
 and managed submission remain open. Revision 18
 declares milestone 1 green (§8). Revision 17
@@ -97,8 +98,13 @@ is a consequence of that. The criterion is §8.
 The jail category is occupied. Anthropic's [`sandbox-runtime`](https://github.com/anthropics/sandbox-runtime)
 (`srt`, Apache-2.0) wraps processes in Seatbelt or bubblewrap with deny-by-default
 proxy-filtered egress. It has no resource limits, no receipt of a run, and it needs
-Node. [`Greywall`](https://github.com/GreyhavenHQ/greywall) is another candidate for
-the D8 evaluation. Existing tools are implementation candidates. The pinned backend
+Node. NVIDIA's [`OpenShell`](https://github.com/NVIDIA/OpenShell) (Apache-2.0) runs
+agents in Docker, Podman, Kubernetes, or VM sandboxes with Landlock filesystem rules,
+per-binary network rules mediated by a trusted supervisor, credentials added only at
+approved endpoints, and formally verified policy changes. It needs a gateway and a
+container runtime or VM, writes no receipt of a run, and collects opt-out telemetry.
+[`Greywall`](https://github.com/GreyhavenHQ/greywall) is another candidate for the
+D8 evaluation. Existing tools are implementation candidates. The pinned backend
 and the integration in this spec pass the same gates.
 
 ## 1. The thesis
