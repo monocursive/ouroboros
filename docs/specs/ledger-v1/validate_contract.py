@@ -93,6 +93,72 @@ def reader_fixtures(validators, records, run):
     expect_invalid(validators["export"], altered, "record bytes in status metadata")
 
 
+def pruning_fixtures(validators, run, records):
+    """Synthetic retained metadata: shape and checksum checks, not deletion proof."""
+    replay = {}
+    replay_hash = hashlib.sha256()
+    writer_keys = {"run_id", "seq", "prev", "received_at", "provenance", "kind", "request_id"}
+    for record in records:
+        if record["kind"] == "source":
+            original = {"kind": "source", "request_id": record["request_id"],
+                        "body": {k: v for k, v in record.items() if k not in writer_keys}}
+        else:
+            original = {k: v for k, v in record.items()
+                        if k not in {"schema", "run_id", "attempt_id", "seq", "prev", "received_at", "provenance"}}
+        receipt = {"seq": record["seq"], "digest": digest(record)}
+        identity = rfc8785.dumps({"request_id": record["request_id"],
+                                 "effect_id": record.get("effect_id"),
+                                 "payload_digest": digest(original), **receipt})
+        replay_hash.update(len(identity).to_bytes(8, "little"))
+        replay_hash.update(identity)
+        replay[record["request_id"]] = {"digest": digest(original), "receipt": receipt}
+        if record.get("effect_id"):
+            replay[f'effect:{record["kind"]}:{record["effect_id"]}'] = replay[record["request_id"]]
+    data = b"".join(rfc8785.dumps(record) + b"\n" for record in records)
+    segment = {"name": "events-0001.ndjson", "first_seq": 1, "last_seq": len(records),
+               "bytes": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+               "head_digest": run["chain"]["head_digest"]}
+    manifest = {"schema": "ouro.ledger.segments/2", "run_id": run["run_id"],
+                "attempt_id": run["attempt_id"], "segments": [segment],
+                "replay_digest": "sha256:" + replay_hash.hexdigest()}
+    retained = {"schema": "ouro.ledger.gc-anchor/1", "run": run, "manifest": manifest,
+                "replay": replay, "strict_source_loss": False,
+                "last_activity_at": max(record["received_at"] for record in records),
+                "collected_at": "2026-10-05T12:00:00Z", "cutoff": "2026-10-04T12:00:00Z",
+                "retain_days": 1, "operator": run["owner"],
+                "files": [{"path": segment["name"], "bytes": len(data), "digest": segment["digest"],
+                           "device": 1, "inode": 1}]}
+    envelope = {"digest": digest(retained), "retained": retained}
+    validators["gc-anchor"].validate(envelope)
+    complete = {"schema": "ouro.ledger.gc-complete/1", "anchor_digest": envelope["digest"]}
+    validators["gc-complete"].validate(complete)
+    history = {"state": "pruned", "anchor_digest": envelope["digest"],
+               "collected_at": retained["collected_at"]}
+    result = {"schema": "ouro.ledger.gc-result/1", "retain_days": 1,
+              "pruned": [{"run_id": run["run_id"], "chain": run["chain"], "history": history,
+                          "removed_files": 1, "removed_bytes": len(data)}],
+              "kept": [], "failed": [], "next_after": None}
+    validators["gc-result"].validate(result)
+    for state in ["pruning", "pruned"]:
+        validators["run"].validate({**run, "history": {**history, "state": state}})
+    for path in ["../escape", "artifacts/../stdout.bin", "artifacts/vendor-state", "run.json"]:
+        altered = copy.deepcopy(envelope)
+        altered["retained"]["files"][0]["path"] = path
+        expect_invalid(validators["gc-anchor"], altered, "unsafe deletion inventory path")
+    for key, value in [("holds", ["operator"]), ("history", history), ("state", "outcome_unknown")]:
+        altered = copy.deepcopy(envelope)
+        altered["retained"]["run"][key] = value
+        expect_invalid(validators["gc-anchor"], altered, "ineligible retained run")
+    altered = copy.deepcopy(envelope)
+    altered["retained"]["files"][0].update(path="artifacts/stdout.bin", bytes=16777217)
+    expect_invalid(validators["gc-anchor"], altered, "unbounded capture inventory")
+    altered = copy.deepcopy(result)
+    altered["pruned"][0]["history"]["state"] = "pruning"
+    expect_invalid(validators["gc-result"], altered, "unfinished pruning claims a receipt")
+    altered = {**complete, "anchor_digest": "sha256:invalid"}
+    expect_invalid(validators["gc-complete"], altered, "invalid completion anchor")
+
+
 def main():
     jail_schemas = jail.load_schemas(JAIL)
     ledger_schemas = jail.load_schemas(ROOT)
@@ -118,6 +184,40 @@ def main():
                            ("source", canonical_source), ("record", prepared),
                            ("record", owner), ("record", canonical_source), ("run", run)]:
         validators[name].validate(instance)
+
+    # Retention intents are canonical operator records, never owner observations.
+    for kind in ["hold", "release"]:
+        intent = copy.deepcopy(prepared)
+        intent.update(kind=kind, request_id=f"retention-{kind}", body={})
+        validators["record"].validate(intent)
+        for key, value in [("body", {"actor": "operator"}), ("effect_id", "forged")]:
+            altered = copy.deepcopy(intent)
+            altered[key] = value
+            expect_invalid(validators["record"], altered, "forged retention payload")
+        for key, value in [("role", "owner"), ("token_id", "a" * 32)]:
+            altered = copy.deepcopy(intent)
+            altered["provenance"][key] = value
+            expect_invalid(validators["record"], altered, "forged retention authority")
+    held = copy.deepcopy(run)
+    held["holds"] = ["operator"]
+    validators["run"].validate(held)
+    for holds in [["operator", "operator"], ["invented"]]:
+        held["holds"] = holds
+        expect_invalid(validators["run"], held, "invalid operator holds")
+    gc = read("gc-plan.json")
+    validators["gc-plan"].validate(gc)
+    for key, value in [("dry_run", False), ("deletion_supported", False),
+                       ("verification_required", False), ("retain_days", 0),
+                       ("retain_days", 36501), ("next_after", "../escape"),
+                       ("runs", gc["runs"] * 101)]:
+        altered = copy.deepcopy(gc)
+        altered[key] = value
+        expect_invalid(validators["gc-plan"], altered, "unsafe retention preview")
+    altered = copy.deepcopy(gc)
+    altered["runs"][0]["candidate"] = True
+    expect_invalid(validators["gc-plan"], altered, "candidate has keep reasons")
+    altered["runs"][0]["keep_reasons"] = []
+    validators["gc-plan"].validate(altered)
 
     # Source composition preserves every value in the frozen producer envelope.
     writer_keys = {"run_id", "seq", "prev", "received_at", "provenance", "kind", "request_id"}
@@ -204,6 +304,7 @@ def main():
         if record["kind"] == "source":
             trace.append({k: v for k, v in record.items() if k not in writer_keys})
     assert failure_records[-1] == failure
+    pruning_fixtures(validators, failure_run, failure_records)
     assert failure_run["chain"] == {"head_seq": len(failure_records), "head_digest": previous}
     receipt = failure["body"]["receipt"]
     assert receipt["phase"] == "refused" and receipt["outcome"]["kind"] == "exec_error"

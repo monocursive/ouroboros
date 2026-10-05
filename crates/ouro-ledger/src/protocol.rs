@@ -78,6 +78,73 @@ pub struct RunRecord {
     pub receipts: Vec<Value>,
     pub capture: Value,
     pub chain: Chain,
+    /// Rebuilt from canonical operator hold/release records. Legacy runs have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<PrunedHistory>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrunedHistory {
+    pub state: String,
+    pub anchor_digest: String,
+    pub collected_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcReceipt {
+    pub run_id: String,
+    pub chain: Chain,
+    pub history: PrunedHistory,
+    pub removed_files: u32,
+    pub removed_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcFailure {
+    pub run_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcResult {
+    pub schema: String,
+    pub retain_days: u32,
+    pub pruned: Vec<GcReceipt>,
+    pub kept: Vec<GcCandidate>,
+    pub failed: Vec<GcFailure>,
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcCandidate {
+    pub run_id: String,
+    pub state: String,
+    pub child_protection: String,
+    pub chain: Chain,
+    pub last_activity_at: Option<String>,
+    pub candidate: bool,
+    pub keep_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcPlan {
+    pub schema: String,
+    pub dry_run: bool,
+    pub deletion_supported: bool,
+    pub verification_required: bool,
+    pub retain_days: u32,
+    pub evaluated_at: String,
+    pub cutoff: String,
+    pub runs: Vec<GcCandidate>,
+    pub next_after: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +156,8 @@ pub struct VerifyReport {
     pub coverage: Value,
     pub events: u64,
     pub problems: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<PrunedHistory>,
 }
 
 pub const MAX_READ_LIMIT: u32 = 1000;
@@ -195,6 +264,20 @@ pub enum Request {
     },
     Ping,
     SettleOrphans,
+    Hold {
+        run_id: String,
+        request_id: String,
+    },
+    Release {
+        run_id: String,
+        request_id: String,
+    },
+    Gc {
+        dry_run: bool,
+        retain_days: u32,
+        after: Option<String>,
+        limit: u32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

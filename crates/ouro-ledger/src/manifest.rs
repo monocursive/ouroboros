@@ -47,7 +47,7 @@ pub(crate) fn names(directory: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
     pub schema: String,

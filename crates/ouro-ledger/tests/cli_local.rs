@@ -28,6 +28,170 @@ fn doctor_does_not_start_a_session_writer() {
     assert!(!cli.data.join("ledger/serve.sock").exists());
 }
 
+#[test]
+fn retention_cli_persists_holds_and_preview_never_starts_or_mutates_a_writer() {
+    let mut cli = LocalCli::new();
+    assert!(!cli.invoke(&["gc", "--dry-run", "--json"]).status.success());
+    assert!(!cli.data.join("ledger").exists());
+    assert!(!cli.invoke(&["gc", "--json"]).status.success());
+    assert!(!cli.data.join("ledger").exists());
+    let writer = cli.start_writer();
+    let run = successful_preparation(&cli.prepare("retention-cli", &fixture_request()));
+    let run_id = run["run_id"].as_str().unwrap();
+    let held = cli.json(&["hold", run_id, "--request-id", "stable-hold", "--json"]);
+    assert_eq!(held["operation"], "hold");
+    assert_eq!(
+        cli.json(&["show", run_id, "--json"])["holds"],
+        json!(["operator"])
+    );
+    drop(writer);
+    let _writer = cli.start_writer();
+    assert_eq!(
+        cli.json(&["hold", run_id, "--request-id", "stable-hold", "--json"]),
+        held
+    );
+    let before = fs::read(
+        cli.data
+            .join("ledger")
+            .join(run_id)
+            .join("events-0001.ndjson"),
+    )
+    .unwrap();
+    let projection = fs::read(cli.data.join("ledger").join(run_id).join("run.json")).unwrap();
+    let plan = cli.json(&["gc", "--dry-run", "--json"]);
+    assert_eq!(plan["schema"], "ouro.ledger.gc-plan/1");
+    assert_eq!(plan["retain_days"], 90);
+    assert_eq!(plan["deletion_supported"], true);
+    assert_eq!(plan["verification_required"], true);
+    assert_eq!(plan["runs"][0]["candidate"], false);
+    assert!(
+        plan["runs"][0]["keep_reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("operator_hold"))
+    );
+    assert_eq!(
+        fs::read(
+            cli.data
+                .join("ledger")
+                .join(run_id)
+                .join("events-0001.ndjson")
+        )
+        .unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::read(cli.data.join("ledger").join(run_id).join("run.json")).unwrap(),
+        projection
+    );
+    assert!(!cli.data.join("ledger/readers").exists());
+    let released = cli.json(&[
+        "release",
+        run_id,
+        "--request-id",
+        "stable-release",
+        "--json",
+    ]);
+    assert_eq!(released["operation"], "release");
+    assert_eq!(
+        cli.json(&["hold", run_id, "--request-id", "stable-hold", "--json"]),
+        held
+    );
+    assert!(cli.json(&["show", run_id, "--json"]).get("holds").is_none());
+    assert!(
+        !cli.invoke(&["release", run_id, "--request-id", "stable-hold"])
+            .status
+            .success()
+    );
+    let generated = cli.json(&["hold", run_id, "--json"]);
+    assert!(
+        generated["request_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("retention_")
+    );
+    assert!(
+        !cli.invoke(&["gc", "--dry-run", "--limit", "101"])
+            .status
+            .success()
+    );
+    assert!(
+        !cli.invoke(&["gc", "--dry-run", "--retain-days", "0"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn gc_cli_prunes_aged_fixture_history_and_preserves_preparation_identity_after_restart() {
+    use ouro_records::canonical::{sha256_prefixed, to_jcs};
+    use std::{io::Write, time::SystemTime};
+    let mut cli = LocalCli::new();
+    let mut records =
+        include_str!("../../../docs/specs/ledger-v1/fixtures/exec-failure-records.ndjson")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+    let run_id = records[0]["run_id"].as_str().unwrap().to_owned();
+    let request_id = records[0]["body"]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let payload = records[0]["body"]["payload"].clone();
+    let run_dir = cli.data.join("ledger").join(&run_id);
+    for path in [
+        cli.data.join("ledger"),
+        run_dir.clone(),
+        run_dir.join("artifacts"),
+        run_dir.join("receipts"),
+    ] {
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let timestamp =
+        ouro_records::records::rfc3339_utc(SystemTime::now() - Duration::from_secs(2 * 86_400));
+    let mut previous = None::<String>;
+    let mut stream = Vec::new();
+    for record in &mut records {
+        record["prev"] = json!(previous);
+        record["received_at"] = json!(timestamp);
+        let bytes = to_jcs(record).unwrap();
+        previous = Some(sha256_prefixed(&bytes));
+        stream.extend(bytes);
+        stream.push(b'\n');
+    }
+    private_file(&run_dir.join("events-0001.ndjson"))
+        .write_all(&stream)
+        .unwrap();
+    let writer = cli.start_writer();
+    let plan = cli.json(&["gc", "--dry-run", "--retain-days", "1", "--json"]);
+    assert_eq!(plan["runs"][0]["candidate"], true);
+    assert!(run_dir.join("events-0001.ndjson").exists());
+    let result = cli.json(&["gc", "--retain-days", "1", "--json"]);
+    assert_eq!(result["failed"], json!([]));
+    assert_eq!(result["pruned"][0]["run_id"], run_id);
+    assert!(!run_dir.join("events-0001.ndjson").exists());
+    let shown = cli.json(&["show", &run_id, "--json"]);
+    assert_eq!(shown["history"]["state"], "pruned");
+    assert_eq!(shown["state"], "settled");
+    assert_eq!(shown["outcome"]["kind"], "exec_error");
+    let exported = cli.invoke(&["export", &run_id, "--ndjson", "--json"]);
+    assert!(!exported.status.success());
+    assert!(exported.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&exported.stderr).contains("pruned"));
+    drop(writer);
+    let _writer = cli.start_writer();
+    let again = cli.json(&["gc", "--retain-days", "1", "--json"]);
+    assert_eq!(again["pruned"], result["pruned"]);
+    let prepared = successful_preparation(&cli.prepare(&request_id, &payload));
+    assert_eq!(prepared["run_id"], run_id);
+    assert_eq!(prepared["history"]["state"], "pruned");
+    let verified = cli.json(&["verify", &run_id, "--json"]);
+    assert_eq!(verified[0]["local_consistency"], true);
+    assert_eq!(verified[0]["events"], 0);
+    assert_eq!(verified[0]["history"]["state"], "pruned");
+}
+
 /// Own every subprocess from spawn through wait, including assertion failures.
 struct Process(Child);
 

@@ -345,6 +345,8 @@ mod tests {
 
     fn run(id: &str) -> RunRecord {
         RunRecord {
+            holds: vec![],
+            history: None,
             schema: "ouro.ledger.run/1".into(),
             run_id: id.into(),
             attempt_id: format!("attempt_{id}"),

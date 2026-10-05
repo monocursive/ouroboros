@@ -1,0 +1,3 @@
+Result=exit-code
+ExecMainStatus=101
+ActiveState=failed

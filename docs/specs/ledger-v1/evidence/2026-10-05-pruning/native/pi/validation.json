@@ -1,0 +1,59 @@
+{
+  "hardware": "Raspberry Pi 4 Model B Rev 1.2",
+  "architecture": "aarch64",
+  "os": "Debian GNU/Linux 13 (trixie)",
+  "kernel": "6.18.50+rpt-rpi-v8",
+  "rust": "1.98.1",
+  "base_revision": "5b0b5531628f8612c43c0873cb3a9261c293b847",
+  "dirty": true,
+  "source_files": 535,
+  "source_manifest_sha256": "6a1a51ce0e6282c6bab7cbfa3d1f9aed6abbec9fd196d00585654ace025df6f1",
+  "build": "passed",
+  "strict_clippy": "passed",
+  "tests": {
+    "passed": 91,
+    "failed": 15,
+    "ignored": 0,
+    "runtime_skips": 0,
+    "launch_tests_failed_at_preflight": 15,
+    "launch_tests_executed_child": 0
+  },
+  "cargo_test_exit": 101,
+  "aggregate_runner_exit": 101,
+  "jail_doctor_exit": 125,
+  "jail_doctor_ready": false,
+  "unsupported_required_capabilities": [
+    "closed_set_observation",
+    "syscall_filter"
+  ],
+  "source_pre_post_hashes": "passed",
+  "binary_hashes": "passed",
+  "refusal_smoke": {
+    "checks_passed": true,
+    "launches_supported": false,
+    "containment_proof": false,
+    "profiles": [
+      {
+        "profile": "tool",
+        "exit": 125,
+        "state": "denied",
+        "refusal": "the host does not provide `closed_set_observation` (unsupported_architecture)",
+        "same_replay_identity_chain_outcome": true,
+        "child_executed": false,
+        "local_consistency": true,
+        "child_protection": "unprotected"
+      },
+      {
+        "profile": "none",
+        "exit": 125,
+        "state": "denied",
+        "refusal": "the host does not provide `closed_set_observation` (unsupported_architecture)",
+        "same_replay_identity_chain_outcome": true,
+        "child_executed": false,
+        "local_consistency": true,
+        "child_protection": "unprotected"
+      }
+    ]
+  },
+  "scope": "GC, storage, readers and CLI passed natively. Full launch suite is not accepted on ARM64: existing syscall tables and closed-set observer are x86_64-only. This is not ARM64 containment or execution acceptance."
+}

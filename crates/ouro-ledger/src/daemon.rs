@@ -27,13 +27,23 @@ use uuid::Uuid;
 
 use crate::{
     protocol::{
-        AppendReceipt, ClaimedOwner, LedgerError, MAX_CONNECTIONS, MAX_FRAME_BYTES, Peer, ReadPage,
-        ReadRequest, Request, Response, Result, RunRecord, VerifyReport,
+        AppendReceipt, ClaimedOwner, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
+        MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Request, Response, Result, RunRecord,
+        VerifyReport,
     },
     store::Store,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
+const GC_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn response_timeout(request: &Request) -> Duration {
+    if matches!(request, Request::Gc { dry_run: false, .. }) {
+        GC_TIMEOUT
+    } else {
+        TIMEOUT
+    }
+}
 
 pub struct Client {
     stream: UnixStream,
@@ -60,7 +70,11 @@ impl Client {
 
     fn request<T: DeserializeOwned>(&mut self, request: Request) -> Result<T> {
         write_frame(&mut self.stream, &request)?;
-        match read_frame::<Response>(&mut self.stream)? {
+        self.stream
+            .set_read_timeout(Some(response_timeout(&request)))?;
+        let response = read_frame::<Response>(&mut self.stream);
+        self.stream.set_read_timeout(Some(TIMEOUT))?;
+        match response? {
             Response::Ok { value } => Ok(serde_json::from_value(value)?),
             Response::Error { message } => Err(LedgerError(message)),
         }
@@ -129,6 +143,34 @@ impl Client {
     }
     pub fn settle_orphans(&mut self) -> Result<Vec<RunRecord>> {
         self.request(Request::SettleOrphans)
+    }
+    pub fn hold(&mut self, run_id: &str, request_id: &str) -> Result<AppendReceipt> {
+        self.request(Request::Hold {
+            run_id: run_id.into(),
+            request_id: request_id.into(),
+        })
+    }
+    pub fn release(&mut self, run_id: &str, request_id: &str) -> Result<AppendReceipt> {
+        self.request(Request::Release {
+            run_id: run_id.into(),
+            request_id: request_id.into(),
+        })
+    }
+    pub fn gc_plan(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcPlan> {
+        self.request(Request::Gc {
+            dry_run: true,
+            retain_days,
+            after: after.map(str::to_owned),
+            limit,
+        })
+    }
+    pub fn gc(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcResult> {
+        self.request(Request::Gc {
+            dry_run: false,
+            retain_days,
+            after: after.map(str::to_owned),
+            limit,
+        })
     }
 }
 
@@ -209,6 +251,7 @@ pub fn serve(data: &Path) -> Result<()> {
                 let _ = socket.set_read_timeout(Some(TIMEOUT));
                 let _ = socket.set_write_timeout(Some(TIMEOUT));
                 while let Ok(request) = read_frame::<Request>(&mut socket) {
+                    let timeout = response_timeout(&request);
                     let (reply, response) = mpsc::sync_channel(1);
                     let message = Message {
                         request,
@@ -224,7 +267,7 @@ pub fn serve(data: &Path) -> Result<()> {
                         );
                         break;
                     }
-                    let Ok(value) = response.recv_timeout(TIMEOUT) else {
+                    let Ok(value) = response.recv_timeout(timeout) else {
                         break;
                     };
                     if write_frame(&mut socket, &value).is_err() {
@@ -346,6 +389,36 @@ fn dispatch(
         Request::SettleOrphans => Ok(serde_json::to_value(
             store.settle_orphans(peer, peer_alive)?,
         )?),
+        Request::Hold { run_id, request_id } => Ok(serde_json::to_value(store.hold(
+            &run_id,
+            &request_id,
+            peer,
+        )?)?),
+        Request::Release { run_id, request_id } => Ok(serde_json::to_value(store.release(
+            &run_id,
+            &request_id,
+            peer,
+        )?)?),
+        Request::Gc {
+            dry_run,
+            retain_days,
+            after,
+            limit,
+        } => {
+            if !dry_run {
+                return Ok(serde_json::to_value(store.gc(
+                    retain_days,
+                    after.as_deref(),
+                    limit,
+                    peer,
+                )?)?);
+            }
+            Ok(serde_json::to_value(store.gc_plan(
+                retain_days,
+                after.as_deref(),
+                limit,
+            )?)?)
+        }
     }
 }
 
@@ -487,12 +560,39 @@ mod tests {
     fn protocol_refuses_caller_claimed_roles_and_oversized_frames() {
         let forged = br#"{"op":"prepare","request_id":"x","payload":{},"actor":"owner"}"#;
         assert!(serde_json::from_slice::<Request>(forged).is_err());
+        for op in ["hold", "release"] {
+            let forged = json!({"op":op,"run_id":"run_00000000000000000000000000000000","request_id":"stable","actor":"operator"});
+            assert!(serde_json::from_value::<Request>(forged).is_err());
+        }
         let forged =
             br#"{"op":"append_source","run_id":"x","event":{},"token":"x","role":"producer"}"#;
         assert!(serde_json::from_slice::<Request>(forged).is_err());
         let bytes = ((MAX_FRAME_BYTES + 1) as u32).to_be_bytes();
         assert!(read_frame::<Value>(&mut bytes.as_slice()).is_err());
         assert!(write_frame(&mut Vec::new(), &json!("x".repeat(MAX_FRAME_BYTES))).is_err());
+    }
+
+    #[test]
+    fn gc_wire_collects_an_empty_store_without_starting_readers() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut tokens = BTreeMap::new();
+        let result = dispatch(
+            &mut store,
+            &mut tokens,
+            Request::Gc {
+                dry_run: false,
+                retain_days: 90,
+                after: None,
+                limit: 25,
+            },
+            &fixture_peer(),
+        )
+        .unwrap();
+        assert_eq!(result["schema"], "ouro.ledger.gc-result/1");
+        assert_eq!(result["pruned"], json!([]));
+        assert!(store.runs().is_empty());
+        assert!(!store.root().join("readers").exists());
     }
 
     #[test]

@@ -1,0 +1,347 @@
+{
+  "binaries": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "b3b829e18a7d43ee589dc37e351cb9480ff7301b493d8227b8c754294638b976",
+      "version": "bubblewrap 0.12.0"
+    },
+    "ouro-jail": {
+      "path": "/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/ouro-jail",
+      "sha256": "cfb6eeff2d29d792eeb0b6a0917210db23a1b109b179bdee54c99fe78bf802f4"
+    }
+  },
+  "build": {
+    "debug_assertions": false,
+    "dirty": true,
+    "inputs": "sha256:fb5bf26aca7496c28692b3cddb7a2ec9a7422c02765882af3b5bce41c8af6d0b",
+    "opt_level": "3",
+    "revision": "5b0b5531628f8612c43c0873cb3a9261c293b847",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "target": "aarch64-unknown-linux-gnu"
+  },
+  "capabilities": [
+    {
+      "evidence_ref": "bwrap_present,pid_namespace",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "pid-namespace",
+      "name": "tree_termination",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "ptrace_seize_descendant,observer_closed_set",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "ptrace",
+      "name": "closed_set_observation",
+      "reason_code": "unsupported_architecture",
+      "scope": "tree",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "filesystem_containment",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "seccomp_filter_load",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "seccomp-bpf",
+      "name": "syscall_filter",
+      "reason_code": "unsupported_architecture",
+      "scope": "process",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": "network_namespace",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "network-namespace",
+      "name": "network_none",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "protected_coverage:existing_and_root",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "supervisor",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "boottime-deadline",
+      "name": "limit:wall",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bubblewrap 0.12.0",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "bubblewrap",
+      "name": "bwrap_present",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531837, inside 4026532741",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "user-namespace",
+      "name": "user_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531836, inside 4026532742; NSpid 2; /proc shows 1,2",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "pid-namespace",
+      "name": "pid_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "interfaces inside: lo",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "network-namespace",
+      "name": "network_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "write into a read-only bind failed EROFS",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "mount_readonly_bind",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "this build is for aarch64; the syscall tables this mechanism rests on are x86_64 only (Linux aarch64 is a later lane, jail-v1 §3.2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "seccomp-bpf",
+      "name": "seccomp_filter_load",
+      "reason_code": "unsupported_architecture",
+      "scope": "host",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": "seized pid 6249, stopped with signal 5, detached",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "ptrace",
+      "name": "ptrace_seize_descendant",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "this build is for aarch64; the syscall tables this mechanism rests on are x86_64 only (Linux aarch64 is a later lane, jail-v1 §3.2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "ptrace-seccomp",
+      "name": "observer_closed_set",
+      "reason_code": "unsupported_architecture",
+      "scope": "host",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": "already_delegated cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-pruning-doctor-20261005-pi-r1.scope",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "systemd-user-transient-scope",
+      "name": "supervisor_scope",
+      "reason_code": "already_delegated",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_delegated_leaf",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_pids",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "No such file or directory (os error 2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_memory",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "No such file or directory (os error 2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_swap",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_cpu",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "/proc/sys/kernel/apparmor_restrict_unprivileged_userns: No such file or directory (os error 2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "apparmor",
+      "name": "apparmor_userns_restriction",
+      "reason_code": "sysctl_absent",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "a nested bubblewrap ran a command; bare unshare(CLONE_NEWUSER) inside: ok",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "nested-bubblewrap",
+      "name": "nested_user_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "this build is for aarch64; the syscall tables this mechanism rests on are x86_64 only (Linux aarch64 is a later lane, jail-v1 §3.2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "seccomp-user-notification",
+      "name": "seccomp_user_notification",
+      "reason_code": "unsupported_architecture",
+      "scope": "host",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": "this build is for aarch64; the syscall tables this mechanism rests on are x86_64 only (Linux aarch64 is a later lane, jail-v1 §3.2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "outside-http-proxy+loopback-bridge",
+      "name": "agent_proxy_bridge",
+      "reason_code": "unsupported_architecture",
+      "scope": "host",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": "this build is for aarch64; the syscall tables this mechanism rests on are x86_64 only (Linux aarch64 is a later lane, jail-v1 §3.2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "seccomp-user-notification",
+      "name": "agent_unix_peer_mediation",
+      "reason_code": "unsupported_architecture",
+      "scope": "host",
+      "status": "unsupported"
+    },
+    {
+      "evidence_ref": "this build is for aarch64; the syscall tables this mechanism rests on are x86_64 only (Linux aarch64 is a later lane, jail-v1 §3.2)",
+      "measured_at": "2026-10-05T18:24:49Z",
+      "mechanism": "landlock+seccomp",
+      "name": "agent_inner_sandbox",
+      "reason_code": "unsupported_architecture",
+      "scope": "host",
+      "status": "unsupported"
+    }
+  ],
+  "component": "ouro-jail",
+  "host": {
+    "apparmor_enabled": false,
+    "apparmor_userns_restriction": {
+      "local_files": [
+        "README"
+      ],
+      "profile_files": [
+        "lxc-usernsexec",
+        "unprivileged_userns"
+      ],
+      "state": "absent",
+      "unpackaged_files": []
+    },
+    "cgroup": {
+      "controllers": [
+        "cpu",
+        "pids"
+      ],
+      "delegated_root": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service",
+      "root_controllers": [
+        "cpuset",
+        "cpu",
+        "io",
+        "pids"
+      ],
+      "subtree_control": [
+        "cpu",
+        "pids"
+      ]
+    },
+    "cpus_online": 4,
+    "distribution": "Debian GNU/Linux 13 (trixie)",
+    "kernel_release": "6.18.50+rpt-rpi-v8",
+    "kernel_version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "linger": true,
+    "memory": {
+      "mem_total_kib": 3886840,
+      "swap_total_kib": 2097148
+    },
+    "operator_identity": "privileged_group",
+    "privileged_groups": [
+      "sudo"
+    ],
+    "sysctls": {
+      "kernel.apparmor_restrict_unprivileged_userns": null,
+      "kernel.io_uring_disabled": "0",
+      "kernel.perf_event_paranoid": "2",
+      "kernel.unprivileged_bpf_disabled": "2",
+      "kernel.yama.ptrace_scope": null,
+      "user.max_user_namespaces": "13226"
+    },
+    "systemd_version": "systemd 257 (257.13-1~deb13u1)",
+    "virtualization": "none"
+  },
+  "launch": null,
+  "platform": {
+    "arch": "aarch64",
+    "kernel": "Linux 6.18.50+rpt-rpi-v8",
+    "os": "linux"
+  },
+  "ready": false,
+  "requirements": [
+    "tree_termination",
+    "closed_set_observation",
+    "filesystem_containment",
+    "syscall_filter",
+    "network_none",
+    "protected_coverage:existing_and_root",
+    "limit:wall"
+  ],
+  "schema": "ouro.jail.doctor/1",
+  "supervisor_scope": {
+    "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-pruning-doctor-20261005-pi-r1.scope",
+    "reason": null,
+    "reason_code": null,
+    "state": "already_delegated",
+    "unit": null
+  },
+  "version": "0.1.0"
+}

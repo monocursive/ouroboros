@@ -81,7 +81,9 @@
             "denied",
             "settled",
             "note",
-            "outcome_unknown"
+            "outcome_unknown",
+            "hold",
+            "release"
           ]
         },
         "request_id": {
@@ -203,6 +205,44 @@
                   "receipt"
                 ]
               }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "hold",
+                  "release"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "properties": {
+                  "role": {
+                    "const": "operator"
+                  },
+                  "token_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "body": {
+                "type": "object",
+                "maxProperties": 0
+              }
+            },
+            "not": {
+              "required": [
+                "effect_id"
+              ]
             }
           }
         }

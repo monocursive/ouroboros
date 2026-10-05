@@ -1,0 +1,27 @@
+{
+  "checks_passed": true,
+  "launches_supported": false,
+  "containment_proof": false,
+  "profiles": [
+    {
+      "profile": "tool",
+      "exit": 125,
+      "state": "denied",
+      "refusal": "the host does not provide `closed_set_observation` (unsupported_architecture)",
+      "same_replay_identity_chain_outcome": true,
+      "child_executed": false,
+      "local_consistency": true,
+      "child_protection": "unprotected"
+    },
+    {
+      "profile": "none",
+      "exit": 125,
+      "state": "denied",
+      "refusal": "the host does not provide `closed_set_observation` (unsupported_architecture)",
+      "same_replay_identity_chain_outcome": true,
+      "child_executed": false,
+      "local_consistency": true,
+      "child_protection": "unprotected"
+    }
+  ]
+}

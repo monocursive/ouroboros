@@ -13,7 +13,8 @@ inspection, local chain verification, conservative orphan reconciliation,
 bounded single-run evidence queries, exact canonical NDJSON export, optional
 detached batch ownership on a provisioned Linux systemd user manager, rotating
 canonical segments, durable replay anchors, a rebuildable SQLite projection and
-restartable reader cursors.
+restartable reader cursors. Operator holds, a bounded retention preview and
+whole-run pruning with retained replay identities and chain anchors are available.
 Linux execution is the acceptance target. macOS clients can read the local
 protocol and verify stores, but native launch ownership currently refuses because
 its birth-identity mechanism has not been implemented.
@@ -215,7 +216,7 @@ extends the frozen producer's properties; its projection back to the source
 is checked against the unmodified jail producer schema.
 
 `kind` is `prepared`, `owner_claimed`, `admitted`, `denied`, `source`, `settled`,
-`note` or `outcome_unknown`. Sequence starts at 1. The first `prev` is null;
+`note`, `outcome_unknown`, `hold` or `release`. Sequence starts at 1. The first `prev` is null;
 each subsequent `prev` is `sha256:` plus lower-case SHA-256 over the preceding
 record's canonical UTF-8 bytes, excluding its newline. The shared integer-only
 RFC 8785 encoder sorts keys by UTF-16 order, rejects floating-point values and
@@ -258,7 +259,8 @@ it after handing off the durable response. Index errors are reported separately
 by `doctor`; they cannot authorize execution, poison a sound canonical stream
 or revoke a durable append receipt. SQLite lock contention fails immediately,
 so an unavailable projection does not stall the next writer request.
-Retention-pruned replay identities and signed bundles remain deferred.
+Pruned runs recover their replay identities from the retained GC anchor described
+in §8. Signed bundles remain deferred.
 
 The owner reads the jail's canonical receipt at
 `<data>/attempts/<attempt_id>/jail.json`. It does not request another receipt copy
@@ -312,7 +314,8 @@ A full or disconnected queue stops the tree and records an unknown outcome with
 incomplete capture. Final forwarding has a two-second drain deadline so it
 cannot block the owner's evidence and lifetime loop.
 Default metadata uses argv digests and existing jail-redacted observation fields.
-The ledger does not archive vendor state. Capture retention enforcement and
+The ledger does not archive vendor state. Whole-run GC removes inventoried
+stdout/stderr captures with canonical history; separate capture-age policies and
 structured minimization options remain future work.
 
 Selected foreground streams are forwarded through separate queues of at most
@@ -429,7 +432,117 @@ The [read request schema](ledger-v1/read-request.schema.json),
 interface. Their fixtures are document contracts, not a production contract
 freeze or proof of an external custody boundary.
 
-## 8. Acceptance and remaining milestone 2 scope
+## 8. Retention holds and preview
+
+`hold RUN [--request-id ID]` and `release RUN [--request-id ID]` append canonical
+operator records through the authenticated local writer. Their bodies are empty;
+the peer supplies neither provenance nor an effect id. Owner and producer
+capabilities cannot emit these kinds. One operator hold covers the run and its
+captures. `show` includes `holds: ["operator"]` while held; an absent `holds`
+field means no hold, including in legacy projections. Replay rebuilds this field
+from canonical records, never from a mutable projection. Older ledger binaries
+cannot read the new record kinds and must not be used to write these stores.
+
+Each mutation returns the request id and its original append receipt. If no id
+is supplied, the CLI generates one and includes it in an error diagnostic if the
+outcome is uncertain. Retry that same command with the same id. Replaying an old
+hold after a release returns the old receipt without reinstating the hold;
+replaying an old release after a new hold likewise leaves the current hold intact.
+Reusing an id for the opposite operation refuses. Holds work on active and
+terminal runs, including unknown outcomes, and share the ordinary append,
+rotation, synchronization and recovery barriers.
+
+```sh
+ouro-ledger hold RUN_ID --request-id keep-investigation-1 --json
+ouro-ledger gc --dry-run --json
+ouro-ledger release RUN_ID --request-id release-investigation-1 --json
+```
+
+`gc --dry-run` returns one page described by the
+[GC plan schema](ledger-v1/gc-plan.schema.json). It defaults to 90 days, with
+`--retain-days 1..36500` selecting a policy for this invocation only. Persistent
+`[ledger] retain` configuration remains pending. A page defaults to 25 runs,
+at most 100; pass `next_after` as `--after RUN_ID` to continue in run-id order.
+Each page reflects current writer state, not a cross-page frozen snapshot or a
+reusable deletion authorization. The preview requires an existing writer:
+it does not start recovery, rebuild the index, create reader directories, expire
+checkpoints, append records or delete files.
+
+Candidates must have a recorded, known terminal outcome, no operator hold, no
+reader pin, no poisoned state and an unchanged manifest/segment layout. Active
+runs and `outcome_unknown` are retained. Age starts at the latest canonical
+writer receipt time, including later notes and hold/release records, rather than
+producer timestamps or filesystem modification times. Clock regression cannot
+shorten that interval; unsupported or future activity times retain the run.
+At the exact cutoff a run has completed its retention interval.
+
+Live reader checkpoints pin their run for the normal ten-minute retry lifetime,
+including completed pages whose replies may have been lost. Pins survive writer
+restart. Recent corrupt or interrupted checkpoints whose run cannot be established,
+unsafe paths and an oversized checkpoint directory conservatively block all
+candidates. The preview reads at most 64 checkpoint entries of at most 32 KiB
+each, and at most 4,096 segment descriptors per run. It leaves even expired
+checkpoints untouched.
+
+The response explains each retained run through `keep_reasons`, and preserves
+its chain head and `child_protection`. It always says `dry_run: true`,
+`deletion_supported: true` and `verification_required: true`. A candidate is a
+retention assessment against accepted writer state and current layout; the
+preview does not hash all canonical bytes again or inventory capture sizes.
+
+`gc` without `--dry-run` deletes eligible whole-run history through the existing
+writer. It uses the same retention policy and pagination and returns a
+[GC result](ledger-v1/gc-result.schema.json) with `pruned`, `kept`, `failed` and
+`next_after`. A per-run failure gives a nonzero CLI exit; other runs in the page
+can have completed. Repeating GC returns the same retained receipt for an
+already-pruned run. Receipt counters describe the original inventory, not fresh
+bytes removed by each retry. This is an explicit operation, not automatic expiry.
+
+Deletion requires a quiescent writer: an owned prepared or admitted run refuses
+the entire operation. Full verification runs on the single writer, so a launch
+must finish or be reconciled first. The deletion response timeout is five minutes;
+a timeout does not cancel work already accepted. Retry GC or restart the writer
+to resolve an uncertain result. A page is not an atomic transaction across runs.
+
+For each eligible run the writer replays and verifies all canonical segments,
+compares their chain, state and replay identities against accepted writer state,
+and inventories exact segment bytes and selected stdout/stderr captures. It then
+publishes a canonical, checksummed [GC anchor](ledger-v1/gc-anchor.schema.json)
+as `gc.json`: synchronize the temporary file, rename it, then synchronize the run
+directory **before any unlink**. This retained authority holds the original run
+metadata, segment manifest, immutable request/effect receipts, payload digests,
+operator identity, retention times and exact file hashes, sizes and inode/device
+identities. It does not retain canonical event bodies or captured stream bytes.
+Metadata and embedded jail receipts remain; pruning is not a full data-erasure
+guarantee or an external custody proof.
+
+Only named canonical segments and `artifacts/stdout.bin`/`stderr.bin` in that
+inventory may be removed. The writer rechecks owned private directories, regular
+unlinked files, identity, size and contents before unlinking through a pinned
+parent directory. Symlinks, hard links, changed bytes or unexpected segments
+refuse. There is no recursive deletion; run directories, `segments.json`, replay
+anchors, projections, reader checkpoints and other files remain. Inventory is
+bounded to 4,096 segments of at most 1 GiB each, two captures of at most 16 MiB
+each, 65,536 replay-map entries and 16 MiB of retained metadata. Oversized runs
+are retained with an error. These bounds do not change normal segment rotation.
+
+After unlinking, file-parent directories are synchronized before publication of
+the matching [completion marker](ledger-v1/gc-complete.schema.json),
+`gc-done.json`. Restart resumes a pending inventory, accepting authorized missing
+members and refusing changed or reappearing files. Corrupt retained authority
+refuses writer startup rather than recreating preparation identities from absent
+history. Unknown outcomes, holds and live reader pins never enter this protocol.
+
+`show` and `runs` preserve terminal state, outcome, chain head and protection,
+with `history.state: pruning|pruned`. Collected captures report `pruned`, zero
+`stored_bytes` and their original `pruned_bytes`. Exact preparation, owner,
+request and effect replays remain stable; new mutations refuse after the anchor
+is durable. Query/export refuse with an explicit pruned-history error. `verify`
+reports zero available events and the history marker: its local consistency
+result covers retained metadata, matching completion and projection, not deleted
+event bytes. The original `none` label remains `unprotected`.
+
+## 9. Acceptance and remaining milestone 2 scope
 
 The Rust store tests exercise process-lifetime writer exclusion; lost replies
 and recovery; immutable prepare/request/effect identities; reserved admission
@@ -445,6 +558,9 @@ durable cursor restart/retry tests, with working-tree source hashes and platform
 limits. The
 [October 5 rotation record](ledger-v1/evidence/2026-10-05-rotation/README.md)
 covers multi-segment continuity, rotation failures and reader restoration.
+The [October 5 pruning record](ledger-v1/evidence/2026-10-05-pruning/README.md)
+covers hold/reader retention, deletion boundaries, retained replay identities,
+changed-file refusal and actual CLI pruning of a synthetic aged run.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
@@ -461,14 +577,14 @@ and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
 unimplemented verbs/features: `append` for independent operator intents,
-`tail`, cross-run query and comparison, `diff`, `bundle`, `hold`, `release`, `gc`,
-retention-pruned deduplication/chain anchors,
-best-effort outage reconciliation, capture retention, signed bundles and the
+`tail`, cross-run query and comparison, `diff`, `bundle`, persistent retention
+configuration, separate capture retention policies,
+best-effort outage reconciliation, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.
 
-## 9. Linux quickstart
+## 10. Linux quickstart
 
 Build both local executables from the repository root:
 

@@ -1,0 +1,28 @@
+{
+  "schema": "ouro.ledger.gc-plan/1",
+  "dry_run": true,
+  "deletion_supported": true,
+  "verification_required": true,
+  "retain_days": 90,
+  "evaluated_at": "2026-10-05T12:00:00Z",
+  "cutoff": "2026-07-07T12:00:00Z",
+  "runs": [
+    {
+      "run_id": "run_11111111111111111111111111111111",
+      "state": "prepared",
+      "child_protection": "unprotected",
+      "chain": {
+        "head_seq": 3,
+        "head_digest": "sha256:59d00d8feb930504b847939bf9d7de18d82d331e1bb9c5160e413e23e6ff1ca5"
+      },
+      "last_activity_at": "2026-10-05T11:00:00Z",
+      "candidate": false,
+      "keep_reasons": [
+        "active_run",
+        "operator_hold",
+        "retention_window"
+      ]
+    }
+  ],
+  "next_after": null
+}

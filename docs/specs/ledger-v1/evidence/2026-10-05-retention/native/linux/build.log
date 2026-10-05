@@ -1,0 +1,11 @@
+   Compiling libsqlite3-sys v0.38.2
+   Compiling rustls v0.23.45
+   Compiling jsonschema v0.57.0
+   Compiling rusqlite v0.40.2
+   Compiling ouro-jail v0.1.0 (/home/ubuntu/ouro-ledger-retention-20261005-r1/crates/ouro-jail)
+   Compiling rcgen v0.14.10
+   Compiling toml v0.8.23
+   Compiling webpki-roots v1.0.9
+   Compiling ouro-fixture v0.1.0 (/home/ubuntu/ouro-ledger-retention-20261005-r1/crates/ouro-fixture)
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/ouro-ledger-retention-20261005-r1/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 2m 29s

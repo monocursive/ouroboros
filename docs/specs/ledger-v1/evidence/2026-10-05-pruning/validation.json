@@ -1,0 +1,55 @@
+{
+  "base_revision": "5b0b5531628f8612c43c0873cb3a9261c293b847",
+  "dirty": true,
+  "source_files": 535,
+  "source_manifest_sha256": "6a1a51ce0e6282c6bab7cbfa3d1f9aed6abbec9fd196d00585654ace025df6f1",
+  "rust": "1.98.1",
+  "tests": {
+    "macos": {
+      "passed": 90,
+      "failed": 0,
+      "ignored": 0,
+      "runtime_skips": 0
+    },
+    "linux": {
+      "passed": 106,
+      "failed": 0,
+      "ignored": 0,
+      "runtime_skips": 0,
+      "real_jail_launch_tests": 15
+    }
+  },
+  "checks": {
+    "native_release_build": "passed",
+    "strict_clippy_macos_linux": "passed",
+    "contracts": "passed",
+    "format": "passed",
+    "i02": "passed",
+    "freeze": "passed",
+    "links": "passed",
+    "source_pre_post": "passed",
+    "binary_hashes": "passed",
+    "jail_doctor_ready": true
+  },
+  "scope": "Local macOS ledger and native Linux ledger regression; GC uses synthetic test stores, not user data. No managed, provider, native macOS containment or physical power-loss acceptance.",
+  "additional_platforms": {
+    "raspberry_pi_arm64": {
+      "result": "partial",
+      "passed": 91,
+      "failed": 15,
+      "ignored": 0,
+      "runtime_skips": 0,
+      "launch_tests_failed_at_preflight": 15,
+      "jail_doctor_ready": false,
+      "build": "passed",
+      "strict_clippy": "passed",
+      "source_pre_post": "passed",
+      "binary_hashes": "passed",
+      "unsupported_required_capabilities": [
+        "closed_set_observation",
+        "syscall_filter"
+      ],
+      "evidence": "native/pi/validation.json"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+Linux 7.0.0-31-generic x86_64 GNU/Linux
+rustc 1.98.1 (48a229cea 2026-09-01)
+revision=5b0b5531628f8612c43c0873cb3a9261c293b847
+dirty=true
+conformance=1
+SigIgn:	0000000000001004
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        77G   73G  3.7G  96% /

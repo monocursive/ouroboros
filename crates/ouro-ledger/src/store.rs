@@ -28,9 +28,13 @@ use crate::protocol::{
 
 use crate::manifest::{self, STREAM};
 
+mod pruning;
+mod retention;
+
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct Replay {
     digest: String,
     receipt: AppendReceipt,
@@ -59,6 +63,9 @@ struct Stream {
     segment_hash: Sha256,
     replay_hash: Sha256,
     anchors: BTreeMap<u64, Anchor>,
+    last_activity_at: Option<String>,
+    retention_time_valid: bool,
+    pruned: Option<pruning::Retained>,
 }
 
 pub struct Store {
@@ -87,6 +94,14 @@ enum Fault {
     Projection,
     Manifest,
     DirectorySync,
+    GcIntentWrite,
+    GcIntentSync,
+    GcBeforeUnlink,
+    GcAfterUnlink,
+    GcDirectorySync,
+    GcCompletion,
+    GcCompletionSync,
+    GcProjection,
 }
 
 pub fn private_directory(path: &Path) -> Result<()> {
@@ -374,6 +389,8 @@ fn initial_run(run_id: &str, request_id: &str, attempt_id: &str, payload: Value)
             head_seq: 0,
             head_digest: None,
         },
+        holds: vec![],
+        history: None,
     }
 }
 
@@ -420,7 +437,11 @@ impl Store {
             }
             check_run_id(&name)?;
             private_directory(&entry.path())?;
-            let (stream, _) = store.load_stream_with_sync(&name, &recovery_sync)?;
+            let stream = if let Some(retained) = pruning::read(&store.root.join(&name), &name)? {
+                store.restore_pruned(&name, retained)?
+            } else {
+                store.load_stream_with_sync(&name, &recovery_sync)?.0
+            };
             if !stream.poisoned.is_empty() {
                 store.recovery_ambiguous = true;
             }
@@ -440,7 +461,9 @@ impl Store {
                 // Every verified segment was synchronized before publishing
                 // recovered receipts, including a complete unacknowledged tail.
                 store.write_projection(&stream.run)?;
-                crate::manifest::write(&store.root.join(&name), &stream.manifest())?;
+                if stream.pruned.is_none() {
+                    crate::manifest::write(&store.root.join(&name), &stream.manifest())?;
+                }
             }
             store.streams.insert(name, stream);
         }
@@ -502,6 +525,9 @@ impl Store {
                 segment_hash: Sha256::new(),
                 replay_hash: Sha256::new(),
                 anchors: BTreeMap::new(),
+                last_activity_at: None,
+                retention_time_valid: true,
+                pruned: None,
             },
         );
         self.preparations
@@ -524,6 +550,11 @@ impl Store {
                 return Err(LedgerError("attempt already has an owner; dead owners require reconciliation and are never restarted".into()));
             }
             return Ok(());
+        }
+        if stream.pruned.is_some() {
+            return Err(LedgerError(
+                "pruned run cannot acquire a new launch owner".into(),
+            ));
         }
         self.append(
             run_id,
@@ -573,7 +604,9 @@ impl Store {
                 "owner identity does not match the durable claim".into(),
             ));
         }
-        validate_intent(self.stream(run_id)?, &json!({"kind":kind,"body":body}))?;
+        if self.stream(run_id)?.pruned.is_none() {
+            validate_intent(self.stream(run_id)?, &json!({"kind":kind,"body":body}))?;
+        }
         self.append(
             run_id,
             json!({"kind":kind,"body":body,"request_id":request_id,"effect_id":effect_id}),
@@ -683,6 +716,11 @@ impl Store {
         if !stream.poisoned.is_empty() {
             return Err(LedgerError(
                 "stream is poisoned; no dependent dispatch or sequence reuse".into(),
+            ));
+        }
+        if stream.pruned.is_some() {
+            return Err(LedgerError(
+                "run history was pruned; new mutations are refused".into(),
             ));
         }
         validate_transition(stream, &record)?;
@@ -897,6 +935,11 @@ impl Store {
             .streams
             .get(&request.run_id)
             .ok_or_else(|| LedgerError("unknown run".into()))?;
+        if stream.pruned.is_some() {
+            return Err(LedgerError(
+                "run history was pruned; canonical query and export are unavailable".into(),
+            ));
+        }
         self.readers.read(
             &self.root.join(&request.run_id).join(STREAM),
             request,
@@ -981,6 +1024,9 @@ impl Store {
         };
         ids.iter()
             .map(|id| {
+                if self.stream(id)?.pruned.is_some() {
+                    return self.verify_pruned(id);
+                }
                 let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
                 let mut problems = stream.poisoned.clone();
                 if stream.poisoned.is_empty() {
@@ -1023,6 +1069,7 @@ impl Store {
                     coverage: stream.run.coverage,
                     events,
                     problems,
+                    history: None,
                 })
             })
             .collect()
@@ -1050,6 +1097,9 @@ impl Store {
             segment_hash: Sha256::new(),
             replay_hash: Sha256::new(),
             anchors: BTreeMap::new(),
+            last_activity_at: None,
+            retention_time_valid: true,
+            pruned: None,
         };
         let directory = self.root.join(run_id);
         let manifest = match crate::manifest::read(&directory, run_id) {
@@ -1276,6 +1326,23 @@ impl Stream {
         receipt: &AppendReceipt,
         payload_digest: &str,
     ) -> Result<()> {
+        // Retention uses writer receipt time, never producer time or file mtime.
+        // A clock regression cannot shorten the observed retention interval.
+        match record["received_at"]
+            .as_str()
+            .filter(|time| crate::reader::utc_second(time))
+        {
+            Some(time) => {
+                if self
+                    .last_activity_at
+                    .as_deref()
+                    .is_none_or(|last| time > last)
+                {
+                    self.last_activity_at = Some(time.into());
+                }
+            }
+            None => self.retention_time_valid = false,
+        }
         self.segment_hash.update(bytes);
         self.segment_hash.update(b"\n");
         self.segment_bytes += bytes.len() as u64 + 1;
@@ -1562,6 +1629,13 @@ fn validate_transition(stream: &Stream, record: &Value) -> Result<()> {
                 }
             }
         }
+        "hold" | "release" => {
+            if record["body"] != json!({}) || record.get("effect_id").is_some() {
+                return Err(LedgerError(
+                    "retention intents require an empty body and no effect id".into(),
+                ));
+            }
+        }
         "prepared" | "owner_claimed" | "admitted" | "denied" | "settled" | "note"
         | "outcome_unknown" => {}
         _ => return Err(LedgerError("unknown durable record kind".into())),
@@ -1602,6 +1676,8 @@ fn apply_record(
         head_digest: Some(receipt.digest),
     };
     match record["kind"].as_str().unwrap_or("") {
+        "hold" => stream.run.holds = vec!["operator".into()],
+        "release" => stream.run.holds.clear(),
         "owner_claimed" => {
             stream.run.owner = Some(serde_json::from_value(record["body"]["owner"].clone())?)
         }
@@ -1753,6 +1829,282 @@ mod tests {
         store.claim_owner(&run.run_id, &peer()).unwrap();
         (temp, store, run)
     }
+
+    #[test]
+    fn retention_holds_replay_without_reapplying_an_old_intent_after_release() {
+        let (temp, mut store, run) = create();
+        store.segment_limit = 1;
+        let original = fs::read(store.root.join(&run.run_id).join(STREAM)).unwrap();
+        let held = store.hold(&run.run_id, "hold-1", &peer()).unwrap();
+        assert_eq!(store.show(&run.run_id).unwrap().holds, ["operator"]);
+        assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
+        assert!(store.release(&run.run_id, "hold-1", &peer()).is_err());
+        let released = store.release(&run.run_id, "release-1", &peer()).unwrap();
+        assert_eq!(released.seq, held.seq + 1);
+        assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
+        assert!(store.show(&run.run_id).unwrap().holds.is_empty());
+        assert!(
+            store
+                .append_owner(
+                    &run.run_id,
+                    "forged",
+                    "hold",
+                    None,
+                    &json!({}),
+                    &peer(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
+                .is_err()
+        );
+        let path = store.root.join(&run.run_id).join(manifest::name(2));
+        let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(record["provenance"]["role"], "operator");
+        assert!(record["provenance"]["token_id"].is_null());
+        drop(store);
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
+        assert_eq!(
+            store.release(&run.run_id, "release-1", &peer()).unwrap(),
+            released
+        );
+        assert!(store.show(&run.run_id).unwrap().holds.is_empty());
+        store.hold(&run.run_id, "hold-2", &peer()).unwrap();
+        assert_eq!(
+            store.release(&run.run_id, "release-1", &peer()).unwrap(),
+            released
+        );
+        assert_eq!(store.show(&run.run_id).unwrap().holds, ["operator"]);
+        assert_eq!(
+            fs::read(store.root.join(&run.run_id).join(STREAM)).unwrap(),
+            original
+        );
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+        drop(store);
+        assert_eq!(
+            Store::open(&temp.path().join("data"))
+                .unwrap()
+                .show(&run.run_id)
+                .unwrap()
+                .holds,
+            ["operator"]
+        );
+    }
+
+    #[test]
+    fn retention_faults_preserve_history_and_recover_one_original_receipt() {
+        for release in [false, true] {
+            for fault in [
+                Fault::BeforeWrite,
+                Fault::RotationCreated,
+                Fault::RotationSynced,
+                Fault::PartialWrite,
+                Fault::EventSync,
+                Fault::Projection,
+                Fault::Manifest,
+                Fault::DirectorySync,
+            ] {
+                let (temp, mut store, run) = create();
+                if release {
+                    store.hold(&run.run_id, "first-hold", &peer()).unwrap();
+                }
+                store.segment_limit = 1;
+                let before = store.show(&run.run_id).unwrap().chain.head_seq;
+                store.fault = Some(fault);
+                let apply = |store: &mut Store| {
+                    if release {
+                        store.release(&run.run_id, "retry", &peer())
+                    } else {
+                        store.hold(&run.run_id, "retry", &peer())
+                    }
+                };
+                assert!(apply(&mut store).is_err());
+                store.fault = None;
+                assert!(
+                    apply(&mut store).is_err(),
+                    "uncertain writes cannot acknowledge before restart"
+                );
+                let directory = store.root.join(&run.run_id);
+                let history = manifest::names(&directory)
+                    .unwrap()
+                    .into_iter()
+                    .map(|name| {
+                        let bytes = fs::read(directory.join(&name)).unwrap();
+                        (name, bytes)
+                    })
+                    .collect::<Vec<_>>();
+                drop(store);
+                let mut store = Store::open(&temp.path().join("data")).unwrap();
+                for (name, bytes) in &history {
+                    assert_eq!(&fs::read(directory.join(name)).unwrap(), bytes);
+                }
+                if matches!(fault, Fault::PartialWrite) {
+                    assert!(apply(&mut store).is_err());
+                    assert!(!store.verify(None).unwrap()[0].local_consistency);
+                } else {
+                    let receipt = apply(&mut store).unwrap();
+                    assert_eq!(receipt.seq, before + 1);
+                    assert_eq!(apply(&mut store).unwrap(), receipt);
+                    assert_eq!(store.show(&run.run_id).unwrap().holds.is_empty(), release);
+                    assert!(store.verify(None).unwrap()[0].local_consistency);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retention_preview_keeps_active_unknown_held_recent_and_damaged_runs() {
+        use std::time::Duration;
+        let (_temp, mut store, run) = create();
+        store
+            .append_owner(
+                &run.run_id,
+                "denial",
+                "denied",
+                None,
+                &json!({"outcome":{"kind":"refused"}}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let now = SystemTime::now();
+        let future = now + Duration::from_secs(90 * 86_400);
+        let plan = store.gc_plan_at(90, None, 100, now).unwrap();
+        assert!(
+            plan.runs[0]
+                .keep_reasons
+                .iter()
+                .any(|r| r == "retention_window")
+        );
+        assert!(
+            store
+                .gc_plan_at(90, None, 100, now - Duration::from_secs(10))
+                .unwrap()
+                .runs[0]
+                .keep_reasons
+                .iter()
+                .any(|r| r == "clock_before_activity")
+        );
+        assert!(store.gc_plan_at(90, None, 100, future).unwrap().runs[0].candidate);
+        store.hold(&run.run_id, "keep", &peer()).unwrap();
+        assert!(
+            store.gc_plan_at(90, None, 100, future).unwrap().runs[0]
+                .keep_reasons
+                .iter()
+                .any(|r| r == "operator_hold")
+        );
+        store.release(&run.run_id, "unhold", &peer()).unwrap();
+        let active = store.prepare("active", &payload(), &peer()).unwrap();
+        let unknown = store.prepare("unknown", &payload(), &peer()).unwrap();
+        store.claim_owner(&unknown.run_id, &peer()).unwrap();
+        store
+            .append_owner(
+                &unknown.run_id,
+                "unknown",
+                "outcome_unknown",
+                None,
+                &json!({}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let plan = store.gc_plan_at(90, None, 100, future).unwrap();
+        assert!(
+            plan.runs
+                .iter()
+                .find(|r| r.run_id == active.run_id)
+                .unwrap()
+                .keep_reasons
+                .iter()
+                .any(|r| r == "active_run")
+        );
+        assert!(
+            plan.runs
+                .iter()
+                .find(|r| r.run_id == unknown.run_id)
+                .unwrap()
+                .keep_reasons
+                .iter()
+                .any(|r| r == "outcome_unknown")
+        );
+        let first = store.gc_plan_at(90, None, 1, future).unwrap();
+        let second = store
+            .gc_plan_at(90, first.next_after.as_deref(), 100, future)
+            .unwrap();
+        assert_eq!(second.runs.len(), 2);
+        assert!(second.runs.iter().all(|r| r.run_id > first.runs[0].run_id));
+        assert!(second.next_after.is_none());
+        assert!(store.gc_plan(0, None, 1).is_err());
+        assert!(store.gc_plan(u32::MAX, None, 1).is_err());
+        assert!(store.gc_plan(90, None, 101).is_err());
+        assert!(store.gc_plan(90, Some("../escape"), 1).is_err());
+        assert!(serde_json::to_vec(&plan).unwrap().len() < MAX_FRAME_BYTES);
+        let path = store.root.join(&run.run_id).join(STREAM);
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(b"partial").unwrap();
+        let plan = store.gc_plan_at(90, None, 100, future).unwrap();
+        assert!(
+            plan.runs
+                .iter()
+                .find(|r| r.run_id == run.run_id)
+                .unwrap()
+                .keep_reasons
+                .iter()
+                .any(|r| r == "canonical_layout_changed")
+        );
+    }
+
+    #[test]
+    fn retention_preview_pins_durable_readers_without_expiring_or_repairing_files() {
+        use std::time::Duration;
+        let (temp, mut store, run) = create();
+        store
+            .read(&read_request(&run, crate::protocol::ReadSelector::All))
+            .unwrap();
+        let directory = store.root.join("readers");
+        let checkpoint = fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let bytes = fs::read(&checkpoint).unwrap();
+        drop(store);
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        let now = SystemTime::now();
+        let plan = store.gc_plan_at(90, None, 100, now).unwrap();
+        assert!(
+            plan.runs[0]
+                .keep_reasons
+                .iter()
+                .any(|r| r == "reader_snapshot")
+        );
+        let later = store
+            .gc_plan_at(90, None, 100, now + Duration::from_secs(601))
+            .unwrap();
+        assert!(
+            !later.runs[0]
+                .keep_reasons
+                .iter()
+                .any(|r| r == "reader_snapshot")
+        );
+        assert_eq!(fs::read(&checkpoint).unwrap(), bytes);
+        fs::write(&checkpoint, b"corrupt").unwrap();
+        assert!(
+            store.gc_plan_at(90, None, 100, now).unwrap().runs[0]
+                .keep_reasons
+                .iter()
+                .any(|r| r == "reader_checkpoint_unknown")
+        );
+        assert_eq!(fs::read(&checkpoint).unwrap(), b"corrupt");
+        fs::remove_file(&checkpoint).unwrap();
+        std::os::unix::fs::symlink("../writer.lock", &checkpoint).unwrap();
+        assert!(
+            store.gc_plan_at(90, None, 100, now).unwrap().runs[0]
+                .keep_reasons
+                .iter()
+                .any(|r| r == "reader_checkpoint_unknown")
+        );
+    }
     fn note(store: &mut Store, run: &RunRecord, key: &str, body: Value) -> Result<AppendReceipt> {
         store.append_owner(
             &run.run_id,
@@ -1763,6 +2115,349 @@ mod tests {
             &peer(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
+    }
+
+    fn gc_fixture() -> (tempfile::TempDir, Store, RunRecord) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut plan = payload();
+        plan["profile"] = json!("none");
+        plan["capture"]["streams"] = json!(["stdout"]);
+        let run = store.prepare("gc-prepare", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        store.segment_limit = 1;
+        source_fixture(&mut store, &run, "exec", 1, None);
+        store
+            .append_owner(
+                &run.run_id,
+                "gc-note",
+                "note",
+                Some("effect-1"),
+                &json!({"note":"private-note-body"}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let path = store.root.join(&run.run_id).join("artifacts/stdout.bin");
+        let mut file = private_file(&path, true, false).unwrap();
+        file.write_all(b"private-capture").unwrap();
+        file.sync_all().unwrap();
+        store.append_owner(&run.run_id, "gc-denial", "denied", None,
+            &json!({"outcome":{"kind":"refused"},"capture":{"stdout":{"state":"captured","stored_bytes":15,"path":"artifacts/stdout.bin"},"stderr":{"state":"not_captured"}}}),
+            &peer(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        (temp, store, run)
+    }
+
+    fn gc_future() -> SystemTime {
+        SystemTime::now() + std::time::Duration::from_secs(2 * 86_400)
+    }
+
+    #[test]
+    fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels() {
+        let (temp, mut store, run) = gc_fixture();
+        let original = store.show(&run.run_id).unwrap();
+        let replay = store.stream(&run.run_id).unwrap().replay.clone();
+        let directory = store.root.join(&run.run_id);
+        let manifest = fs::read(directory.join("segments.json")).unwrap();
+        let result = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(result.pruned.len(), 1);
+        assert!(result.pruned[0].removed_files >= 4);
+        assert!(!directory.join(STREAM).exists());
+        assert!(!directory.join("artifacts/stdout.bin").exists());
+        assert_eq!(fs::read(directory.join("segments.json")).unwrap(), manifest);
+        let anchor = fs::read_to_string(directory.join("gc.json")).unwrap();
+        assert!(!anchor.contains("private-note-body") && !anchor.contains("private-capture"));
+        let projected = store.show(&run.run_id).unwrap();
+        assert_eq!(projected.chain, original.chain);
+        assert_eq!(projected.state, "denied");
+        assert_eq!(projected.child_protection, "unprotected");
+        assert_eq!(projected.history.as_ref().unwrap().state, "pruned");
+        assert_eq!(projected.capture["stdout"]["state"], "pruned");
+        assert_eq!(projected.capture["stdout"]["stored_bytes"], 0);
+        assert_eq!(projected.capture["stdout"]["pruned_bytes"], 15);
+        assert!(
+            store
+                .read(&read_request(&run, crate::protocol::ReadSelector::All))
+                .unwrap_err()
+                .0
+                .contains("pruned")
+        );
+        assert!(store.hold(&run.run_id, "too-late", &peer()).is_err());
+        store.flush_index();
+        drop(store);
+        let mut recovered = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(
+            recovered
+                .prepare("gc-prepare", &run.payload, &peer())
+                .unwrap()
+                .run_id,
+            run.run_id
+        );
+        let mut conflicting = run.payload.clone();
+        conflicting["argv_digest"] = json!(format!("sha256:{}", "f".repeat(64)));
+        assert!(
+            recovered
+                .prepare("gc-prepare", &conflicting, &peer())
+                .is_err()
+        );
+        recovered.claim_owner(&run.run_id, &peer()).unwrap();
+        let note = recovered
+            .append_owner(
+                &run.run_id,
+                "gc-note",
+                "note",
+                Some("effect-1"),
+                &json!({"note":"private-note-body"}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        assert_eq!(note, replay["gc-note"].receipt);
+        assert!(
+            recovered
+                .append_owner(
+                    &run.run_id,
+                    "new-key",
+                    "note",
+                    Some("effect-1"),
+                    &json!({"note":"private-note-body"}),
+                    &peer(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
+                .is_err()
+        );
+        assert!(
+            recovered
+                .append_owner(
+                    &run.run_id,
+                    "gc-note",
+                    "note",
+                    Some("effect-1"),
+                    &json!({"note":"changed"}),
+                    &peer(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
+                .is_err()
+        );
+        source_fixture(&mut recovered, &run, "exec", 1, None);
+        assert_eq!(recovered.stream(&run.run_id).unwrap().replay, replay);
+        let verified = recovered.verify(Some(&run.run_id)).unwrap();
+        assert!(verified[0].local_consistency, "{:?}", verified[0]);
+        assert_eq!(verified[0].events, 0);
+        assert_eq!(verified[0].history.as_ref().unwrap().state, "pruned");
+        assert_eq!(verified[0].child_protection, "unprotected");
+        let again = recovered.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&again.pruned).unwrap(),
+            serde_json::to_value(&result.pruned).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("gc.json")).unwrap(),
+            anchor
+        );
+    }
+
+    #[test]
+    fn gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors() {
+        for fault in [
+            Fault::GcIntentWrite,
+            Fault::GcIntentSync,
+            Fault::GcBeforeUnlink,
+            Fault::GcAfterUnlink,
+            Fault::GcDirectorySync,
+            Fault::GcCompletion,
+            Fault::GcCompletionSync,
+            Fault::GcProjection,
+        ] {
+            let (temp, mut store, run) = gc_fixture();
+            let replay = store.stream(&run.run_id).unwrap().replay.clone();
+            let directory = store.root.join(&run.run_id);
+            let manifest = fs::read(directory.join("segments.json")).unwrap();
+            store.fault = Some(fault);
+            let failed = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+            assert_eq!(failed.failed.len(), 1);
+            assert!(failed.pruned.is_empty());
+            if matches!(fault, Fault::GcIntentWrite) {
+                assert!(!directory.join("gc.json").exists());
+                assert!(directory.join(STREAM).exists());
+            } else {
+                assert!(directory.join("gc.json").exists());
+                assert!(
+                    store
+                        .read(&read_request(&run, crate::protocol::ReadSelector::All))
+                        .is_err()
+                );
+                assert!(store.hold(&run.run_id, "after-decision", &peer()).is_err());
+            }
+            drop(store);
+            let mut recovered = Store::open(&temp.path().join("data")).unwrap();
+            let retried = recovered.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+            assert!(retried.failed.is_empty(), "{:?}", retried.failed);
+            assert_eq!(retried.pruned.len(), 1);
+            assert_eq!(fs::read(directory.join("segments.json")).unwrap(), manifest);
+            assert_eq!(recovered.stream(&run.run_id).unwrap().replay, replay);
+            assert!(!directory.join(STREAM).exists());
+            assert!(!directory.join("artifacts/stdout.bin").exists());
+            assert!(recovered.verify(None).unwrap()[0].local_consistency);
+        }
+    }
+
+    #[test]
+    fn gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directories() {
+        for mode in ["canonical", "capture", "symlink", "anchor"] {
+            let (temp, mut store, run) = gc_fixture();
+            let directory = store.root.join(&run.run_id);
+            let outside = temp.path().join("outside");
+            private_directory(&outside).unwrap();
+            fs::write(outside.join("stdout.bin"), b"must be kept").unwrap();
+            if mode != "canonical" {
+                store.fault = Some(Fault::GcBeforeUnlink);
+                assert_eq!(
+                    store
+                        .gc_at(1, None, 100, &peer(), gc_future())
+                        .unwrap()
+                        .failed
+                        .len(),
+                    1
+                );
+                store.fault = None;
+            }
+            match mode {
+                "canonical" => {
+                    let path = directory.join(manifest::name(3));
+                    let bytes = fs::read_to_string(&path).unwrap();
+                    assert!(bytes.contains("private-note-body"));
+                    fs::write(
+                        path,
+                        bytes.replace("private-note-body", "changed-note-body"),
+                    )
+                    .unwrap();
+                }
+                "capture" => {
+                    fs::write(directory.join("artifacts/stdout.bin"), b"changed-capture").unwrap();
+                }
+                "symlink" => {
+                    fs::rename(
+                        directory.join("artifacts"),
+                        directory.join("preserved-artifacts"),
+                    )
+                    .unwrap();
+                    std::os::unix::fs::symlink(&outside, directory.join("artifacts")).unwrap();
+                }
+                "anchor" => {
+                    fs::write(directory.join("gc.json"), b"broken\n").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let first = fs::read(directory.join(STREAM)).unwrap();
+            let failed = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+            assert_eq!(failed.failed.len(), 1, "{mode}");
+            assert_eq!(fs::read(directory.join(STREAM)).unwrap(), first);
+            assert_eq!(
+                fs::read(outside.join("stdout.bin")).unwrap(),
+                b"must be kept"
+            );
+            if mode == "canonical" {
+                assert!(!directory.join("gc.json").exists());
+            } else {
+                drop(store);
+                assert!(Store::open(&temp.path().join("data")).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn gc_keeps_held_unknown_recent_and_live_reader_runs_and_refuses_active_launches() {
+        let (_temp, mut store, run) = gc_fixture();
+        assert!(store.gc(1, None, 100, &peer()).unwrap().pruned.is_empty());
+        store.hold(&run.run_id, "hold", &peer()).unwrap();
+        assert!(
+            store
+                .gc_at(1, None, 100, &peer(), gc_future())
+                .unwrap()
+                .pruned
+                .is_empty()
+        );
+        store.release(&run.run_id, "release", &peer()).unwrap();
+        let active = store.prepare("active", &payload(), &peer()).unwrap();
+        store.claim_owner(&active.run_id, &peer()).unwrap();
+        assert!(
+            store
+                .gc_at(1, None, 100, &peer(), gc_future())
+                .unwrap_err()
+                .0
+                .contains("quiescent")
+        );
+        store.settle_orphans(&peer(), |_| false).unwrap();
+        store
+            .read(&read_request(&run, crate::protocol::ReadSelector::All))
+            .unwrap();
+        // Model a reader begun at the injected collection clock, after the run aged.
+        let now = gc_future();
+        let entry = fs::read_dir(store.root.join("readers"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut envelope: Value = serde_json::from_slice(&fs::read(&entry).unwrap()).unwrap();
+        envelope["checkpoint"]["created"] =
+            json!(now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+        envelope["digest"] = json!(digest(&envelope["checkpoint"]).unwrap());
+        fs::write(&entry, canonical(&envelope).unwrap()).unwrap();
+        let result = store.gc_at(1, None, 100, &peer(), now).unwrap();
+        assert!(result.pruned.is_empty());
+        assert!(result.kept.iter().any(
+            |r| r.run_id == run.run_id && r.keep_reasons.iter().any(|r| r == "reader_snapshot")
+        ));
+        assert!(
+            result.kept.iter().any(|r| r.run_id == active.run_id
+                && r.keep_reasons.iter().any(|r| r == "outcome_unknown"))
+        );
+        let result = store
+            .gc_at(
+                1,
+                None,
+                100,
+                &peer(),
+                now + std::time::Duration::from_secs(601),
+            )
+            .unwrap();
+        assert_eq!(result.pruned.len(), 1);
+        assert_eq!(result.pruned[0].run_id, run.run_id);
+        assert_eq!(store.show(&active.run_id).unwrap().state, "outcome_unknown");
+    }
+
+    #[test]
+    fn gc_never_removes_files_reappearing_after_completion() {
+        let (temp, mut store, run) = gc_fixture();
+        let directory = store.root.join(&run.run_id);
+        assert_eq!(
+            store
+                .gc_at(1, None, 100, &peer(), gc_future())
+                .unwrap()
+                .pruned
+                .len(),
+            1
+        );
+        private_file(&directory.join(STREAM), true, false)
+            .unwrap()
+            .write_all(b"restored history")
+            .unwrap();
+        assert!(!store.verify(None).unwrap()[0].local_consistency);
+        let retry = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+        assert_eq!(retry.failed.len(), 1);
+        assert_eq!(
+            fs::read(directory.join(STREAM)).unwrap(),
+            b"restored history"
+        );
+        drop(store);
+        assert!(Store::open(&temp.path().join("data")).is_err());
+        assert_eq!(
+            fs::read(directory.join(STREAM)).unwrap(),
+            b"restored history"
+        );
     }
 
     fn read_request(run: &RunRecord, selector: crate::protocol::ReadSelector) -> ReadRequest {

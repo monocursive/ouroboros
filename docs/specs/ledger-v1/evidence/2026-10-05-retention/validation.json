@@ -1,0 +1,33 @@
+{
+  "base_revision": "5b0b5531628f8612c43c0873cb3a9261c293b847",
+  "working_tree": true,
+  "scope": "durable operator holds and non-destructive retention preview",
+  "macos": {
+    "passed": 84,
+    "failed": 0,
+    "ignored": 0,
+    "skip_markers": 0
+  },
+  "linux": {
+    "passed": 100,
+    "failed": 0,
+    "ignored": 0,
+    "skip_markers": 0,
+    "real_launch_tests": 15,
+    "doctor_ready": true,
+    "source_files_checked": 531,
+    "binary_hashes_checked": 3,
+    "validation_exit": 0
+  },
+  "checks": {
+    "ledger_clippy": "passed",
+    "ledger_contract": "passed",
+    "i02": "passed",
+    "format": "passed",
+    "links": "passed",
+    "freeze": "passed",
+    "source_hashes": "passed"
+  },
+  "gc_deletion": "not_implemented",
+  "persistent_retention_config": "not_implemented"
+}

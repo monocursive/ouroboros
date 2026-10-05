@@ -130,6 +130,39 @@
         "head_digest"
       ],
       "additionalProperties": false
+    },
+    "holds": {
+      "type": "array",
+      "maxItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "const": "operator"
+      }
+    },
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "anchor_digest",
+        "collected_at"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "pruning",
+            "pruned"
+          ]
+        },
+        "anchor_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "collected_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
     }
   },
   "additionalProperties": false,

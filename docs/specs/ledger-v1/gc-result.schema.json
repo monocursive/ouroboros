@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-gc-result:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "retain_days",
+    "pruned",
+    "kept",
+    "failed",
+    "next_after"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.gc-result/1"
+    },
+    "retain_days": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 36500
+    },
+    "pruned": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "chain",
+          "history",
+          "removed_files",
+          "removed_bytes"
+        ],
+        "properties": {
+          "run_id": {
+            "$ref": "urn:ouro:schema:ledger-run:1#/properties/run_id"
+          },
+          "chain": {
+            "$ref": "urn:ouro:schema:ledger-run:1#/properties/chain"
+          },
+          "history": {
+            "allOf": [
+              {
+                "$ref": "urn:ouro:schema:ledger-run:1#/properties/history"
+              },
+              {
+                "properties": {
+                  "state": {
+                    "const": "pruned"
+                  }
+                }
+              }
+            ]
+          },
+          "removed_files": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4098
+          },
+          "removed_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4398080065536
+          }
+        }
+      }
+    },
+    "kept": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "urn:ouro:schema:ledger-gc-plan:1#/properties/runs/items"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    "failed": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "message"
+        ],
+        "properties": {
+          "run_id": {
+            "$ref": "urn:ouro:schema:ledger-run:1#/properties/run_id"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
+      }
+    },
+    "next_after": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^run_[0-9a-f]{32}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,3 @@
+target/release/ouro-jail: OK
+target/release/ouro-fixture: OK
+target/release/ouro-ledger: OK

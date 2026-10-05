@@ -312,7 +312,7 @@ fn checkpoints(directory: &Path, now: u64) -> Result<Checkpoints> {
     Ok(result)
 }
 
-fn utc_second(value: &str) -> bool {
+pub(crate) fn utc_second(value: &str) -> bool {
     let b = value.as_bytes();
     if b.len() != 20
         || b[4] != b'-'
@@ -488,6 +488,65 @@ fn selection_status(filter: &ReadFilter, coverage: &Value) -> &'static str {
 }
 
 impl Readers {
+    /// Called only after a durable pruning decision and after all live pins expired.
+    pub(crate) fn forget_run(&mut self, run_id: &str) {
+        self.sessions
+            .retain(|_, session| session.request.run_id != run_id);
+    }
+
+    /// Inspect pins without expiring files, creating directories or restoring pages.
+    /// Even the final page stays pinned for the normal lost-reply retry interval.
+    pub(crate) fn retention_pins(&self, root: &Path, now: u64) -> Result<BTreeSet<String>> {
+        let mut pins = self
+            .sessions
+            .values()
+            .filter(|session| now.saturating_sub(session.created) < TTL.as_secs())
+            .map(|session| session.request.run_id.clone())
+            .collect::<BTreeSet<_>>();
+        let directory = root.join("readers");
+        match fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(pins),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        private_directory(&directory)?;
+        for (count, entry) in fs::read_dir(&directory)?.enumerate() {
+            if count >= MAX_SESSIONS * 2 {
+                return Err(LedgerError(
+                    "reader checkpoint directory exceeds bounded size".into(),
+                ));
+            }
+            let entry = entry?;
+            let name = entry.file_name();
+            let (id, suffix) = name
+                .to_str()
+                .and_then(|name| name.rsplit_once('.'))
+                .filter(|(id, suffix)| token_valid(id) && ["json", "tmp"].contains(suffix))
+                .ok_or_else(|| LedgerError("reader checkpoint filename is unsafe".into()))?;
+            let file = checkpoint_file(&entry.path())?;
+            if suffix == "json"
+                && let Ok((checkpoint, _)) = load_checkpoint(&directory, id)
+                && checkpoint.created <= now
+            {
+                if now - checkpoint.created < TTL.as_secs() {
+                    pins.insert(checkpoint.request.run_id);
+                }
+            } else {
+                let modified = file
+                    .metadata()?
+                    .modified()?
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| LedgerError("reader checkpoint timestamp is invalid".into()))?
+                    .as_secs();
+                if now.saturating_sub(modified) < TTL.as_secs() {
+                    // An interrupted or corrupt checkpoint cannot identify its run.
+                    return Err(LedgerError("reader checkpoint pin is unknown".into()));
+                }
+            }
+        }
+        Ok(pins)
+    }
+
     pub(crate) fn read(
         &mut self,
         path: &Path,

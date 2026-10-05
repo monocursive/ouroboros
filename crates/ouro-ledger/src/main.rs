@@ -94,11 +94,40 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Keep a run and its captures until an explicit release.
+    Hold(RetentionArgs),
+    /// Release the operator hold; retention and reader pins still apply.
+    Release(RetentionArgs),
+    /// Prune eligible terminal history and captures, retaining replay and chain anchors.
+    Gc {
+        #[arg(long)]
+        dry_run: bool,
+        /// Retention policy for this invocation; does not save configuration.
+        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        retain_days: u32,
+        /// Continue after the last run id returned by the previous page.
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 25, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
     /// Check the local writer and store; does not measure jail capabilities.
     Doctor {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Args)]
+struct RetentionArgs {
+    run_id: String,
+    /// Reuse this id when retrying a request whose reply was lost.
+    #[arg(long)]
+    request_id: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -224,6 +253,31 @@ fn output(value: &Value, json_output: bool) -> Result<()> {
         writeln!(stdout, "{}", serde_json::to_string_pretty(value)?)?;
     }
     Ok(())
+}
+
+fn retention_command(data: &std::path::Path, args: RetentionArgs, hold: bool) -> Result<i32> {
+    let request_id = args
+        .request_id
+        .unwrap_or_else(|| format!("retention_{}", uuid::Uuid::new_v4().simple()));
+    let operation = if hold { "hold" } else { "release" };
+    let result = (|| -> Result<()> {
+        let mut client = runner::connect_or_start(data)?;
+        let receipt = if hold {
+            client.hold(&args.run_id, &request_id)?
+        } else {
+            client.release(&args.run_id, &request_id)?
+        };
+        output(
+            &json!({"operation":operation,"run_id":args.run_id,"request_id":request_id,"receipt":receipt}),
+            args.json,
+        )
+    })();
+    result.map_err(|error| {
+        LedgerError(format!(
+            "{operation} request {request_id}: {error}; inspect or retry using this same request id"
+        ))
+    })?;
+    Ok(0)
 }
 
 fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
@@ -426,6 +480,30 @@ fn execute(cli: Cli) -> Result<i32> {
             output(&service::cancel(&data, &run_id)?, json)?;
             Ok(0)
         }
+        Action::Hold(args) => retention_command(&data, args, true),
+        Action::Release(args) => retention_command(&data, args, false),
+        Action::Gc {
+            dry_run,
+            retain_days,
+            after,
+            limit,
+            json,
+        } => {
+            // A dry run must not bootstrap recovery, rebuild projections, or expire readers.
+            let mut client = daemon::Client::connect(&data)?;
+            if dry_run {
+                output(
+                    &serde_json::to_value(client.gc_plan(retain_days, after.as_deref(), limit)?)?,
+                    json,
+                )?;
+                Ok(0)
+            } else {
+                let result = client.gc(retain_days, after.as_deref(), limit)?;
+                let passed = result.failed.is_empty();
+                output(&serde_json::to_value(result)?, json)?;
+                Ok(if passed { 0 } else { 1 })
+            }
+        }
         Action::Doctor { json } => {
             // A readiness read must not create a session-bound writer which
             // would subsequently prevent independent service ownership.
@@ -572,6 +650,7 @@ fn execute(cli: Cli) -> Result<i32> {
                 | Action::Owner { .. }
                 | Action::Wait { .. }
                 | Action::Cancel { .. } => unreachable!(),
+                Action::Hold(_) | Action::Release(_) | Action::Gc { .. } => unreachable!(),
             }
             Ok(0)
         }
