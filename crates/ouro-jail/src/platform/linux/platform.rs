@@ -296,6 +296,7 @@ fn inputs_for(
                 "bwrap_present",
                 "network_namespace",
                 "seccomp_user_notification",
+                "unix_socket_diagnostics",
             ],
             "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
             CapabilityScope::Tree,
@@ -4422,7 +4423,8 @@ mod tests {
             [
                 "bwrap_present",
                 "network_namespace",
-                "seccomp_user_notification"
+                "seccomp_user_notification",
+                "unix_socket_diagnostics"
             ]
         );
         assert_eq!(super::probes_for("limit:pids"), ["cgroup_pids"]);
@@ -4752,9 +4754,19 @@ mod tests {
             ok("bwrap_present"),
             ok("network_namespace"),
             ok("seccomp_user_notification"),
+            ok("unix_socket_diagnostics"),
         ];
         let measured = capability_for(REQ_NETWORK_PROXY, &all, "2026-09-22T00:00:00Z");
         assert_eq!(measured.status, CapabilityStatus::Available);
+        let mut no_diag = all.clone();
+        no_diag[3].status = ProbeStatus::Unavailable;
+        no_diag[3].reason_code = "unix_socket_diagnostics_unavailable";
+        let no_diag = capability_for(REQ_NETWORK_PROXY, &no_diag, "2026-09-22T00:00:00Z");
+        assert_eq!(no_diag.status, CapabilityStatus::Unavailable);
+        assert_eq!(
+            no_diag.reason_code.as_deref(),
+            Some("unix_socket_diagnostics_unavailable")
+        );
         let mut refused = all.clone();
         refused[2].status = ProbeStatus::Unavailable;
         refused[2].reason_code = "listener_refused";
@@ -4766,7 +4778,8 @@ mod tests {
             &[
                 "bwrap_present",
                 "network_namespace",
-                "seccomp_user_notification"
+                "seccomp_user_notification",
+                "unix_socket_diagnostics"
             ]
         );
     }

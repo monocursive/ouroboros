@@ -20,8 +20,9 @@ and SOCKS5 TCP proxying, optional HTTP(S) credential vaulting, event journals,
 
 Native Raspberry Pi validation covers the ARM64 syscall filters and observer.
 Host capabilities still decide which profiles can run: the tested Pi kernel
-disables memory cgroups and omits Landlock, so the corresponding required
-features refuse before the command starts.
+disables memory cgroups and omits Landlock and Unix socket diagnostics.
+`tool` and `none` pass native launch tests; required memory ceilings,
+requested Landlock domains and `agent` refuse before the command starts.
 
 Fourteen starter launch profiles are embedded. OpenCode has recorded live
 runs, but a bundled profile is not a promise that every version of that agent

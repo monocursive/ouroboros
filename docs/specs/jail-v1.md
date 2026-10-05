@@ -313,10 +313,12 @@ before preparation.
 
 ARM64 validation is a separate lane from the x86_64 release host. The current
 Raspberry Pi 4 test host runs Debian 13.7 on kernel `6.18.50+rpt-rpi-v8`.
-Its boot command line disables memory cgroups, and its kernel has
-`CONFIG_SECURITY_LANDLOCK` unset. A required memory ceiling therefore refuses
-before exec, and a requested Landlock domain refuses before running its child;
-neither is reported as enforced. Runtime-library candidates such as `/lib64`
+Its boot command line disables memory cgroups, and its kernel omits
+`CONFIG_SECURITY_LANDLOCK` and `CONFIG_UNIX_DIAG`. Required memory ceilings,
+requested Landlock domains and the `agent` profile therefore refuse before
+exec; `tool` and `none` remain eligible. The `unix_socket_diagnostics` probe
+performs a real AF_UNIX VFS dump: opening a netlink socket alone does not prove
+the kernel supports it. Runtime-library candidates such as `/lib64`
 are bound only where present, with actual mounts recorded in the receipt.
 No promise is made about all kernels newer than a version.
 
@@ -1441,8 +1443,10 @@ dispositions such as an inherited ignored SIGHUP pass through unchanged.
 
 `agent` uses a separate filter that permits the unprivileged sandboxing an
 inner vendor sandbox needs: `no_new_privs`, its own seccomp filters and
-Landlock. These work inside the outer layer on every supported host and are
-the nesting `agent` guarantees. Where the host also permits nested user
+Landlock. These work inside the outer layer on the reference host; the
+`agent_inner_sandbox` probe reports whether a particular kernel supports the
+Landlock nesting sequence. A requested inner domain must refuse when absent.
+Where the host also permits nested user
 namespaces, the filter additionally permits the namespace creation and
 mount/unmount an inner namespace sandbox needs, within the outer restricted
 authority. Nothing it permits may recover excluded paths, make locked
@@ -2594,8 +2598,11 @@ Required Linux probes:
   launch profile `experimental`; a tested combination is recorded as
   supported in [agent compatibility](jail-v1/agent-compatibility.md), not in
   the binary (§15 A01).
-- For `agent`, measured by one real run: `seccomp_user_notification`,
-  `agent_proxy_bridge` (an allowed and a denied destination, direct egress
+- Before an `agent` run, `seccomp_user_notification` and
+  `unix_socket_diagnostics` measure the listener handoff and a real AF_UNIX
+  VFS dump. Both are prerequisites of `network_proxy`; failure refuses before
+  exec, without falling back to denying all same-attempt pathname IPC.
+- For `agent`, measured by one real run: `agent_proxy_bridge` (an allowed and a denied destination, direct egress
   refused), `agent_unix_peer_mediation` (a host socket denied, an attempt
   socket allowed) and `agent_inner_sandbox` (a Landlock and seccomp inner
   sandbox restricts its child; `nested_user_namespace` reported as measured).

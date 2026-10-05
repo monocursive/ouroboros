@@ -114,6 +114,8 @@ nested_user_namespace = "unavailable"
 # pidfd_getfd (Yama scope 1 permits a descendant). Same mechanism as
 # evidence/unixpeer-spike-2026-09-22-ouro-ci.txt steps 1-2.
 seccomp_user_notification = "available"
+# Opening the netlink socket is insufficient: an AF_UNIX VFS dump must work.
+unix_socket_diagnostics = "available"
 
 # One real `ouro-jail run --profile agent`: through 127.0.0.1:3128 an allowed
 # loopback origin (numeric grant) answers 200 and the proxy records

@@ -35,7 +35,7 @@ pub mod agent;
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
 /// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 20] = [
+pub const PROBE_NAMES: [&str; 21] = [
     "bwrap_present",
     "user_namespace",
     "pid_namespace",
@@ -57,6 +57,7 @@ pub const PROBE_NAMES: [&str; 20] = [
     // J3-agent begin: the unix-peer mediation's kernel mechanism (§10), and
     // the three `agent` rows of §14.1, read from one real agent run
     "seccomp_user_notification",
+    "unix_socket_diagnostics",
     "agent_proxy_bridge",
     "agent_unix_peer_mediation",
     "agent_inner_sandbox",
@@ -297,6 +298,7 @@ pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) 
         "nested_user_namespace" => probe_nested_userns(jail_exe, bwrap),
         // J3-agent begin
         "seccomp_user_notification" => probe_user_notification(),
+        "unix_socket_diagnostics" => probe_unix_socket_diagnostics(),
         "agent_proxy_bridge" => agent::proxy_bridge(jail_exe),
         "agent_unix_peer_mediation" => agent::unix_peer(jail_exe),
         "agent_inner_sandbox" => agent::inner_sandbox(jail_exe),
@@ -692,6 +694,37 @@ fn probe_nested_userns(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 // ---------------------------------------------------------------------------
 // Probes that need no sandbox
 // ---------------------------------------------------------------------------
+
+/// Opening NETLINK_SOCK_DIAG alone succeeds even on a kernel built without
+/// CONFIG_UNIX_DIAG. The mediator needs an actual AF_UNIX dump to prove that
+/// a pathname listener belongs to the attempt's network namespace.
+fn probe_unix_socket_diagnostics() -> ProbeResult {
+    const NAME: &str = "unix_socket_diagnostics";
+    const MECHANISM: &str = "netlink-sock-diag";
+    let result = super::sockdiag::SockDiag::open().and_then(|mut socket| {
+        // A negative poll descriptor disables the optional stop channel;
+        // dump still enforces its own deadline and datagram bound.
+        socket.dump(super::sockdiag::UDIAG_SHOW_VFS, -1)
+    });
+    match result {
+        Ok(_) => ProbeResult::new(
+            NAME,
+            ProbeStatus::Available,
+            MECHANISM,
+            "ok",
+            "an AF_UNIX sock_diag dump with UDIAG_SHOW_VFS completed",
+        ),
+        Err(error) => ProbeResult::new(
+            NAME,
+            ProbeStatus::Unavailable,
+            MECHANISM,
+            "unix_socket_diagnostics_unavailable",
+            format!(
+                "AF_UNIX sock_diag dump failed: {error}; agent pathname mediation requires kernel CONFIG_UNIX_DIAG support"
+            ),
+        ),
+    }
+}
 
 // J3-agent begin: the mediation's own mechanism, measured
 /// `seccomp_user_notification`: an unprivileged child installs the agent's
@@ -1518,6 +1551,7 @@ mod tests {
                     "bwrap_present",
                     "network_namespace",
                     "seccomp_user_notification",
+                    "unix_socket_diagnostics",
                 ][..],
                 CapabilityScope::Tree,
             ),

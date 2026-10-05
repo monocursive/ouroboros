@@ -8,6 +8,43 @@ use std::process::Command;
 mod common;
 
 #[test]
+fn an_agent_requires_unix_socket_diagnostics_before_exec() {
+    if !common::live() {
+        return;
+    }
+    let diagnostics =
+        ouro_jail::platform::linux::sockdiag::SockDiag::open().and_then(|mut socket| {
+            socket.dump(ouro_jail::platform::linux::sockdiag::UDIAG_SHOW_VFS, -1)
+        });
+    let jail = Jail::new().unwrap();
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let run = jail
+        .args(["run", "--profile", "agent", "--workspace"])
+        .arg(&workspace)
+        .args(["--limit", "wall=5s"])
+        .target(["/bin/sh", "-c", "printf agent-child-ran"])
+        .run()
+        .unwrap();
+    if diagnostics.is_ok() {
+        assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+        assert!(run.stdout_text().contains("agent-child-ran"));
+    } else {
+        assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
+        assert!(!run.stdout_text().contains("agent-child-ran"));
+        assert!(
+            run.stderr_text()
+                .contains("unix_socket_diagnostics_unavailable"),
+            "{}",
+            run.stderr_text()
+        );
+        eprintln!(
+            "host AF_UNIX diagnostics unavailable; agent refused before exec: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn a_required_memory_ceiling_runs_only_when_the_host_can_enforce_it() {
     if !common::live() {
         return;

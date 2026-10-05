@@ -21,8 +21,9 @@ Supported for execution: Linux on x86_64 or aarch64, on a host that runs its own
 delegate a cgroup v2 subtree is not). The reference host is Ubuntu 26.04.1 on
 kernel 7.0; native ARM64 checks also run on a Raspberry Pi 4 with Debian 13.
 Capabilities are host-specific: the tested Pi's kernel disables memory cgroups
-and omits Landlock. Required memory ceilings and requested Landlock domains
-refuse there before exec. Run `doctor --profile <profile>` for the policy you
+and omits Landlock and AF_UNIX socket diagnostics. Required memory ceilings,
+requested Landlock domains and the `agent` profile refuse there before exec;
+`tool` and `none` remain eligible. Run `doctor --profile <profile>` for the policy you
 intend to use. macOS builds support inspection (`version`, `explain`, `doctor`)
 and refuse execution with exit 125. Linux builds for other architectures refuse
 with 125 (`unsupported_architecture`).
