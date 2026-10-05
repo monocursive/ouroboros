@@ -1,0 +1,65 @@
+{
+  "revision": "2d88db2295eecff139e983cf3206f7e222ac12d9",
+  "input_digest": "sha256:a7e407154e79bf9de9c4cc08fcef6b76bce0038b13fb06769b4e8f11a7648a42",
+  "arch": "aarch64",
+  "validation_exit": 0,
+  "passed": 790,
+  "failed": 0,
+  "ignored": 1,
+  "stages": {
+    "unit": {
+      "passed": 508,
+      "failed": 0,
+      "ignored": 1
+    },
+    "live": {
+      "passed": 44,
+      "failed": 0,
+      "ignored": 0
+    },
+    "matrix-tool": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "matrix-none": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "published": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "freeze-tables": {
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    "fixture-unit": {
+      "passed": 109,
+      "failed": 0,
+      "ignored": 0
+    },
+    "fixture-identity": {
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    "ledger": {
+      "passed": 106,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "explicit_exclusions": [
+    "positive Landlock fixture identity (kernel lacks CONFIG_SECURITY_LANDLOCK)",
+    "positive agent conformance (kernel lacks CONFIG_UNIX_DIAG)",
+    "positive required-memory build conformance (boot disables memory cgroups)"
+  ],
+  "real_ledger_launch_tests": 15,
+  "source_checks": "precheck and postcheck passed for 1530 files",
+  "doctor_tool_ready": true,
+  "doctor_agent_exit": 125
+}

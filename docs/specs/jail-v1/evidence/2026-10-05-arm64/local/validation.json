@@ -1,0 +1,10 @@
+{
+  "revision": "2d88db2295eecff139e983cf3206f7e222ac12d9",
+  "platform": "aarch64-apple-darwin",
+  "workspace_test_exit": 0,
+  "passed": 1127,
+  "failed": 0,
+  "ignored": 7,
+  "ignored_scope": "evidence generator, subprocess helpers, external Unicode dataset test and documentation example",
+  "scope": "portable workspace behavior; Linux execution tests are excluded by target configuration"
+}

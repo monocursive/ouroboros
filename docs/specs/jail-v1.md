@@ -321,6 +321,8 @@ performs a real AF_UNIX VFS dump: opening a netlink socket alone does not prove
 the kernel supports it. Runtime-library candidates such as `/lib64`
 are bound only where present, with actual mounts recorded in the receipt.
 No promise is made about all kernels newer than a version.
+The [native ARM64 validation record](jail-v1/evidence/2026-10-05-arm64/README.md)
+contains the tested source, binaries, host limits and launch results.
 
 The native macOS CI lane initially targets Apple Silicon; Intel compilation is
 additional evidence, not an execution support claim. CI compiles

@@ -1,0 +1,9 @@
+$ uv run docs/specs/jail-v1/validate_contract.py
+exit 0
+--- stdout ---
+PASS: 8 schemas (29 frozen files), 37 examples, 5 evidence receipts, 198 validation cases,
+      102 semantic cases, 24 gate frames, policy/argv golden bytes,
+      native codec, and 26 address cases.
+No live containment, observer, proxy, or platform execution was tested.
+--- stderr ---
+Installed 9 packages in 17ms

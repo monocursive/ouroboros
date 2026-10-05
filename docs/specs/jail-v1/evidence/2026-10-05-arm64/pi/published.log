@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.34s
+     Running tests/j4_closed_set_linux.rs (target/release/deps/j4_closed_set_linux-182a19d79349cf92)
+
+running 1 test
+test j4_closed_set_the_published_table_is_the_one_this_build_traces ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.34s
+

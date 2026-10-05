@@ -1,0 +1,9 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/crates/ouro-jail)
+    Finished `release` profile [optimized] target(s) in 1m 05s
+     Running tests/j4_closed_set_linux.rs (target/release/deps/j4_closed_set_linux-182a19d79349cf92)
+
+running 1 test
+test j4_o01_every_variant_is_one_event_per_result_tool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.46s
+

@@ -1,0 +1,16 @@
+{
+  "revision": "2d88db2295eecff139e983cf3206f7e222ac12d9",
+  "input_digest": "sha256:a7e407154e79bf9de9c4cc08fcef6b76bce0038b13fb06769b4e8f11a7648a42",
+  "conformance": "pass",
+  "passed": 1875,
+  "failed": 0,
+  "ignored": 16,
+  "live_runtime_skips": 0,
+  "hosted_run": "https://github.com/monocursive/ouroboros/actions/runs/37365762696",
+  "gate_counts": {
+    "credential": 1,
+    "elsewhere": 4,
+    "pass": 39,
+    "pass+limits": 7
+  }
+}

@@ -38,10 +38,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       # J5 platform compilation (jail-v1 §3.2): compile-only evidence for a
       # triple no runner executes, one per leg. Intel macOS is "additional
-      # evidence, not an execution support claim"; Linux aarch64 is a later
-      # lane, and a build for it reports the filter and observer capabilities
-      # `unsupported` (reason `unsupported_architecture`), so it refuses
-      # before exec. `cargo check`, not clippy: some lints (a cast to
+      # evidence, not an execution support claim"; Linux aarch64 execution
+      # is validated separately on the native Raspberry Pi. This job proves
+      # only compilation. `cargo check`, not clippy: some lints (a cast to
       # `c_char`, which is `u8` there) differ by target without being defects.
       # Nothing here runs, so nothing here is claimed as tested.
       - name: Cross-target check (compile only)

@@ -1,0 +1,21 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/crates/ouro-jail)
+    Finished `release` profile [optimized] target(s) in 12.66s
+     Running tests/portable_freeze.rs (target/release/deps/portable_freeze-1904e991156ffd7e)
+
+running 13 tests
+test a_recorded_tested_run_is_the_milestone_run ... ok
+test the_backend_plans_are_the_frozen_ones ... ok
+test the_built_in_baselines_are_the_frozen_ones ... ok
+test the_bundled_launch_profiles_are_the_frozen_ones ... ok
+test the_closed_set_is_the_frozen_one ... ok
+test the_contained_environment_is_the_frozen_one ... ok
+test the_contained_mount_baselines_are_the_frozen_ones ... ok
+test the_filter_digests_are_the_frozen_ones ... ok
+test the_freeze_names_itself ... ok
+test the_frozen_schemas_are_the_frozen_ones ... ok
+test the_lock_file_is_the_frozen_one ... ok
+test the_manifests_are_the_frozen_ones ... ok
+test the_toolchain_is_the_frozen_one ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+

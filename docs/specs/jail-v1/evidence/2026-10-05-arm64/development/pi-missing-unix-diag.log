@@ -1,0 +1,75 @@
+    Finished `release` profile [optimized] target(s) in 0.34s
+     Running tests/conformance_j3_agent.rs (target/release/deps/conformance_j3_agent-223f399dfedecfc5)
+
+running 6 tests
+test n05_a_proxy_replaced_after_the_first_connect_is_never_reached ... ok
+test n05_a_proxy_replaced_before_the_first_connect_is_never_reached ... ok
+test n05_child_path_and_mount_changes_cannot_redirect_the_bridge ... ok
+test n05_connects_from_worker_threads_are_mediated_like_any_other ... FAILED
+test n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable ... ok
+test n05_same_attempt_ipc_and_scm_rights_work_and_datagram_sockets_are_refused ... FAILED
+
+failures:
+
+---- n05_connects_from_worker_threads_are_mediated_like_any_other stdout ----
+
+thread 'n05_connects_from_worker_threads_are_mediated_like_any_other' (12692) panicked at crates/ouro-jail/tests/conformance_j3_agent.rs:2020:5:
+assertion `left == right` failed: {"attempt_seqpacket":"EACCES","attempt_stream":"EACCES","bridge":"ok","host":"EACCES","main_thread_is_leader":true}
+  left: String("EACCES")
+ right: "ok"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- n05_same_attempt_ipc_and_scm_rights_work_and_datagram_sockets_are_refused stdout ----
+
+thread 'n05_same_attempt_ipc_and_scm_rights_work_and_datagram_sockets_are_refused' (12820) panicked at crates/ouro-jail/tests/conformance_j3_agent.rs:1926:5:
+assertion `left == right` failed: stdout: {"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_STREAM"},"ret":3,"errno":null}
+{"op":"bind","args":{"addrlen":16,"mechanism":"linux_raw_syscall","path":"/tmp/ipc.sock","type":"SOCK_STREAM"},"ret":0,"errno":null}
+{"op":"listen","args":{"backlog":16,"mechanism":"linux_raw_syscall"},"ret":0,"errno":null}
+{"op":"execve","args":{"argc":4,"error_pipe_fd":5,"mechanism":"linux_raw_syscall","path":"/tmp/ouro-jail-harness-TR39vQ/workspace/bin/ouro-fixture","pid":6},"ret":0,"errno":null}
+{"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_STREAM"},"ret":3,"errno":null}
+{"op":"connect","args":{"abstract":false,"addrlen":16,"family":"AF_UNIX","len_variant":"nul","mechanism":"linux_raw_syscall","path":"/tmp/ipc.sock","type":"SOCK_STREAM"},"ret":-1,"errno":"EACCES"}
+{"op":"accept4","args":{"errno_source":"fixture_deadline","index":0,"mechanism":"linux_raw_syscall","timed_out":true},"ret":-1,"errno":"ETIMEDOUT"}
+{"op":"wait","args":{"code":3,"exited":true,"killed_at_deadline":false,"pid":6,"signal":null},"ret":768,"errno":null}
+{"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_SEQPACKET"},"ret":3,"errno":null}
+{"op":"bind","args":{"addrlen":20,"mechanism":"linux_raw_syscall","path":"/tmp/ipc-seq.sock","type":"SOCK_SEQPACKET"},"ret":0,"errno":null}
+{"op":"listen","args":{"backlog":16,"mechanism":"linux_raw_syscall"},"ret":0,"errno":null}
+{"op":"execve","args":{"argc":5,"error_pipe_fd":5,"mechanism":"linux_raw_syscall","path":"/tmp/ouro-jail-harness-TR39vQ/workspace/bin/ouro-fixture","pid":7},"ret":0,"errno":null}
+{"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_SEQPACKET"},"ret":3,"errno":null}
+{"op":"connect","args":{"abstract":false,"addrlen":20,"family":"AF_UNIX","len_variant":"nul","mechanism":"linux_raw_syscall","path":"/tmp/ipc-seq.sock","type":"SOCK_SEQPACKET"},"ret":-1,"errno":"EACCES"}
+{"op":"accept4","args":{"errno_source":"fixture_deadline","index":0,"mechanism":"linux_raw_syscall","timed_out":true},"ret":-1,"errno":"ETIMEDOUT"}
+{"op":"wait","args":{"code":3,"exited":true,"killed_at_deadline":false,"pid":7,"signal":null},"ret":768,"errno":null}
+{"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_STREAM"},"ret":3,"errno":null}
+{"op":"bind","args":{"addrlen":54,"mechanism":"linux_raw_syscall","path":"/tmp/ouro-jail-harness-TR39vQ/workspace/ws-ipc.sock","type":"SOCK_STREAM"},"ret":0,"errno":null}
+{"op":"listen","args":{"backlog":16,"mechanism":"linux_raw_syscall"},"ret":0,"errno":null}
+{"op":"execve","args":{"argc":4,"error_pipe_fd":5,"mechanism":"linux_raw_syscall","path":"/tmp/ouro-jail-harness-TR39vQ/workspace/bin/ouro-fixture","pid":8},"ret":0,"errno":null}
+{"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_STREAM"},"ret":3,"errno":null}
+{"op":"connect","args":{"abstract":false,"addrlen":54,"family":"AF_UNIX","len_variant":"nul","mechanism":"linux_raw_syscall","path":"/tmp/ouro-jail-harness-TR39vQ/workspace/ws-ipc.sock","type":"SOCK_STREAM"},"ret":-1,"errno":"EACCES"}
+{"op":"accept4","args":{"errno_source":"fixture_deadline","index":0,"mechanism":"linux_raw_syscall","timed_out":true},"ret":-1,"errno":"ETIMEDOUT"}
+{"op":"wait","args":{"code":3,"exited":true,"killed_at_deadline":false,"pid":8,"signal":null},"ret":768,"errno":null}
+{"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_STREAM"},"ret":3,"errno":null}
+{"op":"bind","args":{"addrlen":16,"mechanism":"linux_raw_syscall","path":"/tmp/scm.sock","type":"SOCK_STREAM"},"ret":0,"errno":null}
+{"op":"listen","args":{"backlog":16,"mechanism":"linux_raw_syscall"},"ret":0,"errno":null}
+{"op":"execve","args":{"argc":4,"error_pipe_fd":5,"mechanism":"linux_raw_syscall","path":"/tmp/ouro-jail-harness-TR39vQ/workspace/bin/ouro-fixture","pid":9},"ret":0,"errno":null}
+{"op":"openat","args":{"dirfd":"AT_FDCWD","flags":0,"mechanism":"linux_raw_syscall","mode":"0","path":"/tmp/ouro-jail-harness-TR39vQ/workspace/payload.txt"},"ret":3,"errno":null}
+{"op":"socket","args":{"cloexec":"SOCK_CLOEXEC","family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_STREAM"},"ret":4,"errno":null}
+{"op":"connect","args":{"addrlen":16,"family":"AF_UNIX","mechanism":"linux_raw_syscall","path":"/tmp/scm.sock","type":"SOCK_STREAM"},"ret":-1,"errno":"EACCES"}
+{"op":"accept4","args":{"errno_source":"fixture_deadline","index":0,"mechanism":"linux_raw_syscall","timed_out":true},"ret":-1,"errno":"ETIMEDOUT"}
+{"op":"wait","args":{"code":3,"exited":true,"killed_at_deadline":false,"pid":9,"signal":null},"ret":768,"errno":null}
+{"op":"socket","args":{"family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_DGRAM","type_arg":2,"type_flags":[]},"ret":-1,"errno":"EPERM"}
+{"op":"socket","args":{"family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_RAW","type_arg":3,"type_flags":[]},"ret":-1,"errno":"EPERM"}
+{"op":"socket","args":{"family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_DGRAM","type_arg":526338,"type_flags":["SOCK_CLOEXEC","SOCK_NONBLOCK"]},"ret":-1,"errno":"EPERM"}
+{"op":"socketpair","args":{"family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_DGRAM","type_arg":2,"type_flags":[]},"ret":-1,"errno":"EPERM"}
+{"op":"socketpair","args":{"family":"AF_UNIX","mechanism":"linux_raw_syscall","type":"SOCK_RAW","type_arg":524291,"type_flags":["SOCK_CLOEXEC"]},"ret":-1,"errno":"EPERM"}
+
+stderr: 
+  left: Some(3)
+ right: Some(0)
+
+
+failures:
+    n05_connects_from_worker_threads_are_mediated_like_any_other
+    n05_same_attempt_ipc_and_scm_rights_work_and_datagram_sockets_are_refused
+
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 31 filtered out; finished in 42.26s
+
+error: test failed, to rerun pass `-p ouro-jail --test conformance_j3_agent`

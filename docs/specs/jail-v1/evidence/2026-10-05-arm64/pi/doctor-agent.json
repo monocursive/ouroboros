@@ -1,0 +1,346 @@
+{
+  "binaries": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "b3b829e18a7d43ee589dc37e351cb9480ff7301b493d8227b8c754294638b976",
+      "version": "bubblewrap 0.12.0"
+    },
+    "ouro-jail": {
+      "path": "/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/ouro-jail",
+      "sha256": "06062e1cb4be10ba7d7d211f4ca3d4a54b21021e89eb17474401e3a6346d4afd"
+    }
+  },
+  "build": {
+    "debug_assertions": false,
+    "dirty": false,
+    "inputs": "sha256:a7e407154e79bf9de9c4cc08fcef6b76bce0038b13fb06769b4e8f11a7648a42",
+    "opt_level": "3",
+    "revision": "2d88db2295eecff139e983cf3206f7e222ac12d9",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "target": "aarch64-unknown-linux-gnu"
+  },
+  "capabilities": [
+    {
+      "evidence_ref": "bwrap_present,pid_namespace",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "pid-namespace",
+      "name": "tree_termination",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "ptrace_seize_descendant,observer_closed_set",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "ptrace",
+      "name": "closed_set_observation",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "filesystem_containment",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "seccomp_filter_load",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "seccomp-bpf",
+      "name": "syscall_filter",
+      "reason_code": "ok",
+      "scope": "process",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,network_namespace,seccomp_user_notification,unix_socket_diagnostics",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
+      "name": "network_proxy",
+      "reason_code": "unix_socket_diagnostics_unavailable",
+      "scope": "tree",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "supervisor",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "boottime-deadline",
+      "name": "limit:wall",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bubblewrap 0.12.0",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "bubblewrap",
+      "name": "bwrap_present",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531837, inside 4026532741",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "user-namespace",
+      "name": "user_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531836, inside 4026532743; NSpid 2; /proc shows 1,2",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "pid-namespace",
+      "name": "pid_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "interfaces inside: lo",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "network-namespace",
+      "name": "network_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "write into a read-only bind failed EROFS",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "mount_readonly_bind",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "Seccomp mode 2, AF_UNIX socket EPERM, allowed write ok, filter sha256:554202286b3e5afd939fba13fee312738dd158677c6292179416b85044d957c9",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "seccomp-bpf",
+      "name": "seccomp_filter_load",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "seized pid 20249, stopped with signal 5, detached",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "ptrace",
+      "name": "ptrace_seize_descendant",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "attached blocked launcher; one successful create matched the fixture, final exit observed, zero loss",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "ptrace-seccomp",
+      "name": "observer_closed_set",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "already_delegated cgroup=/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-arm64-r5b.service",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "systemd-user-transient-scope",
+      "name": "supervisor_scope",
+      "reason_code": "already_delegated",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_delegated_leaf",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_pids",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "No such file or directory (os error 2)",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_memory",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "No such file or directory (os error 2)",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_swap",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_cpu",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "/proc/sys/kernel/apparmor_restrict_unprivileged_userns: No such file or directory (os error 2)",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "apparmor",
+      "name": "apparmor_userns_restriction",
+      "reason_code": "sysctl_absent",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "a nested bubblewrap ran a command; bare unshare(CLONE_NEWUSER) inside: ok",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "nested-bubblewrap",
+      "name": "nested_user_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "an unprivileged child installed the mediation filter (sha256:33063c21492671bcf0a73a39a2a51af680cb9482443fb5ab8be82ba019aa4136) with a listener, and pidfd_getfd took it",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "seccomp-user-notification",
+      "name": "seccomp_user_notification",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "AF_UNIX sock_diag dump failed: No such file or directory (os error 2); agent pathname mediation requires kernel CONFIG_UNIX_DIAG support",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "netlink-sock-diag",
+      "name": "unix_socket_diagnostics",
+      "reason_code": "unix_socket_diagnostics_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "the agent run exited Some(125): ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `network_proxy` (unix_socket_diagnostics_unavailable)",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "outside-http-proxy+loopback-bridge",
+      "name": "agent_proxy_bridge",
+      "reason_code": "probe_failed",
+      "scope": "host",
+      "status": "error"
+    },
+    {
+      "evidence_ref": "the agent run exited Some(125): ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `network_proxy` (unix_socket_diagnostics_unavailable)",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "seccomp-user-notification",
+      "name": "agent_unix_peer_mediation",
+      "reason_code": "probe_failed",
+      "scope": "host",
+      "status": "error"
+    },
+    {
+      "evidence_ref": "the agent run exited Some(125): ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `network_proxy` (unix_socket_diagnostics_unavailable)",
+      "measured_at": "2026-10-05T20:06:42Z",
+      "mechanism": "landlock+seccomp",
+      "name": "agent_inner_sandbox",
+      "reason_code": "probe_failed",
+      "scope": "host",
+      "status": "error"
+    }
+  ],
+  "component": "ouro-jail",
+  "host": {
+    "apparmor_enabled": false,
+    "apparmor_userns_restriction": {
+      "local_files": [
+        "README"
+      ],
+      "profile_files": [
+        "lxc-usernsexec",
+        "unprivileged_userns"
+      ],
+      "state": "absent",
+      "unpackaged_files": []
+    },
+    "cgroup": {
+      "controllers": [
+        "cpu",
+        "pids"
+      ],
+      "delegated_root": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service",
+      "root_controllers": [
+        "cpuset",
+        "cpu",
+        "io",
+        "pids"
+      ],
+      "subtree_control": [
+        "cpu",
+        "pids"
+      ]
+    },
+    "cpus_online": 4,
+    "distribution": "Debian GNU/Linux 13 (trixie)",
+    "kernel_release": "6.18.50+rpt-rpi-v8",
+    "kernel_version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "linger": true,
+    "memory": {
+      "mem_total_kib": 3886840,
+      "swap_total_kib": 2097148
+    },
+    "operator_identity": "privileged_group",
+    "privileged_groups": [
+      "sudo"
+    ],
+    "sysctls": {
+      "kernel.apparmor_restrict_unprivileged_userns": null,
+      "kernel.io_uring_disabled": "0",
+      "kernel.perf_event_paranoid": "2",
+      "kernel.unprivileged_bpf_disabled": "2",
+      "kernel.yama.ptrace_scope": null,
+      "user.max_user_namespaces": "13226"
+    },
+    "systemd_version": "systemd 257 (257.13-1~deb13u1)",
+    "virtualization": "none"
+  },
+  "launch": null,
+  "platform": {
+    "arch": "aarch64",
+    "kernel": "Linux 6.18.50+rpt-rpi-v8",
+    "os": "linux"
+  },
+  "ready": false,
+  "requirements": [
+    "tree_termination",
+    "closed_set_observation",
+    "filesystem_containment",
+    "syscall_filter",
+    "network_proxy",
+    "limit:wall"
+  ],
+  "schema": "ouro.jail.doctor/1",
+  "supervisor_scope": {
+    "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-arm64-r5b.service",
+    "reason": null,
+    "reason_code": null,
+    "state": "already_delegated",
+    "unit": null
+  },
+  "version": "0.1.0"
+}
