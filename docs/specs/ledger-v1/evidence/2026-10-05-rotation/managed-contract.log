@@ -1,0 +1,2 @@
+Validated 1 managed-policy schema, 2 policy examples and 35 cases.
+Document contracts only; identity, policy authorization and runtime containment are not tested.

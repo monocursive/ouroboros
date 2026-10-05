@@ -1,0 +1,3 @@
+f48855c6fc8dc440e29c1af2251e117485e534a66721001343dad5daae4bf745  docs/specs/ledger-v1/evidence/2026-10-05-rotation/native/validate-linux.sh
+d22ff31a4902beef7d696b0774b6e87d56d78c877014b7ad5b33389055c45804  docs/specs/ledger-v1/evidence/2026-10-05-rotation/native/validate-mac.sh
+1b11c513e159dcf49b4f986ae28670de64061db081931db384a8194b18aa28c1  docs/specs/ledger-v1/evidence/2026-10-05-rotation/native/threshold_acceptance.py

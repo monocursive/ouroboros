@@ -11,8 +11,9 @@ one birth-identified launch owner, durable admission before gate release,
 authenticated event ingestion, canonical settlement, opt-in bounded captures,
 inspection, local chain verification, conservative orphan reconciliation,
 bounded single-run evidence queries, exact canonical NDJSON export, optional
-detached batch ownership on a provisioned Linux systemd user manager, durable
-segment/replay anchors, a rebuildable SQLite projection and restartable reader cursors.
+detached batch ownership on a provisioned Linux systemd user manager, rotating
+canonical segments, durable replay anchors, a rebuildable SQLite projection and
+restartable reader cursors.
 Linux execution is the acceptance target. macOS clients can read the local
 protocol and verify stores, but native launch ownership currently refuses because
 its birth-identity mechanism has not been implemented.
@@ -192,8 +193,14 @@ artifact transfer and the managed submission client remain separate work.
 
 ## 4. Store and canonical record
 
-The store uses one nonrotating `events-0001.ndjson` stream per run, a durable
-`segments.json` manifest and an atomic `run.json` projection. Preparation and owner bookkeeping records have
+The store uses ordered `events-0001.ndjson`, `events-0002.ndjson`, … segments
+per run, a durable `segments.json` manifest and an atomic `run.json` projection.
+Before an append would exceed 64 MiB, the writer creates the next segment
+exclusively, synchronizes the empty file and run directory, then appends the
+whole record there. A record never spans files. Sealed files stay unchanged.
+Existing larger legacy files are preserved and rotate on the next append.
+The current bound is 4,096 segments per run; reaching it refuses new appends
+without deleting history. Preparation and owner bookkeeping records have
 `schema: ouro.ledger.event/1`, `run_id`, `attempt_id`, `seq`, `prev`,
 `received_at`, `provenance`, `kind`, `request_id`, `body` and, for owner intents,
 `effect_id`. Canonical source records retain `schema: ouro.event/1` and every
@@ -224,15 +231,25 @@ and chain head. It is rebuilt from verified canonical records at daemon startup.
 The current implementation embeds receipt values in canonical records rather
 than separately storing mutable receipt pointers.
 
-`segments.json` anchors the committed byte length, first and last sequence,
-SHA-256 over the exact stream bytes including LF delimiters, last record digest,
-and an ordered replay-identity digest. The replay preimage is a length-prefixed
-canonical record containing request/effect identity, immutable payload digest
+`segments.json` version 2 anchors each segment in order: filename, committed
+byte length, first and last global sequence, SHA-256 over its exact bytes
+including LF delimiters, and last record digest. The manifest also holds one
+ordered replay-identity digest across the entire run. Global `seq` and `prev`
+continue across every segment boundary; filenames and sequence ranges must
+be contiguous. The manifest is bounded to 2 MiB. The replay preimage is a
+length-prefixed canonical record containing request/effect identity, immutable payload digest
 and the original append receipt. Recovery checks that prefix before promoting
 complete unacknowledged tails. A shorter or changed prefix poisons the stream;
-historical bytes are never truncated or rewritten. Existing streams without a
-manifest are verified and migrated at startup. Deleting both history and its
-same-user anchor has no external witness; manifests do not upgrade `none` protection.
+historical bytes are never truncated or rewritten. Legacy single-segment
+streams without a manifest, and version 1 manifests, are verified and migrated at startup without changing canonical bytes.
+Multiple segments require an anchor. Recovery accepts at most one unlisted
+successor of a fully anchored predecessor: an empty file resumes an interrupted
+rotation, and a complete valid tail recovers its original receipts. Missing,
+reordered, unsafe or altered segments, extra unlisted files, interrupted frames,
+and growth of a sealed predecessor poison the run. Recovery never creates a
+missing committed segment or removes a partial successor. Deleting both history
+and its same-user anchor has no external witness; manifests do not upgrade
+`none` protection.
 The [segment schema](ledger-v1/segments.schema.json) fixes the manifest encoding.
 
 `<data>/ledger/index.sqlite` is a disposable SQLite projection of run metadata.
@@ -241,8 +258,7 @@ it after handing off the durable response. Index errors are reported separately
 by `doctor`; they cannot authorize execution, poison a sound canonical stream
 or revoke a durable append receipt. SQLite lock contention fails immediately,
 so an unavailable projection does not stall the next writer request.
-Segment rotation, retention-pruned replay
-identities and signed bundles remain deferred.
+Retention-pruned replay identities and signed bundles remain deferred.
 
 The owner reads the jail's canonical receipt at
 `<data>/attempts/<attempt_id>/jail.json`. It does not request another receipt copy
@@ -255,7 +271,8 @@ acknowledgement. The run's `receipts/` directory is reserved for future bundles.
 Every successful mutation follows this order:
 
 1. Encode and validate the bounded canonical record without changing state.
-2. Append its exact bytes and LF to the private stream.
+2. If necessary, create and synchronize the next segment and its directory;
+   append the exact record bytes and LF to the private active segment.
 3. `fsync` the stream.
 4. Write a new private projection, `fsync` it, rename to `run.json`, and `fsync`
    the containing directory.
@@ -274,9 +291,9 @@ It does not truncate a partial tail or rewrite historical bytes to manufacture
 a valid chain. An incomplete, oversized, malformed or conflicting stream stays
 poisoned with a verification finding. Ambiguous preparation identity also blocks
 new preparations. Complete records surviving a crash rebuild the original replay
-receipt. Startup synchronizes the same verified canonical file descriptor before
-publishing the repaired projection or promoted manifest. A recovery sync failure
-refuses startup; no recovered retry can be acknowledged before that barrier.
+receipt. Startup synchronizes every verified segment through the same descriptor
+used to read it before publishing the repaired projection or promoted manifest.
+A recovery sync failure refuses startup; no recovered retry can be acknowledged before that barrier.
 
 `verify` reports `local_consistency`, `coverage` and `child_protection` separately.
 A valid chain is local consistency only: deleting both history and its same-user
@@ -362,8 +379,8 @@ directory synchronization failed.
 Restarting the writer preserves the snapshot and the most recent page retry,
 including partially exported records. Checkpoints retain positions and response
 digests, not copies of event payloads or captured output. An expired, corrupt
-or unsafe checkpoint, replaced canonical inode, or changed pinned history refuses
-explicitly. Starting again creates a fresh snapshot; do not append that output
+or unsafe checkpoint, replaced canonical segment inode, or changed pinned
+history refuses explicitly. Starting again creates a fresh snapshot; do not append that output
 to a partial export from the old snapshot.
 Safe corrupt checkpoint files consume bounded session capacity until their
 filesystem timestamp expires, but do not block fresh snapshots or other cursors.
@@ -374,6 +391,13 @@ bounded page to corroborate the prior response. Snapshot state, protection and
 bounded coverage labels must also match their canonical sequence anchor; the
 selection label is derived from that coverage. It does not rescan the history.
 Checkpoints are at most 32 KiB each and the checkpoint directory scan is bounded.
+Version 2 checkpoints bind a digest of the ordered snapshot segment identities
+and byte boundaries. Logical byte offsets remain stable across rotation, so
+readers keep their original snapshot as later files are added. Version 1
+checkpoints still restore a snapshot wholly within the first segment. The
+reader keeps one active stream descriptor and checks at most 4,096 segment
+identities per page; it does not concatenate history into memory or hold every
+segment open. Validation and cursor restoration use transient descriptors.
 
 `export RUN --ndjson` reads all records, including preparation and owner intents.
 It writes the exact stored canonical UTF-8 bytes and LF delimiters to stdout,
@@ -416,8 +440,11 @@ unprotected label for `none`. Protocol tests cover forged role/attempt/peer
 capabilities, caller identity fields, and interrupted or oversized transport.
 These are deterministic fault injections, not a physical full-disk experiment.
 The [October 4 storage/recovery record](ledger-v1/evidence/2026-10-04-storage/README.md)
-documents manifest/replay anchors, disposable index recovery and durable cursor
-restart/retry tests, with working-tree source hashes and platform limits.
+documents the initial manifest/replay anchors, disposable index recovery and
+durable cursor restart/retry tests, with working-tree source hashes and platform
+limits. The
+[October 5 rotation record](ledger-v1/evidence/2026-10-05-rotation/README.md)
+covers multi-segment continuity, rotation failures and reader restoration.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
@@ -435,7 +462,7 @@ and fixtures only; it makes no runtime or custody claim.
 Milestone 2 is still gated on the full North Star durability suite and these
 unimplemented verbs/features: `append` for independent operator intents,
 `tail`, cross-run query and comparison, `diff`, `bundle`, `hold`, `release`, `gc`,
-retention-pruned deduplication/chain anchors, segment rotation,
+retention-pruned deduplication/chain anchors,
 best-effort outage reconciliation, capture retention, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,

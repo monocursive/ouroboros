@@ -1,0 +1,17 @@
+{
+  "result": "pass",
+  "segment_bytes_before_restart": [
+    66654281,
+    1574481
+  ],
+  "snapshot_records": 132,
+  "records_after_append": 133,
+  "export_bytes": 68228762,
+  "export_sha256": "9d6ce37dade64c37dfa68dfe757c3afa1cebbae27dd06d06f410c31d998a75d3",
+  "pages": 1561,
+  "exact_cursor_retry": true,
+  "original_receipt_replay": true,
+  "sealed_segment_unchanged": true,
+  "none_remains_unprotected": true,
+  "elapsed_seconds": 9.776
+}

@@ -114,8 +114,11 @@ retention, signed bundles, best-effort recovery and managed project authorizatio
 are still planned. A plain local export does not establish external custody.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
-SQLite run index and reader cursors that survive writer restart. It keeps one
-canonical segment per run; segment rotation and retention remain pending.
+SQLite run index and reader cursors that survive writer restart. Canonical
+segments now rotate at 64 MiB while preserving global record ordering, exact
+exports and restartable reader snapshots. The
+[rotation checks](specs/ledger-v1/evidence/2026-10-05-rotation/README.md) cover
+interrupted rotation and damaged segments. Retention remains pending.
 
 ## Later: submit work to a team worker
 

@@ -1,0 +1,82 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "base_revision": "02411d4941ddb07312eb61bb64c3d88a7f2766be",
+  "working_tree": true,
+  "workspace": {
+    "passed": 1115,
+    "failed": 0,
+    "ignored": 7,
+    "skip_markers": 0,
+    "ignored_tests": [
+      "test platform::linux::seccomp::tests::bless_the_pinned_seccomp_tables ... ignored, writes the evidence files; run deliberately",
+      "test n03_nfc_normalization_test_17 ... ignored, needs the 2.8 MB NormalizationTest.txt; see the doc comment",
+      "test seam_child_helper ... ignored, child helper invoked by j4_s9_every_test_seam_in_force_is_recorded",
+      "test proxy_limits_helper ... ignored, child helper invoked by the n04 descriptor tests",
+      "test lock_probe_child_helper ... ignored, child helper invoked by the_lease_is_exclusive_across_processes",
+      "test j4_fsize_helper ... ignored, subprocess helper for j4_r03_a_failed_local_write_never_leaves_a_partial_frame_mid_file",
+      "test crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail (line 84) ... ignored"
+    ]
+  },
+  "ledger": {
+    "passed": 78,
+    "failed": 0,
+    "ignored": 0,
+    "new_rotation_tests": 8
+  },
+  "i02_regressions": {
+    "passed": 9,
+    "failed": 0
+  },
+  "checks": {
+    "workspace_tests": "passed",
+    "clippy": "passed",
+    "format": "passed",
+    "i02": "passed",
+    "jail_contract": "passed",
+    "ledger_contract": "passed",
+    "managed_policy_contract": "passed",
+    "links": "passed",
+    "freeze": "passed"
+  },
+  "linux_rotation_runtime": "passed: 94 tests including 15 real launches, doctor, and production-threshold daemon acceptance",
+  "native_validation": {
+    "linux": {
+      "passed": 94,
+      "failed": 0,
+      "ignored": 0,
+      "skip_markers": 0,
+      "validation_exit": 0,
+      "source_files_checked": 528,
+      "clippy": "passed",
+      "real_launch_tests": 15,
+      "doctor_ready": true,
+      "production_threshold": {
+        "result": "pass",
+        "segment_bytes_before_restart": [
+          66654281,
+          1574481
+        ],
+        "snapshot_records": 132,
+        "records_after_append": 133,
+        "export_bytes": 68228762,
+        "export_sha256": "9d6ce37dade64c37dfa68dfe757c3afa1cebbae27dd06d06f410c31d998a75d3",
+        "pages": 1561,
+        "exact_cursor_retry": true,
+        "original_receipt_replay": true,
+        "sealed_segment_unchanged": true,
+        "none_remains_unprotected": true,
+        "elapsed_seconds": 9.776
+      }
+    },
+    "mac": {
+      "passed": 78,
+      "failed": 0,
+      "ignored": 0,
+      "skip_markers": 0,
+      "validation_exit": 0,
+      "source_files_checked": 528,
+      "clippy": "passed"
+    }
+  }
+}
