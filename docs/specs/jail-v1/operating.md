@@ -16,13 +16,16 @@ uncontained `none`.
 
 ## Install
 
-Supported for execution: Linux on x86_64, on a host that runs its own kernel
+Supported for execution: Linux on x86_64 or aarch64, on a host that runs its own kernel
 (a virtual machine is fine; a container that cannot create user namespaces or
 delegate a cgroup v2 subtree is not). The reference host is Ubuntu 26.04.1 on
-kernel 7.0. macOS builds support inspection (`version`, `explain`, `doctor`)
-and refuse execution with exit 125. A Linux build for another architecture
-compiles and refuses before preparation with 125
-(`unsupported_architecture`), because every syscall table in v1 is x86_64's.
+kernel 7.0; native ARM64 checks also run on a Raspberry Pi 4 with Debian 13.
+Capabilities are host-specific: the tested Pi's kernel disables memory cgroups
+and omits Landlock. Required memory ceilings and requested Landlock domains
+refuse there before exec. Run `doctor --profile <profile>` for the policy you
+intend to use. macOS builds support inspection (`version`, `explain`, `doctor`)
+and refuse execution with exit 125. Linux builds for other architectures refuse
+with 125 (`unsupported_architecture`).
 
 Build the binary from the workspace with the pinned toolchain
 (`rust-toolchain.toml`):

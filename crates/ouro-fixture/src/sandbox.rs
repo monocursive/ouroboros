@@ -10,14 +10,14 @@
 //!    tree is granted) and TCP connect (when asked, ABI 4 and later), add one
 //!    `path_beneath` rule per tree, and restrict this process.
 //! 3. seccomp, when a syscall is named: a filter that checks the
-//!    architecture (x86_64, x32 numbers refused), returns `EPERM` for the
+//!    native architecture (x86_64 or aarch64; x32 numbers refused), returns `EPERM` for the
 //!    named numbers and allows everything else.
 //! 4. `execve` of ARGV. Nothing is reported on success: the image is gone.
 //!
 //! A step that fails stops the mode before the exec: running the command
 //! without the sandbox it asked for would be the silent degradation the
 //! product forbids. So does a request the kernel cannot honour (TCP rules on
-//! ABI < 4, the x86_64 table on another architecture): it is refused before
+//! ABI < 4, a syscall name absent from the native table): it is refused before
 //! the first step, never approximated.
 //!
 //! The seccomp program is built by a pure function ([`seccomp_program`]) and
@@ -155,12 +155,126 @@ pub const X86_64_SYSCALLS: &[(&str, u32)] = &[
     ("landlock_add_rule", 445),
     ("landlock_restrict_self", 446),
 ];
+/// asm-generic 64-bit syscall table; absent legacy calls are deliberately
+/// absent here rather than silently translated to a different syscall.
+pub const AARCH64_SYSCALLS: &[(&str, u32)] = &[
+    ("read", 63),
+    ("write", 64),
+    ("close", 57),
+    ("fstat", 80),
+    ("mmap", 222),
+    ("mprotect", 226),
+    ("ioctl", 29),
+    ("dup", 23),
+    ("getpid", 172),
+    ("socket", 198),
+    ("connect", 203),
+    ("accept", 202),
+    ("sendto", 206),
+    ("recvfrom", 207),
+    ("sendmsg", 211),
+    ("recvmsg", 212),
+    ("shutdown", 210),
+    ("bind", 200),
+    ("listen", 201),
+    ("socketpair", 199),
+    ("setsockopt", 208),
+    ("clone", 220),
+    ("execve", 221),
+    ("kill", 129),
+    ("uname", 160),
+    ("fcntl", 25),
+    ("flock", 32),
+    ("truncate", 45),
+    ("ftruncate", 46),
+    ("getcwd", 17),
+    ("chdir", 49),
+    ("fchdir", 50),
+    ("fchmod", 52),
+    ("fchown", 55),
+    ("ptrace", 117),
+    ("setuid", 146),
+    ("setgid", 144),
+    ("setsid", 157),
+    ("personality", 92),
+    ("pivot_root", 41),
+    ("prctl", 167),
+    ("chroot", 51),
+    ("mount", 40),
+    ("umount2", 39),
+    ("sethostname", 161),
+    ("setdomainname", 162),
+    ("gettid", 178),
+    ("tkill", 130),
+    ("add_key", 217),
+    ("request_key", 218),
+    ("keyctl", 219),
+    ("openat", 56),
+    ("mkdirat", 34),
+    ("mknodat", 33),
+    ("fchownat", 54),
+    ("newfstatat", 79),
+    ("unlinkat", 35),
+    ("renameat", 38),
+    ("linkat", 37),
+    ("symlinkat", 36),
+    ("readlinkat", 78),
+    ("fchmodat", 53),
+    ("faccessat", 48),
+    ("unshare", 97),
+    ("accept4", 242),
+    ("dup3", 24),
+    ("pipe2", 59),
+    ("perf_event_open", 241),
+    ("name_to_handle_at", 264),
+    ("open_by_handle_at", 265),
+    ("setns", 268),
+    ("process_vm_readv", 270),
+    ("process_vm_writev", 271),
+    ("renameat2", 276),
+    ("seccomp", 277),
+    ("memfd_create", 279),
+    ("bpf", 280),
+    ("execveat", 281),
+    ("userfaultfd", 282),
+    ("statx", 291),
+    ("pidfd_send_signal", 424),
+    ("io_uring_setup", 425),
+    ("io_uring_enter", 426),
+    ("io_uring_register", 427),
+    ("open_tree", 428),
+    ("move_mount", 429),
+    ("fsopen", 430),
+    ("fsconfig", 431),
+    ("fsmount", 432),
+    ("fspick", 433),
+    ("pidfd_open", 434),
+    ("clone3", 435),
+    ("openat2", 437),
+    ("pidfd_getfd", 438),
+    ("faccessat2", 439),
+    ("mount_setattr", 442),
+    ("landlock_create_ruleset", 444),
+    ("landlock_add_rule", 445),
+    ("landlock_restrict_self", 446),
+];
+pub const NATIVE_SYSCALLS: &[(&str, u32)] =
+    if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        AARCH64_SYSCALLS
+    } else {
+        X86_64_SYSCALLS
+    };
+pub const NATIVE_ARCH: &str = if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+    "aarch64"
+} else {
+    "x86_64"
+};
 
 /// The most syscalls one filter may name. Two instructions each keeps the
 /// program far inside `BPF_MAXINSNS` and every jump offset at 0 or 1.
 pub const MAX_SECCOMP_SYSCALLS: usize = 256;
 
-/// Resolve names (or decimal numbers below 1024) to x86_64 numbers,
+/// Resolve names (or decimal numbers below 1024) to native syscall numbers,
 /// deduplicated in first-seen order.
 pub fn resolve_syscalls(names: &[String]) -> Result<Vec<(String, u32)>, Usage> {
     let mut out: Vec<(String, u32)> = Vec::new();
@@ -171,13 +285,13 @@ pub fn resolve_syscalls(names: &[String]) -> Result<Vec<(String, u32)>, Usage> {
             }
             nr
         } else {
-            X86_64_SYSCALLS
+            NATIVE_SYSCALLS
                 .iter()
                 .find(|(name, _)| name == n)
                 .map(|(_, nr)| *nr)
                 .ok_or_else(|| {
                     format!(
-                        "unknown syscall `{n}`: name one of the fixture's x86_64 table or give a number"
+                        "unknown syscall `{n}`: name one of the fixture's native table or give a number"
                     )
                 })?
         };
@@ -215,8 +329,12 @@ const JSET_K: u16 = 0x45;
 /// `BPF_RET | BPF_K`.
 const RET_K: u16 = 0x06;
 
-/// `AUDIT_ARCH_X86_64`: EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE.
-pub const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+/// `AUDIT_ARCH`: EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE.
+pub const AUDIT_ARCH: u32 = if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+    0xc000_00b7
+} else {
+    0xc000_003e
+};
 /// Set in the syscall number of an x32 call.
 pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 pub const RET_KILL_PROCESS: u32 = 0x8000_0000;
@@ -237,7 +355,7 @@ const fn insn(code: u16, jt: u8, jf: u8, k: u32) -> Insn {
 pub fn seccomp_program(numbers: &[u32]) -> Vec<Insn> {
     let mut p = vec![
         insn(LD_W_ABS, 0, 0, OFF_ARCH),
-        insn(JEQ_K, 1, 0, AUDIT_ARCH_X86_64),
+        insn(JEQ_K, 1, 0, AUDIT_ARCH),
         insn(RET_K, 0, 0, RET_KILL_PROCESS),
         insn(LD_W_ABS, 0, 0, OFF_NR),
         insn(JSET_K, 0, 1, X32_SYSCALL_BIT),
@@ -367,7 +485,7 @@ pub(crate) fn sandbox_exec(
             ),
         ));
     }
-    if !syscalls.is_empty() && !cfg!(target_arch = "x86_64") {
+    if !syscalls.is_empty() && !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return Ok(refuse(
             rep,
             "seccomp",
@@ -408,7 +526,7 @@ mod linux {
 
     use super::{
         ACCESS_NET_CONNECT_TCP, LANDLOCK_CREATE_RULESET_VERSION, LANDLOCK_RULE_PATH_BENEATH,
-        PathBeneathAttr, RO_RIGHTS, Request, RulesetAttr, fs_rights, seccomp_program,
+        NATIVE_ARCH, PathBeneathAttr, RO_RIGHTS, Request, RulesetAttr, fs_rights, seccomp_program,
     };
     use crate::ops::finish;
     use crate::raw::{self, Attempt};
@@ -604,7 +722,7 @@ mod linux {
             Value::Array(numbers.iter().map(|n| Value::from(*n)).collect()),
         );
         r.set("action", "SECCOMP_RET_ERRNO(EPERM)");
-        r.set("arch", "x86_64");
+        r.set("arch", NATIVE_ARCH);
         r.set("arch_mismatch_action", "SECCOMP_RET_KILL_PROCESS");
         r.set("x32_action", "SECCOMP_RET_KILL_PROCESS");
         r.set("instructions", program.len());
@@ -623,14 +741,10 @@ mod tests {
     #[test]
     fn the_filter_denies_exactly_the_named_numbers_on_x86_64() {
         let p = seccomp_program(&[83, 258]);
-        assert_eq!(interpret(&p, AUDIT_ARCH_X86_64, 83), RET_ERRNO | 1);
-        assert_eq!(interpret(&p, AUDIT_ARCH_X86_64, 258), RET_ERRNO | 1);
+        assert_eq!(interpret(&p, AUDIT_ARCH, 83), RET_ERRNO | 1);
+        assert_eq!(interpret(&p, AUDIT_ARCH, 258), RET_ERRNO | 1);
         for other in [0, 1, 59, 84, 257, 259, 1023] {
-            assert_eq!(
-                interpret(&p, AUDIT_ARCH_X86_64, other),
-                RET_ALLOW,
-                "{other}"
-            );
+            assert_eq!(interpret(&p, AUDIT_ARCH, other), RET_ALLOW, "{other}");
         }
     }
 
@@ -640,19 +754,24 @@ mod tests {
         // only. Try to get around it with i386 (0x40000003) and aarch64
         // (0xC00000B7), and with the x32 bit on a denied and an allowed nr.
         let p = seccomp_program(&[83]);
-        for arch in [0x4000_0003, 0xC000_00B7, 0] {
+        for arch in [
+            0x4000_0003,
+            if NATIVE_ARCH == "aarch64" {
+                0xc000_003e
+            } else {
+                0xc000_00b7
+            },
+            0,
+        ] {
             for nr in [83, 0, 59] {
                 assert_eq!(interpret(&p, arch, nr), RET_KILL_PROCESS, "{arch:#x}/{nr}");
             }
         }
         assert_eq!(
-            interpret(&p, AUDIT_ARCH_X86_64, X32_SYSCALL_BIT | 83),
+            interpret(&p, AUDIT_ARCH, X32_SYSCALL_BIT | 83),
             RET_KILL_PROCESS
         );
-        assert_eq!(
-            interpret(&p, AUDIT_ARCH_X86_64, X32_SYSCALL_BIT),
-            RET_KILL_PROCESS
-        );
+        assert_eq!(interpret(&p, AUDIT_ARCH, X32_SYSCALL_BIT), RET_KILL_PROCESS);
     }
 
     #[test]
@@ -665,8 +784,8 @@ mod tests {
                 assert!(i + 1 + usize::from(insn.jt.max(insn.jf)) < p.len());
             }
         }
-        assert_eq!(interpret(&p, AUDIT_ARCH_X86_64, 255), RET_ERRNO | 1);
-        assert_eq!(interpret(&p, AUDIT_ARCH_X86_64, 256), RET_ALLOW);
+        assert_eq!(interpret(&p, AUDIT_ARCH, 255), RET_ERRNO | 1);
+        assert_eq!(interpret(&p, AUDIT_ARCH, 256), RET_ALLOW);
         assert_eq!(size_of::<Insn>(), 8, "struct sock_filter is 8 bytes");
     }
 
@@ -675,7 +794,13 @@ mod tests {
         let got = resolve_syscalls(&["mkdirat".into(), "83".into(), "mkdirat".into()]).unwrap();
         assert_eq!(
             got,
-            vec![("mkdirat".to_string(), 258), ("83".to_string(), 83)]
+            vec![
+                (
+                    "mkdirat".to_string(),
+                    if NATIVE_ARCH == "aarch64" { 34 } else { 258 }
+                ),
+                ("83".to_string(), 83)
+            ]
         );
         assert!(
             resolve_syscalls(&["nosuchcall".into()])
@@ -710,6 +835,121 @@ mod tests {
             "nothing is claimed beyond ABI 5's rights"
         );
         assert_eq!(RO_RIGHTS & fs_rights(1), RO_RIGHTS);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn the_arm64_table_matches_libc_for_every_named_syscall() {
+        let expected: &[(&str, i64)] = &[
+            ("read", libc::SYS_read),
+            ("write", libc::SYS_write),
+            ("close", libc::SYS_close),
+            ("fstat", libc::SYS_fstat),
+            ("mmap", libc::SYS_mmap),
+            ("mprotect", libc::SYS_mprotect),
+            ("ioctl", libc::SYS_ioctl),
+            ("dup", libc::SYS_dup),
+            ("getpid", libc::SYS_getpid),
+            ("socket", libc::SYS_socket),
+            ("connect", libc::SYS_connect),
+            ("accept", libc::SYS_accept),
+            ("sendto", libc::SYS_sendto),
+            ("recvfrom", libc::SYS_recvfrom),
+            ("sendmsg", libc::SYS_sendmsg),
+            ("recvmsg", libc::SYS_recvmsg),
+            ("shutdown", libc::SYS_shutdown),
+            ("bind", libc::SYS_bind),
+            ("listen", libc::SYS_listen),
+            ("socketpair", libc::SYS_socketpair),
+            ("setsockopt", libc::SYS_setsockopt),
+            ("clone", libc::SYS_clone),
+            ("execve", libc::SYS_execve),
+            ("kill", libc::SYS_kill),
+            ("uname", libc::SYS_uname),
+            ("fcntl", libc::SYS_fcntl),
+            ("flock", libc::SYS_flock),
+            ("truncate", libc::SYS_truncate),
+            ("ftruncate", libc::SYS_ftruncate),
+            ("getcwd", libc::SYS_getcwd),
+            ("chdir", libc::SYS_chdir),
+            ("fchdir", libc::SYS_fchdir),
+            ("fchmod", libc::SYS_fchmod),
+            ("fchown", libc::SYS_fchown),
+            ("ptrace", libc::SYS_ptrace),
+            ("setuid", libc::SYS_setuid),
+            ("setgid", libc::SYS_setgid),
+            ("setsid", libc::SYS_setsid),
+            ("personality", libc::SYS_personality),
+            ("pivot_root", libc::SYS_pivot_root),
+            ("prctl", libc::SYS_prctl),
+            ("chroot", libc::SYS_chroot),
+            ("mount", libc::SYS_mount),
+            ("umount2", libc::SYS_umount2),
+            ("sethostname", libc::SYS_sethostname),
+            ("setdomainname", libc::SYS_setdomainname),
+            ("gettid", libc::SYS_gettid),
+            ("tkill", libc::SYS_tkill),
+            ("add_key", libc::SYS_add_key),
+            ("request_key", libc::SYS_request_key),
+            ("keyctl", libc::SYS_keyctl),
+            ("openat", libc::SYS_openat),
+            ("mkdirat", libc::SYS_mkdirat),
+            ("mknodat", libc::SYS_mknodat),
+            ("fchownat", libc::SYS_fchownat),
+            ("newfstatat", libc::SYS_newfstatat),
+            ("unlinkat", libc::SYS_unlinkat),
+            ("renameat", libc::SYS_renameat),
+            ("linkat", libc::SYS_linkat),
+            ("symlinkat", libc::SYS_symlinkat),
+            ("readlinkat", libc::SYS_readlinkat),
+            ("fchmodat", libc::SYS_fchmodat),
+            ("faccessat", libc::SYS_faccessat),
+            ("unshare", libc::SYS_unshare),
+            ("accept4", libc::SYS_accept4),
+            ("dup3", libc::SYS_dup3),
+            ("pipe2", libc::SYS_pipe2),
+            ("perf_event_open", libc::SYS_perf_event_open),
+            ("name_to_handle_at", libc::SYS_name_to_handle_at),
+            ("open_by_handle_at", libc::SYS_open_by_handle_at),
+            ("setns", libc::SYS_setns),
+            ("process_vm_readv", libc::SYS_process_vm_readv),
+            ("process_vm_writev", libc::SYS_process_vm_writev),
+            ("renameat2", libc::SYS_renameat2),
+            ("seccomp", libc::SYS_seccomp),
+            ("memfd_create", libc::SYS_memfd_create),
+            ("bpf", libc::SYS_bpf),
+            ("execveat", libc::SYS_execveat),
+            ("userfaultfd", libc::SYS_userfaultfd),
+            ("statx", libc::SYS_statx),
+            ("pidfd_send_signal", libc::SYS_pidfd_send_signal),
+            ("io_uring_setup", libc::SYS_io_uring_setup),
+            ("io_uring_enter", libc::SYS_io_uring_enter),
+            ("io_uring_register", libc::SYS_io_uring_register),
+            ("open_tree", libc::SYS_open_tree),
+            ("move_mount", libc::SYS_move_mount),
+            ("fsopen", libc::SYS_fsopen),
+            ("fsconfig", libc::SYS_fsconfig),
+            ("fsmount", libc::SYS_fsmount),
+            ("fspick", libc::SYS_fspick),
+            ("pidfd_open", libc::SYS_pidfd_open),
+            ("clone3", libc::SYS_clone3),
+            ("openat2", libc::SYS_openat2),
+            ("pidfd_getfd", libc::SYS_pidfd_getfd),
+            ("faccessat2", libc::SYS_faccessat2),
+            ("mount_setattr", libc::SYS_mount_setattr),
+            ("landlock_create_ruleset", libc::SYS_landlock_create_ruleset),
+            ("landlock_add_rule", libc::SYS_landlock_add_rule),
+            ("landlock_restrict_self", libc::SYS_landlock_restrict_self),
+        ];
+        assert_eq!(expected.len(), AARCH64_SYSCALLS.len());
+        for &(name, nr) in expected {
+            let declared = AARCH64_SYSCALLS
+                .iter()
+                .find(|(key, _)| *key == name)
+                .unwrap()
+                .1;
+            assert_eq!(i64::from(declared), nr, "{name}");
+        }
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

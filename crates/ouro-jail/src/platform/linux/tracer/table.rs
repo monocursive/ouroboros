@@ -112,9 +112,13 @@ fn operation(entry: &Entry) -> String {
 /// The table, as the evidence file holds it.
 #[must_use]
 pub fn closed_set_table() -> String {
-    let x86 = sys::AUDIT_ARCH_X86_64;
+    let x86 = sys::AUDIT_ARCH;
     let mut out = String::new();
-    out.push_str("ouro-jail observer closed set `linux-closed-v1` (x86_64, ptrace backend)\n");
+    let _ = writeln!(
+        out,
+        "ouro-jail observer closed set `linux-closed-v1` ({}, ptrace backend)",
+        crate::platform::linux::abi::TABLE_ARCH
+    );
     out.push_str(
         "jail-v1 §11.2, §11.4; generated from the observer's CLOSED_SET and the narrowing\n\
          canonical learning filter (every verdict below is the program's own, run on\n\
@@ -315,6 +319,6 @@ mod tests {
         assert!(table.contains("under none nothing refuses them"));
         assert!(!table.contains("NOT REFUSED"));
         assert!(table.contains(&narrowing_filter_digest()));
-        assert!(table.contains("rows: 22"));
+        assert!(table.contains(&format!("rows: {}", CLOSED_SET.len())));
     }
 }

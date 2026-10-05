@@ -937,7 +937,7 @@ impl fmt::Display for TracerError {
             TracerError::UnsupportedArch => {
                 write!(
                     f,
-                    "the ptrace observer implements the x86_64 closed set only"
+                    "the ptrace observer implements the x86_64 and aarch64 closed sets"
                 )
             }
             TracerError::Seize { pid, errno } => write!(
@@ -1296,7 +1296,8 @@ mod tests {
         // rest of the suite runs in parallel.
         let before = tracer_threads();
         match Tracer::attach(0, TracerConfig::default()) {
-            Err(TracerError::UnsupportedArch) if !cfg!(target_arch = "x86_64") => {}
+            Err(TracerError::UnsupportedArch)
+                if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) => {}
             Err(TracerError::Seize { pid, errno }) => {
                 assert_eq!(pid, 0);
                 assert!(
@@ -1333,7 +1334,8 @@ mod tests {
         // pid 1 is not a descendant of this process, so Yama at scope 1 and
         // the ordinary permission check both refuse it.
         match Tracer::attach(1, TracerConfig::default()) {
-            Err(TracerError::UnsupportedArch) if !cfg!(target_arch = "x86_64") => {}
+            Err(TracerError::UnsupportedArch)
+                if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) => {}
             Err(TracerError::Seize { pid: 1, errno }) => {
                 assert!(
                     errno == libc::EPERM || errno == libc::ESRCH,

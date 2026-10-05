@@ -675,14 +675,14 @@ fn landlock(grants: &[(&str, bool)]) -> String {
 fn inner_seccomp() -> String {
     use crate::platform::linux::bpf::Asm;
     use crate::platform::linux::seccomp::{
-        AUDIT_ARCH_X86_64, LINUX_EPERM, SD_ARCH, SD_NR, SECCOMP_RET_ALLOW, ret_errno,
+        AUDIT_ARCH, LINUX_EPERM, SD_ARCH, SD_NR, SECCOMP_RET_ALLOW, ret_errno,
     };
     let mut asm = Asm::new();
     asm.ld_w_abs(SD_ARCH)
-        .jeq(AUDIT_ARCH_X86_64, None, Some("deny"))
+        .jeq(AUDIT_ARCH, None, Some("deny"))
         .ld_w_abs(SD_NR)
-        .jeq(83, Some("deny"), None)
-        .jeq(258, Some("deny"), None)
+        .jeq(super::super::abi::nr(83, 34), Some("deny"), None)
+        .jeq(super::super::abi::nr(258, 34), Some("deny"), None)
         .ret(SECCOMP_RET_ALLOW)
         .label("deny")
         .ret(ret_errno(LINUX_EPERM));

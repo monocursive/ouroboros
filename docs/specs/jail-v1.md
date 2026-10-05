@@ -298,22 +298,33 @@ Conformance runs on the host as a dedicated operator account,
 `ouro-ci`: no sudo, no capability, lingering enabled (a per-user logind
 setting, §9.3) so its `user@` service delegates the cgroup controllers, and
 nothing else (§16). A VM is acceptable; a container that cannot delegate the required
-kernel features is not a substitute for the release runner. Linux aarch64
-gets its own native conformance run before it is advertised; it is a later
-lane, not the reference host. Every syscall table in v1 (the contained
-filters, the mediation filter and the observer's closed set) is x86_64's, so
-a build for another architecture compiles, and the probes that rest on those
-tables report `unsupported` with reason `unsupported_architecture`:
-`syscall_filter`, `closed_set_observation` and `network_proxy` are
-unsupported, `doctor` is not ready and `run` refuses with 125 before
-preparation. No promise is made about all kernels newer than
-a version.
+kernel features is not a substitute for the release runner.
+
+The Linux backend implements native x86_64 and aarch64 syscall tables for
+contained filters, Unix-peer mediation and the closed-set observer. Native
+ARM64 uses `PTRACE_GETREGSET` / `PTRACE_SETREGSET`, `NT_ARM_SYSTEM_CALL` to
+cancel a forbidden exec, and the ARM64 signal-frame layout to resolve syscall
+restarts. Legacy pathname syscalls absent from ARM64 are not invented: its
+13-row closed set uses the native `*at` variants. Foreign ABIs remain refused
+by contained filters; uncontained observation records foreign calls and the
+open-ended listener/untraced-child gaps for AArch32 as well as x86 compatibility
+ABIs. Other native architectures report `unsupported_architecture` and refuse
+before preparation.
+
+ARM64 validation is a separate lane from the x86_64 release host. The current
+Raspberry Pi 4 test host runs Debian 13.7 on kernel `6.18.50+rpt-rpi-v8`.
+Its boot command line disables memory cgroups, and its kernel has
+`CONFIG_SECURITY_LANDLOCK` unset. A required memory ceiling therefore refuses
+before exec, and a requested Landlock domain refuses before running its child;
+neither is reported as enforced. Runtime-library candidates such as `/lib64`
+are bound only where present, with actual mounts recorded in the receipt.
+No promise is made about all kernels newer than a version.
 
 The native macOS CI lane initially targets Apple Silicon; Intel compilation is
 additional evidence, not an execution support claim. CI compiles
 `aarch64-unknown-linux-gnu` and `x86_64-apple-darwin` (all targets, warnings
-denied); neither is executed, and neither is a support claim. Both
-architectures remain possible through the platform contract.
+denied). Those cross-compilation checks do not replace native execution
+validation. macOS remains a refusal-only execution backend.
 
 ### 3.3 macOS work that must remain possible
 
@@ -795,7 +806,7 @@ Apply configuration in this order:
    (`assume-outside-no-bus`) or with lingering treated as off
    (`assume-outside-no-linger`); any other value is ignored; it is named in
    `supervisor_scope.test_seam`, with the value applied or null when
-   ignored. `OURO_JAIL_TEST_ARCH` makes the probes that rest on the x86_64
+   ignored. `OURO_JAIL_TEST_ARCH` makes the probes that rest on native
    syscall tables refuse as a build for the named architecture would (§3.2);
    it can only add a refusal, and the refusal's evidence names it.
    `OURO_JAIL_TEST_MOUNT_SWAP=<dir>` writes `<dir>/pinned` once every mount
@@ -1815,8 +1826,9 @@ artifacts from the test runner.
 Attach supported native ABI variants of the operations below. The implementation
 must publish its exact hook/syscall table. Calls absent on an architecture are
 identified as absent; equivalent variants that exist must be tested. The
-x86_64 table is published as
-[`evidence/closed-set-x86_64.txt`](jail-v1/evidence/closed-set-x86_64.txt),
+tables are published separately as
+[`evidence/closed-set-x86_64.txt`](jail-v1/evidence/closed-set-x86_64.txt) and
+[`evidence/closed-set-aarch64.txt`](jail-v1/evidence/closed-set-aarch64.txt),
 generated from the observer's rows and by running the installed narrowing
 filter; it names the canonical narrowing-filter digest that receipts record
 in `lifetime.native.details.narrowing_filter_digest`, and conformance

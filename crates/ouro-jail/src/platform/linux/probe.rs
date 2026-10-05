@@ -229,7 +229,7 @@ fn seam_refusal_for(name: &str, seam: Option<&str>) -> Option<ProbeResult> {
 // J5-D end
 
 // J5-D begin: the architecture refusal (§3.2)
-/// The probes whose mechanism is one of this implementation's x86_64
+/// The probes whose mechanism is one of this implementation's native
 /// syscall tables, with the mechanism each one names: the `tool` and `agent`
 /// filters, the observer's closed set and narrowing filter, and the
 /// unix-peer mediation filter the `agent` rows run under.
@@ -259,9 +259,8 @@ pub fn architecture_refusal(name: &str, arch: &str) -> Option<ProbeResult> {
         mechanism,
         seccomp::REASON_UNSUPPORTED_ARCHITECTURE,
         format!(
-            "this build is for {arch}; the syscall tables this mechanism rests on are {} only \
-             (Linux {arch} is a later lane, jail-v1 §3.2)",
-            seccomp::TABLE_ARCH
+            "this build is for {arch}; this mechanism implements Linux x86_64 and aarch64 \
+             syscall tables only (jail-v1 §3.2)"
         ),
     ))
 }
@@ -1437,8 +1436,8 @@ mod tests {
     ];
 
     #[test]
-    fn off_x86_64_the_table_bound_probes_are_unsupported_before_running() {
-        for arch in ["aarch64", "riscv64", "x86", "powerpc64"] {
+    fn unsupported_architectures_the_table_bound_probes_are_unsupported_before_running() {
+        for arch in ["riscv64", "arm", "x86", "powerpc64"] {
             for name in PROBE_NAMES {
                 let Some(refusal) = architecture_refusal(name, arch) else {
                     assert!(
@@ -1478,11 +1477,11 @@ mod tests {
             for seam in [None, Some(""), Some("x86_64")] {
                 assert_eq!(seam_refusal_for(name, seam), None, "{name} {seam:?}");
             }
-            let refusal = seam_refusal_for(name, Some("aarch64")).expect("refused");
+            let refusal = seam_refusal_for(name, Some("riscv64")).expect("refused");
             assert_eq!(refusal.status, ProbeStatus::Unsupported);
-            assert!(refusal.evidence.contains("OURO_JAIL_TEST_ARCH=aarch64"));
+            assert!(refusal.evidence.contains("OURO_JAIL_TEST_ARCH=riscv64"));
         }
-        assert_eq!(seam_refusal_for("bwrap_present", Some("aarch64")), None);
+        assert_eq!(seam_refusal_for("bwrap_present", Some("riscv64")), None);
     }
 
     /// The capability mapping: on a build the tables do not cover, the
@@ -1490,14 +1489,14 @@ mod tests {
     /// the architecture's reason, which no requirement accepts, so `doctor`
     /// is not ready and `run` refuses with 125 before preparation.
     #[test]
-    fn off_x86_64_the_filter_and_observer_capabilities_refuse() {
+    fn unsupported_architectures_the_filter_and_observer_capabilities_refuse() {
         use crate::capability::{CapabilityScope, CapabilityStatus};
         // Every other probe as if it had succeeded, so the refusal is the
         // architecture's alone.
         let results: Vec<ProbeResult> = PROBE_NAMES
             .iter()
             .map(|name| {
-                architecture_refusal(name, "aarch64").unwrap_or_else(|| {
+                architecture_refusal(name, "riscv64").unwrap_or_else(|| {
                     ProbeResult::new(name, ProbeStatus::Available, "test", "ok", "")
                 })
             })

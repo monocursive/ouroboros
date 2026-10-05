@@ -324,10 +324,9 @@ fn s03_a_landlock_and_seccomp_inner_sandbox_starts_and_restricts_its_child() {
         argv.push(OsString::from("--landlock-ro"));
         argv.push(ro.as_os_str().to_owned());
     }
-    for name in ["mkdir", "mkdirat"] {
-        argv.push(OsString::from("--seccomp-errno"));
-        argv.push(OsString::from(name));
-    }
+    #[cfg(not(target_arch = "aarch64"))]
+    argv.extend(["--seccomp-errno", "mkdir"].map(OsString::from));
+    argv.extend(["--seccomp-errno", "mkdirat"].map(OsString::from));
     argv.push(OsString::from("--"));
     argv.push(c.fixture.clone().into_os_string());
     argv.push(OsString::from("script"));
@@ -552,7 +551,7 @@ fn s03_the_named_limits_are_what_the_specification_says() {
         return;
     }
     const SCRIPT: &str = r#"
-import ctypes, errno, json
+import ctypes, errno, json, platform
 libc = ctypes.CDLL(None, use_errno=True)
 class SockFilter(ctypes.Structure):
     _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte), ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint)]
@@ -563,7 +562,7 @@ fprog = SockFprog(1, prog)
 libc.syscall.restype = ctypes.c_long
 out = {"no_new_privs": libc.prctl(38, 1, 0, 0, 0)}
 def seccomp(flags):
-    rc = libc.syscall(317, 1, ctypes.c_ulong(flags), ctypes.byref(fprog))
+    rc = libc.syscall(277 if platform.machine() == "aarch64" else 317, 1, ctypes.c_ulong(flags), ctypes.byref(fprog))
     return "ok" if rc >= 0 else errno.errorcode[ctypes.get_errno()]
 out["inner_new_listener"] = seccomp(1 << 3)
 out["inner_plain_filter"] = seccomp(0)
@@ -3334,7 +3333,7 @@ fn review_the_target_cannot_reach_into_the_bridge() {
     }
     let script = format!(
         r#"
-import ctypes, errno, json, os, signal, sys, time, urllib.request
+import ctypes, errno, json, platform, os, signal, sys, time, urllib.request
 {FIND_BRIDGE}
 url = sys.argv[1]
 out = {{}}

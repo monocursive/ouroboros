@@ -1220,7 +1220,7 @@ fn socket_bound_at(path: &Path) -> Option<i32> {
                 .sun_path
                 .iter()
                 .take_while(|byte| **byte != 0)
-                .map(|byte| *byte as u8)
+                .map(|byte| byte.to_ne_bytes()[0])
                 .collect();
             bytes == path.as_os_str().as_bytes()
         }

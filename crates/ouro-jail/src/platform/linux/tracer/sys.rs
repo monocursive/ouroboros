@@ -75,12 +75,20 @@ pub const SI_CODE_HANDLER_ENTRY: c_int = libc::SIGTRAP;
 pub const TRAP_BRKPT: c_int = 1;
 pub const TRAP_TRACE: c_int = 2;
 
-/// Where an x86_64 signal frame keeps the interrupted `rax` and `rip`,
-/// relative to the `ucontext` the kernel passes a handler in `rdx`:
-/// `uc_mcontext` (a `struct sigcontext`) follows `uc_flags`, `uc_link` and
-/// the 24-byte `uc_stack`, and `rax` and `rip` are its 14th and 17th words.
-pub const FRAME_RAX: u64 = 40 + 13 * 8;
-pub const FRAME_RIP: u64 = 40 + 16 * 8;
+/// Offsets from ucontext to the interrupted result register and PC.
+/// x86_64 has mcontext at 40, with rax/rip at words 13/16; arm64 has
+/// mcontext at 176, then fault_address, x0..x30, sp and pc. Native libc
+/// layout assertions below independently check both ABIs.
+pub const FRAME_RESULT: u64 = if cfg!(target_arch = "aarch64") {
+    176 + 8
+} else {
+    40 + 13 * 8
+};
+pub const FRAME_IP: u64 = if cfg!(target_arch = "aarch64") {
+    176 + 8 + 32 * 8
+} else {
+    40 + 16 * 8
+};
 
 /// `struct ptrace_syscall_info.op`.
 pub const SYSCALL_INFO_NONE: u8 = 0;
@@ -92,7 +100,7 @@ pub const SYSCALL_INFO_SECCOMP: u8 = 3;
 /// exit stop and never to user space. None of them is a result yet: when
 /// the thread next returns to user space the kernel either re-enters the
 /// call or turns the code into `EINTR`, depending on the code and on the
-/// signal being delivered (`arch/x86/kernel/signal.c`):
+/// signal being delivered (`arch/{x86,arm64}/kernel/signal.c`):
 ///
 /// | code | a handler runs | no handler runs |
 /// |---|---|---|
@@ -128,7 +136,7 @@ pub fn is_restart(rval: i64) -> bool {
 pub const SECCOMP_SET_MODE_FILTER: libc::c_long = 1;
 pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 pub const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
-pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+pub const AUDIT_ARCH: u32 = crate::platform::linux::abi::AUDIT_ARCH;
 /// x86_64 marks an x32 syscall by this bit in `nr`.
 pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 /// The 32-bit x86 audit architecture: `int 0x80` entries carry this arch and
@@ -338,7 +346,7 @@ pub struct SyscallInfo {
     pub rval: i64,
 }
 
-/// `struct ptrace_syscall_info` as the kernel lays it out on x86_64:
+/// `struct ptrace_syscall_info` as the kernel lays it out on both native ABIs:
 /// `op` at 0, `arch` at 4, `instruction_pointer` at 8, `stack_pointer` at
 /// 16, then the union at 24 (`nr` + six args for an entry or seccomp stop,
 /// `rval` for an exit stop).
@@ -396,40 +404,64 @@ pub fn siginfo(pid: pid_t) -> io::Result<(c_int, c_int)> {
     Ok((info.si_signo, info.si_code))
 }
 
-/// The four general registers the handler-entry check reads.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Regs {
-    pub rax: u64,
-    pub rdx: u64,
-    pub rdi: u64,
-    pub rsp: u64,
-}
-
-/// A stopped tracee's general registers (`PTRACE_GETREGS`).
-///
-/// # Errors
-/// The `errno` of the request; `ENOSYS` off x86_64, where the observer
-/// refuses to attach anyway.
+/// Locate the signal frame the kernel has just built for a single-stepped
+/// handler. Called only after checking the kernel's handler-entry siginfo.
 #[cfg(target_arch = "x86_64")]
-pub fn regs(pid: pid_t) -> io::Result<Regs> {
-    // SAFETY: `user_regs_struct` is plain integers; all-zero is valid.
+pub fn handler_ucontext(pid: pid_t, delivered: u64) -> io::Result<Option<u64>> {
+    // SAFETY: integer register buffer of the kernel's documented size.
     let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
     ptrace_raw(
         PTRACE_GETREGS,
         pid,
         std::ptr::null_mut(),
-        (&raw mut regs).cast::<c_void>(),
+        (&raw mut regs).cast(),
     )?;
-    Ok(Regs {
-        rax: regs.rax,
-        rdx: regs.rdx,
-        rdi: regs.rdi,
-        rsp: regs.rsp,
+    Ok(
+        (regs.rax == 0 && regs.rdi == delivered && regs.rsp.checked_add(8) == Some(regs.rdx))
+            .then_some(regs.rdx),
+    )
+}
+
+/// Linux arm64 user_pt_regs: x0..x30, sp, pc, pstate (NT_PRSTATUS).
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Default)]
+struct Arm64Regs {
+    x: [u64; 31],
+    sp: u64,
+    pc: u64,
+    pstate: u64,
+}
+
+#[cfg(target_arch = "aarch64")]
+fn arm64_regset<T>(pid: pid_t, request: c_uint, note: u64, value: &mut T) -> io::Result<()> {
+    let mut iov = libc::iovec {
+        iov_base: std::ptr::from_mut(value).cast(),
+        iov_len: std::mem::size_of::<T>(),
+    };
+    ptrace_raw(request, pid, as_ptr(note), (&raw mut iov).cast())?;
+    if iov.iov_len != std::mem::size_of::<T>() {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn handler_ucontext(pid: pid_t, delivered: u64) -> io::Result<Option<u64>> {
+    let mut regs = Arm64Regs::default();
+    arm64_regset(pid, libc::PTRACE_GETREGSET, 1, &mut regs)?;
+    // rt_sigframe is siginfo (128 bytes), then ucontext. The kernel only
+    // supplies x2 with SA_SIGINFO, so derive the frame from sp for ordinary
+    // handlers too. setup_return always sets x0 to the delivered signal.
+    Ok(if regs.x[0] == delivered && regs.sp & 15 == 0 {
+        regs.sp.checked_add(128)
+    } else {
+        None
     })
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-pub fn regs(_pid: pid_t) -> io::Result<Regs> {
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn handler_ucontext(_pid: pid_t, _delivered: u64) -> io::Result<Option<u64>> {
     Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
@@ -534,7 +566,23 @@ pub fn deny_exec(pid: pid_t, entry: bool) -> io::Result<()> {
     )?;
     Ok(())
 }
-#[cfg(not(target_arch = "x86_64"))]
+/// Skip the syscall through NT_ARM_SYSTEM_CALL, not x8: the kernel has
+/// already copied x8 into pt_regs.syscallno before the seccomp stop. At the
+/// exit stop replace x0 with EPERM, preserving all other registers.
+#[cfg(target_arch = "aarch64")]
+pub fn deny_exec(pid: pid_t, entry: bool) -> io::Result<()> {
+    if entry {
+        let mut syscallno: i32 = -1;
+        arm64_regset(pid, libc::PTRACE_SETREGSET, 0x404, &mut syscallno)
+    } else {
+        let mut regs = Arm64Regs::default();
+        arm64_regset(pid, libc::PTRACE_GETREGSET, 1, &mut regs)?;
+        regs.x[0] = (-i64::from(libc::EPERM)) as u64;
+        arm64_regset(pid, libc::PTRACE_SETREGSET, 1, &mut regs)
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn deny_exec(_pid: pid_t, _entry: bool) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
@@ -586,6 +634,22 @@ mod tests {
     use super::*;
 
     /// The ABI constants spelled out above must be the ones `libc` knows.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn arm64_signal_frame_and_register_layout_match_libc() {
+        let mcontext = std::mem::offset_of!(libc::ucontext_t, uc_mcontext) as u64;
+        assert_eq!(
+            FRAME_RESULT,
+            mcontext + std::mem::offset_of!(libc::mcontext_t, regs) as u64
+        );
+        assert_eq!(
+            FRAME_IP,
+            mcontext + std::mem::offset_of!(libc::mcontext_t, pc) as u64
+        );
+        assert_eq!(std::mem::size_of::<Arm64Regs>(), 34 * 8);
+        assert_eq!(std::mem::size_of::<libc::siginfo_t>(), 128);
+    }
+
     /// `PTRACE_GET_SYSCALL_INFO` is deliberately absent: it is not in every
     /// `libc` release, which is why this module defines it.
     #[test]
@@ -677,8 +741,8 @@ mod tests {
     fn the_signal_frame_offsets_match_the_ucontext_layout() {
         let mcontext = std::mem::offset_of!(libc::ucontext_t, uc_mcontext) as u64;
         let gregs = std::mem::offset_of!(libc::mcontext_t, gregs) as u64;
-        assert_eq!(FRAME_RAX, mcontext + gregs + 8 * libc::REG_RAX as u64);
-        assert_eq!(FRAME_RIP, mcontext + gregs + 8 * libc::REG_RIP as u64);
+        assert_eq!(FRAME_RESULT, mcontext + gregs + 8 * libc::REG_RAX as u64);
+        assert_eq!(FRAME_IP, mcontext + gregs + 8 * libc::REG_RIP as u64);
         assert_eq!(TRAP_BRKPT, libc::TRAP_BRKPT);
         assert_eq!(TRAP_TRACE, libc::TRAP_TRACE);
     }
@@ -741,7 +805,7 @@ mod tests {
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");
         let err = siginfo(me).expect_err("not a tracee");
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");
-        let err = regs(me).expect_err("not a tracee");
+        let err = handler_ucontext(me, 1).expect_err("not a tracee");
         assert!(
             matches!(err.raw_os_error(), Some(libc::ESRCH | libc::ENOSYS)),
             "{err}"

@@ -931,7 +931,13 @@ impl Boundary {
                 // The runtime plan already renders merged-/usr aliases as
                 // symlinks and pins their real roots. Do not reopen /bin or
                 // /lib as an operator bind (or mount over those aliases).
-                if bplan.etc_paths.contains(&host)
+                // Baseline runtime candidates are optional distribution
+                // paths: ARM64 Debian, for example, has /lib but no /lib64.
+                // BwrapPlan already discovers and records the roots that
+                // exist. Do not turn an absent default into a required bind.
+                // Errors other than absence still reach pinning and refuse.
+                if absent_runtime_candidate(reference, &host)
+                    || bplan.etc_paths.contains(&host)
                     || bplan.roots.iter().any(|root| match root {
                         jfs::RootSpec::RoBind(path) | jfs::RootSpec::Symlink { path, .. } => {
                             path == &host
@@ -3187,6 +3193,14 @@ fn prepare_mounts(
     }
 }
 
+fn absent_runtime_candidate(reference: &PathRef, host: &Path) -> bool {
+    reference.root == RootToken::Host
+        && crate::profiles::LINUX_RUNTIME_ROOTS
+            .iter()
+            .any(|candidate| host == Path::new(candidate))
+        && std::fs::metadata(host).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Join a root with a reference's native-byte suffix.
 fn join_suffix(base: &Path, reference: &PathRef) -> PathBuf {
     let suffix = reference.path.as_bytes();
@@ -4308,7 +4322,7 @@ mod tests {
     /// preparation), and nothing else: `none` with observation off still
     /// derives every requirement it needs.
     #[test]
-    fn off_x86_64_the_real_mapping_refuses_exactly_the_table_bound_requirements() {
+    fn unsupported_architectures_the_real_mapping_refuses_exactly_the_table_bound_requirements() {
         use super::super::probe::{self, ProbeResult, ProbeStatus};
         use crate::capability::{
             CapabilityStatus, REQ_CLOSED_SET_OBSERVATION, REQ_NETWORK_PROXY, REQ_SYSCALL_FILTER,
@@ -4317,7 +4331,7 @@ mod tests {
         let results: Vec<ProbeResult> = probe::PROBE_NAMES
             .iter()
             .map(|name| {
-                probe::architecture_refusal(name, "aarch64").unwrap_or_else(|| ProbeResult {
+                probe::architecture_refusal(name, "riscv64").unwrap_or_else(|| ProbeResult {
                     name,
                     status: ProbeStatus::Available,
                     mechanism: "test",

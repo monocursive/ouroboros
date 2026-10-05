@@ -8,7 +8,7 @@ You choose the files it can read or change, the services it can contact, and
 how long it can run. A receipt tells you which controls were applied and how
 the run ended.
 
-**You'll need a Linux x86_64 machine to execute commands.** This is
+**You'll need a Linux x86_64 or aarch64 machine to execute commands.** This is
 pre-release software, currently installed from source. On a Mac, you can
 build the CLI and inspect policies; sandboxed execution is still unavailable.
 

@@ -46,8 +46,8 @@ pub const TESTED_MARKER: &str =
 /// directory only the tables the build is pinned against are frozen: the
 /// run's own evidence is recorded after the run and must not invalidate it.
 const FROZEN_PATHSPECS: [&str; 6] = [
-    "docs/specs/jail-v1/evidence/closed-set-x86_64.txt",
-    "docs/specs/jail-v1/evidence/seccomp-table-*-x86_64.txt",
+    "docs/specs/jail-v1/evidence/closed-set-*.txt",
+    "docs/specs/jail-v1/evidence/seccomp-table-*.txt",
     "docs/specs/jail-v1/frozen-schemas.toml",
     "docs/specs/jail-v1/*.schema.json",
     "crates/ouro-jail/profiles/launch",
@@ -291,46 +291,53 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
     let _ = writeln!(w, "sha256 = {}", quote(&sha256_hex(&lock)));
     let _ = writeln!(w, "packages = {packages}");
 
-    // The filters, from the checked-in evidence tables.
-    let _ = writeln!(
-        w,
-        "\n# The seccomp programs' digests, from {EVIDENCE}/seccomp-table-*.txt"
-    );
-    let _ = writeln!(w, "[filters]");
-    let _ = writeln!(w, "arch = \"x86_64\"");
-    for (key, table, index) in FILTER_TABLES {
-        let text = read(root, &format!("{EVIDENCE}/{table}"))?;
-        let digest =
-            nth_digest(&text, index).ok_or_else(|| format!("{table}: no digest #{index}"))?;
-        let _ = writeln!(w, "{key} = {}", quote(&digest));
-    }
-    let _ = writeln!(w, "\n# The evidence tables themselves, byte for byte");
-    let _ = writeln!(w, "[filters.table_sha256]");
-    let mut seen = std::collections::BTreeSet::new();
-    for (_, table, _) in FILTER_TABLES {
-        if seen.insert(table) {
-            let bytes = std::fs::read(root.join(EVIDENCE).join(table))
-                .map_err(|error| format!("{table}: {error}"))?;
-            let _ = writeln!(w, "{} = {}", quote(table), quote(&sha256_hex(&bytes)));
+    // Keep the reference x86_64 sections stable and pin the ARM64 programs
+    // independently: a native build must never compare against another ABI.
+    for (arch, prefix) in [("x86_64", ""), ("aarch64", "aarch64_")] {
+        // The filters, from the checked-in evidence tables.
+        let _ = writeln!(
+            w,
+            "\n# The seccomp programs' digests, from {EVIDENCE}/seccomp-table-*.txt"
+        );
+        let _ = writeln!(w, "[{prefix}filters]");
+        let _ = writeln!(w, "arch = {}", quote(arch));
+        for (key, table, index) in FILTER_TABLES {
+            let table = table.replace("x86_64", arch);
+            let text = read(root, &format!("{EVIDENCE}/{table}"))?;
+            let digest =
+                nth_digest(&text, index).ok_or_else(|| format!("{table}: no digest #{index}"))?;
+            let _ = writeln!(w, "{key} = {}", quote(&digest));
         }
-    }
+        let _ = writeln!(w, "\n# The evidence tables themselves, byte for byte");
+        let _ = writeln!(w, "[{prefix}filters.table_sha256]");
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, table, _) in FILTER_TABLES {
+            let table = table.replace("x86_64", arch);
+            if seen.insert(table.clone()) {
+                let bytes = std::fs::read(root.join(EVIDENCE).join(&table))
+                    .map_err(|error| format!("{table}: {error}"))?;
+                let _ = writeln!(w, "{} = {}", quote(&table), quote(&sha256_hex(&bytes)));
+            }
+        }
 
-    // The closed set.
-    let closed = read(root, &format!("{EVIDENCE}/{CLOSED_SET_TABLE}"))?;
-    let narrowing =
-        nth_digest(&closed, 0).ok_or_else(|| format!("{CLOSED_SET_TABLE}: no digest"))?;
-    let _ = writeln!(
-        w,
-        "\n# The observer's closed set, from {EVIDENCE}/{CLOSED_SET_TABLE}"
-    );
-    let _ = writeln!(w, "[closed_set]");
-    let _ = writeln!(w, "name = \"linux-closed-v1\"");
-    let _ = writeln!(w, "narrowing_filter = {}", quote(&narrowing));
-    let _ = writeln!(
-        w,
-        "table_sha256 = {}",
-        quote(&sha256_hex(closed.as_bytes()))
-    );
+        // The closed set.
+        let closed_set_table = CLOSED_SET_TABLE.replace("x86_64", arch);
+        let closed = read(root, &format!("{EVIDENCE}/{closed_set_table}"))?;
+        let narrowing =
+            nth_digest(&closed, 0).ok_or_else(|| format!("{closed_set_table}: no digest"))?;
+        let _ = writeln!(
+            w,
+            "\n# The observer's closed set, from {EVIDENCE}/{closed_set_table}"
+        );
+        let _ = writeln!(w, "[{prefix}closed_set]");
+        let _ = writeln!(w, "name = \"linux-closed-v1\"");
+        let _ = writeln!(w, "narrowing_filter = {}", quote(&narrowing));
+        let _ = writeln!(
+            w,
+            "table_sha256 = {}",
+            quote(&sha256_hex(closed.as_bytes()))
+        );
+    }
 
     // The contained mount baselines.
     let _ = writeln!(

@@ -70,6 +70,18 @@ const HELPER_C: &str = r##"
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
+#ifdef __aarch64__
+#define NATIVE_MKDIR_NR SYS_mkdirat
+#define native_mkdir(p, m) syscall(SYS_mkdirat, AT_FDCWD, (p), (m))
+#define native_rmdir(p) syscall(SYS_unlinkat, AT_FDCWD, (p), AT_REMOVEDIR)
+#define native_open(p, f) syscall(SYS_openat, AT_FDCWD, (p), (f))
+#else
+#define NATIVE_MKDIR_NR SYS_mkdir
+#define native_mkdir(p, m) syscall(SYS_mkdir, (p), (m))
+#define native_rmdir(p) syscall(SYS_rmdir, (p))
+#define native_open(p, f) syscall(SYS_open, (p), (f))
+#endif
+
 
 static void report(const char *label, long r, int err, const char *p) {
     printf("%s\t%ld\t%d\t%s\n", label, r, err, p ? p : "");
@@ -151,7 +163,7 @@ static void *park_thread(void *arg) {
                             (socklen_t) sizeof p->addr);
     p->err = p->result < 0 ? errno : 0;
     if (p->after) {
-        p->after_result = syscall(SYS_mkdir, p->after, 0700);
+        p->after_result = native_mkdir(p->after, 0700);
         p->after_err = p->after_result < 0 ? errno : 0;
     }
     return NULL;
@@ -257,7 +269,7 @@ static void on_sig(int sig) { (void) sig; g_hits++; }
 static void on_info(int sig, siginfo_t *info, void *uc) { (void) sig; (void) info; (void) uc; g_hits++; }
 static void on_mkdir(int sig) {
     (void) sig;
-    syscall(SYS_mkdir, g_hpath, 0700);
+    native_mkdir(g_hpath, 0700);
     g_hits++;
 }
 
@@ -270,11 +282,19 @@ static void on_rewrite(int sig, siginfo_t *info, void *ucv) {
     ucontext_t *uc = ucv;
     (void) sig; (void) info;
     g_hits++;
+#ifdef __aarch64__
+    if (uc->uc_mcontext.regs[8] == (unsigned long)g_rewrite_nr) {
+        uc->uc_mcontext.regs[0] = -EINTR;
+        uc->uc_mcontext.pc += 4;
+        g_rewrote++;
+    }
+#else
     if (uc->uc_mcontext.gregs[REG_RAX] == g_rewrite_nr) {
         uc->uc_mcontext.gregs[REG_RAX] = -EINTR;
         uc->uc_mcontext.gregs[REG_RIP] += 2;
         g_rewrote++;
     }
+#endif
 }
 
 static void set_action(int sig, void (*handler)(int), int flags) {
@@ -437,11 +457,11 @@ static int mode_inflight(int argc, char **argv) {
     report("parked", r, 0, p.path);
     if (r) return 3;
     for (i = 0; i < n; i++) {
-        if (syscall(SYS_mkdir, m, 0700) == 0) covered++;
-        if (syscall(SYS_rmdir, m) == 0) covered++;
+        if (native_mkdir(m, 0700) == 0) covered++;
+        if (native_rmdir(m) == 0) covered++;
         r = syscall(SYS_openat, AT_FDCWD, "/proc/self/stat", O_RDONLY | O_CLOEXEC);
         if (r >= 0) { reads++; close((int) r); }
-        r = syscall(SYS_open, "/proc/self/stat", O_RDONLY | O_CLOEXEC);
+        r = native_open("/proc/self/stat", O_RDONLY | O_CLOEXEC);
         if (r >= 0) { reads++; close((int) r); }
     }
     report("covered", covered, 0, m);
@@ -449,7 +469,7 @@ static int mode_inflight(int argc, char **argv) {
     pthread_kill(t, SIGUSR1);
     pthread_join(t, NULL);
     report("released", p.result, p.err, p.path);
-    r = syscall(SYS_mkdir, after, 0700);
+    r = native_mkdir(after, 0700);
     report("after", r, r < 0 ? errno : 0, after);
     return 0;
 }
@@ -463,8 +483,8 @@ static void *hammer(void *arg) {
     char d[4096];
     snprintf(d, sizeof d, "%s/t%ld", g_race_dir, (long) (intptr_t) arg);
     for (;;) {
-        syscall(SYS_mkdir, d, 0700);
-        syscall(SYS_rmdir, d);
+        native_mkdir(d, 0700);
+        native_rmdir(d);
     }
     return NULL;
 }
@@ -576,7 +596,7 @@ static int mode_hide(int argc, char **argv) {
     long r;
     struct sock_filter prog[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mkdir, 0, 1),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NATIVE_MKDIR_NR, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
@@ -596,14 +616,14 @@ static int mode_hide(int argc, char **argv) {
         if (g_listener < 0) return 3;
         pthread_create(&s, NULL, serve_continue, NULL);
         snprintf(path, sizeof path, "%s/hidden1", argv[3]);
-        r = syscall(SYS_mkdir, path, 0700);
+        r = native_mkdir(path, 0700);
         report("hidden1", r, r < 0 ? errno : 0, path);
     } else if (!strcmp(argv[4], "untraced")) {
         int status = 0;
         long child = syscall(SYS_clone, CLONE_UNTRACED | SIGCHLD, 0, 0, 0, 0);
         if (child == 0) {
             snprintf(path, sizeof path, "%s/untraced", argv[3]);
-            r = syscall(SYS_mkdir, path, 0700);
+            r = native_mkdir(path, 0700);
             report("untraced_mkdir", r, r < 0 ? errno : 0, path);
             _exit(0);
         }
@@ -616,7 +636,7 @@ static int mode_hide(int argc, char **argv) {
     pthread_join(t, NULL);
     report("released", p.result, p.err, p.path);
     snprintf(path, sizeof path, "%s/hidden2", argv[3]);
-    r = syscall(SYS_mkdir, path, 0700);
+    r = native_mkdir(path, 0700);
     report("hidden2", r, r < 0 ? errno : 0, path);
     return 0;
 }
@@ -1231,7 +1251,15 @@ fn j4_o1_read_only_opens_are_never_inflight_loss() {
     // The slot came back: the mkdir after the release is a result.
     assert_eq!(
         observed.results_on(&s(&w.root.join("after"))),
-        vec![(ClosedOp::Mkdir, "mkdir", 0)]
+        vec![(
+            ClosedOp::Mkdir,
+            if cfg!(target_arch = "aarch64") {
+                "mkdirat"
+            } else {
+                "mkdir"
+            },
+            0
+        )]
     );
 }
 
@@ -1781,7 +1809,15 @@ fn j4_w3_an_untraced_clone_refused_a_slot_is_the_open_ended_gap_of_its_kind() {
         );
         assert_eq!(
             observed.results_on(&s(&w.root.join("hidden2"))),
-            vec![(ClosedOp::Mkdir, "mkdir", 0)],
+            vec![(
+                ClosedOp::Mkdir,
+                if cfg!(target_arch = "aarch64") {
+                    "mkdirat"
+                } else {
+                    "mkdir"
+                },
+                0
+            )],
             "{label}: the slot came back"
         );
     }
@@ -1943,7 +1979,15 @@ fn j4_w3_r1_a_restart_the_handler_rewrote_then_another_call_is_a_gap_first() {
     let after = s(&w.root.join("after"));
     assert_eq!(
         observed.results_on(&after),
-        vec![(ClosedOp::Mkdir, "mkdir", 0)]
+        vec![(
+            ClosedOp::Mkdir,
+            if cfg!(target_arch = "aarch64") {
+                "mkdirat"
+            } else {
+                "mkdir"
+            },
+            0
+        )]
     );
     let gap = position(&observed, |event| {
         matches!(
@@ -1993,7 +2037,15 @@ fn j4_w3_r1_a_covered_call_inside_an_sa_restart_handler_costs_one_gap() {
     assert!(results[0] >= 0, "{results:?}");
     assert_eq!(
         observed.results_on(&s(&w.root.join("h"))),
-        vec![(ClosedOp::Mkdir, "mkdir", 0)]
+        vec![(
+            ClosedOp::Mkdir,
+            if cfg!(target_arch = "aarch64") {
+                "mkdirat"
+            } else {
+                "mkdir"
+            },
+            0
+        )]
     );
     assert_eq!(
         observed.gaps(),

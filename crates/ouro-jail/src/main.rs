@@ -922,7 +922,8 @@ mod tests {
     #[test]
     fn the_closed_set_is_announced_only_where_the_build_can_observe_it() {
         assert_eq!(closed_set_for(true, "x86_64"), Some("linux-closed-v1"));
-        for arch in ["aarch64", "riscv64", "x86", ""] {
+        assert_eq!(closed_set_for(true, "aarch64"), Some("linux-closed-v1"));
+        for arch in ["riscv64", "x86", ""] {
             assert_eq!(closed_set_for(true, arch), None, "{arch}");
         }
         for arch in ["x86_64", "aarch64"] {

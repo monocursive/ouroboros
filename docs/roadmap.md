@@ -13,10 +13,15 @@ implementation. We haven't set release dates.
 
 ## Available in the source today
 
-The `ouro-jail` CLI runs commands on Linux x86_64 with file and network
+The `ouro-jail` CLI runs commands on Linux x86_64 and aarch64 with file and network
 policies, runtime limits, and a receipt for each attempt. It includes HTTP
 and SOCKS5 TCP proxying, optional HTTP(S) credential vaulting, event journals,
 `tail`, and permission proposals with `learn`.
+
+Native Raspberry Pi validation covers the ARM64 syscall filters and observer.
+Host capabilities still decide which profiles can run: the tested Pi kernel
+disables memory cgroups and omits Landlock, so the corresponding required
+features refuse before the command starts.
 
 Fourteen starter launch profiles are embedded. OpenCode has recorded live
 runs, but a bundled profile is not a promise that every version of that agent
@@ -110,7 +115,7 @@ cancellation, owner death and writer loss. `wait` reads the durable outcome;
 
 The [ledger specification](specs/ledger-v1.md) names its current acceptance and
 limits. The complete milestone remains open: cross-run queries, comparisons,
-retention, signed bundles, best-effort recovery and managed project authorization
+retention configuration, signed bundles, best-effort recovery and managed project authorization
 are still planned. A plain local export does not establish external custody.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
@@ -118,7 +123,14 @@ SQLite run index and reader cursors that survive writer restart. Canonical
 segments now rotate at 64 MiB while preserving global record ordering, exact
 exports and restartable reader snapshots. The
 [rotation checks](specs/ledger-v1/evidence/2026-10-05-rotation/README.md) cover
-interrupted rotation and damaged segments. Retention remains pending.
+interrupted rotation and damaged segments. Durable operator holds and
+`gc --dry-run` now explain retention candidates while preserving active runs,
+unknown outcomes and reader snapshots. Whole-run `gc` now verifies canonical
+history, persists replay identities and chain anchors, then removes inventoried
+segments and captures with restart recovery. The
+[pruning checks](specs/ledger-v1/evidence/2026-10-05-pruning/README.md) record its
+failure boundaries and platform evidence. Persistent retention configuration and
+separate capture policies remain pending.
 
 ## Later: submit work to a team worker
 

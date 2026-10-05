@@ -648,20 +648,20 @@ mod imp {
         Attempt::finish(r)
     }
 
-    /// `CLONE_UNTRACED` from `linux/sched.h`. Read only by the x86_64 path.
-    #[cfg(target_arch = "x86_64")]
+    /// `CLONE_UNTRACED` from `linux/sched.h`.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub(crate) const CLONE_UNTRACED: u64 = 0x0080_0000;
 
     /// `clone(CLONE_UNTRACED | SIGCHLD)` with no new stack, which makes the
     /// child a copy of this process (as `fork` would) that the kernel does
-    /// not attach to a tracer. The child makes one raw `mkdir(path)` and
+    /// not attach to a tracer. The child makes one native mkdir operation and
     /// exits with its errno, 0 on success. Returns the `clone` result and,
     /// when a child ran, its raw wait status.
     ///
-    /// x86_64 only: the argument order of `clone` differs between
-    /// architectures, and this is the one the observer's tables describe.
+    /// x86_64 and arm64 both take flags first; their remaining clone
+    /// arguments are all zero here, including stack, TLS and TID pointers.
     pub(crate) fn clone_untraced_mkdir(path: *const c_char) -> (Attempt, Option<c_int>) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             let flags = CLONE_UNTRACED | libc::SIGCHLD as u64;
             // SAFETY: without CLONE_VM and with a null stack the child runs
@@ -683,7 +683,10 @@ mod imp {
                 // SAFETY: `path` points into memory copied into this child;
                 // `_exit` never returns.
                 unsafe {
+                    #[cfg(target_arch = "x86_64")]
                     let m = libc::syscall(libc::SYS_mkdir, path, 0o700 as c_long);
+                    #[cfg(target_arch = "aarch64")]
+                    let m = libc::syscall(libc::SYS_mkdirat, libc::AT_FDCWD, path, 0o700 as c_long);
                     let code = if m == 0 { 0 } else { *libc::__errno_location() };
                     libc::_exit(code & 0xff);
                 }
@@ -699,12 +702,12 @@ mod imp {
             };
             (attempt, status)
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let _ = path;
             (
                 Attempt::Absent(format!(
-                    "the clone argument order is only spelled out for x86_64, not {}",
+                    "the clone argument order is only spelled out for x86_64 and aarch64, not {}",
                     std::env::consts::ARCH
                 )),
                 None,

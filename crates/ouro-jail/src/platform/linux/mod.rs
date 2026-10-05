@@ -6,6 +6,7 @@
 //! `bpf` and `seccomp` describe the Linux ABI but call nothing, so they build
 //! and test on every host; everything below them is gated.
 
+pub mod abi;
 pub mod bpf;
 // J3-agent begin: the loopback bridge is a portable byte relay; only its
 // hidden subcommand and its place in the sandbox are Linux's

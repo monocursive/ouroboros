@@ -36,6 +36,26 @@ name = "linux-closed-v1"
 narrowing_filter = "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181"
 table_sha256 = "5b8afce234fc2c9513ad1069f1b2de00c5542e7a93458443d45c7aa22e80c8fa"
 
+# The seccomp programs' digests, from docs/specs/jail-v1/evidence/seccomp-table-*.txt
+[aarch64_filters]
+arch = "aarch64"
+tool = "sha256:554202286b3e5afd939fba13fee312738dd158677c6292179416b85044d957c9"
+agent = "sha256:ae33ef8df611e28be335803b8161e639f7678345e2aa710b5c173a41875de055"
+agent_namespace = "sha256:52a13e8ce62d615ad756e950382944442e000fb1609afd99de44c446d027de62"
+agent_mediation = "sha256:33063c21492671bcf0a73a39a2a51af680cb9482443fb5ab8be82ba019aa4136"
+
+# The evidence tables themselves, byte for byte
+[aarch64_filters.table_sha256]
+"seccomp-table-tool-aarch64.txt" = "f3a40724ef2086684d56e3602339ee0b09c6777ac9c2b839b662142b5e394a0c"
+"seccomp-table-agent-aarch64.txt" = "324f84b60b71021f5add5597268d4c1ca803f7603d92364f3454d1748b92bab5"
+"seccomp-table-agent-namespace-aarch64.txt" = "ac38668e8e6bc62437305053506f37c77924c9e637f2b1c70b57f72c80d71703"
+
+# The observer's closed set, from docs/specs/jail-v1/evidence/closed-set-aarch64.txt
+[aarch64_closed_set]
+name = "linux-closed-v1"
+narrowing_filter = "sha256:f5353e3a8e29beeca5edb0e19952196e8c1b8b575c4d5aab1698a7017fefb56e"
+table_sha256 = "a0b842cbae4834fbb8512474ee5e39e7b9ba0d007b64b818cbf5bec324be4b02"
+
 # The contained mount baselines: what every contained profile mounts
 [mounts]
 # crates/ouro-jail/src/profiles.rs LINUX_RUNTIME_ROOTS
@@ -1094,64 +1114,6 @@ id = "urn:ouro:schema:learned-policy:1"
 identifier = "ouro.jail.learned-policy/1"
 sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 
-# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---
-[tested]
-debug_assertions = false
-dirty = false
-inputs = "sha256:fb5bf26aca7496c28692b3cddb7a2ec9a7422c02765882af3b5bce41c8af6d0b"
-opt_level = "3"
-ouro_jail_sha256 = "ba9ca235e145610cc78852cacc02e95193f6e69799f0cbe3099794fa167ff096"
-platform_arch = "x86_64"
-platform_kernel = "Linux 7.0.0-31-generic"
-platform_os = "linux"
-ready = true
-revision = "db5a9572f560ef67c6ed3a42ca5dd3b385249b01"
-rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
-target = "x86_64-unknown-linux-gnu"
-unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
-verification = ["inputs_match_tree", "revision_is_ancestor_of_head", "inputs_match_revision", "frozen_inputs_unchanged_since_revision"]
-
-[tested.backend]
-path = "/usr/bin/bwrap"
-sha256 = "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6"
-version = "bubblewrap 0.11.1"
-
-[tested.host]
-apparmor_enabled = true
-cpus_online = 4
-distribution = "Ubuntu 26.04.1 LTS"
-kernel_release = "7.0.0-31-generic"
-kernel_version = "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026"
-linger = true
-operator_identity = "unprivileged"
-privileged_groups = []
-systemd_version = "systemd 259 (259.5-0ubuntu3.4)"
-virtualization = "kvm"
-
-[tested.host.apparmor_userns_restriction]
-local_files = ["README"]
-profile_files = ["bwrap-userns-restrict", "glycin.bwrap", "lxc-usernsexec", "unprivileged_userns"]
-state = "on"
-unpackaged_files = []
-
-[tested.host.cgroup]
-controllers = ["cpu", "memory", "pids"]
-delegated_root = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service"
-root_controllers = ["cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem"]
-subtree_control = ["cpu", "memory", "pids"]
-
-[tested.host.memory]
-mem_total_kib = 3905584
-swap_total_kib = 8388604
-
-[tested.host.sysctls]
-"kernel.apparmor_restrict_unprivileged_userns" = "1"
-"kernel.io_uring_disabled" = "0"
-"kernel.perf_event_paranoid" = "4"
-"kernel.unprivileged_bpf_disabled" = "2"
-"kernel.yama.ptrace_scope" = "1"
-"user.max_user_namespaces" = "11829"
-
-[tested.supervisor_scope]
-cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p3216626-i11612465.scope"
-state = "already_delegated"
+# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
+# records the milestone conformance run, and `cargo xtask freeze --check`
+# fails until it is.

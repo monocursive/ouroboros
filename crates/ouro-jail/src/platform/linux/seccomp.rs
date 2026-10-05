@@ -5,25 +5,14 @@
 //! reference host that makes the raw syscall inside the jail and reports its
 //! errno. A rule with no such test would be a claim, not a boundary.
 //!
-//! Syscall numbers are the x86_64 ABI. They are written out rather than taken
-//! from `libc` so that the table is the same whatever host builds it, and a
-//! Linux-only test checks every one of them against the kernel headers
-//! installed on the build host.
+//! Explicit x86_64 and aarch64 syscall numbers are selected by [`super::abi`].
+//! Native tests check the numbers against libc and exercise the installed
+//! filters. A foreign ABI never reaches the native syscall comparisons.
 
 use super::bpf::{Asm, BpfError, Program};
 
-/// `AUDIT_ARCH_X86_64` from `linux/audit.h`.
-pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
-
-// J5-D begin: the architecture the tables cover (jail-v1 §3.2)
-/// The one architecture, as `std::env::consts::ARCH` spells it, whose
-/// syscall numbers this implementation's filter tables, mediation filter and
-/// closed set carry. Linux aarch64 is a later lane (§3.2): a build for any
-/// other architecture compiles, and the capabilities that rest on these
-/// tables report `unsupported` with [`REASON_UNSUPPORTED_ARCHITECTURE`], so
-/// `doctor` is not ready and `run` refuses before preparation instead of
-/// loading a filter that denies every call.
-pub const TABLE_ARCH: &str = "x86_64";
+use super::abi::{self, nr};
+pub use super::abi::{AUDIT_ARCH, TABLE_ARCH};
 
 /// The reason code of a capability whose syscall tables do not cover the
 /// architecture this binary was built for.
@@ -33,7 +22,7 @@ pub const REASON_UNSUPPORTED_ARCHITECTURE: &str = "unsupported_architecture";
 /// value).
 #[must_use]
 pub fn tables_cover(arch: &str) -> bool {
-    arch == TABLE_ARCH
+    matches!(arch, "x86_64" | "aarch64")
 }
 // J5-D end
 /// Bit set in the syscall number for the x32 ABI (`__X32_SYSCALL_BIT`).
@@ -77,30 +66,30 @@ pub const fn sd_arg_low(index: u32) -> u32 {
 // The syscall table
 // ---------------------------------------------------------------------------
 
-/// Syscalls denied outright with `EPERM`, as x86_64 numbers.
+/// Syscalls denied outright with `EPERM`, using native ABI numbers.
 ///
 /// The list is jail-v1 §9.2 verbatim: host tracing and inspection, kernel
 /// replacement and modules, the keyring, all three `io_uring` entry points,
 /// every mount interface old and new, and namespace entry.
 pub const DENY_EPERM: &[(&str, u32)] = &[
-    ("ptrace", 101),
-    ("process_vm_readv", 310),
-    ("process_vm_writev", 311),
-    ("bpf", 321),
-    ("perf_event_open", 298),
-    ("kexec_load", 246),
-    ("kexec_file_load", 320),
-    ("init_module", 175),
-    ("finit_module", 313),
-    ("delete_module", 176),
-    ("keyctl", 250),
-    ("add_key", 248),
-    ("request_key", 249),
+    ("ptrace", nr(101, 117)),
+    ("process_vm_readv", nr(310, 270)),
+    ("process_vm_writev", nr(311, 271)),
+    ("bpf", nr(321, 280)),
+    ("perf_event_open", nr(298, 241)),
+    ("kexec_load", nr(246, 104)),
+    ("kexec_file_load", nr(320, 294)),
+    ("init_module", nr(175, 105)),
+    ("finit_module", nr(313, 273)),
+    ("delete_module", nr(176, 106)),
+    ("keyctl", nr(250, 219)),
+    ("add_key", nr(248, 217)),
+    ("request_key", nr(249, 218)),
     ("io_uring_setup", 425),
     ("io_uring_enter", 426),
     ("io_uring_register", 427),
-    ("mount", 165),
-    ("umount2", 166),
+    ("mount", nr(165, 40)),
+    ("umount2", nr(166, 39)),
     ("move_mount", 429),
     ("open_tree", 428),
     ("fsopen", 430),
@@ -108,18 +97,18 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     ("fspick", 433),
     ("fsconfig", 431),
     ("mount_setattr", 442),
-    ("pivot_root", 155),
-    ("chroot", 161),
-    ("unshare", 272),
-    ("setns", 308),
+    ("pivot_root", nr(155, 41)),
+    ("chroot", nr(161, 51)),
+    ("unshare", nr(272, 97)),
+    ("setns", nr(308, 268)),
     // Defense in depth beyond the spec's named list: page-fault control
     // widens kernel race windows, handle-based opens can walk outside the
     // bind view given a reachable mount fd, and the kernel log discloses
     // host memory addresses where dmesg_restrict is lax.
-    ("userfaultfd", 323),
-    ("open_by_handle_at", 304),
-    ("name_to_handle_at", 303),
-    ("syslog", 103),
+    ("userfaultfd", nr(323, 282)),
+    ("open_by_handle_at", nr(304, 265)),
+    ("name_to_handle_at", nr(303, 264)),
+    ("syslog", nr(103, 116)),
     // Security 2026-09-25-2 (audits S7 and S10): the ptrace-class cousins
     // of the denied `ptrace`/`process_vm_*`. Each is kernel-gated by a
     // PTRACE_MODE_* check, but on a host with
@@ -134,9 +123,9 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     ("pidfd_open", 434),
     ("pidfd_getfd", 438),
     ("process_madvise", 440),
-    ("kcmp", 312),
-    ("move_pages", 279),
-    ("migrate_pages", 256),
+    ("kcmp", nr(312, 272)),
+    ("move_pages", nr(279, 239)),
+    ("migrate_pages", nr(256, 238)),
     // Security 2026-09-25-2 (audit S10): `statmount`/`listmount` read the
     // mount topology. Inside the jail they see only its own mount
     // namespace, but §9.2's claim is "every mount interface old and new",
@@ -152,7 +141,7 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     // table must not ship new kernel surface by accident — `quotactl_fd`'s
     // fds come only from denied syscalls today, which is unreachability, not
     // a deny.
-    ("quotactl", 179),
+    ("quotactl", nr(179, 60)),
     ("quotactl_fd", 443),
     // Security 2026-09-27 (audit 4 B8, the S10 drift class): the global
     // clock-adjustment interfaces. Inside the jail they are stopped by the
@@ -160,10 +149,10 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     // refusal, which is exactly the "new kernel surface ships allowed"
     // shape §9.2's rationale names. `adjtimex`, `clock_adjtime` and
     // `clock_settime` join the table; reading the clock stays allowed.
-    ("adjtimex", 159),
-    ("clock_settime", 227),
-    ("clock_adjtime", 305),
-    ("settimeofday", 164),
+    ("adjtimex", nr(159, 171)),
+    ("clock_settime", nr(227, 112)),
+    ("clock_adjtime", nr(305, 266)),
+    ("settimeofday", nr(164, 170)),
     ("setxattrat", 463),
     ("getxattrat", 464),
     ("listxattrat", 465),
@@ -179,15 +168,15 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
 /// inspect (jail-v1 §9.2).
 pub const NR_CLONE3: u32 = 435;
 /// `clone`.
-pub const NR_CLONE: u32 = 56;
+pub const NR_CLONE: u32 = nr(56, 220);
 /// `socket`.
-pub const NR_SOCKET: u32 = 41;
+pub const NR_SOCKET: u32 = nr(41, 198);
 /// `socketpair`.
-pub const NR_SOCKETPAIR: u32 = 53;
+pub const NR_SOCKETPAIR: u32 = nr(53, 199);
 /// `ioctl`.
-pub const NR_IOCTL: u32 = 16;
+pub const NR_IOCTL: u32 = nr(16, 29);
 /// `seccomp`.
-pub const NR_SECCOMP: u32 = 317;
+pub const NR_SECCOMP: u32 = nr(317, 277);
 /// `SECCOMP_FILTER_FLAG_NEW_LISTENER`, tested in argument 1 of `seccomp`.
 pub const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
 
@@ -288,7 +277,10 @@ pub(crate) fn tool_baseline_with_storage(storage: bool) -> Result<Program, BpfEr
     if storage {
         // A new hard link could import a foreign-owned inode from a read-only
         // grant into the writable tree and charge a different user's quota.
-        deny.extend([("link", 86), ("linkat", 265)]);
+        if !abi::AARCH64 {
+            deny.push(("link", 86));
+        }
+        deny.push(("linkat", nr(265, 37)));
     }
     build(&Shape {
         deny,
@@ -302,9 +294,9 @@ pub(crate) fn tool_baseline_with_storage(storage: bool) -> Result<Program, BpfEr
 fn build(shape: &Shape) -> Result<Program, BpfError> {
     let mut asm = Asm::new();
 
-    // Architecture first. Anything that is not x86_64 is denied outright.
+    // Architecture first. Anything outside this build's native ABI is denied.
     asm.ld_w_abs(SD_ARCH)
-        .jeq(AUDIT_ARCH_X86_64, None, Some(L_DENY_EPERM));
+        .jeq(AUDIT_ARCH, None, Some(L_DENY_EPERM));
 
     // Then the syscall number. x32 shares the x86_64 audit arch but uses a
     // distinct numbering; deny it rather than mismatch the table.
@@ -460,11 +452,11 @@ pub const UNPRIVILEGED_SETUP: [&str; 5] = [
 /// deny list. `setns`, the new mount API, `clone3` and every host-inspection
 /// rule stay denied in both variants.
 pub const NAMESPACE_SETUP: [(&str, u32); 5] = [
-    ("mount", 165),
-    ("umount2", 166),
-    ("pivot_root", 155),
-    ("chroot", 161),
-    ("unshare", 272),
+    ("mount", nr(165, 40)),
+    ("umount2", nr(166, 39)),
+    ("pivot_root", nr(155, 41)),
+    ("chroot", nr(161, 51)),
+    ("unshare", nr(272, 97)),
 ];
 
 /// The `agent` baseline bubblewrap loads, in `variant`.
@@ -500,7 +492,10 @@ pub(crate) fn agent_baseline_with_storage(
             .collect(),
     };
     if storage {
-        deny.extend([("link", 86), ("linkat", 265)]);
+        if !abi::AARCH64 {
+            deny.push(("link", 86));
+        }
+        deny.push(("linkat", nr(265, 37)));
     }
     build(&Shape {
         deny,
@@ -511,8 +506,8 @@ pub(crate) fn agent_baseline_with_storage(
     })
 }
 
-/// `connect` on x86_64.
-pub const NR_CONNECT: u32 = 42;
+/// Native `connect`.
+pub const NR_CONNECT: u32 = nr(42, 203);
 /// `SOCK_TYPE_MASK`: the bits of a socket type below the creation flags.
 pub const SOCK_TYPE_MASK: u32 = 0xf;
 /// `SOCK_STREAM`.
@@ -541,8 +536,7 @@ pub fn mediation_filter() -> Result<Program, BpfError> {
     const SOCKET: &str = "socket_family";
     const DENY_FAMILY: &str = "deny_family";
     let mut asm = Asm::new();
-    asm.ld_w_abs(SD_ARCH)
-        .jeq(AUDIT_ARCH_X86_64, None, Some(DENY));
+    asm.ld_w_abs(SD_ARCH).jeq(AUDIT_ARCH, None, Some(DENY));
     asm.ld_w_abs(SD_NR)
         .jset(X32_SYSCALL_BIT, Some(DENY), None)
         .jeq(NR_CONNECT, Some(NOTIFY), None)
@@ -578,7 +572,7 @@ pub fn agent_baseline_table(variant: AgentVariant) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "ouro-jail `agent` seccomp baseline (x86_64), variant {}",
+        "ouro-jail `agent` seccomp baseline ({TABLE_ARCH}), variant {}",
         variant.as_str()
     );
     out.push_str(
@@ -588,7 +582,8 @@ pub fn agent_baseline_table(variant: AgentVariant) -> String {
     );
     let _ = writeln!(
         out,
-        "arch != AUDIT_ARCH_X86_64  EPERM   (0x{AUDIT_ARCH_X86_64:08x} required)"
+        "arch != AUDIT_ARCH_{}  EPERM   (0x{AUDIT_ARCH:08x} required)",
+        TABLE_ARCH.to_uppercase()
     );
     let _ = writeln!(
         out,
@@ -699,12 +694,13 @@ mediation filter (installed by the launcher with its own listener)
 pub fn tool_baseline_table() -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    out.push_str("ouro-jail `tool` seccomp baseline (x86_64)\n");
+    let _ = writeln!(out, "ouro-jail `tool` seccomp baseline ({TABLE_ARCH})");
     out.push_str("jail-v1 §9.2, north-star §4.3\n\n");
     out.push_str("precondition              action\n");
     let _ = writeln!(
         out,
-        "arch != AUDIT_ARCH_X86_64  EPERM   (0x{AUDIT_ARCH_X86_64:08x} required)"
+        "arch != AUDIT_ARCH_{}  EPERM   (0x{AUDIT_ARCH:08x} required)",
+        TABLE_ARCH.to_uppercase()
     );
     let _ = writeln!(
         out,
@@ -870,9 +866,83 @@ pub use linux_only::{install, program_pipe, set_no_new_privs};
 mod tests {
     // J5-D begin: the architecture the tables cover
     #[test]
-    fn the_tables_cover_x86_64_and_nothing_else() {
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn baseline_numbers_match_the_native_libc_table() {
+        let expected = [
+            ("ptrace", libc::SYS_ptrace as u32),
+            ("process_vm_readv", libc::SYS_process_vm_readv as u32),
+            ("process_vm_writev", libc::SYS_process_vm_writev as u32),
+            ("bpf", libc::SYS_bpf as u32),
+            ("perf_event_open", libc::SYS_perf_event_open as u32),
+            ("kexec_load", libc::SYS_kexec_load as u32),
+            ("kexec_file_load", libc::SYS_kexec_file_load as u32),
+            ("init_module", libc::SYS_init_module as u32),
+            ("finit_module", libc::SYS_finit_module as u32),
+            ("delete_module", libc::SYS_delete_module as u32),
+            ("keyctl", libc::SYS_keyctl as u32),
+            ("add_key", libc::SYS_add_key as u32),
+            ("request_key", libc::SYS_request_key as u32),
+            ("io_uring_setup", libc::SYS_io_uring_setup as u32),
+            ("io_uring_enter", libc::SYS_io_uring_enter as u32),
+            ("io_uring_register", libc::SYS_io_uring_register as u32),
+            ("mount", libc::SYS_mount as u32),
+            ("umount2", libc::SYS_umount2 as u32),
+            ("move_mount", libc::SYS_move_mount as u32),
+            ("open_tree", libc::SYS_open_tree as u32),
+            ("fsopen", libc::SYS_fsopen as u32),
+            ("fsmount", libc::SYS_fsmount as u32),
+            ("fspick", libc::SYS_fspick as u32),
+            ("fsconfig", libc::SYS_fsconfig as u32),
+            ("mount_setattr", libc::SYS_mount_setattr as u32),
+            ("pivot_root", libc::SYS_pivot_root as u32),
+            ("chroot", libc::SYS_chroot as u32),
+            ("unshare", libc::SYS_unshare as u32),
+            ("setns", libc::SYS_setns as u32),
+            ("userfaultfd", libc::SYS_userfaultfd as u32),
+            ("open_by_handle_at", libc::SYS_open_by_handle_at as u32),
+            ("name_to_handle_at", libc::SYS_name_to_handle_at as u32),
+            ("syslog", libc::SYS_syslog as u32),
+            ("pidfd_send_signal", libc::SYS_pidfd_send_signal as u32),
+            ("pidfd_open", libc::SYS_pidfd_open as u32),
+            ("pidfd_getfd", libc::SYS_pidfd_getfd as u32),
+            ("process_madvise", libc::SYS_process_madvise as u32),
+            ("kcmp", libc::SYS_kcmp as u32),
+            ("move_pages", libc::SYS_move_pages as u32),
+            ("migrate_pages", libc::SYS_migrate_pages as u32),
+            ("quotactl", libc::SYS_quotactl as u32),
+            ("quotactl_fd", libc::SYS_quotactl_fd as u32),
+            ("adjtimex", libc::SYS_adjtimex as u32),
+            ("clock_settime", libc::SYS_clock_settime as u32),
+            ("clock_adjtime", libc::SYS_clock_adjtime as u32),
+            ("settimeofday", libc::SYS_settimeofday as u32),
+        ];
+        for (name, number) in expected {
+            assert_eq!(
+                DENY_EPERM.iter().find(|(n, _)| *n == name).map(|(_, n)| *n),
+                Some(number),
+                "{name}"
+            );
+        }
+        for (actual, expected) in [
+            (NR_CLONE, libc::SYS_clone),
+            (NR_SOCKET, libc::SYS_socket),
+            (NR_SOCKETPAIR, libc::SYS_socketpair),
+            (NR_CONNECT, libc::SYS_connect),
+            (NR_IOCTL, libc::SYS_ioctl),
+            (NR_SECCOMP, libc::SYS_seccomp),
+        ] {
+            assert_eq!(actual as i64, expected);
+        }
+    }
+
+    #[test]
+    fn the_tables_cover_both_native_64_bit_abis() {
         assert!(tables_cover("x86_64"));
-        for other in ["aarch64", "x86", "riscv64", "arm", "powerpc64", "s390x", ""] {
+        assert!(tables_cover("aarch64"));
+        for other in ["x86", "riscv64", "arm", "powerpc64", "s390x", ""] {
             assert!(!tables_cover(other), "{other}");
         }
         assert_eq!(REASON_UNSUPPORTED_ARCHITECTURE, "unsupported_architecture");
@@ -900,7 +970,11 @@ mod tests {
                 agent_baseline_with_storage(AgentVariant::UnprivilegedInner, true).unwrap(),
             ),
         ] {
-            for nr in [86, 265] {
+            for nr in if abi::AARCH64 {
+                vec![37]
+            } else {
+                vec![86, 265]
+            } {
                 assert_eq!(run(&plain, X86, nr, [0; 2]), SECCOMP_RET_ALLOW);
                 assert_eq!(run(&bounded, X86, nr, [0; 2]), EPERM);
                 assert_eq!(run(&bounded, X86, nr | X32_SYSCALL_BIT, [0; 2]), EPERM);
@@ -924,7 +998,7 @@ mod tests {
         assert_eq!(insns[0].code, super::super::bpf::CODE_LD_W_ABS);
         assert_eq!(insns[0].k, SD_ARCH, "the first load is the architecture");
         assert_eq!(insns[1].code, super::super::bpf::CODE_JEQ_K);
-        assert_eq!(insns[1].k, AUDIT_ARCH_X86_64);
+        assert_eq!(insns[1].k, AUDIT_ARCH);
         assert_eq!(insns[2].k, SD_NR, "the syscall number is loaded second");
     }
 
@@ -1068,10 +1142,20 @@ mod tests {
     /// AF_UNSPEC 0, one past the last (46) and a negative int.
     const OUTSIDE: [u32; 11] = [17, 38, 40, 42, 15, 7, 30, 44, 0, 46, 0xffff_ffff];
     const NETLINK_ROUTE: u32 = 0;
-    const X86: u32 = AUDIT_ARCH_X86_64;
+    const X86: u32 = AUDIT_ARCH;
     /// Non-native ABIs the reference host accepts or could: i386, aarch64,
     /// 32-bit arm, garbage.
-    const FOREIGN: [u32; 5] = [0x4000_0003, 0xc000_00b7, 0x4000_0028, 0, 0xffff_ffff];
+    const FOREIGN: [u32; 5] = [
+        0x4000_0003,
+        if abi::AARCH64 {
+            0xc000_003e
+        } else {
+            0xc000_00b7
+        },
+        0x4000_0028,
+        0,
+        0xffff_ffff,
+    ];
 
     /// Regenerates the pinned evidence tables after a deliberate change to
     /// the deny set (audit 4 B8 used it for the time-family additions). Run
@@ -1083,18 +1167,24 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/specs/jail-v1/evidence/"
         );
+        #[cfg(target_os = "linux")]
         std::fs::write(
-            format!("{}seccomp-table-tool-x86_64.txt", base),
+            format!("{base}closed-set-{TABLE_ARCH}.txt"),
+            super::super::tracer::closed_set_table(),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}seccomp-table-tool-{TABLE_ARCH}.txt", base),
             tool_baseline_table(),
         )
         .unwrap();
         std::fs::write(
-            format!("{}seccomp-table-agent-x86_64.txt", base),
+            format!("{}seccomp-table-agent-{TABLE_ARCH}.txt", base),
             agent_baseline_table(AgentVariant::UnprivilegedInner),
         )
         .unwrap();
         std::fs::write(
-            format!("{}seccomp-table-agent-namespace-x86_64.txt", base),
+            format!("{}seccomp-table-agent-namespace-{TABLE_ARCH}.txt", base),
             agent_baseline_table(AgentVariant::NamespaceInner),
         )
         .unwrap();
@@ -1105,9 +1195,12 @@ mod tests {
         // The shared builder must not have moved a single instruction of the
         // `tool` filter J2 verified: its digest is pinned by the evidence
         // file the conformance run compares, checked here on every host.
-        let checked_in = include_str!(
-            "../../../../../docs/specs/jail-v1/evidence/seccomp-table-tool-x86_64.txt"
-        );
+        let checked_in = std::fs::read_to_string(format!(
+            "{}/../../docs/specs/jail-v1/evidence/seccomp-table-tool-{}.txt",
+            env!("CARGO_MANIFEST_DIR"),
+            TABLE_ARCH
+        ))
+        .unwrap();
         assert_eq!(tool_baseline_table(), checked_in);
     }
 
@@ -1116,12 +1209,18 @@ mod tests {
     /// change to either digest is a visible diff.
     #[test]
     fn the_agent_baselines_are_byte_for_byte_the_checked_in_ones() {
-        let unprivileged = include_str!(
-            "../../../../../docs/specs/jail-v1/evidence/seccomp-table-agent-x86_64.txt"
-        );
-        let namespace = include_str!(
-            "../../../../../docs/specs/jail-v1/evidence/seccomp-table-agent-namespace-x86_64.txt"
-        );
+        let unprivileged = std::fs::read_to_string(format!(
+            "{}/../../docs/specs/jail-v1/evidence/seccomp-table-agent-{}.txt",
+            env!("CARGO_MANIFEST_DIR"),
+            TABLE_ARCH
+        ))
+        .unwrap();
+        let namespace = std::fs::read_to_string(format!(
+            "{}/../../docs/specs/jail-v1/evidence/seccomp-table-agent-namespace-{}.txt",
+            env!("CARGO_MANIFEST_DIR"),
+            TABLE_ARCH
+        ))
+        .unwrap();
         assert_eq!(
             agent_baseline_table(AgentVariant::UnprivilegedInner),
             unprivileged
@@ -1179,7 +1278,7 @@ mod tests {
         );
         // The unprivileged inner sandbox: no_new_privs (prctl 157), seccomp
         // (317) and the three Landlock calls (444-446) are allowed.
-        for nr in [157, 317, 444, 445, 446] {
+        for nr in [nr(157, 167), NR_SECCOMP, 444, 445, 446] {
             assert_eq!(run(&agent, X86, nr, [0, 0]), SECCOMP_RET_ALLOW, "nr {nr}");
         }
         for arch in FOREIGN {
@@ -1209,7 +1308,7 @@ mod tests {
             assert_eq!(run(&ns, X86, *nr, [0, 0]), EPERM, "{name} stays denied");
         }
         // setns, the new mount API and clone3 are never part of it.
-        for nr in [308, 428, 429, 430, 431, 432, 433, 442] {
+        for nr in [nr(308, 268), 428, 429, 430, 431, 432, 433, 442] {
             assert_eq!(run(&ns, X86, nr, [0, 0]), EPERM, "nr {nr}");
         }
         assert_eq!(run(&ns, X86, NR_CLONE3, [0, 0]), ENOSYS);
@@ -1381,7 +1480,7 @@ mod tests {
     /// makes a child's second one fail with `EBUSY` (jail-v1 §9.2).
     #[test]
     fn j4_d1_the_tool_baseline_refuses_a_notification_listener() {
-        const SECCOMP: u32 = 317;
+        const SECCOMP: u32 = NR_SECCOMP;
         const SET_MODE_FILTER: u32 = 1;
         const NEW_LISTENER: u32 = 1 << 3;
         const TSYNC: u32 = 1;

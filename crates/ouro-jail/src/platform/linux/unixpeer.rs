@@ -76,8 +76,8 @@ pub const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
 pub const SECCOMP_RET_ALLOW: u32 = super::seccomp::SECCOMP_RET_ALLOW;
 /// `SECCOMP_RET_ERRNO`.
 pub const SECCOMP_RET_ERRNO: u32 = super::seccomp::SECCOMP_RET_ERRNO;
-/// `AUDIT_ARCH_X86_64`.
-pub const AUDIT_ARCH_X86_64: u32 = super::seccomp::AUDIT_ARCH_X86_64;
+/// `AUDIT_ARCH`.
+pub const AUDIT_ARCH: u32 = super::seccomp::AUDIT_ARCH;
 
 #[cfg(test)]
 use super::seccomp::{LINUX_EPERM, X32_SYSCALL_BIT};
@@ -340,37 +340,29 @@ mod tests {
         let eperm = SECCOMP_RET_ERRNO | LINUX_EPERM;
         // connect on the native ABI -> USER_NOTIF
         assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, NR_CONNECT, 0, 0),
+            run_filter(AUDIT_ARCH, NR_CONNECT, 0, 0),
             SECCOMP_RET_USER_NOTIF
         );
         // AF_UNIX SOCK_DGRAM / SOCK_RAW -> EPERM; SOCK_STREAM (with CLOEXEC) and
         // SOCK_SEQPACKET -> ALLOW (type masked)
-        assert_eq!(run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, AF_UNIX, 2), eperm);
-        assert_eq!(run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, AF_UNIX, 3), eperm);
+        assert_eq!(run_filter(AUDIT_ARCH, NR_SOCKET, AF_UNIX, 2), eperm);
+        assert_eq!(run_filter(AUDIT_ARCH, NR_SOCKET, AF_UNIX, 3), eperm);
         assert_eq!(
-            run_filter(
-                AUDIT_ARCH_X86_64,
-                NR_SOCKET,
-                AF_UNIX,
-                SOCK_STREAM | 0x0008_0000
-            ),
+            run_filter(AUDIT_ARCH, NR_SOCKET, AF_UNIX, SOCK_STREAM | 0x0008_0000),
             SECCOMP_RET_ALLOW
         );
         assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, AF_UNIX, SOCK_SEQPACKET),
+            run_filter(AUDIT_ARCH, NR_SOCKET, AF_UNIX, SOCK_SEQPACKET),
             SECCOMP_RET_ALLOW
         );
         // non-AF_UNIX socket, socketpair DGRAM, and an unrelated syscall
         assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, NR_SOCKET, 2, SOCK_STREAM),
+            run_filter(AUDIT_ARCH, NR_SOCKET, 2, SOCK_STREAM),
             SECCOMP_RET_ALLOW
         );
+        assert_eq!(run_filter(AUDIT_ARCH, NR_SOCKETPAIR, AF_UNIX, 2), eperm);
         assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, NR_SOCKETPAIR, AF_UNIX, 2),
-            eperm
-        );
-        assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, 1 /* write */, 0, 0),
+            run_filter(AUDIT_ARCH, 1 /* write */, 0, 0),
             SECCOMP_RET_ALLOW
         );
 
@@ -378,9 +370,13 @@ mod tests {
         // non-native ABI is denied EPERM regardless of the syscall, so a compat
         // connect cannot escape mediation.
         for arch in [
-            0xc000_00b7u32, // aarch64
-            0x4000_0003,    // i386
-            0x4000_00b7,    // arm (32-bit)
+            if crate::platform::linux::abi::AARCH64 {
+                0xc000_003e
+            } else {
+                0xc000_00b7
+            }, // other native ABI
+            0x4000_0003, // i386
+            0x4000_0028, // arm (32-bit)
             0,
             0xffff_ffff,
         ] {
@@ -395,13 +391,10 @@ mod tests {
         // x32 shares the x86_64 audit arch but its numbering is distinct, so it
         // is denied even though the arch matches.
         assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, X32_SYSCALL_BIT | NR_CONNECT, 0, 0),
+            run_filter(AUDIT_ARCH, X32_SYSCALL_BIT | NR_CONNECT, 0, 0),
             eperm
         );
-        assert_eq!(
-            run_filter(AUDIT_ARCH_X86_64, X32_SYSCALL_BIT | 59, 0, 0),
-            eperm
-        );
+        assert_eq!(run_filter(AUDIT_ARCH, X32_SYSCALL_BIT | 59, 0, 0), eperm);
     }
 
     #[test]

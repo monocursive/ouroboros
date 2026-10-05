@@ -22,9 +22,13 @@ use std::process::Command;
 
 use ouro_fixture::harness::{self, TempDir};
 
+#[cfg(not(target_arch = "aarch64"))]
 const TRACED: &str = "open,openat,openat2,creat,mkdir,mkdirat,rename,renameat,renameat2,\
                       unlink,unlinkat,rmdir,link,linkat,symlink,symlinkat,execve,execveat,connect,\
                       mknod,mknodat,truncate,ftruncate";
+
+#[cfg(target_arch = "aarch64")]
+const TRACED: &str = "openat,openat2,mkdirat,renameat,renameat2,unlinkat,linkat,symlinkat,execve,execveat,connect,mknodat,truncate,ftruncate";
 
 fn strace_available() -> bool {
     Command::new("strace")
@@ -78,7 +82,9 @@ fn each_via_reaches_the_kernel_as_exactly_that_syscall() {
     // while the kernel saw `openat`.
     for (via, syscall) in [
         ("openat", "openat"),
+        #[cfg(not(target_arch = "aarch64"))]
         ("open", "open"),
+        #[cfg(not(target_arch = "aarch64"))]
         ("creat", "creat"),
         ("openat2", "openat2"),
     ] {
@@ -119,7 +125,12 @@ fn the_directory_and_link_variants_are_distinct_at_the_kernel() {
     let dir = TempDir::new("ouro-fixture-identity").unwrap();
     let log = dir.path().join("trace");
 
-    for (mode, via, syscall) in [("mkdir", "mkdir", "mkdir"), ("mkdir", "mkdirat", "mkdirat")] {
+    let variants = [
+        #[cfg(not(target_arch = "aarch64"))]
+        ("mkdir", "mkdir", "mkdir"),
+        ("mkdir", "mkdirat", "mkdirat"),
+    ];
+    for (mode, via, syscall) in variants {
         let path = dir.path().join(format!("d-{via}"));
         let trace = traced(&log, &[mode, &path.display().to_string(), "--via", via]);
         assert!(
@@ -129,6 +140,7 @@ fn the_directory_and_link_variants_are_distinct_at_the_kernel() {
     }
 
     for (via, syscall) in [
+        #[cfg(not(target_arch = "aarch64"))]
         ("rename", "rename"),
         ("renameat", "renameat"),
         ("renameat2", "renameat2"),
@@ -157,8 +169,10 @@ fn the_directory_and_link_variants_are_distinct_at_the_kernel() {
     }
 
     for (mode, via, syscall, extra) in [
+        #[cfg(not(target_arch = "aarch64"))]
         ("unlink", "unlink", "unlink", None),
         ("unlink", "unlinkat", "unlinkat", None),
+        #[cfg(not(target_arch = "aarch64"))]
         ("symlink", "symlink", "symlink", Some("target")),
         ("symlink", "symlinkat", "symlinkat", Some("target")),
     ] {
@@ -202,7 +216,12 @@ fn the_node_creation_variants_are_distinct_at_the_kernel() {
     let dir = TempDir::new("ouro-fixture-identity").unwrap();
     let log = dir.path().join("trace");
 
-    for (via, syscall) in [("mknod", "mknod"), ("mknodat", "mknodat")] {
+    let variants = [
+        #[cfg(not(target_arch = "aarch64"))]
+        ("mknod", "mknod"),
+        ("mknodat", "mknodat"),
+    ];
+    for (via, syscall) in variants {
         let path = dir.path().join(format!("n-{via}"));
         let trace = traced(&log, &["mknod", &path.display().to_string(), "--via", via]);
         assert!(

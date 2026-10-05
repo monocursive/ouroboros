@@ -239,6 +239,9 @@ struct Site {
     arch: u32,
     nr: u64,
     ip: u64,
+    /// arm64 restores the original x0 argument before restarting; x86_64
+    /// restores the syscall number in rax. Keep the entry value to verify it.
+    arg0: u64,
 }
 
 /// A call whose syscall exit carried a kernel restart code (J4 O-2).
@@ -326,14 +329,15 @@ enum Verdict {
     Unknown,
 }
 
-/// The kernel's decision at a signal handler's entry (`handle_signal` in
-/// `arch/x86/kernel/signal.c`). `ERESTARTNOHAND` and `ERESTART_RESTARTBLOCK`
+/// The kernel's decision at a signal handler's entry
+/// (`arch/{x86,arm64}/kernel/signal.c`). `ERESTARTNOHAND` and `ERESTART_RESTARTBLOCK`
 /// become `EINTR` and `ERESTARTNOINTR` is re-entered, whatever the handler.
 /// `ERESTARTSYS` is re-entered only under `SA_RESTART`, which is read from
-/// what the kernel saved in the frame: `rax = -EINTR` with `rip` unchanged,
-/// or `rax` = the call's number with `rip` rewound over the two-byte
-/// `syscall` (or `int 0x80`) instruction. Anything else is not a frame this
-/// call produced.
+/// what the kernel saved in the frame: the result register is `-EINTR`
+/// with the PC unchanged, or the PC is rewound over the syscall instruction.
+/// For a restart, x86_64 restores the syscall number in rax and rewinds two
+/// bytes; arm64 restores the original x0 argument and rewinds four bytes.
+/// Anything else is not a frame this call produced.
 fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdict {
     match code {
         sys::ERESTARTNOINTR => Verdict::Restarted,
@@ -342,7 +346,20 @@ fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdi
             Some((ax, ip)) if ax == (-i64::from(libc::EINTR)) as u64 && ip == site.ip => {
                 Verdict::Interrupted
             }
-            Some((ax, ip)) if ax == site.nr && ip == site.ip.wrapping_sub(2) => Verdict::Restarted,
+            Some((ax, ip))
+                if ax
+                    == if site.arch == 0xc000_00b7 {
+                        site.arg0
+                    } else {
+                        site.nr
+                    }
+                    && ip
+                        == site
+                            .ip
+                            .wrapping_sub(if site.arch == 0xc000_00b7 { 4 } else { 2 }) =>
+            {
+                Verdict::Restarted
+            }
             _ => Verdict::Unknown,
         },
         _ => Verdict::Unknown,
@@ -1577,22 +1594,21 @@ impl Session {
         let listener_flags =
             u64::from(crate::platform::linux::tracer::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER);
         let untraced_flag = u64::from(crate::platform::linux::tracer::filter::CLONE_UNTRACED);
-        let x32 = info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0;
+        let x32 = info.arch == 0xc000_003e && info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0;
         let i386 = info.arch == sys::AUDIT_ARCH_I386;
-        if !i386 && !x32 {
+        let arm32 = info.arch == 0x4000_0028;
+        if !i386 && !x32 && !arm32 {
             return None;
         }
         let nr = info.nr & !u64::from(sys::X32_SYSCALL_BIT);
-        let is_seccomp = (i386
-            && nr == u64::from(crate::platform::linux::tracer::filter::I386_LISTENER_SYSCALL))
-            || (x32
-                && !i386
-                && nr == u64::from(crate::platform::linux::tracer::filter::LISTENER_SYSCALL.1));
-        let is_clone = (i386
-            && nr == u64::from(crate::platform::linux::tracer::filter::I386_CLONE_SYSCALL))
-            || (x32
-                && !i386
-                && nr == u64::from(crate::platform::linux::tracer::filter::CLONE_SYSCALL.1));
+        let is_seccomp = (arm32 && nr == 383)
+            || (i386
+                && nr == u64::from(crate::platform::linux::tracer::filter::I386_LISTENER_SYSCALL))
+            || (x32 && !i386 && nr == 317);
+        let is_clone = (arm32 && nr == 120)
+            || (i386
+                && nr == u64::from(crate::platform::linux::tracer::filter::I386_CLONE_SYSCALL))
+            || (x32 && !i386 && nr == 56);
         if is_seccomp && info.args[1] & listener_flags != 0 {
             return Some(InFlight::Listener);
         }
@@ -1634,12 +1650,13 @@ impl Session {
             arch: info.arch,
             nr: info.nr,
             ip: info.ip,
+            arg0: info.args[0],
         };
         // jail-v1 §9.2: validate the architecture before the syscall number.
         // A compat or x32 entry carries a number from a different table, and
         // naming it from this one would mislabel the call (J4 D2): it is
         // foreign, followed to its return and never decoded.
-        if info.arch != sys::AUDIT_ARCH_X86_64 || info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0 {
+        if info.arch != sys::AUDIT_ARCH || info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0 {
             // Security 2026-09-27 (audit 4 B2): the two calls whose *native*
             // forms carry their own classification — a listener hides every
             // later syscall for as long as it is held, and an untraced
@@ -1749,7 +1766,7 @@ impl Session {
         pending.args.flags = flags;
         pending.flags_unavailable = flags_unavailable;
         if entry.op == ClosedOp::Exec && !self.config.commands.is_empty() {
-            let argv = sys::argv(tid, info.args[if info.nr == 322 { 2 } else { 1 }]);
+            let argv = sys::argv(tid, info.args[if entry.name == "execveat" { 2 } else { 1 }]);
             pending.args.command = self
                 .config
                 .commands
@@ -2329,32 +2346,27 @@ impl Session {
 
     /// The `ucontext` of the signal frame the kernel has just set up, when
     /// the stop is the notification of a handler's entry to a single-stepped
-    /// tracee: `si_code` is the notification's own, and the registers are
-    /// the ones `__setup_rt_frame` loads — `rdi` the signal delivered, `rax`
-    /// zero, `rsp` the frame and `rdx` its `ucontext`, one word above it. At
-    /// a signal-delivery stop inside the same sequence `rax` still holds the
-    /// restart code, so a `SIGTRAP` sent by anyone is not mistaken for it.
+    /// tracee: `si_code` is the notification's own, then the native register
+    /// reader verifies the delivered signal and locates the kernel frame.
+    /// An ordinary signal-delivery stop is not this handler-entry stop.
     fn handler_entry(&mut self, tid: pid_t, delivered: libc::c_int) -> Option<u64> {
         let (signo, code) = sys::siginfo(tid).ok()?;
         if signo != libc::SIGTRAP || code != sys::SI_CODE_HANDLER_ENTRY {
             return None;
         }
-        let regs = sys::regs(tid).ok()?;
-        let delivered = u64::try_from(delivered).ok()?;
-        (regs.rax == 0 && regs.rdi == delivered && regs.rsp.checked_add(8) == Some(regs.rdx))
-            .then_some(regs.rdx)
+        sys::handler_ucontext(tid, u64::try_from(delivered).ok()?).ok()?
     }
 
-    /// The interrupted `rax` and `rip` the kernel saved in the frame whose
-    /// `ucontext` is at `uc`.
+    /// The interrupted result register and PC the kernel saved in the frame
+    /// whose `ucontext` is at `uc`.
     fn read_frame(tid: pid_t, uc: u64) -> Option<(u64, u64)> {
         let mut word = [0u8; 8];
         let mut read = |offset: u64| {
             (sys::read_remote(tid, uc.checked_add(offset)?, &mut word) == 8)
                 .then(|| u64::from_ne_bytes(word))
         };
-        let ax = read(sys::FRAME_RAX)?;
-        let ip = read(sys::FRAME_RIP)?;
+        let ax = read(sys::FRAME_RESULT)?;
+        let ip = read(sys::FRAME_IP)?;
         Some((ax, ip))
     }
 
@@ -2376,6 +2388,7 @@ impl Session {
                     arch: info.arch,
                     nr: info.nr,
                     ip: info.ip,
+                    arg0: info.args[0],
                 })
             }
             // Left this stop without being resumed, which only a SIGKILL does
@@ -2934,7 +2947,8 @@ mod tests {
     #[test]
     fn pointed_arguments_are_reverified_at_the_exit() {
         let (mut session, _rx) = stalled_session();
-        let entry = closed_set::lookup(257).expect("openat");
+        let entry = closed_set::lookup(u64::from(crate::platform::linux::abi::nr(257, 56)))
+            .expect("openat");
         let mut path = b"/workspace/file.txt\0".to_vec();
         let addr = path.as_ptr() as u64;
         let mut raw = [0u64; 6];
@@ -3024,9 +3038,10 @@ mod tests {
                 start_ticks: None,
                 pending: Some(InFlight::Closed(pending.clone())),
                 site: Site {
-                    arch: sys::AUDIT_ARCH_X86_64,
+                    arch: sys::AUDIT_ARCH,
                     nr: 437,
                     ip: 0,
+                    arg0: 0,
                 },
                 entry_fresh: false,
                 restart: None,
@@ -3265,17 +3280,32 @@ mod tests {
         // its leader's birth, not by the worker's own.
         session.register(WORKER);
         session.register(RECYCLED);
-        pend(&mut session, WORKER, 83, "/w/by-worker");
+        pend(
+            &mut session,
+            WORKER,
+            u64::from(crate::platform::linux::abi::nr(83, 34)),
+            "/w/by-worker",
+        );
         session.handle_exit(WORKER, 0);
         session.handle_death(WORKER, 0);
         session.handle_exec(RECYCLED);
-        pend(&mut session, RECYCLED, 83, "/w/old");
+        pend(
+            &mut session,
+            RECYCLED,
+            u64::from(crate::platform::linux::abi::nr(83, 34)),
+            "/w/old",
+        );
         session.handle_exit(RECYCLED, 0);
         session.handle_death(RECYCLED, 0);
         // Reaped: the kernel may now give the number to a new task.
         table.lock().unwrap().insert(RECYCLED, (RECYCLED, 2000));
         session.register(RECYCLED);
-        pend(&mut session, RECYCLED, 87, "/w/new");
+        pend(
+            &mut session,
+            RECYCLED,
+            u64::from(crate::platform::linux::abi::nr(87, 35)),
+            "/w/new",
+        );
         session.handle_exit(RECYCLED, -i64::from(libc::ENOENT));
         session.handle_death(RECYCLED, libc::SIGKILL);
         let events = drained(&rx, &mut session);
@@ -3298,14 +3328,24 @@ mod tests {
                 other => (format!("{other:?}"), None),
             })
             .collect();
+        let mkdir = if cfg!(target_arch = "aarch64") {
+            "mkdirat"
+        } else {
+            "mkdir"
+        };
+        let unlink = if cfg!(target_arch = "aarch64") {
+            "unlinkat"
+        } else {
+            "unlink"
+        };
         assert_eq!(
             seen,
             vec![
-                (format!("mkdir {RECYCLED}/{WORKER}"), Some(1000)),
+                (format!("{mkdir} {RECYCLED}/{WORKER}"), Some(1000)),
                 (format!("exec {RECYCLED}"), Some(1000)),
-                (format!("mkdir {RECYCLED}/{RECYCLED}"), Some(1000)),
+                (format!("{mkdir} {RECYCLED}/{RECYCLED}"), Some(1000)),
                 (format!("exit {RECYCLED}"), Some(1000)),
-                (format!("unlink {RECYCLED}/{RECYCLED}"), Some(2000)),
+                (format!("{unlink} {RECYCLED}/{RECYCLED}"), Some(2000)),
             ],
             "the new task under the old number never execed: no second exit"
         );
@@ -3368,12 +3408,16 @@ mod tests {
     #[test]
     fn j4_o2_the_verdict_at_a_handler_follows_the_kernel_for_every_code() {
         let site = Site {
-            arch: sys::AUDIT_ARCH_X86_64,
+            arch: sys::AUDIT_ARCH,
             nr: 257,
             ip: 0x40_1002,
+            arg0: 257,
         };
         let eintr = (-i64::from(libc::EINTR)) as u64;
-        let restarted = Some((257, 0x40_1000));
+        let restarted = Some((
+            257,
+            site.ip - if cfg!(target_arch = "aarch64") { 4 } else { 2 },
+        ));
         let interrupted = Some((eintr, 0x40_1002));
         for frame in [None, restarted, interrupted] {
             assert_eq!(
@@ -3444,7 +3488,12 @@ mod tests {
         );
         session.register(RECYCLED);
 
-        waiting(&mut session, RECYCLED, 257, "/w/interrupted");
+        waiting(
+            &mut session,
+            RECYCLED,
+            libc::SYS_openat as u64,
+            "/w/interrupted",
+        );
         assert_eq!(session.inflight, 1, "still in flight while waiting");
         assert!(drained(&rx, &mut session).is_empty(), "no result yet");
         session.settle_restart(RECYCLED, Verdict::Interrupted);
@@ -3458,12 +3507,22 @@ mod tests {
         );
         assert_eq!(session.inflight, 0);
 
-        waiting(&mut session, RECYCLED, 83, "/w/restarted");
+        waiting(
+            &mut session,
+            RECYCLED,
+            u64::from(crate::platform::linux::abi::nr(83, 34)),
+            "/w/restarted",
+        );
         session.settle_restart(RECYCLED, Verdict::Restarted);
         assert!(drained(&rx, &mut session).is_empty());
         assert_eq!(session.inflight, 0);
 
-        waiting(&mut session, RECYCLED, 83, "/w/unknown");
+        waiting(
+            &mut session,
+            RECYCLED,
+            u64::from(crate::platform::linux::abi::nr(83, 34)),
+            "/w/unknown",
+        );
         session.settle_restart(RECYCLED, Verdict::Unknown);
         let events = drained(&rx, &mut session);
         assert!(
@@ -3476,7 +3535,12 @@ mod tests {
         );
         assert_eq!(session.inflight, 0);
 
-        waiting(&mut session, RECYCLED, 83, "/w/died");
+        waiting(
+            &mut session,
+            RECYCLED,
+            u64::from(crate::platform::linux::abi::nr(83, 34)),
+            "/w/died",
+        );
         session.handle_death(RECYCLED, libc::SIGKILL);
         assert!(drained(&rx, &mut session).is_empty(), "no result, no gap");
         assert_eq!(session.inflight, 0);
@@ -3522,7 +3586,7 @@ mod tests {
     /// A handler's entry has just said "restarted": by the frame, or by the
     /// restart code alone.
     fn announced(session: &mut Session, tid: pid_t, by_kernel: bool) {
-        waiting(session, tid, 257, "/w/fifo");
+        waiting(session, tid, libc::SYS_openat as u64, "/w/fifo");
         let wait = session
             .tasks
             .get_mut(&tid)
@@ -3623,7 +3687,7 @@ mod tests {
     #[test]
     fn j4_w3_r2_a_kill_at_a_stepped_reentry_ends_the_wait_without_a_count() {
         let (mut session, rx) = scripted(TracerConfig::default(), &[(RECYCLED, RECYCLED)]);
-        waiting(&mut session, RECYCLED, 257, "/w/fifo");
+        waiting(&mut session, RECYCLED, libc::SYS_openat as u64, "/w/fifo");
         session.judge_entry_stop(RECYCLED, EntryStop::Killed);
         session.handle_death(RECYCLED, libc::SIGKILL);
         assert!(drained(&rx, &mut session).is_empty());
@@ -3646,9 +3710,9 @@ mod tests {
         for carried in [false, true] {
             let (mut session, rx) =
                 scripted(TracerConfig::default(), &[(LEADER, LEADER), (PEER, LEADER)]);
-            pend(&mut session, LEADER, 257, "/w/fifo");
+            pend(&mut session, LEADER, libc::SYS_openat as u64, "/w/fifo");
             if carried {
-                pend(&mut session, PEER, 59, "/bin/image");
+                pend(&mut session, PEER, libc::SYS_execve as u64, "/bin/image");
             }
             session.exec_transition(LEADER, PEER);
             let events = drained(&rx, &mut session);
@@ -3727,7 +3791,7 @@ mod tests {
             },
             &[(LEADER, LEADER), (PEER, LEADER)],
         );
-        pend(&mut session, LEADER, 257, "/w/fifo");
+        pend(&mut session, LEADER, libc::SYS_openat as u64, "/w/fifo");
         session.follow(PEER, InFlight::Listener, Site::default());
         session.follow(PEER, InFlight::Untraced, Site::default());
         session.follow(PEER, InFlight::Foreign, Site::default());
@@ -3983,8 +4047,8 @@ mod tests {
         // x32 seccomp (317 | bit) and clone (56 | bit).
         assert_eq!(
             kind(Session::compat_special(&info(
-                sys::AUDIT_ARCH_X86_64,
-                u64::from(tfilter::LISTENER_SYSCALL.1) | u64::from(sys::X32_SYSCALL_BIT),
+                0xc000_003e,
+                317u64 | u64::from(sys::X32_SYSCALL_BIT),
                 0,
                 flag
             ))),
@@ -3992,8 +4056,8 @@ mod tests {
         );
         assert_eq!(
             kind(Session::compat_special(&info(
-                sys::AUDIT_ARCH_X86_64,
-                u64::from(tfilter::CLONE_SYSCALL.1) | u64::from(sys::X32_SYSCALL_BIT),
+                0xc000_003e,
+                56u64 | u64::from(sys::X32_SYSCALL_BIT),
                 untraced,
                 0
             ))),
@@ -4008,6 +4072,29 @@ mod tests {
                 0,
                 flag
             ))),
+            "none"
+        );
+        // AArch32 EABI has its own seccomp number. It can create the same
+        // open-ended listener/untraced-child gaps as x86 compatibility ABIs.
+        assert_eq!(
+            kind(Session::compat_special(&info(0x4000_0028, 383, 0, flag))),
+            "listener"
+        );
+        assert_eq!(
+            kind(Session::compat_special(&info(
+                0x4000_0028,
+                120,
+                untraced,
+                0
+            ))),
+            "untraced"
+        );
+        assert_eq!(
+            kind(Session::compat_special(&info(0x4000_0028, 354, 0, flag))),
+            "none"
+        );
+        assert_eq!(
+            kind(Session::compat_special(&info(0x4000_0028, 383, 0, 0))),
             "none"
         );
         // Another foreign architecture entirely.
@@ -4593,7 +4680,8 @@ mod tests {
             raw[1] = path.as_ptr() as u64;
             raw[2] = flags;
             session.tasks.get_mut(&self_pid).unwrap().pending = Some(InFlight::Closed(Pending {
-                entry: closed_set::lookup(257).expect("openat"),
+                entry: closed_set::lookup(u64::from(crate::platform::linux::abi::nr(257, 56)))
+                    .expect("openat"),
                 args: Args {
                     path: Some(PathSnapshot {
                         bytes: path[..path.len() - 1].to_vec(),
@@ -4763,7 +4851,7 @@ mod tests {
             },
         );
         session.tasks.get_mut(&EXECER).unwrap().pending = Some(InFlight::Closed(Pending {
-            entry: closed_set::lookup(59).expect("execve"),
+            entry: closed_set::lookup(libc::SYS_execve as u64).expect("execve"),
             args: Args {
                 path: Some(PathSnapshot {
                     bytes: b"/usr/bin/git".to_vec(),

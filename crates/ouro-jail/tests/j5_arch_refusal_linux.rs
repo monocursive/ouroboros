@@ -1,6 +1,6 @@
 //! J5-D review F12: the architecture refusal, end to end through `doctor`
 //! and `run`, on the reference host, with the architecture injected by the
-//! `OURO_JAIL_TEST_ARCH` seam (a real aarch64 Linux run is a later lane,
+//! `OURO_JAIL_TEST_ARCH` seam (a real riscv64 Linux run is a later lane,
 //! jail-v1 §3.2; the seam only ever adds the refusal a build for that
 //! architecture makes, and its evidence names the seam).
 
@@ -61,12 +61,12 @@ fn row<'a>(report: &'a Value, name: &str) -> &'a Value {
 }
 
 #[test]
-fn j5_an_aarch64_build_is_not_ready_and_refuses_contained_runs_before_exec() {
+fn j5_an_riscv64_build_is_not_ready_and_refuses_contained_runs_before_exec() {
     if !common::live() {
         return;
     }
     let dirs = Dirs::new();
-    let doctor = dirs.jail(Some("aarch64"), &["doctor", "--json"]);
+    let doctor = dirs.jail(Some("riscv64"), &["doctor", "--json"]);
     assert_eq!(doctor.status.code(), Some(125), "doctor is not ready");
     let report: Value = serde_json::from_slice(&doctor.stdout).expect("doctor --json");
     for name in [
@@ -86,7 +86,7 @@ fn j5_an_aarch64_build_is_not_ready_and_refuses_contained_runs_before_exec() {
     assert!(
         row(&report, "seccomp_filter_load")["evidence_ref"]
             .as_str()
-            .is_some_and(|evidence| evidence.contains("OURO_JAIL_TEST_ARCH=aarch64")),
+            .is_some_and(|evidence| evidence.contains("OURO_JAIL_TEST_ARCH=riscv64")),
         "the refusal names the seam"
     );
     // Rows that rest on no syscall table are measured as usual.
@@ -101,7 +101,7 @@ fn j5_an_aarch64_build_is_not_ready_and_refuses_contained_runs_before_exec() {
             arguments.extend(["--limit", "mem=1GiB"]);
         }
         arguments.extend(["--", "/usr/bin/touch", "target-ran"]);
-        let run = dirs.jail(Some("aarch64"), &arguments);
+        let run = dirs.jail(Some("riscv64"), &arguments);
         let stderr = String::from_utf8_lossy(&run.stderr);
         assert_eq!(run.status.code(), Some(125), "{profile}: {stderr}");
         assert!(
@@ -112,7 +112,7 @@ fn j5_an_aarch64_build_is_not_ready_and_refuses_contained_runs_before_exec() {
     }
     // `none` with observation off rests on no table and still runs.
     let none = dirs.jail(
-        Some("aarch64"),
+        Some("riscv64"),
         &[
             "run",
             "--profile",

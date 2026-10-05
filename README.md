@@ -15,9 +15,11 @@ agent keeps its own models and workflow.
 [Website](https://ouroboros.monocursive.com/) · [User guide](docs/guide.md) ·
 [Roadmap](docs/roadmap.md) · [Operator reference](docs/specs/jail-v1/operating.md)
 
-**Pre-release.** Execution is validated on Linux x86_64. macOS builds provide
-inspection commands and currently refuse sandboxed execution; other Linux
-architectures also refuse execution. Installation is from source. Public jail
+**Pre-release.** Linux execution supports x86_64 and aarch64, with a reference
+x86_64 conformance host and native Raspberry Pi checks. Available profiles
+depend on the host's kernel capabilities; see the [platform requirements](docs/specs/jail-v1.md#32-initial-support-matrix).
+macOS builds provide inspection commands and currently refuse sandboxed
+execution; other Linux architectures also refuse execution. Installation is from source. Public jail
 release artifacts and a Homebrew tap are not configured yet.
 
 ## What you can do

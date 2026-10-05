@@ -142,13 +142,16 @@ fn the_lock_file_is_the_frozen_one() {
 fn the_filter_digests_are_the_frozen_ones() {
     use ouro_jail::platform::linux::seccomp::{self, AgentVariant};
     let freeze = freeze();
-    assert_eq!(
-        frozen_str(&freeze, &["filters", "arch"]),
-        seccomp::TABLE_ARCH
-    );
-    let tool = evidence("seccomp-table-tool-x86_64.txt");
-    let agent = evidence("seccomp-table-agent-x86_64.txt");
-    let namespace = evidence("seccomp-table-agent-namespace-x86_64.txt");
+    let arch = ouro_jail::platform::linux::abi::TABLE_ARCH;
+    let filters = if arch == "aarch64" {
+        "aarch64_filters"
+    } else {
+        "filters"
+    };
+    assert_eq!(frozen_str(&freeze, &[filters, "arch"]), seccomp::TABLE_ARCH);
+    let tool = evidence(&format!("seccomp-table-tool-{arch}.txt"));
+    let agent = evidence(&format!("seccomp-table-agent-{arch}.txt"));
+    let namespace = evidence(&format!("seccomp-table-agent-namespace-{arch}.txt"));
     for (key, table, index, built) in [
         (
             "tool",
@@ -173,7 +176,7 @@ fn the_filter_digests_are_the_frozen_ones() {
                 .digest(),
         ),
     ] {
-        let frozen = frozen_str(&freeze, &["filters", key]);
+        let frozen = frozen_str(&freeze, &[filters, key]);
         assert_eq!(
             table_digests(table).get(index).map(String::as_str),
             Some(frozen),
@@ -182,7 +185,7 @@ fn the_filter_digests_are_the_frozen_ones() {
         assert_eq!(built, frozen, "{key} as this build makes it: {REGENERATE}");
     }
     // The mediation filter both agent tables list after the baseline.
-    let mediation = frozen_str(&freeze, &["filters", "agent_mediation"]);
+    let mediation = frozen_str(&freeze, &[filters, "agent_mediation"]);
     for table in [&agent, &namespace] {
         assert_eq!(
             table_digests(table).get(1).map(String::as_str),
@@ -203,13 +206,16 @@ fn the_filter_digests_are_the_frozen_ones() {
         "the mediation filter the launcher installs: {REGENERATE}"
     );
     for (name, text) in [
-        ("seccomp-table-tool-x86_64.txt", &tool),
-        ("seccomp-table-agent-x86_64.txt", &agent),
-        ("seccomp-table-agent-namespace-x86_64.txt", &namespace),
+        (format!("seccomp-table-tool-{arch}.txt"), &tool),
+        (format!("seccomp-table-agent-{arch}.txt"), &agent),
+        (
+            format!("seccomp-table-agent-namespace-{arch}.txt"),
+            &namespace,
+        ),
     ] {
         assert_eq!(
             sha256_hex(text.as_bytes()),
-            frozen_str(&freeze, &["filters", "table_sha256", name]),
+            frozen_str(&freeze, &[filters, "table_sha256", &name]),
             "{name}: {REGENERATE}"
         );
     }
@@ -218,26 +224,32 @@ fn the_filter_digests_are_the_frozen_ones() {
 #[test]
 fn the_closed_set_is_the_frozen_one() {
     let freeze = freeze();
-    let table = evidence("closed-set-x86_64.txt");
+    let arch = ouro_jail::platform::linux::abi::TABLE_ARCH;
+    let closed = if arch == "aarch64" {
+        "aarch64_closed_set"
+    } else {
+        "closed_set"
+    };
+    let table = evidence(&format!("closed-set-{arch}.txt"));
     assert_eq!(
-        frozen_str(&freeze, &["closed_set", "name"]),
+        frozen_str(&freeze, &[closed, "name"]),
         ouro_jail::observer::CoverageSummary::linux_closed_set()
     );
     assert_eq!(
         table_digests(&table).first().map(String::as_str),
-        Some(frozen_str(&freeze, &["closed_set", "narrowing_filter"])),
+        Some(frozen_str(&freeze, &[closed, "narrowing_filter"])),
         "the closed-set table's narrowing filter: {REGENERATE}"
     );
     assert_eq!(
         sha256_hex(table.as_bytes()),
-        frozen_str(&freeze, &["closed_set", "table_sha256"]),
-        "closed-set-x86_64.txt: {REGENERATE}"
+        frozen_str(&freeze, &[closed, "table_sha256"]),
+        "closed-set-{arch}.txt: {REGENERATE}"
     );
     // The table this build traces with, where the tracer exists.
     #[cfg(target_os = "linux")]
     assert_eq!(
         sha256_hex(ouro_jail::platform::linux::tracer::closed_set_table().as_bytes()),
-        frozen_str(&freeze, &["closed_set", "table_sha256"]),
+        frozen_str(&freeze, &[closed, "table_sha256"]),
         "the closed set this build traces: {REGENERATE}"
     );
 }

@@ -256,26 +256,35 @@ fn dump(run: &Run) -> String {
 // ---------------------------------------------------------------------------
 
 /// The 22 x86_64 rows of `linux-closed-v1` (§11.2).
-const ROWS: [&str; 22] = [
+const ROWS: &[&str] = &[
     "execve",
     "execveat",
+    #[cfg(not(target_arch = "aarch64"))]
     "open",
     "openat",
     "openat2",
+    #[cfg(not(target_arch = "aarch64"))]
     "creat",
     "truncate",
+    #[cfg(not(target_arch = "aarch64"))]
     "rename",
     "renameat",
     "renameat2",
+    #[cfg(not(target_arch = "aarch64"))]
     "unlink",
     "unlinkat",
+    #[cfg(not(target_arch = "aarch64"))]
     "rmdir",
+    #[cfg(not(target_arch = "aarch64"))]
     "mkdir",
     "mkdirat",
+    #[cfg(not(target_arch = "aarch64"))]
     "mknod",
     "mknodat",
+    #[cfg(not(target_arch = "aarch64"))]
     "link",
     "linkat",
+    #[cfg(not(target_arch = "aarch64"))]
     "symlink",
     "symlinkat",
     "connect",
@@ -450,7 +459,7 @@ fn o01_steps(c: &Case) -> Value {
     let base = c.base();
     let w = |name: &str| format!("{base}/{name}");
     let fixture = c.fixture_s();
-    serde_json::json!([
+    let steps = serde_json::json!([
         ["mkdir", base.clone(), "--expect", "any"],
         [
             "open",
@@ -593,7 +602,35 @@ fn o01_steps(c: &Case) -> Value {
         ],
         ["exec", "--via", "execve", "--", fixture, "exit", "0"],
         ["exec", "--via", "execveat", "--", fixture, "exit", "0"]
-    ])
+    ]);
+    #[cfg(target_arch = "aarch64")]
+    let steps = {
+        let mut steps = steps;
+        // Preserve every operation and dependency in the matrix while using
+        // only native ABI variants. The observer must name the actual *at
+        // syscall, which the fixture and strace independently verify.
+        for step in steps.as_array_mut().unwrap() {
+            let args = step.as_array_mut().unwrap();
+            if let Some(via) = args.iter().position(|arg| arg == "--via") {
+                let native = match args[via + 1].as_str().unwrap() {
+                    "open" | "creat" => "openat",
+                    "mkdir" => "mkdirat",
+                    "rename" => "renameat",
+                    "link" => "linkat",
+                    "symlink" => "symlinkat",
+                    "mknod" => "mknodat",
+                    "unlink" | "rmdir" => "unlinkat",
+                    _ => continue,
+                };
+                if args[via + 1] == "creat" {
+                    args.extend(["--create".into(), "--write".into(), "--trunc".into()]);
+                }
+                args[via + 1] = native.into();
+            }
+        }
+        steps
+    };
+    steps
 }
 
 /// O01 for one profile: every fixture line of a closed-set call matches
@@ -1587,7 +1624,10 @@ fn j4_clone_untraced_is_a_gap_in_none() {
 // ---------------------------------------------------------------------------
 
 fn published_table_path() -> PathBuf {
-    specs_dir().join("evidence/closed-set-x86_64.txt")
+    specs_dir().join(format!(
+        "evidence/closed-set-{}.txt",
+        ouro_jail::platform::linux::abi::TABLE_ARCH
+    ))
 }
 
 /// §11.2: "The implementation must publish its exact hook/syscall table."

@@ -1,4 +1,4 @@
-//! `linux-closed-v1`: the nineteen x86_64 syscalls of jail-v1 §11.2 and the
+//! `linux-closed-v1`: the native Linux syscalls of jail-v1 §11.2 and the
 //! shape of the arguments the observer reads from each one.
 //!
 //! The table is the module's single source of truth. The narrowing filter
@@ -6,6 +6,8 @@
 //! tracer thread uses the same rows to decide which argument is a pathname,
 //! which is a directory fd and where the flags live. A syscall not in this
 //! table is not observed and is not claimed to be.
+
+use crate::platform::linux::abi;
 
 /// The operation families the consumer maps onto the §11.2 audit rows.
 ///
@@ -112,6 +114,7 @@ pub enum FlagSource {
     Arg(u8),
     /// `creat`: the kernel defines it as `open(path, O_CREAT|O_WRONLY|O_TRUNC,
     /// mode)`, so the flags are the syscall itself rather than an argument.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))] // no native creat syscall
     ImpliedCreat,
     /// `openat2`: argument `ptr` points at a `struct open_how` of `size`
     /// bytes given by argument `size`. Only `open_how.flags` is decoded, and
@@ -176,42 +179,51 @@ const fn row(
 #[rustfmt::skip]
 pub const CLOSED_SET: &[Entry] = &[
     // proc.exec
-    row(59, "execve", ClosedOp::Exec, (None, Some(0)), (None, None), FlagSource::None),
-    row(322, "execveat", ClosedOp::Exec, (Some(0), Some(1)), (None, None), FlagSource::Arg(4)),
+    row(abi::nr(59, 221) as u64, "execve", ClosedOp::Exec, (None, Some(0)), (None, None), FlagSource::None),
+    row(abi::nr(322, 281) as u64, "execveat", ClosedOp::Exec, (Some(0), Some(1)), (None, None), FlagSource::Arg(4)),
     // fs.create / fs.write, decided from the flags by the consumer
+    #[cfg(not(target_arch = "aarch64"))]
     row(2, "open", ClosedOp::Open, (None, Some(0)), (None, None), FlagSource::Arg(1)),
-    row(257, "openat", ClosedOp::Open, (Some(0), Some(1)), (None, None), FlagSource::Arg(2)),
-    row(437, "openat2", ClosedOp::Open, (Some(0), Some(1)), (None, None), FlagSource::OpenHow { ptr: 2, size: 3 }),
+    row(abi::nr(257, 56) as u64, "openat", ClosedOp::Open, (Some(0), Some(1)), (None, None), FlagSource::Arg(2)),
+    row(abi::nr(437, 437) as u64, "openat2", ClosedOp::Open, (Some(0), Some(1)), (None, None), FlagSource::OpenHow { ptr: 2, size: 3 }),
+    #[cfg(not(target_arch = "aarch64"))]
     row(85, "creat", ClosedOp::Open, (None, Some(0)), (None, None), FlagSource::ImpliedCreat),
     // fs.write through a pathname. The second argument is a length, not flags.
-    row(76, "truncate", ClosedOp::Truncate, (None, Some(0)), (None, None), FlagSource::None),
+    row(abi::nr(76, 45) as u64, "truncate", ClosedOp::Truncate, (None, Some(0)), (None, None), FlagSource::None),
     // fs.rename
+    #[cfg(not(target_arch = "aarch64"))]
     row(82, "rename", ClosedOp::Rename, (None, Some(0)), (None, Some(1)), FlagSource::None),
-    row(264, "renameat", ClosedOp::Rename, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::None),
-    row(316, "renameat2", ClosedOp::Rename, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::Arg(4)),
+    row(abi::nr(264, 38) as u64, "renameat", ClosedOp::Rename, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::None),
+    row(abi::nr(316, 276) as u64, "renameat2", ClosedOp::Rename, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::Arg(4)),
     // fs.unlink
+    #[cfg(not(target_arch = "aarch64"))]
     row(87, "unlink", ClosedOp::Unlink, (None, Some(0)), (None, None), FlagSource::None),
-    row(263, "unlinkat", ClosedOp::Unlink, (Some(0), Some(1)), (None, None), FlagSource::Arg(2)),
+    row(abi::nr(263, 35) as u64, "unlinkat", ClosedOp::Unlink, (Some(0), Some(1)), (None, None), FlagSource::Arg(2)),
+    #[cfg(not(target_arch = "aarch64"))]
     row(84, "rmdir", ClosedOp::Rmdir, (None, Some(0)), (None, None), FlagSource::None),
     // fs.create through directory entries
+    #[cfg(not(target_arch = "aarch64"))]
     row(83, "mkdir", ClosedOp::Mkdir, (None, Some(0)), (None, None), FlagSource::None),
-    row(258, "mkdirat", ClosedOp::Mkdir, (Some(0), Some(1)), (None, None), FlagSource::None),
+    row(abi::nr(258, 34) as u64, "mkdirat", ClosedOp::Mkdir, (Some(0), Some(1)), (None, None), FlagSource::None),
     // mknod(path, mode, dev) and mknodat(dirfd, path, mode, dev): the second
     // numeric argument is a mode, so it is not recorded as flags.
+    #[cfg(not(target_arch = "aarch64"))]
     row(133, "mknod", ClosedOp::Mknod, (None, Some(0)), (None, None), FlagSource::None),
-    row(259, "mknodat", ClosedOp::Mknod, (Some(0), Some(1)), (None, None), FlagSource::None),
+    row(abi::nr(259, 33) as u64, "mknodat", ClosedOp::Mknod, (Some(0), Some(1)), (None, None), FlagSource::None),
+    #[cfg(not(target_arch = "aarch64"))]
     row(86, "link", ClosedOp::Link, (None, Some(0)), (None, Some(1)), FlagSource::None),
-    row(265, "linkat", ClosedOp::Link, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::Arg(4)),
+    row(abi::nr(265, 37) as u64, "linkat", ClosedOp::Link, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::Arg(4)),
     // symlink(target, linkpath) and symlinkat(target, newdirfd, linkpath).
     // `path` is the link the call creates, because that is the entry every
     // other row puts there and the one the closed set classifies on. The
     // target is a string the kernel stores without resolving it, so it is
     // `path2` and has no directory fd.
+    #[cfg(not(target_arch = "aarch64"))]
     row(88, "symlink", ClosedOp::Symlink, (None, Some(1)), (None, Some(0)), FlagSource::None),
-    row(266, "symlinkat", ClosedOp::Symlink, (Some(1), Some(2)), (None, Some(0)), FlagSource::None),
+    row(abi::nr(266, 36) as u64, "symlinkat", ClosedOp::Symlink, (Some(1), Some(2)), (None, Some(0)), FlagSource::None),
     // net.connect
     Entry {
-        nr: 42,
+        nr: abi::nr(42, 203) as u64,
         name: "connect",
         op: ClosedOp::Connect,
         dirfd: None,
@@ -255,25 +267,30 @@ mod tests {
 
     #[test]
     fn the_set_has_exactly_the_twenty_two_rows_of_the_spec() {
-        assert_eq!(CLOSED_SET.len(), 22);
+        let count = if abi::AARCH64 { 13 } else { 22 };
+        assert_eq!(CLOSED_SET.len(), count);
         let numbers: BTreeSet<u64> = CLOSED_SET.iter().map(|e| e.nr).collect();
-        assert_eq!(numbers.len(), 22, "no syscall number may appear twice");
-        let expected: BTreeSet<u64> = [
-            59, 322, 2, 257, 437, 85, 76, 82, 264, 316, 87, 263, 84, 83, 258, 133, 259, 86, 265,
-            88, 266, 42,
-        ]
+        assert_eq!(numbers.len(), count, "no syscall number may appear twice");
+        let expected: BTreeSet<u64> = if abi::AARCH64 {
+            vec![221, 281, 56, 437, 45, 38, 276, 35, 34, 33, 37, 36, 203]
+        } else {
+            vec![
+                59, 322, 2, 257, 437, 85, 76, 82, 264, 316, 87, 263, 84, 83, 258, 133, 259, 86,
+                265, 88, 266, 42,
+            ]
+        }
         .into_iter()
         .collect();
         assert_eq!(numbers, expected);
         let names: BTreeSet<&str> = CLOSED_SET.iter().map(|e| e.name).collect();
-        assert_eq!(names.len(), 22, "no syscall name may appear twice");
+        assert_eq!(names.len(), count, "no syscall name may appear twice");
     }
 
     /// `ftruncate` names a descriptor rather than a pathname, so it is
     /// excluded exactly as `write` is, and the table must say so by not
     /// containing it.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn descriptor_based_mutations_stay_outside_the_set() {
         for nr in [
             libc::SYS_ftruncate,
@@ -291,28 +308,37 @@ mod tests {
     /// The table must agree with the `SYS_*` numbers of this target, which is
     /// the only cross-check that catches a transposed digit.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn numbers_match_the_targets_syscall_table() {
         let expected: &[(&str, u64)] = &[
             ("execve", libc::SYS_execve as u64),
             ("execveat", libc::SYS_execveat as u64),
+            #[cfg(target_arch = "x86_64")]
             ("open", libc::SYS_open as u64),
             ("openat", libc::SYS_openat as u64),
+            #[cfg(target_arch = "x86_64")]
             ("creat", libc::SYS_creat as u64),
+            #[cfg(target_arch = "x86_64")]
             ("rename", libc::SYS_rename as u64),
             ("renameat", libc::SYS_renameat as u64),
             ("renameat2", libc::SYS_renameat2 as u64),
+            #[cfg(target_arch = "x86_64")]
             ("unlink", libc::SYS_unlink as u64),
             ("unlinkat", libc::SYS_unlinkat as u64),
+            #[cfg(target_arch = "x86_64")]
             ("rmdir", libc::SYS_rmdir as u64),
+            #[cfg(target_arch = "x86_64")]
             ("mkdir", libc::SYS_mkdir as u64),
             ("mkdirat", libc::SYS_mkdirat as u64),
+            #[cfg(target_arch = "x86_64")]
             ("link", libc::SYS_link as u64),
             ("linkat", libc::SYS_linkat as u64),
+            #[cfg(target_arch = "x86_64")]
             ("symlink", libc::SYS_symlink as u64),
             ("symlinkat", libc::SYS_symlinkat as u64),
             ("connect", libc::SYS_connect as u64),
             ("truncate", libc::SYS_truncate as u64),
+            #[cfg(target_arch = "x86_64")]
             ("mknod", libc::SYS_mknod as u64),
             ("mknodat", libc::SYS_mknodat as u64),
         ];
@@ -338,11 +364,14 @@ mod tests {
     #[test]
     fn two_path_rows_carry_both_paths_and_their_directory_fds() {
         for name in [
+            #[cfg(target_arch = "x86_64")]
             "rename",
             "renameat",
             "renameat2",
+            #[cfg(target_arch = "x86_64")]
             "link",
             "linkat",
+            #[cfg(target_arch = "x86_64")]
             "symlink",
             "symlinkat",
         ] {
@@ -362,14 +391,17 @@ mod tests {
     /// kernel stores without resolving.
     #[test]
     fn symlink_puts_the_link_it_creates_in_the_primary_path() {
-        let symlink = CLOSED_SET.iter().find(|e| e.name == "symlink").unwrap();
-        assert_eq!(symlink.path, Some(1), "symlink(target, linkpath): the link");
-        assert_eq!(symlink.path2, Some(0), "and the target is the second path");
-        assert_eq!(symlink.dirfd, None);
-        assert_eq!(
-            symlink.dirfd2, None,
-            "a stored string is resolved against nothing"
-        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            let symlink = CLOSED_SET.iter().find(|e| e.name == "symlink").unwrap();
+            assert_eq!(symlink.path, Some(1), "symlink(target, linkpath): the link");
+            assert_eq!(symlink.path2, Some(0), "and the target is the second path");
+            assert_eq!(symlink.dirfd, None);
+            assert_eq!(
+                symlink.dirfd2, None,
+                "a stored string is resolved against nothing"
+            );
+        }
         let symlinkat = CLOSED_SET.iter().find(|e| e.name == "symlinkat").unwrap();
         assert_eq!(
             symlinkat.path,
