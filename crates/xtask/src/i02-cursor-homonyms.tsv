@@ -1,5 +1,8 @@
 # Reviewed pagination homonyms: repository-relative path<TAB>exact trimmed source.
 # Only the cursor token is exempt. Updating a line requires reviewing its meaning.
+crates/ouro-ledger/src/store.rs	fn reader_cursor_refuses_replaced_later_segment_after_restart() {
+crates/ouro-ledger/src/store.rs	request.cursor = store.read(&request).unwrap().next_cursor;
+crates/ouro-ledger/src/store.rs	.join(format!("{}.json", &request.cursor.as_ref().unwrap()[..32]));
 crates/ouro-ledger/src/main.rs	/// Resume with the same run and filters using the returned cursor.
 crates/ouro-ledger/src/main.rs	cursor: Option<String>,
 crates/ouro-ledger/src/main.rs	/// Resume the original snapshot using a previously returned cursor.

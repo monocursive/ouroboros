@@ -169,6 +169,23 @@ def main():
         altered["segment"][key] = value
         expect_invalid(validators["segments"], altered, "unsafe segment anchor")
 
+    # Version 2 preserves the legacy anchors and adds an ordered segment array.
+    rotated = copy.deepcopy(manifest)
+    rotated["schema"] = "ouro.ledger.segments/2"
+    rotated["segments"] = [rotated.pop("segment")]
+    validators["segments"].validate(rotated)
+    for key, value in [("name", "../escape"), ("first_seq", 0),
+                       ("digest", "sha256:invalid"), ("bytes", 0)]:
+        altered = copy.deepcopy(rotated)
+        altered["segments"][0][key] = value
+        expect_invalid(validators["segments"], altered, "unsafe rotated segment")
+    altered = copy.deepcopy(rotated)
+    altered["segments"] = []
+    expect_invalid(validators["segments"], altered, "empty rotated manifest")
+    altered = copy.deepcopy(rotated)
+    altered["segment"] = manifest["segment"]
+    expect_invalid(validators["segments"], altered, "mixed manifest versions")
+
     # Ledger admission can end in a proved native exec failure while preserving
     # the jail's refused phase. The run settles failure, never success or denial.
     failure = read("settled-exec-failure.json")

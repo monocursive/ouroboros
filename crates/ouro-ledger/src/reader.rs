@@ -45,8 +45,7 @@ struct Ready {
 struct Session {
     created: u64,
     request: ReadRequest,
-    path: PathBuf,
-    file: File,
+    file: crate::segments::Snapshot,
     device: u64,
     inode: u64,
     accepted_bytes: u64,
@@ -96,6 +95,8 @@ struct Checkpoint {
     device: u64,
     inode: u64,
     accepted_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    segments_digest: Option<String>,
     template: ReadPage,
     position: Position,
     current: String,
@@ -195,7 +196,14 @@ fn load_checkpoint(directory: &Path, id: &str) -> Result<(Checkpoint, File)> {
         .map_err(|_| LedgerError("reader checkpoint is corrupt".into()))?;
     let checkpoint = envelope.checkpoint;
     if envelope.digest != durable_digest(&checkpoint)?
-        || checkpoint.schema != "ouro.ledger.reader-checkpoint/1"
+        || !matches!(
+            checkpoint.schema.as_str(),
+            "ouro.ledger.reader-checkpoint/1" | "ouro.ledger.reader-checkpoint/2"
+        )
+        || (checkpoint.schema == "ouro.ledger.reader-checkpoint/2"
+            && checkpoint.segments_digest.is_none())
+        || (checkpoint.schema == "ouro.ledger.reader-checkpoint/1"
+            && checkpoint.segments_digest.is_some())
         || checkpoint.id != id
         || !token_valid(&checkpoint.current)
         || !token_valid(&checkpoint.prior.token)
@@ -302,36 +310,6 @@ fn checkpoints(directory: &Path, now: u64) -> Result<Checkpoints> {
         ));
     }
     Ok(result)
-}
-
-fn reader_file(path: &Path) -> Result<File> {
-    for directory in path
-        .parent()
-        .into_iter()
-        .chain(path.parent().and_then(Path::parent))
-    {
-        let metadata = fs::symlink_metadata(directory)?;
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(LedgerError("reader directory is unsafe".into()));
-        }
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-    {
-        return Err(LedgerError("reader canonical file is unsafe".into()));
-    }
-    Ok(file)
 }
 
 fn utc_second(value: &str) -> bool {
@@ -598,8 +576,9 @@ impl Readers {
                     "reader session limit reached; wait for expiry".into(),
                 ));
             }
-            let file = reader_file(path)?;
-            let metadata = file.metadata()?;
+            let file = crate::segments::Snapshot::open(path, accepted_bytes)?;
+            let physical_bytes = file.physical_bytes();
+            let (device, inode) = file.first_identity();
             let id = Uuid::new_v4().simple().to_string();
             let token = Uuid::new_v4().simple().to_string();
             let mut health = if poisoned.is_empty() {
@@ -618,9 +597,9 @@ impl Readers {
             } else {
                 "incomplete"
             };
-            let unexpected_tail = metadata.len() != accepted_bytes;
+            let unexpected_tail = physical_bytes != accepted_bytes;
             if unexpected_tail {
-                health = if metadata.len() < accepted_bytes {
+                health = if physical_bytes < accepted_bytes {
                     "corrupt"
                 } else {
                     "incomplete"
@@ -660,10 +639,9 @@ impl Readers {
                 Session {
                     created: now,
                     request: request.clone(),
-                    path: path.into(),
                     file,
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
+                    device,
+                    inode,
                     accepted_bytes,
                     offset: 0,
                     pending: vec![],
@@ -755,13 +733,14 @@ impl Session {
         let mut request = self.request.clone();
         request.cursor = None;
         let checkpoint = Checkpoint {
-            schema: "ouro.ledger.reader-checkpoint/1".into(),
+            schema: "ouro.ledger.reader-checkpoint/2".into(),
             id: id.into(),
             created: self.created,
             request,
             device: self.device,
             inode: self.inode,
             accepted_bytes: self.accepted_bytes,
+            segments_digest: Some(self.file.identity()?),
             template: self.template.clone(),
             position: self.position(),
             current: self.current.clone(),
@@ -815,20 +794,21 @@ impl Session {
         accepted: impl Fn(&str) -> Option<AppendReceipt>,
         accepted_snapshot: impl Fn(u64, &str, u64, Option<&ReadPage>) -> bool,
     ) -> Result<Self> {
-        let file = reader_file(path)?;
-        let metadata = file.metadata()?;
-        if metadata.dev() != checkpoint.device
-            || metadata.ino() != checkpoint.inode
-            || metadata.len() < checkpoint.accepted_bytes
+        let file = crate::segments::Snapshot::open(path, checkpoint.accepted_bytes)?;
+        file.validate()?;
+        if file.first_identity() != (checkpoint.device, checkpoint.inode)
+            || match &checkpoint.segments_digest {
+                Some(identity) => &file.identity()? != identity,
+                None => !file.is_single_segment(),
+            }
         {
             return Err(LedgerError(
-                "reader canonical snapshot identity or length changed".into(),
+                "reader canonical snapshot is corrupt: identity or length changed".into(),
             ));
         }
         let mut session = Self {
             created: checkpoint.created,
             request: checkpoint.request,
-            path: path.into(),
             file,
             device: checkpoint.device,
             inode: checkpoint.inode,
@@ -1011,7 +991,7 @@ impl Session {
         Ok(())
     }
 
-    fn corrupt(&mut self, page: &mut ReadPage, reason: &'static str) {
+    fn corrupt(&mut self, page: &mut ReadPage, reason: &str) {
         page.local_consistency = false;
         page.stream_status = "corrupt".into();
         page.problems.push(reason.into());
@@ -1031,19 +1011,8 @@ impl Session {
         page: &mut ReadPage,
         accepted: impl Fn(&str) -> Option<AppendReceipt>,
     ) -> Result<()> {
-        let current = match reader_file(&self.path) {
-            Ok(file) => file.metadata()?,
-            Err(_) => {
-                self.corrupt(page, "canonical stream became missing or unsafe");
-                return Ok(());
-            }
-        };
-        if current.dev() != self.device || current.ino() != self.inode {
-            self.corrupt(page, "canonical stream identity changed during snapshot");
-            return Ok(());
-        }
-        if current.len() < self.accepted_bytes {
-            self.corrupt(page, "canonical snapshot was truncated during reading");
+        if let Err(error) = self.file.validate() {
+            self.corrupt(page, &error.to_string());
             return Ok(());
         }
         let (mut scanned, mut frames, mut output) = (0, 0, 0);

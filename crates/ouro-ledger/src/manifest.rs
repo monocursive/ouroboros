@@ -1,4 +1,4 @@
-//! Durable anchors for the canonical segment and its replay identities.
+//! Durable anchors for ordered canonical segments and their replay identities.
 //! A manifest can lag an unacknowledged append; its committed prefix cannot change.
 
 use std::{
@@ -16,7 +16,36 @@ use crate::protocol::{LedgerError, Result};
 
 pub(crate) const NAME: &str = "segments.json";
 pub(crate) const STREAM: &str = "events-0001.ndjson";
-const MAX_BYTES: u64 = 4096;
+pub(crate) const MAX_SEGMENTS: usize = 4096;
+const MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+pub(crate) fn name(number: usize) -> String {
+    format!("events-{number:04}.ndjson")
+}
+
+/// Enumeration never guesses across a gap or silently ignores a segment.
+pub(crate) fn names(directory: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name();
+        if name.as_encoded_bytes().starts_with(b"events-") {
+            names.push(
+                name.into_string()
+                    .map_err(|_| LedgerError("invalid segment name".into()))?,
+            );
+            if names.len() > MAX_SEGMENTS {
+                return Err(LedgerError("segment count exceeds bounded limit".into()));
+            }
+        }
+    }
+    names.sort();
+    if names.is_empty() || names.iter().enumerate().any(|(i, n)| *n != name(i + 1)) {
+        return Err(LedgerError(
+            "missing, reordered or invalid canonical segments".into(),
+        ));
+    }
+    Ok(names)
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -24,11 +53,11 @@ pub(crate) struct Manifest {
     pub schema: String,
     pub run_id: String,
     pub attempt_id: String,
-    pub segment: Segment,
+    pub segments: Vec<Segment>,
     pub replay_digest: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Segment {
     pub name: String,
@@ -37,6 +66,23 @@ pub(crate) struct Segment {
     pub bytes: u64,
     pub digest: String,
     pub head_digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Legacy {
+    schema: String,
+    run_id: String,
+    attempt_id: String,
+    segment: Segment,
+    replay_digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Wire {
+    Current(Manifest),
+    Legacy(Legacy),
 }
 
 fn digest(value: &str) -> bool {
@@ -80,17 +126,35 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
         ));
     }
     bytes.pop();
-    let manifest: Manifest = serde_json::from_slice(&bytes)?;
-    let value = serde_json::to_value(&manifest)?;
+    let wire: Wire = serde_json::from_slice(&bytes)?;
+    let value = serde_json::to_value(&wire)?;
+    let manifest = match wire {
+        Wire::Current(m) if m.schema == "ouro.ledger.segments/2" => m,
+        Wire::Legacy(m) if m.schema == "ouro.ledger.segments/1" => Manifest {
+            schema: "ouro.ledger.segments/2".into(),
+            run_id: m.run_id,
+            attempt_id: m.attempt_id,
+            segments: vec![m.segment],
+            replay_digest: m.replay_digest,
+        },
+        _ => return Err(LedgerError("unsupported segment manifest version".into())),
+    };
+    let mut next_seq = Some(1);
+    let valid_segments = !manifest.segments.is_empty()
+        && manifest.segments.len() <= MAX_SEGMENTS
+        && manifest.segments.iter().enumerate().all(|(i, s)| {
+            let valid = s.name == name(i + 1)
+                && Some(s.first_seq) == next_seq
+                && s.last_seq >= s.first_seq
+                && s.bytes > 0
+                && digest(&s.digest)
+                && digest(&s.head_digest);
+            next_seq = s.last_seq.checked_add(1);
+            valid
+        });
     if to_jcs(&value).map_err(|e| LedgerError(e.to_string()))? != bytes
-        || manifest.schema != "ouro.ledger.segments/1"
         || manifest.run_id != run_id
-        || manifest.segment.name != STREAM
-        || manifest.segment.first_seq != 1
-        || manifest.segment.last_seq == 0
-        || manifest.segment.bytes == 0
-        || !digest(&manifest.segment.digest)
-        || !digest(&manifest.segment.head_digest)
+        || !valid_segments
         || !digest(&manifest.replay_digest)
     {
         return Err(LedgerError(

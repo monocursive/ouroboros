@@ -5,5 +5,6 @@ mod projection;
 pub mod protocol;
 mod reader;
 pub mod runner;
+mod segments;
 pub mod service;
 pub mod store;
