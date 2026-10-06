@@ -8,8 +8,8 @@ use clap::{Args, Parser, Subcommand};
 use ouro_ledger::{
     daemon,
     protocol::{
-        LedgerError, OperatorIntent, ReadFilter, ReadRequest, ReadSelector, ReadStage, Result,
-        TailRequest,
+        CatalogRequest, DiscoveryRequest, LedgerError, OperatorIntent, ReadFilter, ReadRequest,
+        ReadSelector, ReadStage, Result, RunFilter, TailRequest,
     },
     runner, service,
 };
@@ -71,18 +71,15 @@ enum Action {
         #[arg(long)]
         unit: String,
     },
-    /// List durable runs.
-    Runs {
-        #[arg(long)]
-        json: bool,
-    },
+    /// Discover durable runs with bounded, filter-bound pagination.
+    Runs(Box<RunsArgs>),
     /// Inspect a run's outcome, coverage and protection independently.
     Show {
         run_id: String,
         #[arg(long)]
         json: bool,
     },
-    /// Read bounded pages of attributed observations from up to eight explicit runs.
+    /// Read bounded observations from filtered discovery or up to eight explicit runs.
     Query(Box<QueryArgs>),
     /// Compare covered event counts in two independently verified snapshots.
     Diff {
@@ -263,14 +260,51 @@ struct RetentionArgs {
 }
 
 #[derive(Args)]
+struct RunsArgs {
+    /// Inclusive last accepted writer activity, YYYY-MM-DDTHH:MM:SSZ.
+    #[arg(long)]
+    since: Option<String>,
+    /// Exclusive last accepted writer activity, YYYY-MM-DDTHH:MM:SSZ.
+    #[arg(long)]
+    until: Option<String>,
+    #[arg(long)]
+    launch: Option<String>,
+    /// Require every repeated tag; names are exact and case-sensitive.
+    #[arg(long)]
+    tag: Vec<String>,
+    #[arg(long, value_parser = ["pending", "refused", "exited", "signaled", "exec_error", "unknown"])]
+    outcome: Option<String>,
+    #[arg(long)]
+    after: Option<String>,
+    #[arg(long, default_value_t = 25, value_parser = clap::value_parser!(u32).range(1..=100))]
+    limit: u32,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 #[command(group(clap::ArgGroup::new("evidence_class")
     .required(true)
     .multiple(false)
     .args(["execs", "paths", "hosts", "denials"])))]
 struct QueryArgs {
     /// Repeat for independent per-run snapshots, up to eight unique runs.
-    #[arg(long, required = true)]
+    #[arg(long)]
     run: Vec<String>,
+    /// Select runs by last accepted activity, independently of event --since.
+    #[arg(long, conflicts_with = "run")]
+    run_since: Option<String>,
+    #[arg(long, conflicts_with = "run")]
+    run_until: Option<String>,
+    #[arg(long, conflicts_with = "run")]
+    launch: Option<String>,
+    #[arg(long, conflicts_with = "run")]
+    tag: Vec<String>,
+    #[arg(long, conflicts_with = "run", value_parser = ["pending", "refused", "exited", "signaled", "exec_error", "unknown"])]
+    outcome: Option<String>,
+    /// Continue automatic discovery with the same filters and limit.
+    #[arg(long, conflicts_with_all = ["run", "cursor", "resume"])]
+    after: Option<String>,
     #[arg(long, group = "evidence_class")]
     execs: bool,
     #[arg(long, group = "evidence_class")]
@@ -326,6 +360,9 @@ struct RunArgs {
     jail: String,
     #[arg(long)]
     launch: Option<String>,
+    /// Immutable operator labels: at most sixteen unique ASCII names.
+    #[arg(long)]
+    tag: Vec<String>,
     #[arg(long)]
     workspace: Option<PathBuf>,
     #[arg(long)]
@@ -440,6 +477,28 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
         since: args.since,
         until: args.until,
     };
+    if args.run.is_empty() {
+        if args.cursor.is_some() || !args.resume.is_empty() {
+            return Err(LedgerError(
+                "automatic discovery uses --after; --cursor and --resume require --run".into(),
+            ));
+        }
+        let page = client.discover(&DiscoveryRequest {
+            runs: RunFilter {
+                since: args.run_since,
+                until: args.run_until,
+                launch: args.launch,
+                tags: args.tag,
+                outcome: args.outcome,
+            },
+            filter,
+            after: args.after,
+            limit: args.limit,
+        })?;
+        let passed = page.problem.is_none() && page.page.as_ref().is_none_or(query_page_ok);
+        output(&serde_json::to_value(page)?, args.json)?;
+        return Ok(if passed { 0 } else { 1 });
+    }
     let unique: std::collections::BTreeSet<_> = args.run.iter().collect();
     if args.run.len() > 8 || unique.len() != args.run.len() {
         return Err(LedgerError(
@@ -642,7 +701,7 @@ fn execute(cli: Cli) -> Result<i32> {
     match cli.command {
         Action::Version { json } => {
             output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1"},"schema_frozen":false,"execution_platform":"linux"}),
+                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1"},"schema_frozen":false,"execution_platform":"linux"}),
                 json,
             )?;
             Ok(0)
@@ -728,6 +787,7 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(if ready { 0 } else { 1 })
         }
         Action::Run(args) => {
+            ouro_ledger::discovery::validate_tags(&args.tag)?;
             if args.detach && args.io != "batch" {
                 return Err(LedgerError("--detach requires --io batch".into()));
             }
@@ -760,7 +820,7 @@ fn execute(cli: Cli) -> Result<i32> {
                     policy.push(path.into_os_string());
                 }
             }
-            if let Some(launch) = args.launch {
+            if let Some(launch) = &args.launch {
                 policy.push("--launch".into());
                 policy.push(launch.into());
             }
@@ -784,6 +844,8 @@ fn execute(cli: Cli) -> Result<i32> {
                 captures: args.capture,
                 capture_limit: args.capture_limit,
                 best_effort: args.evidence == "best-effort",
+                launch: args.launch,
+                tags: args.tag,
             };
             if args.detach {
                 let record = service::launch(&options).map_err(|error| LedgerError(format!(
@@ -828,7 +890,20 @@ fn execute(cli: Cli) -> Result<i32> {
                         json,
                     )?;
                 }
-                Action::Runs { json } => output(&serde_json::to_value(client.runs()?)?, json)?,
+                Action::Runs(args) => {
+                    let page = client.catalog(&CatalogRequest {
+                        filter: RunFilter {
+                            since: args.since,
+                            until: args.until,
+                            launch: args.launch,
+                            tags: args.tag,
+                            outcome: args.outcome,
+                        },
+                        after: args.after,
+                        limit: args.limit,
+                    })?;
+                    output(&serde_json::to_value(page)?, args.json)?;
+                }
                 Action::Show { run_id, json } => {
                     output(&serde_json::to_value(client.show(&run_id)?)?, json)?
                 }

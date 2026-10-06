@@ -184,6 +184,82 @@ pub const READ_SCAN_FRAMES: usize = 32;
 pub const READ_OUTPUT_BYTES: usize = 131_072;
 pub const READ_CHUNK_BYTES: usize = 65_536;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RunFilter {
+    /// Inclusive last accepted writer activity time.
+    pub since: Option<String>,
+    /// Exclusive last accepted writer activity time.
+    pub until: Option<String>,
+    pub launch: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Exact recorded outcome kind, or `pending` before any terminal outcome.
+    pub outcome: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogRequest {
+    pub filter: RunFilter,
+    pub after: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub attempt_id: String,
+    pub request_id: String,
+    pub last_activity_at: Option<String>,
+    pub profile: String,
+    pub launch: Option<String>,
+    pub tags: Vec<String>,
+    pub state: String,
+    pub outcome: String,
+    pub child_protection: String,
+    pub coverage: Value,
+    pub chain: Chain,
+    pub evidence_status: String,
+    pub history: Option<PrunedHistory>,
+    pub capture_history: Option<PrunedHistory>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPage {
+    pub schema: String,
+    pub snapshot: String,
+    pub runs: Vec<RunSummary>,
+    pub matched_runs: u32,
+    pub scanned_runs: u32,
+    pub next_after: Option<String>,
+    pub done: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryRequest {
+    pub runs: RunFilter,
+    pub filter: ReadFilter,
+    pub after: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryPage {
+    pub schema: String,
+    pub catalog_snapshot: String,
+    pub matched_runs: u32,
+    pub run: Option<RunSummary>,
+    pub page: Option<ReadPage>,
+    pub problem: Option<String>,
+    pub next_after: Option<String>,
+    pub done: bool,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadSelector {
@@ -315,6 +391,12 @@ pub enum Request {
         run_id: String,
     },
     Runs,
+    Catalog {
+        request: CatalogRequest,
+    },
+    Discover {
+        request: DiscoveryRequest,
+    },
     Verify {
         run_id: Option<String>,
     },

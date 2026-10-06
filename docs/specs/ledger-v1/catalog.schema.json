@@ -1,0 +1,188 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.catalog/1"
+    },
+    "snapshot": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "runs": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/summary"
+      }
+    },
+    "matched_runs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 16384
+    },
+    "scanned_runs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 16384
+    },
+    "next_after": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 4096
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "done": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema",
+    "snapshot",
+    "runs",
+    "matched_runs",
+    "scanned_runs",
+    "next_after",
+    "done"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9a-f]{32}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "request_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "last_activity_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "profile": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "launch": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.:-]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.:-]+$"
+          }
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "admitted",
+            "denied",
+            "settled",
+            "outcome_unknown"
+          ],
+          "description": "Settled means a durably recorded terminal result after admission, including a proved exec_error; it does not imply success. Denied is a refusal before ledger admission."
+        },
+        "outcome": {
+          "enum": [
+            "pending",
+            "refused",
+            "exited",
+            "signaled",
+            "exec_error",
+            "unknown"
+          ]
+        },
+        "child_protection": {
+          "enum": [
+            "enforced",
+            "unprotected"
+          ]
+        },
+        "coverage": {
+          "$ref": "urn:ouro:schema:ledger-read:1#/$defs/coverage"
+        },
+        "chain": {
+          "$ref": "urn:ouro:schema:ledger-read:1#/$defs/chain"
+        },
+        "evidence_status": {
+          "enum": [
+            "available",
+            "ambiguous",
+            "pruned"
+          ]
+        },
+        "history": {
+          "anyOf": [
+            {
+              "$ref": "urn:ouro:schema:ledger-run:1#/properties/history"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capture_history": {
+          "anyOf": [
+            {
+              "$ref": "urn:ouro:schema:ledger-run:1#/properties/capture_history"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "run_id",
+        "attempt_id",
+        "request_id",
+        "last_activity_at",
+        "profile",
+        "launch",
+        "tags",
+        "state",
+        "outcome",
+        "child_protection",
+        "coverage",
+        "chain",
+        "evidence_status",
+        "history",
+        "capture_history"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-catalog:1",
+  "title": "Run catalog page from accepted writer state; not fresh disk verification"
+}

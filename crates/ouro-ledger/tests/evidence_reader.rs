@@ -869,3 +869,249 @@ fn diff_corrupt_or_missing_history_never_returns_a_successful_empty_comparison()
     assert_eq!(report["left"]["child_protection"], "unknown");
     assert!(report["left"]["problem"].is_string());
 }
+
+#[test]
+fn catalog_cli_filters_labels_outcome_and_activity_then_resumes_after_restart() {
+    let mut tagged = records();
+    tagged[0]["body"]["payload"]["launch"] = json!("fixture-launch");
+    tagged[0]["body"]["payload"]["tags"] = json!(["blue", "qa"]);
+    let mut fixture = Fixture::new(tagged);
+    let mut other = fixture.records.clone();
+    other[0]["body"]["payload"]["tags"] = json!(["blue"]);
+    fixture.add_run(OTHER_RUN, other);
+    let args = [
+        "runs",
+        "--launch",
+        "fixture-launch",
+        "--tag",
+        "blue",
+        "--outcome",
+        "exec_error",
+        "--limit",
+        "1",
+        "--json",
+    ];
+    let output = fixture.run(&args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let first: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(first["matched_runs"], 2);
+    assert_eq!(first["runs"][0]["run_id"], RUN);
+    assert_eq!(first["runs"][0]["child_protection"], "enforced");
+    let after = first["next_after"].as_str().unwrap();
+    fixture.restart();
+    let mut next = args.to_vec();
+    next.extend(["--after", after]);
+    let output = fixture.run(&next);
+    assert!(output.status.success());
+    let second: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(second["runs"][0]["run_id"], OTHER_RUN);
+    assert_eq!(second["done"], true);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fixture.run(&next).stdout).unwrap(),
+        second
+    );
+    let selected = fixture.run(&[
+        "runs",
+        "--tag",
+        "qa",
+        "--tag",
+        "blue",
+        "--since",
+        "2026-09-30T12:00:07Z",
+        "--until",
+        "2026-09-30T12:00:08Z",
+        "--json",
+    ]);
+    assert!(selected.status.success());
+    let selected: Value = serde_json::from_slice(&selected.stdout).unwrap();
+    assert_eq!(selected["matched_runs"], 1);
+    assert_eq!(selected["runs"][0]["run_id"], RUN);
+    assert!(
+        !fixture
+            .run(&["runs", "--tag", "blue", "--after", after, "--json"])
+            .status
+            .success()
+    );
+    let empty = fixture.run(&["runs", "--tag", "absent", "--json"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&empty.stdout).unwrap()["runs"],
+        json!([])
+    );
+}
+
+#[test]
+fn discovered_query_walks_runs_and_retries_per_run_pages_across_writer_restarts() {
+    let mut fixture = Fixture::new(records());
+    fixture.add_run(OTHER_RUN, fixture.records.clone());
+    let args = [
+        "query",
+        "--execs",
+        "--outcome",
+        "exec_error",
+        "--limit",
+        "1",
+        "--json",
+    ];
+    let first = fixture.run(&args);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["schema"], "ouro.ledger.discovery/1");
+    assert_eq!(first["matched_runs"], 2);
+    let mut after = first["next_after"].as_str().map(str::to_owned);
+    let mut observed = first["page"]["records"].as_array().unwrap().clone();
+    let mut pages = 1;
+    while let Some(position) = after {
+        fixture.restart();
+        let mut next = args.to_vec();
+        next.extend(["--after", &position]);
+        let output = fixture.run(&next);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(page["catalog_snapshot"], first["catalog_snapshot"]);
+        assert_eq!(page["run"]["chain"], page["page"]["snapshot"]);
+        assert_eq!(page["run"]["run_id"], page["page"]["run_id"]);
+        if pages == 1 {
+            let replay = fixture.run(&next);
+            assert!(replay.status.success());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+                page
+            );
+        }
+        observed.extend(page["page"]["records"].as_array().unwrap().clone());
+        after = page["next_after"].as_str().map(str::to_owned);
+        pages += 1;
+        assert!(pages <= 4);
+    }
+    assert_eq!(pages, 4);
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0]["run_id"], RUN);
+    assert_eq!(observed[1]["run_id"], OTHER_RUN);
+    for record in observed {
+        assert_eq!(record["stage"], "result");
+        assert_eq!(record["provenance"]["role"], "producer");
+    }
+    let position = first["next_after"].as_str().unwrap();
+    assert!(
+        !fixture
+            .run(&[
+                "query",
+                "--execs",
+                "--outcome",
+                "exec_error",
+                "--stage",
+                "result",
+                "--limit",
+                "1",
+                "--after",
+                position,
+                "--json"
+            ])
+            .status
+            .success()
+    );
+    assert!(
+        !fixture
+            .run(&[
+                "query", "--run", RUN, "--execs", "--tag", "ignored", "--json"
+            ])
+            .status
+            .success()
+    );
+    assert!(
+        !fixture
+            .run(&["query", "--execs", "--cursor", "a", "--json"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn discovery_refuses_changed_catalogs_and_old_reader_heads_without_relabelling_history() {
+    let mut fixture = Fixture::new(records());
+    let old = fixture.query(&["--limit", "1"]);
+    let initial = fixture.run(&["query", "--execs", "--limit", "1", "--json"]);
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    let body = fixture.temp.path().join("catalog-note.json");
+    fs::write(&body, b"{}").unwrap();
+    assert!(
+        fixture
+            .run(&[
+                "append",
+                "--run",
+                RUN,
+                "--request-id",
+                "catalog-change",
+                "--kind",
+                "note",
+                "--body-file",
+                body.to_str().unwrap(),
+                "--json"
+            ])
+            .status
+            .success()
+    );
+    let changed = fixture.run(&[
+        "query",
+        "--execs",
+        "--limit",
+        "1",
+        "--after",
+        initial["next_after"].as_str().unwrap(),
+        "--json",
+    ]);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("catalog changed"));
+    let current = fixture.run(&["query", "--execs", "--limit", "1", "--json"]);
+    assert!(current.status.success());
+    let current: Value = serde_json::from_slice(&current.stdout).unwrap();
+    let mut forged: Value = serde_json::from_str(current["next_after"].as_str().unwrap()).unwrap();
+    forged["read_position"] = old["next_cursor"].clone();
+    let result = fixture.run(&[
+        "query",
+        "--execs",
+        "--limit",
+        "1",
+        "--after",
+        &forged.to_string(),
+        "--json",
+    ]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("reader snapshot differs"));
+}
+
+#[test]
+fn discovered_query_reports_corrupt_history_and_empty_selection_separately() {
+    use std::io::Write as _;
+    let mut fixture = Fixture::new(records());
+    let empty = fixture.run(&["query", "--execs", "--tag", "absent", "--json"]);
+    assert!(empty.status.success());
+    let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty["matched_runs"], 0);
+    assert_eq!(empty["page"], Value::Null);
+    assert_eq!(empty["done"], true);
+    OpenOptions::new()
+        .append(true)
+        .open(&fixture.stream)
+        .unwrap()
+        .write_all(b"bad\n")
+        .unwrap();
+    let corrupt = fixture.run(&["query", "--execs", "--json"]);
+    assert!(!corrupt.status.success());
+    let corrupt: Value = serde_json::from_slice(&corrupt.stdout).unwrap();
+    assert_eq!(corrupt["matched_runs"], 1);
+    assert_eq!(corrupt["page"]["local_consistency"], false);
+    assert_eq!(corrupt["page"]["stream_status"], "incomplete");
+}

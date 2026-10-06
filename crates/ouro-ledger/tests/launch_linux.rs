@@ -1190,3 +1190,104 @@ fn real_run_diff_keeps_none_unprotected_and_separates_unobserved_coverage() {
             .all(|r| r.local_consistency)
     );
 }
+
+#[test]
+fn real_launch_labels_drive_filtered_discovery_without_changing_replay_identity() {
+    use serde_json::json;
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let fixture = Fixture::new(&jail);
+    let profiles = fixture.config.join("launch");
+    fs::create_dir(&profiles).unwrap();
+    fs::set_permissions(&profiles, fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = profiles.join("fixture-discovery.toml");
+    fs::write(&profile, "name = \"fixture-discovery\"\njail = \"tool\"\n").unwrap();
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = fixture.command("discovery-labelled", true);
+    command.args([
+        "--launch",
+        "fixture-discovery",
+        "--tag",
+        "qa",
+        "--tag",
+        "blue",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf x >> discovery-executions",
+    ]);
+    let (output, run) = fixture.run(&mut command);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run.payload["launch"], "fixture-discovery");
+    assert_eq!(run.payload["tags"], json!(["blue", "qa"]));
+    let (output, replay) = fixture.run(&mut command);
+    assert!(output.status.success());
+    assert_eq!(replay.run_id, run.run_id);
+    assert_eq!(
+        fs::read(fixture.workspace.join("discovery-executions")).unwrap(),
+        b"x"
+    );
+    let mut other = fixture.command_with_profile("discovery-other", true, "none");
+    other.args(["--tag", "green", "--", "/bin/true"]);
+    let (output, unprotected) = fixture.run(&mut other);
+    assert!(output.status.success());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
+    command.arg("--data-dir").arg(&fixture.data).args([
+        "query",
+        "--execs",
+        "--launch",
+        "fixture-discovery",
+        "--tag",
+        "blue",
+        "--tag",
+        "qa",
+        "--outcome",
+        "exited",
+        "--json",
+    ]);
+    let output = Process::spawn(&mut command, true).finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["matched_runs"], 1);
+    assert_eq!(page["run"]["run_id"], run.run_id);
+    assert_eq!(page["page"]["child_protection"], "enforced");
+    assert!(
+        page["page"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["operation"] == "proc.exec" && r["provenance"]["role"] == "producer")
+    );
+    let catalog = fixture
+        .client()
+        .catalog(&ouro_ledger::protocol::CatalogRequest {
+            filter: ouro_ledger::protocol::RunFilter {
+                tags: vec!["green".into()],
+                ..Default::default()
+            },
+            after: None,
+            limit: 25,
+        })
+        .unwrap();
+    assert_eq!(catalog.matched_runs, 1);
+    assert_eq!(catalog.runs[0].run_id, unprotected.run_id);
+    assert_eq!(catalog.runs[0].child_protection, "unprotected");
+    assert!(catalog.runs[0].launch.is_none());
+    assert!(
+        fixture
+            .client()
+            .verify(None)
+            .unwrap()
+            .iter()
+            .all(|r| r.local_consistency)
+    );
+}

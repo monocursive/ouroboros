@@ -127,3 +127,9 @@ crates/ouro-ledger/src/main.rs	#[arg(long, conflicts_with = "cursor")]
 crates/ouro-ledger/src/main.rs	if args.run.len() > 1 && args.cursor.is_some() {
 crates/ouro-ledger/src/main.rs	cursor: positions.remove(&run),
 crates/ouro-ledger/src/main.rs	cursor: args.cursor.or_else(|| positions.remove(&run_id)),
+crates/ouro-ledger/src/main.rs	#[arg(long, conflicts_with_all = ["run", "cursor", "resume"])]
+crates/ouro-ledger/src/main.rs	if args.cursor.is_some() || !args.resume.is_empty() {
+crates/ouro-ledger/src/main.rs	"automatic discovery uses --after; --cursor and --resume require --run".into(),
+crates/ouro-ledger/src/store/catalog.rs	cursor: None,
+crates/ouro-ledger/src/store/catalog.rs	cursor: prior.and_then(|p| p.read_position),
+crates/ouro-ledger/src/store/catalog.rs	Some((catalog_after, page.next_cursor.clone()))

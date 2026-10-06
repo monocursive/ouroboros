@@ -55,6 +55,9 @@ pub struct RunOptions {
     pub captures: Vec<String>,
     pub capture_limit: u64,
     pub best_effort: bool,
+    pub launch: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 pub struct RunResult {
@@ -214,6 +217,15 @@ fn payload(options: &RunOptions, plan: &Value, image_digest: &str) -> Result<Val
         "evidence":if options.best_effort {"best-effort"} else {"strict"}});
     if options.detached {
         request["owner_lifetime"] = "systemd_user_service".into();
+    }
+    if let Some(launch) = &options.launch {
+        request["launch"] = json!(launch);
+    }
+    if !options.tags.is_empty() {
+        crate::discovery::validate_tags(&options.tags)?;
+        let mut tags = options.tags.clone();
+        tags.sort();
+        request["tags"] = json!(tags);
     }
     Ok(request)
 }

@@ -1,0 +1,75 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.discovery/1"
+    },
+    "catalog_snapshot": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "matched_runs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 16384
+    },
+    "run": {
+      "anyOf": [
+        {
+          "$ref": "urn:ouro:schema:ledger-catalog:1#/$defs/summary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "page": {
+      "anyOf": [
+        {
+          "$ref": "urn:ouro:schema:ledger-read:1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "problem": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "next_after": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 4096
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "done": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema",
+    "catalog_snapshot",
+    "matched_runs",
+    "run",
+    "page",
+    "problem",
+    "next_after",
+    "done"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-discovery:1",
+  "title": "One bounded run evidence page from a bound catalog selection"
+}

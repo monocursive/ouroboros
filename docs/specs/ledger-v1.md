@@ -460,8 +460,8 @@ that page's `next_cursor`. Omit finished runs from the next request. A selected
 run without a resume position starts a new snapshot; it does not implicitly
 continue a previous invocation. The existing single-run `--cursor` and output
 shape remain supported. Any failed or inconsistent page makes the CLI exit
-nonzero while retaining successful pages. Implicit all-run selection and run
-catalog filters remain unimplemented.
+nonzero while retaining successful pages. Omit `--run` to use filtered run
+discovery, described below.
 
 `diff A B --json` compares **event counts**, grouped by class, source, operation,
 stage, decision and the complete source outcome. It does not compare paths,
@@ -566,6 +566,73 @@ skipping or a reset to another stream.
 
 The [tail request](ledger-v1/tail-request.schema.json) and
 [tail page](ledger-v1/tail.schema.json) schemas describe these bounded reads.
+
+### 7.2 Run catalog and filtered discovery
+
+`runs --json` returns a [catalog envelope](ledger-v1/catalog.schema.json), replacing
+the earlier full-record array. Each summary preserves the accepted run identity,
+chain head, state, recorded outcome, protection, bounded coverage, launch name,
+tags and pruning markers. It omits full payloads, receipts and capture contents.
+Use `show RUN` for the full record. `evidence_status: available` describes the
+writer's accepted projection; catalog listing does not freshly verify disk bytes.
+Poisoned runs are explicitly ambiguous with degraded coverage and unknown outcome;
+pruned runs retain their original labels and retained-history marker.
+
+Filter with `--launch NAME`, repeated `--tag TAG` (all must match), `--outcome`
+(`pending`, `refused`, `exited`, `signaled`, `exec_error` or `unknown`), and
+`--since` / `--until`. Run time bounds select **last accepted writer activity**,
+including later operator records, using inclusive/exclusive whole-second UTC
+bounds. They do not select by launch start time or source event clock.
+
+`run --launch NAME --tag blue --tag qa ...` records the explicitly selected
+launch profile name and sorted tags in the immutable preparation payload. Tags
+are at most sixteen unique ASCII identifiers, each 1–64 bytes, using letters,
+digits, `_`, `.`, `:` and `-`. They are operator metadata, not authorization or
+attested producer observations. Legacy preparations remain unchanged: absent
+launch names and tags appear as `null` and `[]`; no labels are inferred from
+workspace paths or vendor state. Changing labels on the same request ID refuses.
+
+Catalog pages default to 25 summaries, accept `--limit 1..100`, and cap serialized
+summary bytes at 128 KiB. They use canonical run-ID order, not time order.
+Each call scans at most 16,384 stored runs; a larger catalog refuses explicitly,
+while explicit run readers remain available. The legacy socket `runs` endpoint
+is retained only for at most 100 full records within a 128 KiB serialization
+budget; larger responses instruct callers to use catalog pagination.
+
+Resume with the returned `next_after` as `--after`, keeping the same filters and
+limit. The bounded position binds normalized filters, the last run ID and a
+fingerprint of all matching summaries and heads. Restart/retry preserves the
+selection while those summaries remain unchanged. Any matching addition, new
+record, changed label or pruning marker invalidates continuation and requires a
+fresh discovery; changes to excluded runs do not. Positions confer no authority
+or retention hold and do not create new persistent sessions.
+
+`query --execs --launch NAME --tag blue --outcome exited --json` discovers runs
+without explicit IDs. It returns one ordinary bounded event page from one run
+per invocation in a [discovery envelope](ledger-v1/discovery.schema.json).
+Use `--run-since` / `--run-until` for run activity; existing `--since` / `--until`
+still filter individual records. Continue using `--after` until `done` is true.
+The position binds the matching catalog, event filters, limit, current run and
+ordinary reader position. Every page checks that its run and snapshot head match
+the selected catalog summary. Explicit `--run` cannot be combined with catalog
+filters or `--after`; its existing `--cursor` and `--resume` remain supported.
+
+Every run preserves its own coverage, protection and original source attribution.
+There is no atomic cross-run snapshot. Opening the first page of a run uses a new
+reader: retry preserves content and head but may return a new reader token.
+Subsequent pages retain ordinary snapshot pins, expiry and restart/retry rules.
+The catalog itself adds no GC pin. A changed matching head refuses continuation,
+including on an active run; restart discovery or use an explicit run reader to
+keep a snapshot across appends. Failed or pruned reads return an explicit problem
+and a position for the next run when one exists. Corrupt pages preserve their
+failure labels. Either condition exits nonzero; `done` describes traversal, not
+success. Oversized records retain the existing blocked reader continuation and
+must be retrieved through export. An empty matching catalog has no run or page.
+
+The [catalog request](ledger-v1/catalog-request.schema.json) and
+[discovery request](ledger-v1/discovery-request.schema.json) schemas describe
+these interfaces. Their JSON positions are local continuation data, not portable
+custody proofs or signed capabilities.
 
 ## 8. Retention policies, holds and pruning
 
@@ -784,8 +851,7 @@ The [contract validator](ledger-v1/validate_contract.py) checks versioned schema
 and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
-unimplemented verbs/features: implicit all-run queries and catalog filters,
-entity-level comparison, `bundle`,
+unimplemented verbs/features: entity-level comparison, `bundle`,
 best-effort outage reconciliation, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,

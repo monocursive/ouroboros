@@ -344,7 +344,7 @@ pub(crate) fn utc_second(value: &str) -> bool {
         && number(17, 19) < 60
 }
 
-fn validate_request(request: &ReadRequest) -> Result<()> {
+pub(crate) fn validate_request(request: &ReadRequest) -> Result<()> {
     if !(1..=MAX_READ_LIMIT).contains(&request.limit) {
         return Err(LedgerError("read limit must be between 1 and 1000".into()));
     }

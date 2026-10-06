@@ -1,0 +1,19 @@
+{
+  "runs": {
+    "since": null,
+    "until": null,
+    "launch": null,
+    "tags": [
+      "blue"
+    ],
+    "outcome": null
+  },
+  "filter": {
+    "selector": "execs",
+    "stage": null,
+    "since": null,
+    "until": null
+  },
+  "after": null,
+  "limit": 100
+}

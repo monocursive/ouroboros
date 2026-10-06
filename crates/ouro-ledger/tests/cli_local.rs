@@ -505,7 +505,19 @@ fn preparation_replay_and_inspection_survive_writer_restart() {
         "the valid alternate payload must refuse because its request id is already bound"
     );
     assert_eq!(cli.json(&["show", &run_id, "--json"]), original);
-    assert_eq!(cli.json(&["runs", "--json"]), json!([original.clone()]));
+    let catalog = cli.json(&["runs", "--json"]);
+    assert_eq!(catalog["schema"], "ouro.ledger.catalog/1");
+    assert_eq!(catalog["runs"].as_array().unwrap().len(), 1);
+    for field in [
+        "run_id",
+        "attempt_id",
+        "request_id",
+        "state",
+        "child_protection",
+        "chain",
+    ] {
+        assert_eq!(catalog["runs"][0][field], original[field]);
+    }
     let verification = cli.json(&["verify", &run_id, "--json"]);
     assert_consistent_unlaunched_report(&verification, &run_id);
     let doctor = cli.json(&["doctor", "--json"]);
@@ -534,7 +546,7 @@ fn preparation_replay_and_inspection_survive_writer_restart() {
             .status
             .success()
     );
-    assert_eq!(cli.json(&["runs", "--json"]), json!([original]));
+    assert_eq!(cli.json(&["runs", "--json"]), catalog);
     assert_consistent_unlaunched_report(&cli.json(&["verify", "--json"]), &run_id);
     assert_eq!(fs::read(&stream).unwrap(), bytes_before_restart);
 }
@@ -599,7 +611,7 @@ fn prepare_cli_refuses_raw_metadata_without_persisting_it() {
     let diagnostic = String::from_utf8_lossy(&refused.stderr);
     assert!(diagnostic.contains("digest-only request plan"));
     assert!(!diagnostic.contains(SENTINEL));
-    assert_eq!(cli.json(&["runs", "--json"]), json!([]));
+    assert_eq!(cli.json(&["runs", "--json"])["runs"], json!([]));
 
     let accepted =
         successful_preparation(&cli.prepare("portable-safe-metadata", &fixture_request()));

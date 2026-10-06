@@ -1,0 +1,201 @@
+{
+  "catalog_snapshot": "sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf",
+  "done": false,
+  "matched_runs": 2,
+  "next_after": "{\"schema\":\"ouro.ledger.discovery-position/1\",\"snapshot\":\"sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf\",\"scope\":\"sha256:5ecc147306969b1b7a5c15f4452f4a90b23a8109cffbb039697c01ffe0b3c4b3\",\"catalog_after\":\"{\\\"schema\\\":\\\"ouro.ledger.catalog-position/1\\\",\\\"snapshot\\\":\\\"sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf\\\",\\\"scope\\\":\\\"sha256:b9ec109eac00da4709172904bada02cbc8bec107f9f8afaf5ee54b3c52bc99d1\\\",\\\"last_run\\\":\\\"run_11111111111111111111111111111111\\\"}\",\"read_position\":null}",
+  "page": {
+    "child_protection": "enforced",
+    "coverage": {
+      "classes": {
+        "exec": {
+          "gap_count": 0,
+          "observed_count": 1,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gap_count": 0,
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "gap_count": 0,
+      "scope": "snapshot_run",
+      "selection_status": "active",
+      "status": "by_class"
+    },
+    "done": true,
+    "local_consistency": true,
+    "ndjson": "",
+    "next_cursor": null,
+    "oversized_record": null,
+    "problems": [],
+    "records": [
+      {
+        "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+        "decision": null,
+        "fields": {
+          "path": {
+            "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "digest",
+            "reason": "outside_known_roots"
+          },
+          "path_basis": "argument_snapshot",
+          "path_complete": true,
+          "pid": 1240,
+          "pid_start_ticks": 123460,
+          "syscall": "execve",
+          "tid": 1240
+        },
+        "kind": "source",
+        "monotonic_ns": "260000000",
+        "observed_at": "2026-09-21T12:00:00Z",
+        "operation": "proc.exec",
+        "outcome": {
+          "completion": "syscall_return",
+          "errno": "ENOENT",
+          "ok": false,
+          "return_value": -2
+        },
+        "prev": "sha256:79dbda94a7ae2fbeb32669b5ebc113ee715978003c5838425ff95c2018ebd957",
+        "provenance": {
+          "peer_birth": "boot:fixture:start:42",
+          "peer_pid": 41200,
+          "peer_uid": 1000,
+          "role": "producer",
+          "token_id": "ffffffffffffffffffffffffffffffff"
+        },
+        "received_at": "2026-09-30T12:00:01Z",
+        "request_id": "source:audit:1",
+        "run_id": "run_11111111111111111111111111111111",
+        "schema": "ouro.event/1",
+        "seq": 5,
+        "source": "audit",
+        "source_seq": 1,
+        "stage": "result"
+      }
+    ],
+    "run_id": "run_11111111111111111111111111111111",
+    "scanned_through_seq": 7,
+    "schema": "ouro.ledger.read/1",
+    "snapshot": {
+      "head_digest": "sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0",
+      "head_seq": 7
+    },
+    "state": "settled",
+    "stream_status": "complete"
+  },
+  "problem": null,
+  "run": {
+    "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+    "capture_history": null,
+    "chain": {
+      "head_digest": "sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0",
+      "head_seq": 7
+    },
+    "child_protection": "enforced",
+    "coverage": {
+      "classes": {
+        "exec": {
+          "gap_count": 0,
+          "observed_count": 1,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gap_count": 0,
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "gap_count": 0,
+      "scope": "snapshot_run",
+      "selection_status": "unobserved",
+      "status": "by_class"
+    },
+    "evidence_status": "available",
+    "history": null,
+    "last_activity_at": "2026-09-30T12:00:01Z",
+    "launch": "fixture-discovery",
+    "outcome": "exec_error",
+    "profile": "tool",
+    "request_id": "fixture-run_11111111111111111111111111111111",
+    "run_id": "run_11111111111111111111111111111111",
+    "state": "settled",
+    "tags": [
+      "blue",
+      "qa"
+    ]
+  },
+  "schema": "ouro.ledger.discovery/1"
+}

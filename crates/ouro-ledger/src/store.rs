@@ -29,6 +29,7 @@ use crate::protocol::{
 use crate::manifest::{self, STREAM};
 
 mod capture_pruning;
+mod catalog;
 #[cfg(test)]
 mod intent_tail_tests;
 mod operator;
@@ -45,6 +46,7 @@ struct Replay {
     receipt: AppendReceipt,
 }
 
+#[cfg_attr(test, derive(Clone))]
 struct Anchor {
     bytes: u64,
     digest: String,
@@ -52,6 +54,7 @@ struct Anchor {
     labels_digest: String,
 }
 
+#[cfg_attr(test, derive(Clone))]
 struct Stream {
     run: RunRecord,
     accepted_bytes: u64,
@@ -304,11 +307,12 @@ fn validate_payload(payload: &Value) -> Result<()> {
     let Some(object) = payload.as_object() else {
         return Err(LedgerError("prepare payload must be an object".into()));
     };
+    let optional = ["owner_lifetime", "launch", "tags"];
     let detached = object.contains_key("owner_lifetime");
-    if object.len() != keys.len() + usize::from(detached)
+    if keys.iter().any(|key| !object.contains_key(*key))
         || object
             .keys()
-            .any(|key| !keys.contains(&key.as_str()) && key != "owner_lifetime")
+            .any(|key| !keys.contains(&key.as_str()) && !optional.contains(&key.as_str()))
         || detached
             && (payload["owner_lifetime"] != "systemd_user_service"
                 || payload["io"]["mode"] != "batch")
@@ -322,6 +326,16 @@ fn validate_payload(payload: &Value) -> Result<()> {
         return Err(LedgerError(
             "prepare only accepts the versioned digest-only request plan".into(),
         ));
+    }
+    if payload
+        .get("launch")
+        .is_some_and(|v| !v.as_str().is_some_and(valid_id))
+    {
+        return Err(LedgerError("launch must be a bounded profile name".into()));
+    }
+    if let Some(tags) = payload.get("tags") {
+        let tags: Vec<String> = serde_json::from_value(tags.clone())?;
+        crate::discovery::validate_tags(&tags)?;
     }
     let requirements = payload["requirements"]
         .as_array()

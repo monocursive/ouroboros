@@ -1,0 +1,86 @@
+{
+  "done": false,
+  "matched_runs": 2,
+  "next_after": "{\"schema\":\"ouro.ledger.catalog-position/1\",\"snapshot\":\"sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf\",\"scope\":\"sha256:b9ec109eac00da4709172904bada02cbc8bec107f9f8afaf5ee54b3c52bc99d1\",\"last_run\":\"run_11111111111111111111111111111111\"}",
+  "runs": [
+    {
+      "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+      "capture_history": null,
+      "chain": {
+        "head_digest": "sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0",
+        "head_seq": 7
+      },
+      "child_protection": "enforced",
+      "coverage": {
+        "classes": {
+          "exec": {
+            "gap_count": 0,
+            "observed_count": 1,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.deny": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.write": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "limits": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "wrapper"
+            ],
+            "status": "active"
+          },
+          "net": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "proxy.net": {
+            "gap_count": 0,
+            "observed_count": null,
+            "sources": [],
+            "status": "unsupported"
+          }
+        },
+        "gap_count": 0,
+        "scope": "snapshot_run",
+        "selection_status": "unobserved",
+        "status": "by_class"
+      },
+      "evidence_status": "available",
+      "history": null,
+      "last_activity_at": "2026-09-30T12:00:01Z",
+      "launch": "fixture-discovery",
+      "outcome": "exec_error",
+      "profile": "tool",
+      "request_id": "fixture-run_11111111111111111111111111111111",
+      "run_id": "run_11111111111111111111111111111111",
+      "state": "settled",
+      "tags": [
+        "blue",
+        "qa"
+      ]
+    }
+  ],
+  "scanned_runs": 2,
+  "schema": "ouro.ledger.catalog/1",
+  "snapshot": "sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf"
+}

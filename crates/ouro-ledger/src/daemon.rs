@@ -27,9 +27,10 @@ use uuid::Uuid;
 
 use crate::{
     protocol::{
-        AppendReceipt, ClaimedOwner, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
-        MAX_FRAME_BYTES, OperatorIntent, Peer, ReadPage, ReadRequest, Request, Response, Result,
-        RunRecord, TailPage, TailRequest, VerifyReport,
+        AppendReceipt, CatalogPage, CatalogRequest, ClaimedOwner, DiscoveryPage, DiscoveryRequest,
+        GcPlan, GcResult, LedgerError, MAX_CONNECTIONS, MAX_FRAME_BYTES, OperatorIntent, Peer,
+        ReadPage, ReadRequest, Request, Response, Result, RunRecord, TailPage, TailRequest,
+        VerifyReport,
     },
     store::Store,
 };
@@ -140,6 +141,16 @@ impl Client {
     }
     pub fn runs(&mut self) -> Result<Vec<RunRecord>> {
         self.request(Request::Runs)
+    }
+    pub fn catalog(&mut self, request: &CatalogRequest) -> Result<CatalogPage> {
+        self.request(Request::Catalog {
+            request: request.clone(),
+        })
+    }
+    pub fn discover(&mut self, request: &DiscoveryRequest) -> Result<DiscoveryPage> {
+        self.request(Request::Discover {
+            request: request.clone(),
+        })
     }
     pub fn verify(&mut self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
         self.request(Request::Verify {
@@ -428,7 +439,9 @@ fn dispatch(
             )?)
         }
         Request::Show { run_id } => Ok(serde_json::to_value(store.show(&run_id)?)?),
-        Request::Runs => Ok(serde_json::to_value(store.runs())?),
+        Request::Runs => Ok(serde_json::to_value(store.legacy_runs()?)?),
+        Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
+        Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),
         Request::Verify { run_id } => Ok(serde_json::to_value(store.verify(run_id.as_deref())?)?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(

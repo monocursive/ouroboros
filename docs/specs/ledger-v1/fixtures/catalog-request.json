@@ -1,0 +1,13 @@
+{
+  "filter": {
+    "since": null,
+    "until": null,
+    "launch": null,
+    "tags": [
+      "blue"
+    ],
+    "outcome": null
+  },
+  "after": null,
+  "limit": 1
+}

@@ -89,6 +89,23 @@
         "limit_bytes"
       ],
       "additionalProperties": false
+    },
+    "launch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_.:-]+$"
+      }
     }
   },
   "additionalProperties": false,

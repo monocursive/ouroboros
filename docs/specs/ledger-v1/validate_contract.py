@@ -67,6 +67,60 @@ def operator_tail_fixtures(validators):
     expect_invalid(validators["tail"], altered, "caught-up tail loses resume position")
 
 
+def discovery_fixtures(validators):
+    catalog = read("catalog-page.json")
+    discovery = read("discovery-page.json")
+    catalog_request = read("catalog-request.json")
+    discovery_request = read("discovery-request.json")
+    for name, instance in [("catalog", catalog), ("discovery", discovery),
+                           ("catalog-request", catalog_request),
+                           ("discovery-request", discovery_request)]:
+        validators[name].validate(instance)
+    assert catalog["snapshot"] == discovery["catalog_snapshot"]
+    assert catalog["runs"][0] == discovery["run"]
+    assert discovery["page"]["snapshot"] == discovery["run"]["chain"]
+    assert discovery["page"]["run_id"] == discovery["run"]["run_id"]
+    assert discovery["page"]["child_protection"] == discovery["run"]["child_protection"]
+    assert discovery["page"]["records"][0]["provenance"]["role"] == "producer"
+    assert json.loads(catalog["next_after"])["snapshot"] == catalog["snapshot"]
+    assert json.loads(discovery["next_after"])["snapshot"] == catalog["snapshot"]
+    for name, original, filter_key, maximum in [
+            ("catalog-request", catalog_request, "filter", 100),
+            ("discovery-request", discovery_request, "runs", 1000)]:
+        for key, value in [("tags", ["blue", "blue"]), ("tags", ["x" * 65]),
+                           ("tags", [str(i) for i in range(17)]),
+                           ("launch", "../escape"), ("outcome", "success"),
+                           ("since", "2026-02-30T00:00:00Z")]:
+            altered = copy.deepcopy(original)
+            altered[filter_key][key] = value
+            expect_invalid(validators[name], altered, "invalid run filter")
+        for key, value in [("limit", 0), ("limit", maximum + 1), ("after", "x" * 4097),
+                           ("principal", "forged")]:
+            altered = copy.deepcopy(original)
+            altered[key] = value
+            expect_invalid(validators[name], altered, "unbounded or attributed discovery")
+    altered = copy.deepcopy(discovery_request)
+    altered["filter"]["selector"] = "all"
+    expect_invalid(validators["discovery-request"], altered, "discovery is not full export")
+    request = read("request.json")
+    request.update(launch="fixture-discovery", tags=["blue", "qa"])
+    validators["request"].validate(request)
+    for key, value in [("tags", ["blue", "blue"]), ("tags", ["x" * 65]),
+                       ("launch", "../escape"), ("launch", None)]:
+        altered = copy.deepcopy(request)
+        altered[key] = value
+        expect_invalid(validators["request"], altered, "invalid immutable metadata")
+    altered = copy.deepcopy(catalog)
+    altered["runs"] *= 101
+    expect_invalid(validators["catalog"], altered, "unbounded summary count")
+    altered = copy.deepcopy(catalog)
+    altered["runs"][0]["child_protection"] = "probably_safe"
+    expect_invalid(validators["catalog"], altered, "invented catalog protection")
+    empty = {**discovery, "matched_runs": 0, "run": None, "page": None,
+             "next_after": None, "done": True}
+    validators["discovery"].validate(empty)
+
+
 def reader_fixtures(validators, records, run):
     request = read("read-request.json")
     page = read("read-page.json")
@@ -219,6 +273,7 @@ def main():
     assert not set(jail_schemas) & set(ledger_schemas)
     validators = jail.build_validators(jail_schemas | ledger_schemas)
     operator_tail_fixtures(validators)
+    discovery_fixtures(validators)
     query = read("query-page.json")
     comparison = read("diff-page.json")
     validators["query"].validate(query)
