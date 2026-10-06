@@ -771,6 +771,12 @@ starts its owner with `--io batch`. The resolved mode and descriptors' intended
 roles are recorded in `run.json`; raw output is never mixed into a JSON control
 response. Foreground JSON control uses `--control-fd` if child output is present.
 
+Implemented bundle slice: `bundle RUN --output DIR [--capture stdout|stderr]`
+exports a bounded unsigned snapshot; `verify-bundle DIR` checks it offline.
+The [portable bundle contract](docs/specs/ledger-v1.md#84-unsigned-portable-evidence-bundles)
+preserves protection, coverage and capture limits. Node signatures and external
+custody remain unimplemented.
+
 | # | Functionality | Contract |
 |---|---|---|
 | L1 | Prepare and run | `prepare` allocates `run_id` durably for a `request_id`. The same id and payload returns the same run. A different payload for the same id refuses. `run` without `--prepared` prepares itself. `--jail` starts exactly one jail. `--jail none` still starts the jail, in the `none` mode of §4.1, so supervision and the receipt exist. A prepared run is not a launch authorisation. §7.1 is. |

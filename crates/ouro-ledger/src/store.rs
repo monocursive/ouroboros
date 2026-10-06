@@ -28,7 +28,9 @@ use crate::protocol::{
 
 use crate::manifest::{self, STREAM};
 
+mod bundle_replay;
 mod capture_pruning;
+pub(crate) use bundle_replay::replay as replay_bundle;
 mod catalog;
 #[cfg(test)]
 mod intent_tail_tests;
@@ -1126,27 +1128,7 @@ impl Store {
         run_id: &str,
         sync: &impl Fn(&File) -> std::io::Result<()>,
     ) -> Result<(Stream, u64)> {
-        let placeholder = initial_run(run_id, "", "", json!({}));
-        let mut stream = Stream {
-            run: placeholder,
-            accepted_bytes: 0,
-            replay: BTreeMap::new(),
-            source_heads: BTreeMap::new(),
-            source_gaps: vec![],
-            last_source: None,
-            first_loss: None,
-            receipt_phase: None,
-            poisoned: vec![],
-            segments: vec![],
-            active_segment: 1,
-            segment_bytes: 0,
-            segment_hash: Sha256::new(),
-            replay_hash: Sha256::new(),
-            anchors: BTreeMap::new(),
-            last_activity_at: None,
-            retention_time_valid: true,
-            pruned: None,
-        };
+        let mut stream = Stream::empty(run_id);
         let directory = self.root.join(run_id);
         let manifest = match crate::manifest::read(&directory, run_id) {
             Ok(manifest) => manifest,
@@ -1219,107 +1201,11 @@ impl Store {
                     break;
                 }
                 bytes.pop();
-                let decoded = match serde_json::from_slice::<Value>(&bytes) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        stream
-                            .poisoned
-                            .push(format!("invalid canonical JSON: {error}"));
-                        break;
-                    }
-                };
-                match canonical(&decoded) {
-                    Ok(encoded) if encoded == bytes => {}
-                    _ => {
-                        stream
-                            .poisoned
-                            .push("noncanonical or unsupported stream bytes".into());
-                        break;
-                    }
-                }
-                let expected_seq = events + 1;
-                if validate_frozen("record", &decoded).is_err() {
-                    stream
-                        .poisoned
-                        .push("canonical ledger record violates its versioned schema".into());
-                    break;
-                }
-                let expected_schema = if decoded["kind"] == "source" {
-                    records::SCHEMA_EVENT
-                } else {
-                    "ouro.ledger.event/1"
-                };
-                if decoded["schema"] != expected_schema
-                    || decoded["run_id"] != run_id
-                    || decoded["seq"].as_u64() != Some(expected_seq)
-                    || decoded["prev"] != json!(stream.run.chain.head_digest)
-                {
-                    stream
-                        .poisoned
-                        .push("canonical identity, sequence or hash-chain link mismatch".into());
-                    break;
-                }
-                if events == 0 {
-                    if decoded["kind"] != "prepared" {
-                        stream
-                            .poisoned
-                            .push("stream does not start at durable preparation".into());
-                        break;
-                    }
-                    stream.run = initial_run(
-                        run_id,
-                        decoded["body"]["request_id"].as_str().unwrap_or(""),
-                        decoded["attempt_id"].as_str().unwrap_or(""),
-                        decoded["body"]["payload"].clone(),
-                    );
-                    if let Err(error) = validate_payload(&stream.run.payload) {
-                        stream.poisoned.push(error.to_string());
-                        break;
-                    }
-                }
-                if decoded["attempt_id"] != stream.run.attempt_id {
-                    stream.poisoned.push("mixed attempt identity".into());
-                    break;
-                }
-                if decoded["kind"] == "source"
-                    && validate_source(&original_payload(&decoded)["body"], &stream.run.attempt_id)
-                        .is_err()
-                {
-                    stream
-                        .poisoned
-                        .push("canonical producer violates the frozen source contract".into());
-                    break;
-                }
-                if let Some(receipt) = decoded["body"].get("receipt")
-                    && validate_receipt(receipt).is_err()
-                {
-                    stream
-                        .poisoned
-                        .push("canonical receipt violates the frozen receipt contract".into());
-                    break;
-                }
-                let payload_digest = digest(&original_payload(&decoded))?;
-                let receipt = AppendReceipt {
-                    seq: expected_seq,
-                    digest: sha256_prefixed(&bytes),
-                };
-                if let Err(error) = validate_transition(&stream, &original_payload(&decoded))
-                    .and_then(|_| validate_intent(&stream, &original_payload(&decoded)))
-                    .and_then(|_| {
-                        apply_record(
-                            &mut stream,
-                            &original_payload(&decoded),
-                            receipt.clone(),
-                            payload_digest.clone(),
-                        )
-                    })
-                {
+                if let Err(error) = stream.accept_canonical(run_id, &bytes) {
                     stream.poisoned.push(error.to_string());
                     break;
                 }
                 events += 1;
-                stream.accepted_bytes += (bytes.len() + 1) as u64;
-                stream.hash_record(&bytes, &decoded, &receipt, &payload_digest)?;
                 if let Some(anchor) = anchor
                     && events == anchor.last_seq
                 {
@@ -1362,6 +1248,96 @@ impl Store {
 }
 
 impl Stream {
+    fn empty(run_id: &str) -> Self {
+        Self {
+            run: initial_run(run_id, "", "", json!({})),
+            accepted_bytes: 0,
+            replay: BTreeMap::new(),
+            source_heads: BTreeMap::new(),
+            source_gaps: vec![],
+            last_source: None,
+            first_loss: None,
+            receipt_phase: None,
+            poisoned: vec![],
+            segments: vec![],
+            active_segment: 1,
+            segment_bytes: 0,
+            segment_hash: Sha256::new(),
+            replay_hash: Sha256::new(),
+            anchors: BTreeMap::new(),
+            last_activity_at: None,
+            retention_time_valid: true,
+            pruned: None,
+        }
+    }
+
+    /// Shared by store recovery and read-only portable bundle verification.
+    fn accept_canonical(&mut self, run_id: &str, bytes: &[u8]) -> Result<()> {
+        let decoded: Value = serde_json::from_slice(bytes)
+            .map_err(|error| LedgerError(format!("invalid canonical JSON: {error}")))?;
+        if !canonical(&decoded).is_ok_and(|encoded| encoded == bytes) {
+            return Err(LedgerError(
+                "noncanonical or unsupported stream bytes".into(),
+            ));
+        }
+        validate_frozen("record", &decoded).map_err(|_| {
+            LedgerError("canonical ledger record violates its versioned schema".into())
+        })?;
+        let expected_seq = self.run.chain.head_seq + 1;
+        let expected_schema = if decoded["kind"] == "source" {
+            records::SCHEMA_EVENT
+        } else {
+            "ouro.ledger.event/1"
+        };
+        if decoded["schema"] != expected_schema
+            || decoded["run_id"] != run_id
+            || decoded["seq"].as_u64() != Some(expected_seq)
+            || decoded["prev"] != json!(self.run.chain.head_digest)
+        {
+            return Err(LedgerError(
+                "canonical identity, sequence or hash-chain link mismatch".into(),
+            ));
+        }
+        if expected_seq == 1 {
+            if decoded["kind"] != "prepared" {
+                return Err(LedgerError(
+                    "stream does not start at durable preparation".into(),
+                ));
+            }
+            self.run = initial_run(
+                run_id,
+                decoded["body"]["request_id"].as_str().unwrap_or(""),
+                decoded["attempt_id"].as_str().unwrap_or(""),
+                decoded["body"]["payload"].clone(),
+            );
+            validate_payload(&self.run.payload)?;
+        }
+        if decoded["attempt_id"] != self.run.attempt_id {
+            return Err(LedgerError("mixed attempt identity".into()));
+        }
+        let payload = original_payload(&decoded);
+        if decoded["kind"] == "source" {
+            validate_source(&payload["body"], &self.run.attempt_id).map_err(|_| {
+                LedgerError("canonical producer violates the frozen source contract".into())
+            })?;
+        }
+        if let Some(receipt) = decoded["body"].get("receipt") {
+            validate_receipt(receipt).map_err(|_| {
+                LedgerError("canonical receipt violates the frozen receipt contract".into())
+            })?;
+        }
+        let payload_digest = digest(&payload)?;
+        let receipt = AppendReceipt {
+            seq: expected_seq,
+            digest: sha256_prefixed(bytes),
+        };
+        validate_transition(self, &payload)?;
+        validate_intent(self, &payload)?;
+        apply_record(self, &payload, receipt.clone(), payload_digest.clone())?;
+        self.accepted_bytes += bytes.len() as u64 + 1;
+        self.hash_record(bytes, &decoded, &receipt, &payload_digest)
+    }
+
     fn begin_segment(&mut self, number: usize) {
         self.active_segment = number;
         self.segment_bytes = 0;

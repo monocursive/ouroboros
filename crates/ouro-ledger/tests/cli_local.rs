@@ -18,6 +18,46 @@ use serde_json::{Value, json};
 const WAIT_LIMIT: Duration = Duration::from_secs(5);
 
 #[test]
+fn bundle_cli_is_portable_and_verifies_without_a_writer_or_data_directory() {
+    let mut cli = LocalCli::new();
+    let output = cli.temp.path().join("portable");
+    let path = output.to_str().unwrap();
+    assert!(
+        !cli.invoke(&[
+            "bundle",
+            "run_00000000000000000000000000000000",
+            "--output",
+            path
+        ])
+        .status
+        .success()
+    );
+    assert!(!cli.data.join("ledger").exists());
+    let writer = cli.start_writer();
+    let run = successful_preparation(&cli.prepare("bundle-cli", &fixture_request()));
+    let id = run["run_id"].as_str().unwrap();
+    let report = cli.json(&["bundle", id, "--output", path, "--json"]);
+    assert_eq!(report["authenticity"], "unsigned");
+    assert_eq!(report["state"], "prepared");
+    let original = fs::read(cli.data.join("ledger").join(id).join("events-0001.ndjson")).unwrap();
+    assert_eq!(fs::read(output.join("events.ndjson")).unwrap(), original);
+    drop(writer);
+    fs::remove_dir_all(&cli.data).unwrap();
+    let moved = cli.temp.path().join("moved");
+    fs::rename(&output, &moved).unwrap();
+    let offline = cli.json(&["verify-bundle", moved.to_str().unwrap(), "--json"]);
+    assert_eq!(report, offline);
+    assert!(!cli.data.exists());
+    fs::write(moved.join("events.ndjson"), b"changed\n").unwrap();
+    assert!(
+        !cli.invoke(&["verify-bundle", moved.to_str().unwrap(), "--json"])
+            .status
+            .success()
+    );
+    assert!(!cli.data.exists());
+}
+
+#[test]
 fn doctor_does_not_start_a_session_writer() {
     let mut cli = LocalCli::new();
     let output = cli.invoke(&["doctor", "--json"]);

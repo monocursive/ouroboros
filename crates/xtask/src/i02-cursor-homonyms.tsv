@@ -133,3 +133,7 @@ crates/ouro-ledger/src/main.rs	"automatic discovery uses --after; --cursor and -
 crates/ouro-ledger/src/store/catalog.rs	cursor: None,
 crates/ouro-ledger/src/store/catalog.rs	cursor: prior.and_then(|p| p.read_position),
 crates/ouro-ledger/src/store/catalog.rs	Some((catalog_after, page.next_cursor.clone()))
+crates/ouro-ledger/src/bundle.rs	cursor: None,
+crates/ouro-ledger/src/bundle.rs	.next_cursor
+crates/ouro-ledger/src/bundle.rs	if request.cursor.as_ref() == Some(&next) {
+crates/ouro-ledger/src/bundle.rs	request.cursor = Some(next);

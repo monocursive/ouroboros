@@ -116,8 +116,10 @@ cancellation, owner death and writer loss. `wait` reads the durable outcome;
 
 The [ledger specification](specs/ledger-v1.md) names its current acceptance and
 limits. Bounded run catalogs, filtered cross-run queries, event-count comparisons
-and comparisons of recorded target labels are implemented. Bundles, signatures,
-best-effort recovery and managed project authorization remain planned. The complete
+and comparisons of recorded target labels are implemented. Unsigned portable
+bundles export canonical records, embedded receipts and selected captures with
+offline verification. Signatures, best-effort recovery and managed project
+authorization remain planned. The complete
 milestone is still open. A plain local export does not establish external custody.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable

@@ -314,7 +314,8 @@ The owner reads the jail's canonical receipt at
 `<data>/attempts/<attempt_id>/jail.json`. It does not request another receipt copy
 inside the shared state root; the jail's receipt-copy fence forbids that path.
 Admission and final intent records embed the validated receipt before their
-acknowledgement. The run's `receipts/` directory is reserved for future bundles.
+acknowledgement. Portable bundles extract receipts from those canonical records;
+they never trust a loose receipt copy in the run's `receipts/` directory.
 
 ## 5. Acknowledgements, failure and recovery
 
@@ -840,6 +841,66 @@ After completed capture expiry, subsequent previews report `captures_pruned`
 retention clock. A reader's checkpoint protects both history and captures even
 though canonical export contains no capture bytes.
 
+## 8.4. Unsigned portable evidence bundles
+
+```sh
+ouro-ledger bundle RUN --output /absolute/new-bundle [--capture stdout] [--capture stderr] --json
+ouro-ledger verify-bundle /absolute/new-bundle --json
+```
+
+`bundle` connects to an existing writer and exports one pinned snapshot. The
+new private directory contains exact canonical records concatenated into
+`events.ndjson`, a canonical `receipts.json` array extracted from embedded
+admission/final records, and `bundle.json`. Optional `stdout.bin` and
+`stderr.bin` are included only when explicitly selected. No vendor state,
+SQLite index, credentials, raw argv or environment is discovered or copied.
+Selected output and explicit record bodies can contain secrets.
+
+The [manifest](ledger-v1/bundle.schema.json) inventories each member's length and
+SHA-256. Its `run` is replayed from the exported records and describes that
+historical snapshot, including capture selection, truncation, incomplete output,
+coverage gaps and protection. It does not claim that captures omitted from the
+bundle remain available in the source store. Capture hashes have the explicit
+basis `bundle_time`: original capture content hashes are not part of the launch
+receipt. A capture hash proves consistency of the packaged bytes, not that the
+node's owner left them unchanged before packaging.
+
+Creation requires complete, locally consistent canonical history; already
+pruned history refuses. A default bundle can still export canonical records
+after capture-only expiry; explicitly selecting a missing capture refuses.
+Captures require terminal recorded metadata, an authorized stdout/stderr
+selection, and the exact recorded size. A running or prepared snapshot can be
+bundled without captures. Receipt copies and all snapshot labels are rechecked
+through the same schema, transition, chain and receipt-binding validation used
+by store recovery. Segment layout is reassembled for portability; the original
+physical segment manifest is not copied or represented as a separate witness.
+The writer validates its source segment anchors before emitting the snapshot.
+
+Bounds are 64 MiB of canonical records, 10,000 records, 20,000 reader pages,
+16 MiB per selected capture, 4 MiB each for JSON metadata/receipts, and a
+300-second work budget checked between reads and before publication. The
+writer's 600-second reader pin protects both history and captures while the
+bundle is assembled. A socket failure or budget exhaustion leaves no published
+bundle. Files are synchronized in a private staging directory and published
+with a no-replace atomic rename, then the parent is synchronized. A failure of
+that final parent sync reports the uncertain durable publication explicitly.
+
+`verify-bundle` is offline and read-only, even when the node data directory no
+longer exists. It accepts only the flat allowlisted inventory, rejects symbolic
+and hard links, nonregular files, extra/missing members, oversized data and
+noncanonical/interrupted records, and hashes the same bytes it semantically
+replays. Hash-consistent changes to projection labels or receipt copies refuse
+unless they match canonical history. The
+[verification report](ledger-v1/bundle-verification.schema.json) separates
+`local_consistency`, original coverage, and `child_protection`. A consistent
+`none` run remains `unprotected`.
+
+This format is **unsigned**, with `external_custody: false`. Someone able to
+rewrite the complete bundle can recompute its hashes. Neither this manifest nor
+its digest establishes a trusted signer, independent witness, current storage
+availability, managed authorization or production readiness. Signatures and
+historical-custody migration remain separate milestones.
+
 ## 9. Acceptance and remaining milestone 2 scope
 
 The Rust store tests exercise process-lifetime writer exclusion; lost replies
@@ -889,8 +950,7 @@ The [contract validator](ledger-v1/validate_contract.py) checks versioned schema
 and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
-unimplemented verbs/features: `bundle`,
-best-effort outage reconciliation, signed bundles and the
+unimplemented features: best-effort outage reconciliation, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.

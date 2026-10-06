@@ -98,6 +98,24 @@ enum Action {
     },
     /// Stream an exact canonical snapshot; status is written to stderr.
     Export(Box<ExportArgs>),
+    /// Export an unsigned portable snapshot; captures require explicit selection.
+    Bundle {
+        run_id: String,
+        /// New directory; existing destinations are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+        /// Include a terminal capture, which may contain secrets.
+        #[arg(long, value_parser = ["stdout", "stderr"])]
+        capture: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify a portable bundle offline without opening a node store or writer.
+    VerifyBundle {
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Append an attributed operator assertion; never changes launch state.
     Append(AppendArgs),
     /// Read bounded canonical fragments, optionally following later appends.
@@ -700,17 +718,34 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
 }
 
 fn execute(cli: Cli) -> Result<i32> {
+    if let Action::VerifyBundle { path, json } = &cli.command {
+        output(&ouro_ledger::bundle::verify(path)?, *json)?;
+        return Ok(0);
+    }
     let data = data_dir(cli.data_dir)?;
     match cli.command {
         Action::Version { json } => {
             output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1"},"schema_frozen":false,"execution_platform":"linux"}),
+                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1","bundle":"ouro.ledger.bundle/1","bundle_verification":"ouro.ledger.bundle-verification/1"},"schema_frozen":false,"execution_platform":"linux"}),
                 json,
             )?;
             Ok(0)
         }
         Action::Serve => {
             daemon::serve(&data)?;
+            Ok(0)
+        }
+        Action::Bundle {
+            run_id,
+            output: destination,
+            capture,
+            json,
+        } => {
+            let mut client = daemon::Client::connect(&data)?;
+            output(
+                &ouro_ledger::bundle::create(&mut client, &data, &run_id, &destination, &capture)?,
+                json,
+            )?;
             Ok(0)
         }
         Action::Owner { bootstrap, unit } => {
@@ -956,7 +991,9 @@ fn execute(cli: Cli) -> Result<i32> {
                 | Action::Tail(_)
                 | Action::Hold(_)
                 | Action::Release(_)
-                | Action::Gc { .. } => unreachable!(),
+                | Action::Gc { .. }
+                | Action::Bundle { .. }
+                | Action::VerifyBundle { .. } => unreachable!(),
             }
             Ok(0)
         }

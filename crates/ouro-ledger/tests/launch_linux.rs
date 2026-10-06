@@ -25,6 +25,87 @@ use serde_json::Value;
 
 const COMMAND_LIMIT: Duration = Duration::from_secs(20);
 
+#[test]
+fn real_launch_bundles_verify_offline_with_selected_truncated_captures() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    for profile in ["tool", "none"] {
+        let mut fixture = Fixture::new(&jail);
+        let mut command = fixture.command_with_profile("portable-launch", true, profile);
+        command.args([
+            "--capture",
+            "stdout",
+            "--capture",
+            "stderr",
+            "--capture-limit",
+            "4",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf 'stdout-body'; printf 'stderr-body' >&2",
+        ]);
+        let (result, run) = fixture.run(&mut command);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(run.state, "settled");
+        assert_eq!(run.capture["stdout"]["truncated"], true);
+        let bundle = fixture._temp.path().join("portable");
+        let report = ouro_ledger::bundle::create(
+            &mut fixture.client(),
+            &fixture.data,
+            &run.run_id,
+            &bundle,
+            &["stdout".into()],
+        )
+        .unwrap();
+        assert_eq!(fs::read(bundle.join("stdout.bin")).unwrap(), b"stdo");
+        assert!(!bundle.join("stderr.bin").exists());
+        assert_eq!(
+            report["child_protection"],
+            if profile == "none" {
+                "unprotected"
+            } else {
+                "enforced"
+            }
+        );
+        assert_eq!(report["coverage"], run.coverage);
+        let receipts: Value =
+            serde_json::from_slice(&fs::read(bundle.join("receipts.json")).unwrap()).unwrap();
+        assert_eq!(receipts, serde_json::json!(run.receipts));
+        assert!(!run.receipts.is_empty());
+        fixture.writer.kill();
+        fs::remove_dir_all(&fixture.data).unwrap();
+        let moved = fixture._temp.path().join("moved-bundle");
+        fs::rename(&bundle, &moved).unwrap();
+        let output = Process::spawn(
+            Command::new(env!("CARGO_BIN_EXE_ouro-ledger"))
+                .arg("--data-dir")
+                .arg(&fixture.data)
+                .arg("verify-bundle")
+                .arg(&moved)
+                .arg("--json"),
+            true,
+        )
+        .finish();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            report
+        );
+        assert!(!fixture.data.exists());
+        fs::write(moved.join("stdout.bin"), b"fake").unwrap();
+        assert!(ouro_ledger::bundle::verify(&moved).is_err());
+    }
+}
+
 fn live_jail() -> Option<PathBuf> {
     static JAIL: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     let result = JAIL.get_or_init(|| {

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-bundle-verification:1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.bundle-verification/1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "head_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "head_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "head_seq",
+        "head_digest"
+      ],
+      "additionalProperties": false
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "admitted",
+        "denied",
+        "settled",
+        "outcome_unknown"
+      ],
+      "description": "Settled means a durably recorded terminal result after admission, including a proved exec_error; it does not imply success. Denied is a refusal before ledger admission."
+    },
+    "child_protection": {
+      "enum": [
+        "enforced",
+        "unprotected"
+      ]
+    },
+    "coverage": {
+      "type": "object"
+    },
+    "local_consistency": {
+      "const": true
+    },
+    "authenticity": {
+      "const": "unsigned"
+    },
+    "external_custody": {
+      "const": false
+    },
+    "capture_digest_basis": {
+      "const": "bundle_time"
+    },
+    "captures": {
+      "type": "array",
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "stdout",
+          "stderr"
+        ]
+      }
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "schema",
+    "run_id",
+    "snapshot",
+    "state",
+    "child_protection",
+    "coverage",
+    "local_consistency",
+    "authenticity",
+    "external_custody",
+    "capture_digest_basis",
+    "captures",
+    "manifest_digest"
+  ],
+  "additionalProperties": false
+}

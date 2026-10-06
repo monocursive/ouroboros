@@ -300,6 +300,42 @@ def pruning_fixtures(validators, run, records):
     expect_invalid(validators["gc-complete"], altered, "invalid completion anchor")
 
 
+def bundle_fixtures(validators):
+    manifest = read("bundle.json")
+    report = read("bundle-verification.json")
+    validators["bundle"].validate(manifest)
+    validators["bundle-verification"].validate(report)
+    events = (ROOT / "fixtures" / "bundle-events.ndjson").read_bytes()
+    members = {item["name"]: item for item in manifest["files"]}
+    for name, data in [("events.ndjson", events), ("receipts.json", rfc8785.dumps(manifest["run"]["receipts"]) + b"\n")]:
+        assert members[name]["bytes"] == len(data)
+        assert members[name]["digest"] == "sha256:" + hashlib.sha256(data).hexdigest()
+    for line in events.splitlines():
+        record = json.loads(line)
+        validators["record"].validate(record)
+        assert rfc8785.dumps(record) == line
+    assert report["snapshot"] == manifest["run"]["chain"]
+    assert report["manifest_digest"] == "sha256:" + hashlib.sha256(rfc8785.dumps(manifest) + b"\n").hexdigest()
+    for key, value in [("authenticity", "signed"), ("capture_digest_basis", "launch_time")]:
+        altered = copy.deepcopy(manifest)
+        altered[key] = value
+        expect_invalid(validators["bundle"], altered, "unsupported authenticity claim")
+    for name in ["../events.ndjson", "vendor-state", "argv.bin"]:
+        altered = copy.deepcopy(manifest)
+        altered["files"][0]["name"] = name
+        expect_invalid(validators["bundle"], altered, "unsafe or unsupported member")
+    altered = copy.deepcopy(manifest)
+    altered["files"].append(altered["files"][0])
+    expect_invalid(validators["bundle"], altered, "duplicate canonical member")
+    altered = copy.deepcopy(manifest)
+    altered["files"][0]["bytes"] = 67108865
+    expect_invalid(validators["bundle"], altered, "oversized stream")
+    for key, value in [("external_custody", True), ("authenticity", "signed"), ("local_consistency", False)]:
+        altered = copy.deepcopy(report)
+        altered[key] = value
+        expect_invalid(validators["bundle-verification"], altered, "invalid successful verification claim")
+
+
 def main():
     jail_schemas = jail.load_schemas(JAIL)
     ledger_schemas = jail.load_schemas(ROOT)
@@ -308,6 +344,7 @@ def main():
     operator_tail_fixtures(validators)
     discovery_fixtures(validators)
     target_comparison_fixtures(validators)
+    bundle_fixtures(validators)
     query = read("query-page.json")
     comparison = read("diff-page.json")
     validators["query"].validate(query)
