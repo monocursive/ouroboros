@@ -219,6 +219,25 @@ def main():
     assert not set(jail_schemas) & set(ledger_schemas)
     validators = jail.build_validators(jail_schemas | ledger_schemas)
     operator_tail_fixtures(validators)
+    query = read("query-page.json")
+    comparison = read("diff-page.json")
+    validators["query"].validate(query)
+    validators["diff"].validate(comparison)
+    assert query["pages"][0]["run_id"] != query["pages"][1]["run_id"]
+    assert comparison["mode"] == "event_counts" and comparison["total_changes"] == 2
+    assert comparison["comparison_status"] == "partial"
+    assert comparison["classes"]["proxy.net"]["left_reason"] == "unobserved"
+    position = json.loads(comparison["next_after"])
+    assert position["left_head"] == comparison["left"]["snapshot"]
+    assert position["right_head"] == comparison["right"]["snapshot"]
+    altered = copy.deepcopy(comparison)
+    altered["right"]["child_protection"] = "unprotected"
+    validators["diff"].validate(altered)
+    altered["right"]["child_protection"] = "probably_safe"
+    expect_invalid(validators["diff"], altered, "invented comparison protection")
+    altered = copy.deepcopy(query)
+    altered["pages"] *= 5
+    expect_invalid(validators["query"], altered, "unbounded cross-run fanout")
     request = read("request.json")
     detached = copy.deepcopy(request)
     detached["owner_lifetime"] = "systemd_user_service"

@@ -450,6 +450,50 @@ reader keeps one active stream descriptor and checks at most 4,096 segment
 identities per page; it does not concatenate history into memory or hold every
 segment open. Validation and cursor restoration use transient descriptors.
 
+Cross-run queries accept up to eight explicit, unique runs:
+`query --run A --run B --execs --json`. The [query envelope](ledger-v1/query.schema.json)
+contains independent `pages` and per-run `problems`; each page retains its own
+snapshot, coverage, protection, stage and original provenance. There is no
+atomic snapshot across runs. The same filters and per-run limit apply to every
+selected run. Resume each unfinished run with `--resume RUN=POSITION`, using
+that page's `next_cursor`. Omit finished runs from the next request. A selected
+run without a resume position starts a new snapshot; it does not implicitly
+continue a previous invocation. The existing single-run `--cursor` and output
+shape remain supported. Any failed or inconsistent page makes the CLI exit
+nonzero while retaining successful pages. Implicit all-run selection and run
+catalog filters remain unimplemented.
+
+`diff A B --json` compares **event counts**, grouped by class, source, operation,
+stage, decision and the complete source outcome. It does not compare paths,
+hosts, process identities, event order or field values; equal counts do not
+establish equivalent behavior. Owner and operator intents and wrapper receipt
+notes are excluded. Audit `net` and `proxy.net` remain separate classes. Each
+changed bucket carries counts and the first contributing canonical sequence
+and original provenance from each side; these references are examples, not a
+list of every contributing record.
+
+The [comparison report](ledger-v1/diff.schema.json) retains both snapshot heads,
+coverage summaries and protection labels. A class is comparable only when both
+snapshots are terminal (`settled` or `denied`), completely read without a
+consistency failure, have active gap-free coverage for that class, and declare
+the same nonempty source set. Global or ledger gaps make all classes
+incomparable. Unknown, pruned, corrupt, active or unsupported evidence never
+becomes a count of zero on an allegedly comparable side. `comparison_status`
+is `comparable`, `partial` or `incomparable`; `complete` describes successful
+snapshot reads, independently of class comparability. A failed read or exhausted
+budget returns an incomplete report and exits nonzero; differences themselves
+do not make the command fail.
+
+Comparison uses the existing bounded, pinned reader and parses verified NDJSON
+incrementally. Each side is capped at 64 MiB, 4,096 pages, 4,096 distinct count
+buckets, 8 MiB of keys and 8 KiB per key; the invocation has a 120-second read
+budget (checked between socket calls). Output pages default to 100 changes,
+accept `--limit 1..1000`, and cap serialized change objects at 128 KiB. Resume
+with `--after` from `next_after`. Each output invocation rereads the two streams
+and refuses if either head or the ordered run selection changed. The position
+is not authority and conveys no additional retention pin; ordinary reader pins
+and expiry still apply. Snapshots are taken independently when each read starts.
+
 `export RUN --ndjson` reads all records, including preparation and owner intents.
 It writes the exact stored canonical UTF-8 bytes and LF delimiters to stdout,
 without reserialization, new fields or a new hash chain. No receipt side files,
@@ -737,7 +781,8 @@ The [contract validator](ledger-v1/validate_contract.py) checks versioned schema
 and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
-unimplemented verbs/features: cross-run query and comparison, `diff`, `bundle`,
+unimplemented verbs/features: implicit all-run queries and catalog filters,
+entity-level comparison, `bundle`,
 best-effort outage reconciliation, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,

@@ -1,0 +1,354 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.diff/1"
+    },
+    "mode": {
+      "const": "event_counts"
+    },
+    "comparison_status": {
+      "enum": [
+        "comparable",
+        "partial",
+        "incomparable"
+      ]
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "left": {
+      "$ref": "#/$defs/summary"
+    },
+    "right": {
+      "$ref": "#/$defs/summary"
+    },
+    "classes": {
+      "type": "object",
+      "properties": {
+        "exec": {
+          "$ref": "#/$defs/classification"
+        },
+        "fs.write": {
+          "$ref": "#/$defs/classification"
+        },
+        "fs.deny": {
+          "$ref": "#/$defs/classification"
+        },
+        "net": {
+          "$ref": "#/$defs/classification"
+        },
+        "proxy.net": {
+          "$ref": "#/$defs/classification"
+        },
+        "limits": {
+          "$ref": "#/$defs/classification"
+        }
+      },
+      "required": [
+        "exec",
+        "fs.write",
+        "fs.deny",
+        "net",
+        "proxy.net",
+        "limits"
+      ],
+      "additionalProperties": false
+    },
+    "changes": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "observation": {
+            "type": "object",
+            "properties": {
+              "class": {
+                "enum": [
+                  "exec",
+                  "fs.write",
+                  "fs.deny",
+                  "net",
+                  "proxy.net",
+                  "limits"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "wrapper",
+                  "audit",
+                  "proxy"
+                ]
+              },
+              "operation": {
+                "enum": [
+                  "proc.exec",
+                  "proc.exit",
+                  "fs.create",
+                  "fs.write",
+                  "fs.rename",
+                  "fs.unlink",
+                  "fs.deny",
+                  "net.connect",
+                  "net.dns",
+                  "limit.hit",
+                  "jail.receipt",
+                  "intent.admitted",
+                  "intent.denied",
+                  "intent.settled",
+                  "note"
+                ]
+              },
+              "stage": {
+                "enum": [
+                  "attempt",
+                  "result"
+                ]
+              },
+              "decision": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  null
+                ]
+              },
+              "outcome": {
+                "anyOf": [
+                  {
+                    "$ref": "urn:ouro:schema:ledger-source:1#/$defs/outcome"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "class",
+              "source",
+              "operation",
+              "stage",
+              "decision",
+              "outcome"
+            ],
+            "additionalProperties": false
+          },
+          "left_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "right_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "left_first_record": {
+            "$ref": "#/$defs/reference"
+          },
+          "right_first_record": {
+            "$ref": "#/$defs/reference"
+          }
+        },
+        "required": [
+          "observation",
+          "left_count",
+          "right_count",
+          "left_first_record",
+          "right_first_record"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "total_changes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8192
+    },
+    "next_after": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 1024
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "mode",
+    "comparison_status",
+    "complete",
+    "left",
+    "right",
+    "classes",
+    "changes",
+    "total_changes",
+    "next_after"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-diff:1",
+  "title": "Bounded comparison of covered source event counts; not entity equivalence",
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9a-f]{32}$"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "urn:ouro:schema:ledger-read:1#/$defs/chain"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "admitted",
+            "denied",
+            "settled",
+            "outcome_unknown",
+            "unknown"
+          ]
+        },
+        "child_protection": {
+          "enum": [
+            "enforced",
+            "unprotected",
+            "unknown"
+          ]
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "urn:ouro:schema:ledger-read:1#/$defs/coverage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local_consistency": {
+          "type": "boolean"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "run_id",
+        "snapshot",
+        "state",
+        "child_protection",
+        "coverage",
+        "local_consistency",
+        "complete",
+        "problem"
+      ],
+      "additionalProperties": false
+    },
+    "classification": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "comparable",
+            "incomparable"
+          ]
+        },
+        "left_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "incomplete_evidence",
+                "run_not_terminal",
+                "coverage_degraded",
+                "unobserved",
+                "source_unspecified"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "right_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "incomplete_evidence",
+                "run_not_terminal",
+                "coverage_degraded",
+                "unobserved",
+                "source_unspecified"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shared_reason": {
+          "anyOf": [
+            {
+              "const": "source_set_mismatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "left_reason",
+        "right_reason",
+        "shared_reason"
+      ],
+      "additionalProperties": false
+    },
+    "reference": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "provenance": {
+              "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+            }
+          },
+          "required": [
+            "seq",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

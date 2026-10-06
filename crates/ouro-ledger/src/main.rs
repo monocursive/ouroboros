@@ -82,8 +82,20 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
-    /// Read one bounded page of attributed observations from a run.
+    /// Read bounded pages of attributed observations from up to eight explicit runs.
     Query(Box<QueryArgs>),
+    /// Compare covered event counts in two independently verified snapshots.
+    Diff {
+        left: String,
+        right: String,
+        /// Continue the output page; refuses if either snapshot head changed.
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        limit: u32,
+        #[arg(long)]
+        json: bool,
+    },
     /// Stream an exact canonical snapshot; status is written to stderr.
     Export(Box<ExportArgs>),
     /// Append an attributed operator assertion; never changes launch state.
@@ -256,8 +268,9 @@ struct RetentionArgs {
     .multiple(false)
     .args(["execs", "paths", "hosts", "denials"])))]
 struct QueryArgs {
-    #[arg(long)]
-    run: String,
+    /// Repeat for independent per-run snapshots, up to eight unique runs.
+    #[arg(long, required = true)]
+    run: Vec<String>,
     #[arg(long, group = "evidence_class")]
     execs: bool,
     #[arg(long, group = "evidence_class")]
@@ -278,6 +291,9 @@ struct QueryArgs {
     /// Resume with the same run and filters using the returned cursor.
     #[arg(long)]
     cursor: Option<String>,
+    /// Multi-run continuation: repeat RUN=POSITION for each run to resume.
+    #[arg(long, conflicts_with = "cursor")]
+    resume: Vec<String>,
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
     limit: u32,
     #[arg(long)]
@@ -418,15 +434,73 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
         None => None,
         _ => return Err(LedgerError("unsupported source stage".into())),
     };
+    let filter = ReadFilter {
+        selector,
+        stage,
+        since: args.since,
+        until: args.until,
+    };
+    let unique: std::collections::BTreeSet<_> = args.run.iter().collect();
+    if args.run.len() > 8 || unique.len() != args.run.len() {
+        return Err(LedgerError(
+            "query needs one through eight unique runs".into(),
+        ));
+    }
+    if args.run.len() > 1 && args.cursor.is_some() {
+        return Err(LedgerError(
+            "multi-run query needs --resume RUN=POSITION".into(),
+        ));
+    }
+    let mut positions = std::collections::BTreeMap::new();
+    for resume in args.resume {
+        let (run, position) = resume
+            .split_once('=')
+            .ok_or_else(|| LedgerError("resume needs RUN=POSITION".into()))?;
+        if !args.run.iter().any(|r| r == run)
+            || position.len() != 64
+            || !position.bytes().all(|b| b.is_ascii_hexdigit())
+            || positions
+                .insert(run.to_owned(), position.to_owned())
+                .is_some()
+        {
+            return Err(LedgerError(
+                "resume needs a unique selected run and a valid reader position".into(),
+            ));
+        }
+    }
+    if args.run.len() > 1 {
+        let mut pages = Vec::new();
+        let mut problems = Vec::new();
+        let mut passed = true;
+        for run in args.run {
+            match client.read(&ReadRequest {
+                cursor: positions.remove(&run),
+                run_id: run.clone(),
+                filter: filter.clone(),
+                limit: args.limit,
+            }) {
+                Ok(page) => {
+                    passed &= query_page_ok(&page);
+                    pages.push(page);
+                }
+                Err(error) => {
+                    passed = false;
+                    problems.push(json!({"run_id":run,"message":error.to_string()}));
+                }
+            }
+        }
+        output(
+            &json!({"schema":"ouro.ledger.query/1","snapshot_scope":"independent_per_run",
+            "pages":pages,"problems":problems}),
+            args.json,
+        )?;
+        return Ok(if passed { 0 } else { 1 });
+    }
+    let run_id = args.run.into_iter().next().unwrap();
     let page = client.read(&ReadRequest {
-        run_id: args.run,
-        filter: ReadFilter {
-            selector,
-            stage,
-            since: args.since,
-            until: args.until,
-        },
-        cursor: args.cursor,
+        cursor: args.cursor.or_else(|| positions.remove(&run_id)),
+        run_id,
+        filter,
         limit: args.limit,
     })?;
     output(&serde_json::to_value(&page)?, args.json)?;
@@ -435,16 +509,13 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
             "ouro-ledger: matching record exceeds the query page bound; retrieve it with export RUN --ndjson"
         );
     }
-    Ok(
-        if page.local_consistency
-            && !matches!(page.stream_status.as_str(), "incomplete" | "corrupt")
-            && page.oversized_record.is_none()
-        {
-            0
-        } else {
-            1
-        },
-    )
+    Ok(if query_page_ok(&page) { 0 } else { 1 })
+}
+
+fn query_page_ok(page: &ouro_ledger::protocol::ReadPage) -> bool {
+    page.local_consistency
+        && !matches!(page.stream_status.as_str(), "incomplete" | "corrupt")
+        && page.oversized_record.is_none()
 }
 
 fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs) -> Result<i32> {
@@ -571,7 +642,7 @@ fn execute(cli: Cli) -> Result<i32> {
     match cli.command {
         Action::Version { json } => {
             output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1"},"schema_frozen":false,"execution_platform":"linux"}),
+                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1"},"schema_frozen":false,"execution_platform":"linux"}),
                 json,
             )?;
             Ok(0)
@@ -762,6 +833,24 @@ fn execute(cli: Cli) -> Result<i32> {
                     output(&serde_json::to_value(client.show(&run_id)?)?, json)?
                 }
                 Action::Query(args) => return query(&mut client, *args),
+                Action::Diff {
+                    left,
+                    right,
+                    after,
+                    limit,
+                    json,
+                } => {
+                    let report = ouro_ledger::comparison::compare(
+                        &mut client,
+                        &left,
+                        &right,
+                        after.as_deref(),
+                        limit,
+                    )?;
+                    let passed = report["complete"] == true;
+                    output(&report, json)?;
+                    return Ok(if passed { 0 } else { 1 });
+                }
                 Action::Export(args) => return export(&mut client, &data, *args),
                 Action::Verify { run_id, json } => {
                     let reports = client.verify(run_id.as_deref())?;

@@ -1123,3 +1123,70 @@ fn operator_intents_and_live_tail_preserve_real_jail_ownership_and_source_bytes(
     );
     assert!(client.verify(Some(&run.run_id)).unwrap()[0].local_consistency);
 }
+
+#[test]
+fn real_run_diff_keeps_none_unprotected_and_separates_unobserved_coverage() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let fixture = Fixture::new(&jail);
+    let mut protected = fixture.command("diff-protected", true);
+    protected.args(["--", "/bin/sh", "-c", "printf protected > comparison-proof"]);
+    let (output, left) = fixture.run(&mut protected);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("comparison-proof")).unwrap(),
+        b"protected"
+    );
+    let mut unprotected = fixture.command_with_profile("diff-none", true, "none");
+    unprotected.args(["--", "/bin/true"]);
+    let (output, right) = fixture.run(&mut unprotected);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
+    command.arg("--data-dir").arg(&fixture.data).args([
+        "diff",
+        &left.run_id,
+        &right.run_id,
+        "--json",
+    ]);
+    let output = Process::spawn(&mut command, true).finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["left"]["snapshot"]["head_seq"], left.chain.head_seq);
+    assert_eq!(
+        report["right"]["snapshot"]["head_seq"],
+        right.chain.head_seq
+    );
+    assert_eq!(report["left"]["child_protection"], "enforced");
+    assert_eq!(report["right"]["child_protection"], "unprotected");
+    assert_eq!(report["classes"]["proxy.net"]["status"], "incomparable");
+    assert_eq!(report["classes"]["exec"]["status"], "comparable");
+    assert!(
+        report["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["observation"]["class"] == "fs.write")
+    );
+    assert!(
+        fixture
+            .client()
+            .verify(None)
+            .unwrap()
+            .iter()
+            .all(|r| r.local_consistency)
+    );
+}

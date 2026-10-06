@@ -1,0 +1,48 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.query/1"
+    },
+    "snapshot_scope": {
+      "const": "independent_per_run"
+    },
+    "pages": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "$ref": "urn:ouro:schema:ledger-read:1"
+      }
+    },
+    "problems": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "message"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "snapshot_scope",
+    "pages",
+    "problems"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-query:1",
+  "title": "Explicit cross-run query with independent snapshot pages"
+}

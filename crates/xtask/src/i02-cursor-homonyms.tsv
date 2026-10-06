@@ -118,3 +118,12 @@ crates/ouro-ledger/src/store/tail.rs	cursor.pending_digest = Some(anchor.digest.
 crates/ouro-ledger/src/store/tail.rs	let caught_up = cursor.emitted == 0 && cursor.after == stream.run.chain;
 crates/ouro-ledger/src/store/tail.rs	next_cursor: serde_json::to_string(&cursor)?,
 crates/ouro-ledger/src/store/tail.rs	scanned_through_seq: cursor.after.head_seq,
+crates/ouro-ledger/src/comparison.rs	cursor: None,
+crates/ouro-ledger/src/comparison.rs	request.cursor = Some(
+crates/ouro-ledger/src/comparison.rs	page.next_cursor
+crates/ouro-ledger/src/comparison.rs	page.next_cursor = None;
+crates/ouro-ledger/src/comparison.rs	page.next_cursor = Some("a".repeat(64));
+crates/ouro-ledger/src/main.rs	#[arg(long, conflicts_with = "cursor")]
+crates/ouro-ledger/src/main.rs	if args.run.len() > 1 && args.cursor.is_some() {
+crates/ouro-ledger/src/main.rs	cursor: positions.remove(&run),
+crates/ouro-ledger/src/main.rs	cursor: args.cursor.or_else(|| positions.remove(&run_id)),

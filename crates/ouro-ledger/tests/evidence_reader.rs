@@ -179,6 +179,30 @@ impl Fixture {
         self.start_writer();
     }
 
+    fn add_run(&mut self, run: &str, mut records: Vec<Value>) {
+        use std::io::Write as _;
+        drop(self.writer.take());
+        let directory = self.data.join("ledger").join(run);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut previous = None;
+        let mut file = private_file(&directory.join("events-0001.ndjson"));
+        for record in &mut records {
+            record["run_id"] = json!(run);
+            if record["kind"] == "prepared" {
+                record["body"]["request_id"] = json!(format!("fixture-{run}"));
+                record["request_id"] = json!(format!("prepare:fixture-{run}"));
+            }
+            record["prev"] = json!(previous);
+            let encoded = to_jcs(record).unwrap();
+            previous = Some(sha256_prefixed(&encoded));
+            file.write_all(&encoded).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        drop(file);
+        self.start_writer();
+    }
+
     fn checkpoint(&self, cursor: &str) -> PathBuf {
         self.data
             .join("ledger/readers")
@@ -649,4 +673,199 @@ fn status_events(bytes: &[u8]) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).expect("each status line is JSON"))
         .collect()
+}
+
+const OTHER_RUN: &str = "run_22222222222222222222222222222222";
+
+#[test]
+fn cross_run_pages_keep_attribution_and_resume_independently_after_restart() {
+    let mut fixture = Fixture::new(records());
+    fixture.add_run(OTHER_RUN, fixture.records.clone());
+    let args = [
+        "query", "--run", RUN, "--run", OTHER_RUN, "--execs", "--limit", "1", "--json",
+    ];
+    let first = fixture.run(&args);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["snapshot_scope"], "independent_per_run");
+    for (i, run) in [RUN, OTHER_RUN].iter().enumerate() {
+        assert_eq!(first["pages"][i]["run_id"], *run);
+        assert_eq!(first["pages"][i]["records"][0]["run_id"], *run);
+        assert_eq!(
+            first["pages"][i]["records"][0]["provenance"]["role"],
+            "producer"
+        );
+        assert_eq!(first["pages"][i]["child_protection"], "enforced");
+    }
+    let a = format!(
+        "{RUN}={}",
+        first["pages"][0]["next_cursor"].as_str().unwrap()
+    );
+    let b = format!(
+        "{OTHER_RUN}={}",
+        first["pages"][1]["next_cursor"].as_str().unwrap()
+    );
+    fixture.restart();
+    let mut resume = args.to_vec();
+    resume.extend(["--resume", &a, "--resume", &b]);
+    let second = fixture.run(&resume);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert!(
+        second["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["done"] == true && p["records"] == json!([]))
+    );
+    let replay = fixture.run(&resume);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+        second
+    );
+    let rebound = format!(
+        "{RUN}={}",
+        first["pages"][1]["next_cursor"].as_str().unwrap()
+    );
+    let rejected = fixture.run(&[
+        "query", "--run", RUN, "--run", OTHER_RUN, "--execs", "--limit", "1", "--resume", &rebound,
+        "--json",
+    ]);
+    assert!(!rejected.status.success());
+    let rejected: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(rejected["problems"][0]["run_id"], RUN);
+    assert_eq!(rejected["pages"][0]["run_id"], OTHER_RUN);
+}
+
+#[test]
+fn cross_run_rejects_duplicate_runs_and_malformed_continuations() {
+    let mut fixture = Fixture::new(records());
+    for extra in [
+        vec!["--run", RUN],
+        vec!["--resume", "bad"],
+        vec!["--resume", "run_unknown=abc"],
+    ] {
+        let mut args = vec!["query", "--run", RUN, "--execs"];
+        args.extend(extra);
+        assert!(!fixture.run(&args).status.success());
+    }
+}
+
+#[test]
+fn diff_counts_preserve_provenance_and_paginate_without_claiming_entity_equivalence() {
+    let mut fixture = Fixture::new(records());
+    let mut altered = fixture.records.clone();
+    altered[4]["outcome"]["errno"] = json!("EIO");
+    altered[4]["outcome"]["return_value"] = json!(-5);
+    fixture.add_run(OTHER_RUN, altered);
+    let args = ["diff", RUN, OTHER_RUN, "--limit", "1", "--json"];
+    let result = fixture.run(&args);
+    assert!(
+        result.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let first: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(first["complete"], true);
+    assert_eq!(first["total_changes"], 2);
+    assert_eq!(first["classes"]["exec"]["status"], "comparable");
+    assert_eq!(first["classes"]["proxy.net"]["status"], "incomparable");
+    assert_eq!(first["classes"]["proxy.net"]["left_reason"], "unobserved");
+    assert_eq!(first["left"]["child_protection"], "enforced");
+    assert_eq!(first["changes"][0]["observation"]["stage"], "result");
+    assert_eq!(first["changes"][0]["observation"]["source"], "audit");
+    let after = first["next_after"].as_str().unwrap();
+    fixture.restart();
+    let mut args = args.to_vec();
+    args.extend(["--after", after]);
+    let result = fixture.run(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let second: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(second["next_after"], Value::Null);
+    assert_eq!(second["changes"].as_array().unwrap().len(), 1);
+    assert_ne!(first["changes"], second["changes"]);
+    for page in [&first, &second] {
+        let change = &page["changes"][0];
+        let reference = if change["left_count"] == 1 {
+            &change["left_first_record"]
+        } else {
+            &change["right_first_record"]
+        };
+        assert_eq!(reference["seq"], 5);
+        assert_eq!(reference["provenance"]["role"], "producer");
+    }
+    assert!(
+        !fixture
+            .run(&["diff", OTHER_RUN, RUN, "--after", after, "--json"])
+            .status
+            .success()
+    );
+    let body = fixture.temp.path().join("operator-note.json");
+    fs::write(&body, b"{}").unwrap();
+    assert!(
+        fixture
+            .run(&[
+                "append",
+                "--run",
+                RUN,
+                "--request-id",
+                "diff-head-change",
+                "--kind",
+                "note",
+                "--body-file",
+                body.to_str().unwrap(),
+                "--json"
+            ])
+            .status
+            .success()
+    );
+    let result = fixture.run(&args);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("snapshot changed"));
+}
+
+#[test]
+fn diff_corrupt_or_missing_history_never_returns_a_successful_empty_comparison() {
+    use std::io::Write as _;
+    let mut fixture = Fixture::new(records());
+    fixture.add_run(OTHER_RUN, fixture.records.clone());
+    OpenOptions::new()
+        .append(true)
+        .open(&fixture.stream)
+        .unwrap()
+        .write_all(b"unexpected\n")
+        .unwrap();
+    let result = fixture.run(&["diff", RUN, OTHER_RUN, "--json"]);
+    assert!(!result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["changes"], json!([]));
+    assert_eq!(
+        report["classes"]["exec"]["left_reason"],
+        "incomplete_evidence"
+    );
+    assert_eq!(report["right"]["complete"], true);
+    let result = fixture.run(&[
+        "diff",
+        "run_33333333333333333333333333333333",
+        OTHER_RUN,
+        "--json",
+    ]);
+    assert!(!result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["left"]["child_protection"], "unknown");
+    assert!(report["left"]["problem"].is_string());
 }

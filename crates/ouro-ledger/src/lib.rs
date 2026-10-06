@@ -1,4 +1,5 @@
 //! A local writer and an independent launch owner around the jail's existing protocol.
+pub mod comparison;
 pub mod config;
 pub mod daemon;
 mod manifest;

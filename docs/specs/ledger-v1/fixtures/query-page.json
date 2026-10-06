@@ -1,0 +1,241 @@
+{
+  "pages": [
+    {
+      "child_protection": "enforced",
+      "coverage": {
+        "classes": {
+          "exec": {
+            "gap_count": 0,
+            "observed_count": 1,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.deny": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.write": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "limits": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "wrapper"
+            ],
+            "status": "active"
+          },
+          "net": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "proxy.net": {
+            "gap_count": 0,
+            "observed_count": null,
+            "sources": [],
+            "status": "unsupported"
+          }
+        },
+        "gap_count": 0,
+        "scope": "snapshot_run",
+        "selection_status": "active",
+        "status": "by_class"
+      },
+      "done": true,
+      "local_consistency": true,
+      "ndjson": "",
+      "next_cursor": null,
+      "oversized_record": null,
+      "problems": [],
+      "records": [
+        {
+          "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+          "decision": null,
+          "fields": {
+            "path": {
+              "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "kind": "digest",
+              "reason": "outside_known_roots"
+            },
+            "path_basis": "argument_snapshot",
+            "path_complete": true,
+            "pid": 1240,
+            "pid_start_ticks": 123460,
+            "syscall": "execve",
+            "tid": 1240
+          },
+          "kind": "source",
+          "monotonic_ns": "260000000",
+          "observed_at": "2026-09-21T12:00:00Z",
+          "operation": "proc.exec",
+          "outcome": {
+            "completion": "syscall_return",
+            "errno": "ENOENT",
+            "ok": false,
+            "return_value": -2
+          },
+          "prev": "sha256:486604c5ea8c50c4c1f3345d0eacc2b42cdf031e8fd4eb07ed50fae96457a9a9",
+          "provenance": {
+            "peer_birth": "boot:fixture:start:42",
+            "peer_pid": 41200,
+            "peer_uid": 1000,
+            "role": "producer",
+            "token_id": "ffffffffffffffffffffffffffffffff"
+          },
+          "received_at": "2026-09-30T12:00:01Z",
+          "request_id": "source:audit:1",
+          "run_id": "run_11111111111111111111111111111111",
+          "schema": "ouro.event/1",
+          "seq": 5,
+          "source": "audit",
+          "source_seq": 1,
+          "stage": "result"
+        }
+      ],
+      "run_id": "run_11111111111111111111111111111111",
+      "scanned_through_seq": 7,
+      "schema": "ouro.ledger.read/1",
+      "snapshot": {
+        "head_digest": "sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30",
+        "head_seq": 7
+      },
+      "state": "settled",
+      "stream_status": "complete"
+    },
+    {
+      "child_protection": "enforced",
+      "coverage": {
+        "classes": {
+          "exec": {
+            "gap_count": 0,
+            "observed_count": 1,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.deny": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.write": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "limits": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "wrapper"
+            ],
+            "status": "active"
+          },
+          "net": {
+            "gap_count": 0,
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "proxy.net": {
+            "gap_count": 0,
+            "observed_count": null,
+            "sources": [],
+            "status": "unsupported"
+          }
+        },
+        "gap_count": 0,
+        "scope": "snapshot_run",
+        "selection_status": "active",
+        "status": "by_class"
+      },
+      "done": true,
+      "local_consistency": true,
+      "ndjson": "",
+      "next_cursor": null,
+      "oversized_record": null,
+      "problems": [],
+      "records": [
+        {
+          "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+          "decision": null,
+          "fields": {
+            "path": {
+              "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "kind": "digest",
+              "reason": "outside_known_roots"
+            },
+            "path_basis": "argument_snapshot",
+            "path_complete": true,
+            "pid": 1240,
+            "pid_start_ticks": 123460,
+            "syscall": "execve",
+            "tid": 1240
+          },
+          "kind": "source",
+          "monotonic_ns": "260000000",
+          "observed_at": "2026-09-21T12:00:00Z",
+          "operation": "proc.exec",
+          "outcome": {
+            "completion": "syscall_return",
+            "errno": "EIO",
+            "ok": false,
+            "return_value": -5
+          },
+          "prev": "sha256:3e2090e85a3aafe48c22d33f5112a1bf4d72dc0ba94ba69aa6634d70bbe4e82d",
+          "provenance": {
+            "peer_birth": "boot:fixture:start:42",
+            "peer_pid": 41200,
+            "peer_uid": 1000,
+            "role": "producer",
+            "token_id": "ffffffffffffffffffffffffffffffff"
+          },
+          "received_at": "2026-09-30T12:00:01Z",
+          "request_id": "source:audit:1",
+          "run_id": "run_22222222222222222222222222222222",
+          "schema": "ouro.event/1",
+          "seq": 5,
+          "source": "audit",
+          "source_seq": 1,
+          "stage": "result"
+        }
+      ],
+      "run_id": "run_22222222222222222222222222222222",
+      "scanned_through_seq": 7,
+      "schema": "ouro.ledger.read/1",
+      "snapshot": {
+        "head_digest": "sha256:de3b9ac62e6a1af5b14d43e4b5c1b20768c6e365fe766de769d892f293e81066",
+        "head_seq": 7
+      },
+      "state": "settled",
+      "stream_status": "complete"
+    }
+  ],
+  "problems": [],
+  "schema": "ouro.ledger.query/1",
+  "snapshot_scope": "independent_per_run"
+}

@@ -1,0 +1,208 @@
+{
+  "changes": [
+    {
+      "left_count": 0,
+      "left_first_record": null,
+      "observation": {
+        "class": "exec",
+        "decision": null,
+        "operation": "proc.exec",
+        "outcome": {
+          "completion": "syscall_return",
+          "errno": "EIO",
+          "ok": false,
+          "return_value": -5
+        },
+        "source": "audit",
+        "stage": "result"
+      },
+      "right_count": 1,
+      "right_first_record": {
+        "provenance": {
+          "peer_birth": "boot:fixture:start:42",
+          "peer_pid": 41200,
+          "peer_uid": 1000,
+          "role": "producer",
+          "token_id": "ffffffffffffffffffffffffffffffff"
+        },
+        "seq": 5
+      }
+    }
+  ],
+  "classes": {
+    "exec": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "fs.deny": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "fs.write": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "limits": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "net": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "proxy.net": {
+      "left_reason": "unobserved",
+      "right_reason": "unobserved",
+      "shared_reason": null,
+      "status": "incomparable"
+    }
+  },
+  "comparison_status": "partial",
+  "complete": true,
+  "left": {
+    "child_protection": "enforced",
+    "complete": true,
+    "coverage": {
+      "classes": {
+        "exec": {
+          "gap_count": 0,
+          "observed_count": 1,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gap_count": 0,
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "gap_count": 0,
+      "scope": "snapshot_run",
+      "selection_status": "unobserved",
+      "status": "by_class"
+    },
+    "local_consistency": true,
+    "problem": null,
+    "run_id": "run_11111111111111111111111111111111",
+    "snapshot": {
+      "head_digest": "sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30",
+      "head_seq": 7
+    },
+    "state": "settled"
+  },
+  "mode": "event_counts",
+  "next_after": "{\"left_run\":\"run_11111111111111111111111111111111\",\"right_run\":\"run_22222222222222222222222222222222\",\"left_head\":{\"head_seq\":7,\"head_digest\":\"sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30\"},\"right_head\":{\"head_seq\":7,\"head_digest\":\"sha256:de3b9ac62e6a1af5b14d43e4b5c1b20768c6e365fe766de769d892f293e81066\"},\"offset\":1}",
+  "right": {
+    "child_protection": "enforced",
+    "complete": true,
+    "coverage": {
+      "classes": {
+        "exec": {
+          "gap_count": 0,
+          "observed_count": 1,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gap_count": 0,
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "gap_count": 0,
+      "scope": "snapshot_run",
+      "selection_status": "unobserved",
+      "status": "by_class"
+    },
+    "local_consistency": true,
+    "problem": null,
+    "run_id": "run_22222222222222222222222222222222",
+    "snapshot": {
+      "head_digest": "sha256:de3b9ac62e6a1af5b14d43e4b5c1b20768c6e365fe766de769d892f293e81066",
+      "head_seq": 7
+    },
+    "state": "settled"
+  },
+  "schema": "ouro.ledger.diff/1",
+  "total_changes": 2
+}
