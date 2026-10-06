@@ -187,7 +187,9 @@ fn class_reason(summary: &Value, class: &str) -> Option<&'static str> {
     {
         return Some("coverage_degraded");
     }
-    if entry["status"] != "active" {
+    if !matches!(coverage["status"].as_str(), Some("by_class" | "active"))
+        || entry["status"] != "active"
+    {
         return Some("unobserved");
     }
     if entry["sources"].as_array().is_none_or(Vec::is_empty) {
@@ -370,6 +372,7 @@ mod tests {
             ("/state", json!("admitted"), "run_not_terminal"),
             ("/complete", json!(false), "incomplete_evidence"),
             ("/coverage/status", json!("degraded"), "coverage_degraded"),
+            ("/coverage/status", json!("unobserved"), "unobserved"),
             ("/coverage/gap_count", json!(1), "coverage_degraded"),
             (
                 "/coverage/classes/exec/gap_count",
