@@ -369,6 +369,8 @@ pub fn serve(data: &Path) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        #[cfg(test)]
+        let _fault_scope = crate::faults::scope(crate::faults::request_kind(&message.request));
         let result = dispatch(
             &mut store,
             &mut capabilities,
@@ -379,6 +381,10 @@ pub fn serve(data: &Path) -> Result<()> {
             Ok(value) => Response::Ok { value },
             Err(error) => Response::Error { message: error.0 },
         };
+        #[cfg(test)]
+        if matches!(response, Response::Ok { .. }) {
+            crate::faults::hit("reply.before_send")?;
+        }
         // A dropped reply never rolls back a persisted request or its receipt.
         let _ = message.reply.try_send(response);
         store.flush_index();

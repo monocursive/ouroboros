@@ -1048,6 +1048,12 @@ The [October 6 writer-outage record](ledger-v1/evidence/2026-10-06-writer-outage
 covers bounded best-effort pending evidence, restart reconciliation, local exit
 failures, conservative unknown outcomes and portable recovered bundles.
 
+The [durability acceptance map](ledger-v1/durability-acceptance.md) links each
+North Star §5.4 property to its executable checks and remaining work. Lifecycle
+matrices cover preparation, owner claim, admission, source append and settlement
+at persistence boundaries. A poisoned preparation retry refuses acknowledgement
+until recovery, just like an ambiguous append.
+
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
 capture truncation. A macOS unit-suite pass is not Linux containment evidence.

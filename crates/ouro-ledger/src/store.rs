@@ -34,6 +34,8 @@ pub(crate) use bundle_replay::replay as replay_bundle;
 mod catalog;
 #[cfg(test)]
 mod intent_tail_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 mod operator;
 mod pending_recovery;
 mod pruning;
@@ -522,6 +524,11 @@ impl Store {
                     "request id already maps to a different prepare payload".into(),
                 ));
             }
+            if !self.stream(run_id)?.poisoned.is_empty() {
+                return Err(LedgerError(
+                    "ambiguous preparation cannot acknowledge before recovery".into(),
+                ));
+            }
             return self.show(run_id);
         }
         if self.recovery_ambiguous {
@@ -829,6 +836,8 @@ impl Store {
         receipt: &AppendReceipt,
         payload_digest: &str,
     ) -> Result<()> {
+        #[cfg(test)]
+        let _fault_scope = crate::faults::scope(record["kind"].as_str().unwrap_or(""));
         let directory = self.root.join(run_id);
         let stream = self.streams.get_mut(run_id).expect("known stream");
         let rotate = stream.segment_bytes > 0
@@ -882,13 +891,26 @@ impl Store {
             file.sync_all()?;
             return Err(std::io::Error::from_raw_os_error(libc::EINTR).into());
         }
+        #[cfg(test)]
+        {
+            crate::faults::hit("event.before_write")?;
+            if crate::faults::active("event.partial_write") {
+                file.write_all(&bytes[..bytes.len() / 2])?;
+                file.sync_all()?;
+                crate::faults::hit("event.partial_write")?;
+            }
+        }
         file.write_all(bytes)?;
         file.write_all(b"\n")?;
+        #[cfg(test)]
+        crate::faults::hit("event.before_sync")?;
         #[cfg(test)]
         if matches!(self.fault, Some(Fault::EventSync)) {
             return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
         }
         file.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("event.after_sync")?;
         let stream = self.streams.get_mut(run_id).expect("known stream");
         apply_record(
             stream,
@@ -914,7 +936,11 @@ impl Store {
         if matches!(self.fault, Some(Fault::DirectorySync)) {
             return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
         }
+        #[cfg(test)]
+        crate::faults::hit("append.before_directory_sync")?;
         File::open(self.root.join(run_id))?.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("append.after_directory_sync")?;
         if self.index.is_some() {
             self.index_pending.insert(run_id.into(), run);
         }
@@ -931,10 +957,18 @@ impl Store {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temp)?;
+        #[cfg(test)]
+        crate::faults::hit("projection.before_write")?;
         file.write_all(&canonical(&serde_json::to_value(run)?)?)?;
         file.write_all(b"\n")?;
+        #[cfg(test)]
+        crate::faults::hit("projection.before_sync")?;
         file.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("projection.before_rename")?;
         fs::rename(temp, dir.join("run.json"))?;
+        #[cfg(test)]
+        crate::faults::hit("projection.before_directory_sync")?;
         File::open(dir)?.sync_all()?;
         Ok(())
     }

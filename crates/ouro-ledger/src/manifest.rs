@@ -185,10 +185,18 @@ pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temp)?;
+        #[cfg(test)]
+        crate::faults::hit("manifest.before_write")?;
         file.write_all(&bytes)?;
         file.write_all(b"\n")?;
+        #[cfg(test)]
+        crate::faults::hit("manifest.before_sync")?;
         file.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("manifest.before_rename")?;
         fs::rename(&temp, &target)?;
+        #[cfg(test)]
+        crate::faults::hit("manifest.before_directory_sync")?;
         File::open(directory)?.sync_all()?;
         Ok(())
     })();

@@ -697,7 +697,10 @@ Bounded catalogs and filtered cross-run queries are implemented. Comparisons
 cover event counts and recorded target labels, retaining coverage and protection;
 they do not establish object or content equivalence. Portable bundles, explicit
 node signing and pinned offline verification are implemented. Best-effort
-recovery and managed authorization remain open; the complete
+writer-outage recovery retains bounded pending evidence and explicit degraded
+coverage. The [durability acceptance map](docs/specs/ledger-v1/durability-acceptance.md)
+tracks the remaining checks. Historical custody and managed authorization
+remain open; the complete
 milestone-2 contract below is not yet implemented.
 
 The ledger joins authorisation and attributed observation into one ordered record,

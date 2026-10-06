@@ -127,6 +127,8 @@ bounded pending evidence for already admitted runs, with explicit degraded
 coverage and conservative missing-exit handling. The full durability gate,
 historical-custody migration and managed project authorization remain open.
 A plain local export does not establish external custody.
+The [durability acceptance map](specs/ledger-v1/durability-acceptance.md) tracks
+lifecycle crash coverage and the remaining pending-journal interruption checks.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
 SQLite run index and reader cursors that survive writer restart. Canonical

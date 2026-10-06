@@ -4,6 +4,8 @@ pub mod comparison;
 pub mod config;
 pub mod daemon;
 pub mod discovery;
+#[cfg(test)]
+mod faults;
 mod manifest;
 mod pending;
 mod projection;
