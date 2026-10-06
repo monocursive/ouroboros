@@ -1297,3 +1297,78 @@ fn real_launch_labels_drive_filtered_discovery_without_changing_replay_identity(
             .all(|r| r.local_consistency)
     );
 }
+
+#[test]
+fn real_target_diff_distinguishes_created_paths_and_preserves_producer_references() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let fixture = Fixture::new(&jail);
+    let mut runs = Vec::new();
+    for name in ["target-left", "target-right"] {
+        let mut command = fixture.command(name, true);
+        command.args(["--", "/bin/sh", "-c", &format!("printf x > {name}")]);
+        let (output, run) = fixture.run(&mut command);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(fixture.workspace.join(name)).unwrap(), b"x");
+        runs.push(run);
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
+    command.arg("--data-dir").arg(&fixture.data).args([
+        "diff",
+        &runs[0].run_id,
+        &runs[1].run_id,
+        "--by",
+        "targets",
+        "--json",
+    ]);
+    let output = Process::spawn(&mut command, true).finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["classes"]["fs.write"]["status"], "comparable");
+    let events = [fixture.events(&runs[0]), fixture.events(&runs[1])];
+    for (side, i) in [("left", 0), ("right", 1)] {
+        assert_eq!(report[side]["child_protection"], "enforced");
+        assert_eq!(report[side]["snapshot"]["head_seq"], runs[i].chain.head_seq);
+    }
+    for (name, side, i) in [("target-left", "left", 0), ("target-right", "right", 1)] {
+        let change = report["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| {
+                change["observation"]["class"] == "fs.write"
+                    && change["observation"]["target"]["path"]["value"] == name
+            })
+            .expect("different created path must appear in target comparison");
+        assert_eq!(
+            change["observation"]["target"]["path"]["kind"],
+            "workspace_relative"
+        );
+        let reference = &change[format!("{side}_first_record")];
+        assert_eq!(reference["provenance"]["role"], "producer");
+        let record = &events[i][reference["seq"].as_u64().unwrap() as usize - 1];
+        assert_eq!(
+            record["fields"]["path"],
+            change["observation"]["target"]["path"]
+        );
+        assert_eq!(record["provenance"], reference["provenance"]);
+    }
+    assert!(
+        fixture
+            .client()
+            .verify(None)
+            .unwrap()
+            .iter()
+            .all(|r| r.local_consistency)
+    );
+}

@@ -67,6 +67,39 @@ def operator_tail_fixtures(validators):
     expect_invalid(validators["tail"], altered, "caught-up tail loses resume position")
 
 
+def target_comparison_fixtures(validators):
+    report = read("diff-target-page.json")
+    validators["diff"].validate(report)
+    assert report["mode"] == "target_counts" and report["total_changes"] == 2
+    assert report["target_scope"]["exec"] == ["proc.exec"]
+    assert report["classes"]["net"]["left_reason"] == "target_comparison_unsupported"
+    assert json.loads(report["next_after"])["mode"] == "target_counts"
+    assert report["changes"][0]["observation"]["target"]["path_basis"] == "argument_snapshot"
+    for key in ["target_scope"]:
+        altered = copy.deepcopy(report)
+        del altered[key]
+        expect_invalid(validators["diff"], altered, "missing target semantics")
+    altered = copy.deepcopy(report)
+    del altered["changes"][0]["observation"]["target"]
+    expect_invalid(validators["diff"], altered, "target comparison without target")
+    altered = copy.deepcopy(report)
+    altered["mode"] = "event_counts"
+    expect_invalid(validators["diff"], altered, "target comparison relabelled as count-only")
+    altered = copy.deepcopy(report)
+    altered["changes"][0]["observation"]["target"]["path"] = {"kind":"unavailable", "reason":"argument_not_read"}
+    expect_invalid(validators["diff"], altered, "unknown path presented as comparable identity")
+    altered = copy.deepcopy(report)
+    altered["changes"][0]["observation"]["target"] = {"kind":"proxy_destination", "destination":"example.test:443"}
+    validators["diff"].validate(altered)
+    altered["changes"][0]["observation"]["target"]["destination"] = ""
+    expect_invalid(validators["diff"], altered, "empty proxy identity")
+    altered = copy.deepcopy(report)
+    altered["right"]["unavailable_targets"] = {"exec":{"count":1,"first_record":{"seq":5,"provenance":report["changes"][0]["left_first_record"]["provenance"]}}}
+    validators["diff"].validate(altered)
+    altered["right"]["unavailable_targets"]["exec"]["count"] = 0
+    expect_invalid(validators["diff"], altered, "zero missing-identity count")
+
+
 def discovery_fixtures(validators):
     catalog = read("catalog-page.json")
     discovery = read("discovery-page.json")
@@ -274,6 +307,7 @@ def main():
     validators = jail.build_validators(jail_schemas | ledger_schemas)
     operator_tail_fixtures(validators)
     discovery_fixtures(validators)
+    target_comparison_fixtures(validators)
     query = read("query-page.json")
     comparison = read("diff-page.json")
     validators["query"].validate(query)

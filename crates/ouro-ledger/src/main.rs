@@ -81,10 +81,13 @@ enum Action {
     },
     /// Read bounded observations from filtered discovery or up to eight explicit runs.
     Query(Box<QueryArgs>),
-    /// Compare covered event counts in two independently verified snapshots.
+    /// Compare covered event counts or recorded targets in two verified snapshots.
     Diff {
         left: String,
         right: String,
+        /// Group by recorded target labels, without claiming object identity.
+        #[arg(long, default_value = "counts", value_parser = ["counts", "targets"])]
+        by: String,
         /// Continue the output page; refuses if either snapshot head changed.
         #[arg(long)]
         after: Option<String>,
@@ -911,16 +914,22 @@ fn execute(cli: Cli) -> Result<i32> {
                 Action::Diff {
                     left,
                     right,
+                    by,
                     after,
                     limit,
                     json,
                 } => {
-                    let report = ouro_ledger::comparison::compare(
+                    let report = ouro_ledger::comparison::compare_mode(
                         &mut client,
                         &left,
                         &right,
                         after.as_deref(),
                         limit,
+                        if by == "targets" {
+                            ouro_ledger::comparison::ComparisonMode::TargetCounts
+                        } else {
+                            ouro_ledger::comparison::ComparisonMode::EventCounts
+                        },
                     )?;
                     let passed = report["complete"] == true;
                     output(&report, json)?;

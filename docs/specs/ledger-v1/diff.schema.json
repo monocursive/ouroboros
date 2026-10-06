@@ -5,7 +5,10 @@
       "const": "ouro.ledger.diff/1"
     },
     "mode": {
-      "const": "event_counts"
+      "enum": [
+        "event_counts",
+        "target_counts"
+      ]
     },
     "comparison_status": {
       "enum": [
@@ -122,6 +125,9 @@
                     "type": "null"
                   }
                 ]
+              },
+              "target": {
+                "$ref": "#/$defs/target"
               }
             },
             "required": [
@@ -174,6 +180,27 @@
           "type": "null"
         }
       ]
+    },
+    "target_scope": {
+      "const": {
+        "identity": "recorded_labels",
+        "exec": [
+          "proc.exec"
+        ],
+        "fs.write": [
+          "fs.create",
+          "fs.write",
+          "fs.rename",
+          "fs.unlink"
+        ],
+        "fs.deny": [
+          "fs.deny"
+        ],
+        "proxy.net": [
+          "net.connect",
+          "net.dns"
+        ]
+      }
     }
   },
   "required": [
@@ -191,7 +218,7 @@
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ouro:schema:ledger-diff:1",
-  "title": "Bounded comparison of covered source event counts; not entity equivalence",
+  "title": "Bounded comparison of covered event counts or recorded target labels",
   "$defs": {
     "summary": {
       "type": "object",
@@ -252,6 +279,136 @@
               "type": "null"
             }
           ]
+        },
+        "unavailable_targets": {
+          "type": "object",
+          "properties": {
+            "exec": {
+              "type": "object",
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "first_record": {
+                  "type": "object",
+                  "properties": {
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "provenance": {
+                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                    }
+                  },
+                  "required": [
+                    "seq",
+                    "provenance"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "count",
+                "first_record"
+              ],
+              "additionalProperties": false
+            },
+            "fs.write": {
+              "type": "object",
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "first_record": {
+                  "type": "object",
+                  "properties": {
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "provenance": {
+                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                    }
+                  },
+                  "required": [
+                    "seq",
+                    "provenance"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "count",
+                "first_record"
+              ],
+              "additionalProperties": false
+            },
+            "fs.deny": {
+              "type": "object",
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "first_record": {
+                  "type": "object",
+                  "properties": {
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "provenance": {
+                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                    }
+                  },
+                  "required": [
+                    "seq",
+                    "provenance"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "count",
+                "first_record"
+              ],
+              "additionalProperties": false
+            },
+            "proxy.net": {
+              "type": "object",
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "first_record": {
+                  "type": "object",
+                  "properties": {
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "provenance": {
+                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                    }
+                  },
+                  "required": [
+                    "seq",
+                    "provenance"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "count",
+                "first_record"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -283,7 +440,9 @@
                 "run_not_terminal",
                 "coverage_degraded",
                 "unobserved",
-                "source_unspecified"
+                "source_unspecified",
+                "target_comparison_unsupported",
+                "target_identity_unavailable"
               ]
             },
             {
@@ -299,7 +458,9 @@
                 "run_not_terminal",
                 "coverage_degraded",
                 "unobserved",
-                "source_unspecified"
+                "source_unspecified",
+                "target_comparison_unsupported",
+                "target_identity_unavailable"
               ]
             },
             {
@@ -349,6 +510,144 @@
           "type": "null"
         }
       ]
+    },
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "path"
+            },
+            "path_basis": {
+              "type": "string",
+              "minLength": 1
+            },
+            "path": {
+              "allOf": [
+                {
+                  "$ref": "urn:ouro:schema:ledger-source:1#/$defs/path"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "workspace_relative",
+                        "scratch_relative",
+                        "digest"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "path2": {
+              "allOf": [
+                {
+                  "$ref": "urn:ouro:schema:ledger-source:1#/$defs/path"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "workspace_relative",
+                        "scratch_relative",
+                        "digest"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "action": {},
+            "attempted_operation": {}
+          },
+          "required": [
+            "kind",
+            "path_basis",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "proxy_destination"
+            },
+            "destination": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "destination"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "target_counts"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "target_scope"
+        ],
+        "properties": {
+          "left": {
+            "required": [
+              "unavailable_targets"
+            ]
+          },
+          "right": {
+            "required": [
+              "unavailable_targets"
+            ]
+          },
+          "changes": {
+            "items": {
+              "properties": {
+                "observation": {
+                  "required": [
+                    "target"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "target_scope"
+          ]
+        },
+        "properties": {
+          "changes": {
+            "items": {
+              "properties": {
+                "observation": {
+                  "not": {
+                    "required": [
+                      "target"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

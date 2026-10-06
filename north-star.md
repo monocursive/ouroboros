@@ -683,7 +683,7 @@ refusal, and violation halves of `sandbox.ex`, and `core.md` §7.
 
 ## 5. `ouro-ledger`
 
-Implementation status 2026-09-30: the [first local execution slice](docs/specs/ledger-v1.md)
+Implementation status 2026-10-06: the [local ledger implementation](docs/specs/ledger-v1.md)
 provides a durable single writer, preparation and replay identities, gated Linux
 launch ownership, source ingestion, settlement, bounded opt-in output capture,
 inspection, verification and orphan reconciliation. Its schema is not frozen.
@@ -693,8 +693,11 @@ operator holds and persistent history/capture retention policies are implemented
 Independent operator assertions use a separate effect lifecycle, and live tail
 preserves canonical bytes across rotation and writer restart. Operator decisions
 do not replace launch-owner admission, settlement or jail observations.
-Cross-run query, comparisons, signed bundles, best-effort recovery and managed authorization remain
-open; the complete milestone-2 contract below is not yet implemented.
+Bounded catalogs and filtered cross-run queries are implemented. Comparisons
+cover event counts and recorded target labels, retaining coverage and protection;
+they do not establish object or content equivalence. Bundles, signatures,
+best-effort recovery and managed authorization remain open; the complete
+milestone-2 contract below is not yet implemented.
 
 The ledger joins authorisation and attributed observation into one ordered record,
 keeps that record outside a contained child's write authority, and separates

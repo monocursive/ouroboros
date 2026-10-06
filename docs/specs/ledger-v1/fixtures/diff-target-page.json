@@ -1,0 +1,238 @@
+{
+  "changes": [
+    {
+      "left_count": 1,
+      "left_first_record": {
+        "provenance": {
+          "peer_birth": "boot:fixture:start:42",
+          "peer_pid": 41200,
+          "peer_uid": 1000,
+          "role": "producer",
+          "token_id": "ffffffffffffffffffffffffffffffff"
+        },
+        "seq": 5
+      },
+      "observation": {
+        "class": "exec",
+        "decision": null,
+        "operation": "proc.exec",
+        "outcome": {
+          "completion": "syscall_return",
+          "errno": "ENOENT",
+          "ok": false,
+          "return_value": -2
+        },
+        "source": "audit",
+        "stage": "result",
+        "target": {
+          "kind": "path",
+          "path": {
+            "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "digest",
+            "reason": "outside_known_roots"
+          },
+          "path_basis": "argument_snapshot"
+        }
+      },
+      "right_count": 0,
+      "right_first_record": null
+    }
+  ],
+  "classes": {
+    "exec": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "fs.deny": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "fs.write": {
+      "left_reason": null,
+      "right_reason": null,
+      "shared_reason": null,
+      "status": "comparable"
+    },
+    "limits": {
+      "left_reason": "target_comparison_unsupported",
+      "right_reason": "target_comparison_unsupported",
+      "shared_reason": null,
+      "status": "incomparable"
+    },
+    "net": {
+      "left_reason": "target_comparison_unsupported",
+      "right_reason": "target_comparison_unsupported",
+      "shared_reason": null,
+      "status": "incomparable"
+    },
+    "proxy.net": {
+      "left_reason": "unobserved",
+      "right_reason": "unobserved",
+      "shared_reason": null,
+      "status": "incomparable"
+    }
+  },
+  "comparison_status": "partial",
+  "complete": true,
+  "left": {
+    "child_protection": "enforced",
+    "complete": true,
+    "coverage": {
+      "classes": {
+        "exec": {
+          "gap_count": 0,
+          "observed_count": 1,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gap_count": 0,
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "gap_count": 0,
+      "scope": "snapshot_run",
+      "selection_status": "unobserved",
+      "status": "by_class"
+    },
+    "local_consistency": true,
+    "problem": null,
+    "run_id": "run_11111111111111111111111111111111",
+    "snapshot": {
+      "head_digest": "sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0",
+      "head_seq": 7
+    },
+    "state": "settled",
+    "unavailable_targets": {}
+  },
+  "mode": "target_counts",
+  "next_after": "{\"left_run\":\"run_11111111111111111111111111111111\",\"right_run\":\"run_22222222222222222222222222222222\",\"left_head\":{\"head_seq\":7,\"head_digest\":\"sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0\"},\"right_head\":{\"head_seq\":7,\"head_digest\":\"sha256:8a4afde6c150630091683d839780d99508076571c9a6b843eefe852710770bef\"},\"offset\":1,\"mode\":\"target_counts\"}",
+  "right": {
+    "child_protection": "enforced",
+    "complete": true,
+    "coverage": {
+      "classes": {
+        "exec": {
+          "gap_count": 0,
+          "observed_count": 1,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gap_count": 0,
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "gap_count": 0,
+      "scope": "snapshot_run",
+      "selection_status": "unobserved",
+      "status": "by_class"
+    },
+    "local_consistency": true,
+    "problem": null,
+    "run_id": "run_22222222222222222222222222222222",
+    "snapshot": {
+      "head_digest": "sha256:8a4afde6c150630091683d839780d99508076571c9a6b843eefe852710770bef",
+      "head_seq": 7
+    },
+    "state": "settled",
+    "unavailable_targets": {}
+  },
+  "schema": "ouro.ledger.diff/1",
+  "target_scope": {
+    "exec": [
+      "proc.exec"
+    ],
+    "fs.deny": [
+      "fs.deny"
+    ],
+    "fs.write": [
+      "fs.create",
+      "fs.write",
+      "fs.rename",
+      "fs.unlink"
+    ],
+    "identity": "recorded_labels",
+    "proxy.net": [
+      "net.connect",
+      "net.dns"
+    ]
+  },
+  "total_changes": 2
+}

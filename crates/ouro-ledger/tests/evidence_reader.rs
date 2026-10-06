@@ -1115,3 +1115,125 @@ fn discovered_query_reports_corrupt_history_and_empty_selection_separately() {
     assert_eq!(corrupt["page"]["local_consistency"], false);
     assert_eq!(corrupt["page"]["stream_status"], "incomplete");
 }
+
+#[test]
+fn target_diff_finds_changed_paths_with_equal_counts_and_binds_mode_across_restart() {
+    let mut fixture = Fixture::new(records());
+    let mut altered = fixture.records.clone();
+    altered[4]["fields"]["path"] = json!({"kind":"workspace_relative","value":"other-executable"});
+    fixture.add_run(OTHER_RUN, altered);
+    let counts = fixture.run(&["diff", RUN, OTHER_RUN, "--json"]);
+    assert!(counts.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&counts.stdout).unwrap()["changes"],
+        json!([])
+    );
+    let args = [
+        "diff", RUN, OTHER_RUN, "--by", "targets", "--limit", "1", "--json",
+    ];
+    let result = fixture.run(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let first: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(first["mode"], "target_counts");
+    assert_eq!(first["total_changes"], 2);
+    assert_eq!(first["classes"]["exec"]["status"], "comparable");
+    let after = first["next_after"].as_str().unwrap();
+    fixture.restart();
+    let mut next = args.to_vec();
+    next.extend(["--after", after]);
+    let second = fixture.run(&next);
+    assert!(second.status.success());
+    let second: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second["next_after"], Value::Null);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fixture.run(&next).stdout).unwrap(),
+        second
+    );
+    let mut kinds = Vec::new();
+    for page in [&first, &second] {
+        let change = &page["changes"][0];
+        kinds.push(
+            change["observation"]["target"]["path"]["kind"]
+                .as_str()
+                .unwrap(),
+        );
+        let reference = if change["left_count"] == 1 {
+            &change["left_first_record"]
+        } else {
+            &change["right_first_record"]
+        };
+        assert_eq!(reference["seq"], 5);
+        assert_eq!(reference["provenance"]["role"], "producer");
+        assert_eq!(
+            change["observation"]["target"]["path_basis"],
+            "argument_snapshot"
+        );
+    }
+    kinds.sort();
+    assert_eq!(kinds, vec!["digest", "workspace_relative"]);
+    let wrong_mode = fixture.run(&[
+        "diff", RUN, OTHER_RUN, "--after", after, "--limit", "1", "--json",
+    ]);
+    assert!(!wrong_mode.status.success());
+    assert!(String::from_utf8_lossy(&wrong_mode.stderr).contains("comparison mode"));
+    let body = fixture.temp.path().join("target-head-note.json");
+    fs::write(&body, b"{}").unwrap();
+    assert!(
+        fixture
+            .run(&[
+                "append",
+                "--run",
+                RUN,
+                "--request-id",
+                "target-head-change",
+                "--kind",
+                "note",
+                "--body-file",
+                body.to_str().unwrap()
+            ])
+            .status
+            .success()
+    );
+    let changed = fixture.run(&next);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("snapshot changed"));
+}
+
+#[test]
+fn target_diff_reports_unavailable_identity_and_refuses_corrupt_evidence() {
+    use std::io::Write as _;
+    let mut fixture = Fixture::new(records());
+    let mut altered = fixture.records.clone();
+    altered[4]["fields"]["path"] = json!({"kind":"unavailable","reason":"argument_not_read"});
+    altered[4]["fields"]["path_complete"] = json!(false);
+    fixture.add_run(OTHER_RUN, altered);
+    let args = ["diff", RUN, OTHER_RUN, "--by", "targets", "--json"];
+    let result = fixture.run(&args);
+    assert!(result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["complete"], true);
+    assert_eq!(
+        report["classes"]["exec"]["right_reason"],
+        "target_identity_unavailable"
+    );
+    assert_eq!(report["right"]["unavailable_targets"]["exec"]["count"], 1);
+    assert_eq!(report["changes"], json!([]));
+    OpenOptions::new()
+        .append(true)
+        .open(&fixture.stream)
+        .unwrap()
+        .write_all(b"unexpected\n")
+        .unwrap();
+    let result = fixture.run(&args);
+    assert!(!result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["complete"], false);
+    assert_eq!(
+        report["classes"]["exec"]["left_reason"],
+        "incomplete_evidence"
+    );
+}

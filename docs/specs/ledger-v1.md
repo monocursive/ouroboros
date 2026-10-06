@@ -494,6 +494,35 @@ and refuses if either head or the ordered run selection changed. The position
 is not authority and conveys no additional retention pin; ordinary reader pins
 and expiry still apply. Snapshots are taken independently when each read starts.
 
+`diff A B --by targets --json` additionally groups observations by their stored
+**target labels**, using `mode: target_counts`. Default `--by counts` retains the
+existing count-only behavior and output shape. Both retain the complete source
+outcome, operation, stage and decision in each key. Target positions also bind
+the comparison mode; a position from one mode cannot continue another.
+
+`target_scope` records the supported operations: executable paths for `proc.exec`,
+filesystem paths for create/write/unlink/deny, both ordered endpoints for rename
+(including denied rename), and original proxy destination strings. Path kinds,
+byte-valued path representations, digest reasons and `path_basis` are preserved
+exactly, along with optional `action` and `attempted_operation` fields. No path
+normalization, host resolution or decoding of digested external names occurs.
+Workspace and scratch labels remain relative to each run's own roots. Equal
+labels do not establish the same file, executable image, content or remote peer.
+Process IDs, timestamps, proxy request IDs and resolved proxy addresses are not
+target keys. Process exits have no executable target observation and are outside
+this mode; audit network and limit classes are explicitly unsupported for target
+comparison. Count-only mode still compares those observations when covered.
+
+A missing, unavailable or incomplete required path (including either rename
+endpoint), or a missing/empty proxy destination, makes that entire class
+incomparable for target mode. Each side reports `unavailable_targets` with the
+count and first canonical sequence/provenance reference for affected classes.
+This does not alter the original coverage report. Healthy classes can still be
+compared; an empty change list must be read with the per-class status. Oversized
+target keys fail under the existing 8 KiB key/8 MiB aggregate budgets, never get
+truncated or silently omitted. The ordinary snapshot, corruption, read budget,
+output pagination and protection rules above apply to both modes.
+
 `export RUN --ndjson` reads all records, including preparation and owner intents.
 It writes the exact stored canonical UTF-8 bytes and LF delimiters to stdout,
 without reserialization, new fields or a new hash chain. No receipt side files,
@@ -854,7 +883,7 @@ The [contract validator](ledger-v1/validate_contract.py) checks versioned schema
 and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
-unimplemented verbs/features: entity-level comparison, `bundle`,
+unimplemented verbs/features: `bundle`,
 best-effort outage reconciliation, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,

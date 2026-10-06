@@ -115,9 +115,10 @@ cancellation, owner death and writer loss. `wait` reads the durable outcome;
 `cancel` requests a stop and leaves final settlement to the owner.
 
 The [ledger specification](specs/ledger-v1.md) names its current acceptance and
-limits. The complete milestone remains open: cross-run queries, comparisons,
-signed bundles, best-effort recovery and managed project authorization
-are still planned. A plain local export does not establish external custody.
+limits. Bounded run catalogs, filtered cross-run queries, event-count comparisons
+and comparisons of recorded target labels are implemented. Bundles, signatures,
+best-effort recovery and managed project authorization remain planned. The complete
+milestone is still open. A plain local export does not establish external custody.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
 SQLite run index and reader cursors that survive writer restart. Canonical
