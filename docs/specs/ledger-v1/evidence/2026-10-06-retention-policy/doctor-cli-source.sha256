@@ -1,0 +1,3 @@
+f76160ffcaa50fbc6abc90d5589e1045579850a6100ed885f2074981a8666081  crates/ouro-ledger/src/main.rs
+52528deb318c3d434f3e0cc9abe2386e88074bf9b5d3e389824cd18d4628e686  crates/ouro-ledger/src/config.rs
+f0bc42ba1097392144d705ba385a087867925857249338cb06ba290234afad08  crates/ouro-ledger/tests/cli_local.rs

@@ -1,0 +1,15 @@
+   Compiling ouro-ledger v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-ledger)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.86s
+     Running tests/cli_local.rs (target/debug/deps/cli_local-7df34e08dc78ea9c)
+
+running 7 tests
+test doctor_does_not_start_a_session_writer ... ok
+test gc_cli_prunes_aged_fixture_history_and_preserves_preparation_identity_after_restart ... ok
+test locked_disposable_index_does_not_delay_the_next_daemon_request ... ok
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+test retention_cli_persists_holds_and_preview_never_starts_or_mutates_a_writer ... ok
+test writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.23s
+

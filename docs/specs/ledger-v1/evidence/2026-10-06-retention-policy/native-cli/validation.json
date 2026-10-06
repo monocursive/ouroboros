@@ -1,0 +1,12 @@
+{
+  "revision": "2dd1c3b4",
+  "source": "source.sha256",
+  "source_check": "source-check.log",
+  "platform": "x86_64-unknown-linux-gnu",
+  "umask": "0002",
+  "cli_tests_passed": 7,
+  "config_tests_passed": 1,
+  "failed": 0,
+  "ignored": 0,
+  "scope": "actual CLI/daemon/store tests; actual jailed detached smoke is separate"
+}

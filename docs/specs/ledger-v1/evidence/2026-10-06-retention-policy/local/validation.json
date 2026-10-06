@@ -1,0 +1,10 @@
+{
+  "revision": "d25f1329b7df62933431565487e26e333ebf98c1",
+  "target": "aarch64-apple-darwin",
+  "validation_exit": 0,
+  "passed": 1135,
+  "failed": 0,
+  "ignored": 7,
+  "result_count": 83,
+  "scope": "portable workspace; Linux runtime tests excluded on macOS"
+}

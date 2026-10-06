@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "doctor_reports_writer_policy": true,
+  "run_id": "run_68b71a8c0d164f1faf7b00ec1bcf996e",
+  "configured_history_days": 23,
+  "configured_capture_days": 2,
+  "one_execution": true,
+  "captured_bytes": 8,
+  "truncated": true,
+  "recent_history_and_captures_preserved": true,
+  "running_policy_unchanged_after_file_edit": true,
+  "binary_sha256": {
+    "ouro-ledger": "293a22bc4eb7c07f77f82f21711d05dfc7f0d6c83a0831238b449b1e87fa7ba1",
+    "ouro-jail": "4815f26e064140ba1e2e97d6d3d05d880d0e07b3968d17daf873bd71e3d1775c"
+  }
+}

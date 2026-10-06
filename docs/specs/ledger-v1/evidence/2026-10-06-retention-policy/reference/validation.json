@@ -1,0 +1,29 @@
+{
+  "revision": "2dd1c3b4e2e4ee11eb4ce99fe9fec3110ad1a265",
+  "target": "x86_64-unknown-linux-gnu",
+  "conformance": true,
+  "summary": "conformance PASS 20261006T091939Z-2dd1c3b4e2e4",
+  "passed": 1883,
+  "failed": 0,
+  "ignored": 16,
+  "result_count": 83,
+  "runtime_skips": [],
+  "ignored_scope": "Evidence generators, subprocess helpers invoked by driver tests, external Unicode dataset, and one documentation example. No live capability skips.",
+  "build": {
+    "debug_assertions": false,
+    "dirty": false,
+    "inputs": "sha256:d5a0e965cfba1184b72d88370771812dd9544d31a52316bec75e4a4b15b881b6",
+    "opt_level": "3",
+    "revision": "2dd1c3b4e2e4ee11eb4ce99fe9fec3110ad1a265",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "target": "x86_64-unknown-linux-gnu"
+  },
+  "gate_counts": {
+    "credential": 1,
+    "elsewhere": 4,
+    "pass": 39,
+    "pass+limits": 7
+  },
+  "all_noncredential_gates_pass": false,
+  "gate_scope": "Linux lane passes; four gates include macOS-only clauses and A01 still needs a real agent. Seven passing gates have recorded limits."
+}

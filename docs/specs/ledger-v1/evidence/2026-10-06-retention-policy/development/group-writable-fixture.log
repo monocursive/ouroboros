@@ -1,0 +1,33 @@
+   Compiling toml_edit v0.22.27
+   Compiling ouro-records v0.1.0 (/home/ubuntu/retention-policy-20261006-9af59b47/crates/ouro-records)
+   Compiling toml v0.8.23
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/retention-policy-20261006-9af59b47/crates/ouro-ledger)
+   Compiling ouro-fixture v0.1.0 (/home/ubuntu/retention-policy-20261006-9af59b47/crates/ouro-fixture)
+    Finished `release` profile [optimized] target(s) in 50.93s
+     Running tests/cli_local.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/cli_local-de855bf46b07ab05)
+
+running 7 tests
+test doctor_does_not_start_a_session_writer ... ok
+test gc_cli_prunes_aged_fixture_history_and_preserves_preparation_identity_after_restart ... ok
+test locked_disposable_index_does_not_delay_the_next_daemon_request ... ok
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+test retention_cli_persists_holds_and_preview_never_starts_or_mutates_a_writer ... ok
+test writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart ... FAILED
+
+failures:
+
+---- writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart stdout ----
+
+thread 'writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart' (3764579) panicked at crates/ouro-ledger/tests/cli_local.rs:364:17:
+writer exited exit status: 1: ouro-ledger: retention config must be an owned regular file without group/other write access
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+error: test failed, to rerun pass `-p ouro-ledger --test cli_local`

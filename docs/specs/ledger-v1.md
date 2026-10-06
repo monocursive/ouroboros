@@ -597,7 +597,8 @@ and SQLite index can be rebuilt from canonical history and the capture anchor.
 while capture deletion is pending; completed capture expiry permits later holds,
 notes and eventual whole-run pruning. It does not change canonical activity time.
 The capture anchors remain after whole-run pruning so loss or reappearance is
-still detectable. Existing `none` protection labels remain unchanged.
+still detectable. Downgrading these stores to a writer that does not understand
+capture-pruning anchors is unsupported. Existing `none` protection labels remain unchanged.
 
 Capture receipts describe the original inventory, not bytes removed by a retry.
 After completed capture expiry, subsequent previews report `captures_pruned`
@@ -624,6 +625,9 @@ covers multi-segment continuity, rotation failures and reader restoration.
 The [October 5 pruning record](ledger-v1/evidence/2026-10-05-pruning/README.md)
 covers hold/reader retention, deletion boundaries, retained replay identities,
 changed-file refusal and actual CLI pruning of a synthetic aged run.
+The [October 6 retention-policy record](ledger-v1/evidence/2026-10-06-retention-policy/README.md)
+adds persistent settings, capture-only deletion/recovery and a real detached
+launch using a custom policy on the VPS.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

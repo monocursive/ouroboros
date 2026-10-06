@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "run_id": "run_86d16aadd65642e5861f16a63dc61277",
+  "configured_history_days": 23,
+  "configured_capture_days": 2,
+  "one_execution": true,
+  "captured_bytes": 8,
+  "truncated": true,
+  "recent_history_and_captures_preserved": true,
+  "running_policy_unchanged_after_file_edit": true,
+  "binary_sha256": {
+    "ouro-ledger": "4b6360f7241d186da7961ec840052ce59ee236a51aaa9b66c39dede5c84df842",
+    "ouro-jail": "4815f26e064140ba1e2e97d6d3d05d880d0e07b3968d17daf873bd71e3d1775c"
+  }
+}

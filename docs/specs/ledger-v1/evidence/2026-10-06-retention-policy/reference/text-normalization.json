@@ -1,0 +1,12 @@
+{
+  "gates.txt": {
+    "normalization": "Remove trailing spaces and tabs only",
+    "artifact_sha256": "456370d8f5251aaab69e8aeada598ecc08c5a2c5804c5f578327ba65bbf602f3",
+    "committed_sha256": "f331a660da7272c8cd39f95b80c5dacf2a76c538a2433744d06554a3cd982bd5"
+  },
+  "host-manifest.txt": {
+    "normalization": "Remove trailing spaces and tabs only",
+    "artifact_sha256": "e725070bcb7e70d691a4bc3664ddf4666e296bcc87cbd1403b7c2cc4d61b4c49",
+    "committed_sha256": "c6affffaa1c71f23b3eb7673529e38667708918ef8a440ae618a87bbead9e7ab"
+  }
+}

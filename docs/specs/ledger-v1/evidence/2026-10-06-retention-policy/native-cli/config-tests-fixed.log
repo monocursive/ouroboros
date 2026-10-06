@@ -1,0 +1,9 @@
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/retention-policy-20261006-9af59b47/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 34.47s
+     Running unittests src/lib.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/ouro_ledger-4598bfa53f39a6a1)
+
+running 1 test
+test config::tests::config_is_bounded_strict_and_does_not_silently_default_invalid_retention ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 72 filtered out; finished in 0.00s
+

@@ -1,0 +1,248 @@
+warning[duplicate]: found 2 duplicate entries for crate 'base64'
+   ┌─ /Users/monocursive/code/ouroboros/Cargo.lock:10:1
+   │  
+10 │ ╭ base64 0.22.1 registry+https://github.com/rust-lang/crates.io-index
+11 │ │ base64 0.23.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰───────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ base64 v0.22.1
+     ├── ouro-jail v0.1.0
+     │   └── xtask v0.1.0
+     └── ouro-records v0.1.0
+         ├── ouro-jail v0.1.0 (*)
+         └── ouro-ledger v0.1.0
+   ├ base64 v0.23.1
+     └── pem v4.0.0
+         └── rcgen v0.14.10
+             └── ouro-jail v0.1.0
+                 └── xtask v0.1.0
+
+warning[duplicate]: found 3 duplicate entries for crate 'getrandom'
+   ┌─ /Users/monocursive/code/ouroboros/Cargo.lock:43:1
+   │  
+43 │ ╭ getrandom 0.2.17 registry+https://github.com/rust-lang/crates.io-index
+44 │ │ getrandom 0.3.4 registry+https://github.com/rust-lang/crates.io-index
+45 │ │ getrandom 0.4.3 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ getrandom v0.2.17
+     └── ring v0.17.14
+         ├── rcgen v0.14.10
+         │   └── ouro-jail v0.1.0
+         │       └── xtask v0.1.0
+         ├── rustls v0.23.45
+         │   └── ouro-jail v0.1.0 (*)
+         └── rustls-webpki v0.103.15
+             └── rustls v0.23.45 (*)
+   ├ getrandom v0.3.4
+     ├── ahash v0.8.12
+     │   ├── jsonschema v0.57.0
+     │   │   ├── (dev) ouro-jail v0.1.0
+     │   │   │   └── xtask v0.1.0
+     │   │   └── ouro-ledger v0.1.0
+     │   ├── jsonschema-value v0.57.0
+     │   │   └── jsonschema v0.57.0 (*)
+     │   └── referencing v0.57.0
+     │       └── jsonschema v0.57.0 (*)
+     ├── jsonschema v0.57.0 (*)
+     ├── jsonschema-value v0.57.0 (*)
+     └── referencing v0.57.0 (*)
+   ├ getrandom v0.4.3
+     ├── tempfile v3.27.0
+     │   ├── (dev) ouro-fixture v0.1.0
+     │   │   ├── (dev) ouro-jail v0.1.0
+     │   │   │   └── xtask v0.1.0
+     │   │   └── (dev) ouro-ledger v0.1.0
+     │   ├── (dev) ouro-jail v0.1.0 (*)
+     │   ├── (dev) ouro-ledger v0.1.0 (*)
+     │   └── (dev) xtask v0.1.0 (*)
+     └── uuid v1.26.1
+         ├── ouro-jail v0.1.0 (*)
+         └── ouro-ledger v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'hashbrown'
+   ┌─ /Users/monocursive/code/ouroboros/Cargo.lock:46:1
+   │  
+46 │ ╭ hashbrown 0.16.1 registry+https://github.com/rust-lang/crates.io-index
+47 │ │ hashbrown 0.17.1 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰──────────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ hashbrown v0.16.1
+     └── rsqlite-vfs v0.1.1
+         └── sqlite-wasm-rs v0.5.5
+             └── rusqlite v0.40.2
+                 └── ouro-ledger v0.1.0
+   ├ hashbrown v0.17.1
+     ├── hashlink v0.12.2
+     │   └── rusqlite v0.40.2
+     │       └── ouro-ledger v0.1.0
+     ├── indexmap v2.14.2
+     │   └── toml_edit v0.22.27
+     │       ├── ouro-jail v0.1.0
+     │       │   └── xtask v0.1.0
+     │       └── toml v0.8.23
+     │           ├── ouro-jail v0.1.0 (*)
+     │           ├── ouro-ledger v0.1.0 (*)
+     │           └── xtask v0.1.0 (*)
+     └── referencing v0.57.0
+         └── jsonschema v0.57.0
+             ├── (dev) ouro-jail v0.1.0 (*)
+             └── ouro-ledger v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'r-efi'
+   ┌─ /Users/monocursive/code/ouroboros/Cargo.lock:87:1
+   │  
+87 │ ╭ r-efi 5.3.0 registry+https://github.com/rust-lang/crates.io-index
+88 │ │ r-efi 6.0.0 registry+https://github.com/rust-lang/crates.io-index
+   │ ╰─────────────────────────────────────────────────────────────────┘ lock entries
+   │  
+   ├ r-efi v5.3.0
+     └── getrandom v0.3.4
+         ├── ahash v0.8.12
+         │   ├── jsonschema v0.57.0
+         │   │   ├── (dev) ouro-jail v0.1.0
+         │   │   │   └── xtask v0.1.0
+         │   │   └── ouro-ledger v0.1.0
+         │   ├── jsonschema-value v0.57.0
+         │   │   └── jsonschema v0.57.0 (*)
+         │   └── referencing v0.57.0
+         │       └── jsonschema v0.57.0 (*)
+         ├── jsonschema v0.57.0 (*)
+         ├── jsonschema-value v0.57.0 (*)
+         └── referencing v0.57.0 (*)
+   ├ r-efi v6.0.0
+     └── getrandom v0.4.3
+         ├── tempfile v3.27.0
+         │   ├── (dev) ouro-fixture v0.1.0
+         │   │   ├── (dev) ouro-jail v0.1.0
+         │   │   │   └── xtask v0.1.0
+         │   │   └── (dev) ouro-ledger v0.1.0
+         │   ├── (dev) ouro-jail v0.1.0 (*)
+         │   ├── (dev) ouro-ledger v0.1.0 (*)
+         │   └── (dev) xtask v0.1.0 (*)
+         └── uuid v1.26.1
+             ├── ouro-jail v0.1.0 (*)
+             └── ouro-ledger v0.1.0 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'syn'
+    ┌─ /Users/monocursive/code/ouroboros/Cargo.lock:119:1
+    │  
+119 │ ╭ syn 2.0.119 registry+https://github.com/rust-lang/crates.io-index
+120 │ │ syn 3.0.6 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰───────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ syn v2.0.119
+      └── strum_macros v0.28.0
+          └── strum v0.28.0
+              └── jsonschema v0.57.0
+                  ├── (dev) ouro-jail v0.1.0
+                  │   └── xtask v0.1.0
+                  └── ouro-ledger v0.1.0
+    ├ syn v3.0.6
+      ├── clap_derive v4.6.7
+      │   └── clap v4.6.7
+      │       ├── ouro-fixture v0.1.0
+      │       │   ├── (dev) ouro-jail v0.1.0
+      │       │   │   └── xtask v0.1.0
+      │       │   └── (dev) ouro-ledger v0.1.0
+      │       ├── ouro-jail v0.1.0 (*)
+      │       ├── ouro-ledger v0.1.0 (*)
+      │       └── xtask v0.1.0 (*)
+      ├── ref-cast-impl v1.0.27
+      │   └── ref-cast v1.0.27
+      │       └── fluent-uri v0.4.1
+      │           └── referencing v0.57.0
+      │               └── jsonschema v0.57.0
+      │                   ├── (dev) ouro-jail v0.1.0 (*)
+      │                   └── ouro-ledger v0.1.0 (*)
+      ├── serde_derive v1.0.229
+      │   └── serde v1.0.229
+      │       ├── ahash v0.8.12
+      │       │   ├── jsonschema v0.57.0 (*)
+      │       │   ├── jsonschema-value v0.57.0
+      │       │   │   └── jsonschema v0.57.0 (*)
+      │       │   └── referencing v0.57.0 (*)
+      │       ├── email_address v0.2.9
+      │       │   └── jsonschema v0.57.0 (*)
+      │       ├── fluent-uri v0.4.1 (*)
+      │       ├── jsonschema v0.57.0 (*)
+      │       ├── ouro-fixture v0.1.0 (*)
+      │       ├── ouro-jail v0.1.0 (*)
+      │       ├── ouro-ledger v0.1.0 (*)
+      │       ├── ouro-records v0.1.0
+      │       │   ├── ouro-jail v0.1.0 (*)
+      │       │   └── ouro-ledger v0.1.0 (*)
+      │       ├── serde_spanned v0.6.9
+      │       │   ├── toml v0.8.23
+      │       │   │   ├── ouro-jail v0.1.0 (*)
+      │       │   │   ├── ouro-ledger v0.1.0 (*)
+      │       │   │   └── xtask v0.1.0 (*)
+      │       │   └── toml_edit v0.22.27
+      │       │       ├── ouro-jail v0.1.0 (*)
+      │       │       └── toml v0.8.23 (*)
+      │       ├── toml v0.8.23 (*)
+      │       ├── toml_datetime v0.6.11
+      │       │   ├── toml v0.8.23 (*)
+      │       │   └── toml_edit v0.22.27 (*)
+      │       ├── toml_edit v0.22.27 (*)
+      │       └── xtask v0.1.0 (*)
+      ├── thiserror-impl v2.0.21
+      │   └── thiserror v2.0.21
+      │       └── rsqlite-vfs v0.1.1
+      │           └── sqlite-wasm-rs v0.5.5
+      │               └── rusqlite v0.40.2
+      │                   └── ouro-ledger v0.1.0 (*)
+      └── wasm-bindgen-macro-support v0.2.128
+          └── wasm-bindgen-macro v0.2.128
+              └── wasm-bindgen v0.2.128
+                  ├── getrandom v0.3.4
+                  │   ├── ahash v0.8.12 (*)
+                  │   ├── jsonschema v0.57.0 (*)
+                  │   ├── jsonschema-value v0.57.0 (*)
+                  │   └── referencing v0.57.0 (*)
+                  ├── js-sys v0.3.105
+                  │   ├── getrandom v0.3.4 (*)
+                  │   └── sqlite-wasm-rs v0.5.5 (*)
+                  └── sqlite-wasm-rs v0.5.5 (*)
+
+warning[duplicate]: found 2 duplicate entries for crate 'windows-sys'
+    ┌─ /Users/monocursive/code/ouroboros/Cargo.lock:148:1
+    │  
+148 │ ╭ windows-sys 0.52.0 registry+https://github.com/rust-lang/crates.io-index
+149 │ │ windows-sys 0.61.2 registry+https://github.com/rust-lang/crates.io-index
+    │ ╰────────────────────────────────────────────────────────────────────────┘ lock entries
+    │  
+    ├ windows-sys v0.52.0
+      └── ring v0.17.14
+          ├── rcgen v0.14.10
+          │   └── ouro-jail v0.1.0
+          │       └── xtask v0.1.0
+          ├── rustls v0.23.45
+          │   └── ouro-jail v0.1.0 (*)
+          └── rustls-webpki v0.103.15
+              └── rustls v0.23.45 (*)
+    ├ windows-sys v0.61.2
+      ├── anstyle-query v1.1.5
+      │   └── anstream v1.0.0
+      │       └── clap_builder v4.6.7
+      │           └── clap v4.6.7
+      │               ├── ouro-fixture v0.1.0
+      │               │   ├── (dev) ouro-jail v0.1.0
+      │               │   │   └── xtask v0.1.0
+      │               │   └── (dev) ouro-ledger v0.1.0
+      │               ├── ouro-jail v0.1.0 (*)
+      │               ├── ouro-ledger v0.1.0 (*)
+      │               └── xtask v0.1.0 (*)
+      ├── anstyle-wincon v3.0.11
+      │   └── anstream v1.0.0 (*)
+      ├── errno v0.3.14
+      │   └── rustix v1.1.5
+      │       └── tempfile v3.27.0
+      │           ├── (dev) ouro-fixture v0.1.0 (*)
+      │           ├── (dev) ouro-jail v0.1.0 (*)
+      │           ├── (dev) ouro-ledger v0.1.0 (*)
+      │           └── (dev) xtask v0.1.0 (*)
+      ├── rustix v1.1.5 (*)
+      └── tempfile v3.27.0 (*)
+
+advisories ok, bans ok, licenses ok

@@ -1,0 +1,18 @@
+{
+  "revision": "2dd1c3b4e2e4ee11eb4ce99fe9fec3110ad1a265",
+  "branch": "dev",
+  "source_snapshot": "source.sha256",
+  "pi_status": "offline",
+  "pi_last_seen_utc": "2026-10-06T05:40:00.1Z",
+  "conformance_run": "https://github.com/monocursive/ouroboros/actions/runs/37441425131",
+  "rust_run": "https://github.com/monocursive/ouroboros/actions/runs/37441425168",
+  "contracts_run": "https://github.com/monocursive/ouroboros/actions/runs/37441425173",
+  "doctor_cli_followup_revision": "9af59b476df714f772891e2f03fd28ac835ec7c1",
+  "initial_workspace_revision": "d25f1329b7df62933431565487e26e333ebf98c1",
+  "native_followup_source": "native-cli/source.sha256",
+  "source_snapshot_scope": "Tracked repository files at implementation revision, before final evidence, spec links, and tested-freeze metadata",
+  "source_postcheck": "source-postcheck.log",
+  "followup_source": "doctor-cli-source.sha256",
+  "reference_validation": "reference/validation.json",
+  "reference_conclusion": "success"
+}
