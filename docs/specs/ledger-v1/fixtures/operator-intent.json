@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.ledger.event/1",
+  "run_id": "run_11111111111111111111111111111111",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "seq": 2,
+  "prev": "sha256:995d8cffb5c2ab694a06451e7633a30230a77d6c65d3842acd3811a029cbcba6",
+  "received_at": "2026-09-30T12:00:00Z",
+  "provenance": {
+    "role": "operator",
+    "peer_uid": 1000,
+    "peer_pid": 41200,
+    "peer_birth": "boot:fixture:start:42",
+    "token_id": null
+  },
+  "kind": "operator_intent",
+  "request_id": "operator-decision-1",
+  "body": {
+    "kind": "admitted",
+    "fields": {
+      "reason": "operator-approved fixture"
+    }
+  },
+  "effect_id": "external-effect-1"
+}

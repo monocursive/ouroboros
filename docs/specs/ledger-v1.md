@@ -15,6 +15,7 @@ detached batch ownership on a provisioned Linux systemd user manager, rotating
 canonical segments, durable replay anchors, a rebuildable SQLite projection and
 restartable reader cursors. Operator holds, a bounded retention preview and
 whole-run pruning with retained replay identities and chain anchors are available.
+Independent operator intents and resumable live tail are also available.
 Linux execution is the acceptance target. macOS clients can read the local
 protocol and verify stores, but native launch ownership currently refuses because
 its birth-identity mechanism has not been implemented.
@@ -33,8 +34,9 @@ refuse. This is local same-user operator authority, not managed tenant isolation
 
 Linux sockets authenticate uid and pid with `SO_PEERCRED`. The daemon reads the
 peer's `/proc/<pid>/stat` start time and boot id and stores those as birth
-identity. Request bodies cannot select a role or an actor. `prepare` and orphan
-reconciliation are authenticated operator requests; `show`, `runs`, `verify` and
+identity. Request bodies cannot select a role or an actor. `prepare`, independent
+`append` and orphan reconciliation are authenticated operator requests;
+`show`, `runs`, `tail`, `verify` and
 `doctor` have reader authority. Managed project-scoped access decisions are a
 later milestone and are not provided by these same-user roles.
 
@@ -191,6 +193,50 @@ ouro-ledger --data-dir "$HOME/.local/share/ouro-batch" wait RUN_ID --json
 This is local operator authority on Linux. Remote callers can invoke the CLI
 over their existing SSH access; restricted managed ingress, project ACLs,
 artifact transfer and the managed submission client remain separate work.
+
+### 3.2 Independent operator intents
+
+`append --run RUN --request-id ID --kind admitted|denied|settled|note
+[--effect ID] --body-file FILE [--json]` records an explicit operator assertion.
+Its canonical kind is `operator_intent`; `body.kind` names the operator decision
+and `body.fields` preserves the supplied JSON object. The writer derives
+`provenance.role: operator` and the authenticated peer identity. No capability
+token is needed or accepted on this same-user operator interface.
+
+These assertions do not authorize a jail launch, change run state, settle the
+launch owner's attempt, update coverage/protection, or become source events.
+For example, an operator `settled` assertion about a report does not mean the
+contained command finished. Owner admission and settlement still require their
+existing authenticated lifecycle and corroborating jail receipts. Inspection
+and export distinguish the two kinds of record without inferring execution.
+
+Lifecycle decisions require an effect id. An effect can be admitted then settled,
+or denied before admission. Repeated or conflicting decisions under new request
+ids refuse; a retry of the same request and exact immutable payload returns the
+original `{seq, digest}`, even after later decisions and writer restart. Notes
+may omit an effect id; supplying one reserves a single note identity for that
+effect. Operator effect indexes cannot collide with caller request ids or owner
+effect indexes. Request ids remain unique across a run's mutations.
+
+An admitted operator effect without settlement protects both history and
+captures from GC (`operator_effect_pending`), including after restart. A note
+cannot clear that protection. Once settled, the ordinary retention rules apply.
+Pruning retains prior intent receipts for identical retries and refuses new
+intents. This assertion mechanism does not provide external custody or prove
+that an external effect happened.
+
+The CLI reads at most 64 KiB of JSON; the writer independently bounds the
+canonical body to 64 KiB. The body must be an object and cannot supply reserved
+identity fields (`actor`, `role`, `provenance`, `run_id`, `attempt_id`, `seq`,
+`prev`, `received_at`, `token_id`). Explicit operator metadata is stored as
+provided; no process environment, argv or model payload is captured automatically.
+Ambiguous writes use the existing poisoning and recovery barriers. Preserve the
+request id and exact body when retrying an uncertain result.
+
+The [append request schema](ledger-v1/append-request.schema.json) and
+[canonical record schema](ledger-v1/record.schema.json) describe this interface.
+Writers predating `operator_intent` cannot read these records and must not write
+such stores.
 
 ## 4. Store and canonical record
 
@@ -432,6 +478,49 @@ The [read request schema](ledger-v1/read-request.schema.json),
 interface. Their fixtures are document contracts, not a production contract
 freeze or proof of an external custody boundary.
 
+### 7.1 Live tail
+
+`tail RUN [--cursor CURSOR] [--json]` returns one bounded page from the beginning
+or the supplied byte position. `tail -f RUN` polls for later records until
+interrupted; `--timeout SECONDS` optionally bounds that follow interval.
+It follows after launch settlement too, because later operator records remain
+possible. It connects to the existing writer and never starts a writer as a
+side effect of reading. Transport loss may end the command; resume explicitly
+with the last fully consumed page's cursor after the writer is available again.
+
+Each JSON page carries the observed head, launch state, bounded coverage,
+protection, local consistency, canonical `ndjson` fragments and `next_cursor`.
+`--json` emits one page per line; default output is formatted JSON. Idle follow
+polls do not repeatedly print empty pages. Concatenating the `ndjson` fields
+preserves exact canonical bytes, including source provenance and sequence.
+`scanned_through_seq` counts fully emitted records; a page can end within a
+record. Consume or discard each page as a whole, and save its cursor only after
+its output is committed to your sink. A cursor is a position, not a new snapshot
+or a bearer credential. Retrying it reads the same prefix but may include later
+appends and a newer head.
+
+The reader returns at most 64 KiB of UTF-8 fragments, reads at most 32 frames
+and normally scans at most 128 KiB per call. One larger legal record is verified
+whole (at most the existing 1 MiB frame bound) before emitting any of its bytes;
+subsequent fragments reverify it. Positions bind the run, completed sequence and
+digest, plus a partial record's digest and UTF-8 byte boundary. They survive
+segment rotation and writer restart without storing payloads or checkpoint files.
+Each read validates at most the existing 4,096 segment identities. Following
+uses bounded polling instead of occupying the writer queue with a waiting read.
+
+`caught_up` means only that this page reached the head observed by that call.
+`stream_status: complete` describes a terminal launch record, not success or an
+immutable final history. Local consistency covers the returned bytes against
+the writer's accepted history; prior bytes skipped by a cursor are not freshly
+reverified. Use `verify` for a whole-history check. Damaged bytes, unsafe files,
+unexpected trailing data, poisoned streams and uncorroborated positions refuse
+explicitly. This reader does not pin retention: use an operator hold if history
+must remain available. Pruning between polls causes refusal, never silent
+skipping or a reset to another stream.
+
+The [tail request](ledger-v1/tail-request.schema.json) and
+[tail page](ledger-v1/tail.schema.json) schemas describe these bounded reads.
+
 ## 8. Retention policies, holds and pruning
 
 `hold RUN [--request-id ID]` and `release RUN [--request-id ID]` append canonical
@@ -643,8 +732,7 @@ The [contract validator](ledger-v1/validate_contract.py) checks versioned schema
 and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
-unimplemented verbs/features: `append` for independent operator intents,
-`tail`, cross-run query and comparison, `diff`, `bundle`,
+unimplemented verbs/features: cross-run query and comparison, `diff`, `bundle`,
 best-effort outage reconciliation, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,

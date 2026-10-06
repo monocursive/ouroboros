@@ -458,7 +458,7 @@ pub(crate) fn snapshot_labels_digest(child_protection: &str, coverage: &Value) -
     durable_digest(&json!({"child_protection":child_protection,"coverage":coverage}))
 }
 
-fn selection_status(filter: &ReadFilter, coverage: &Value) -> &'static str {
+pub(crate) fn selection_status(filter: &ReadFilter, coverage: &Value) -> &'static str {
     let classes: &[&str] = match filter.selector {
         ReadSelector::All => &["exec", "fs.write", "fs.deny", "net", "limits", "proxy.net"],
         ReadSelector::Execs => &["exec"],

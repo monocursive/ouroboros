@@ -29,8 +29,12 @@ use crate::protocol::{
 use crate::manifest::{self, STREAM};
 
 mod capture_pruning;
+#[cfg(test)]
+mod intent_tail_tests;
+mod operator;
 mod pruning;
 mod retention;
+mod tail;
 
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -1596,7 +1600,7 @@ fn validate_transition(stream: &Stream, record: &Value) -> Result<()> {
         return Err(LedgerError("duplicate preparation".into()));
     }
     if let Some(effect_id) = record["effect_id"].as_str() {
-        let effect_key = format!("effect:{kind}:{effect_id}");
+        let effect_key = operator::effect_key(record, effect_id);
         if let Some(previous) = stream.replay.get(&effect_key) {
             if previous.digest != digest(record)? {
                 return Err(LedgerError(
@@ -1609,6 +1613,7 @@ fn validate_transition(stream: &Stream, record: &Value) -> Result<()> {
         }
     }
     match kind {
+        "operator_intent" => operator::validate(stream, record)?,
         "admitted" | "denied" if stream.run.state != "prepared" => {
             return Err(LedgerError(
                 "admission or refusal is only valid from prepared".into(),
@@ -1694,13 +1699,9 @@ fn apply_record(
     };
     stream.replay.insert(request_id.into(), replay.clone());
     if let Some(effect_id) = record["effect_id"].as_str() {
-        stream.replay.insert(
-            format!(
-                "effect:{}:{effect_id}",
-                record["kind"].as_str().unwrap_or("")
-            ),
-            replay,
-        );
+        stream
+            .replay
+            .insert(operator::effect_key(record, effect_id), replay);
     }
     stream.run.chain = Chain {
         head_seq: receipt.seq,
@@ -2148,7 +2149,7 @@ mod tests {
         )
     }
 
-    fn gc_fixture() -> (tempfile::TempDir, Store, RunRecord) {
+    pub(super) fn gc_fixture() -> (tempfile::TempDir, Store, RunRecord) {
         gc_fixture_captures(&[("stdout", b"private-capture")])
     }
 
@@ -2198,7 +2199,7 @@ mod tests {
         (temp, store, run)
     }
 
-    fn gc_future() -> SystemTime {
+    pub(super) fn gc_future() -> SystemTime {
         SystemTime::now() + std::time::Duration::from_secs(2 * 86_400)
     }
 

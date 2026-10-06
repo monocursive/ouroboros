@@ -34,6 +34,39 @@ def expect_invalid(validator, instance, label):
     assert not validator.is_valid(instance), f"invalid fixture accepted: {label}"
 
 
+def operator_tail_fixtures(validators):
+    request = read("append-request.json")
+    record = read("operator-intent.json")
+    validators["append-request"].validate(request)
+    validators["record"].validate(record)
+    assert record["body"]["fields"] == request["intent"]["body"]
+    for role in ["owner", "producer"]:
+        altered = copy.deepcopy(record)
+        altered["provenance"]["role"] = role
+        expect_invalid(validators["record"], altered, "operator intent role forgery")
+    for key in ["actor", "role", "provenance", "run_id", "attempt_id", "seq", "prev", "received_at", "token_id"]:
+        altered = copy.deepcopy(request)
+        altered["intent"]["body"][key] = "forged"
+        expect_invalid(validators["append-request"], altered, "caller identity")
+    for kind in ["admitted", "denied", "settled"]:
+        altered = copy.deepcopy(request)
+        altered["intent"].update(kind=kind, effect_id=None)
+        expect_invalid(validators["append-request"], altered, "effect lifecycle without identity")
+    for kind in ["owner_claimed", "source", "outcome_unknown", "hold"]:
+        altered = copy.deepcopy(request)
+        altered["intent"]["kind"] = kind
+        expect_invalid(validators["append-request"], altered, "operator attempts owner mutation")
+    page = read("tail-page.json")
+    validators["tail"].validate(page)
+    validators["tail-request"].validate({"run_id":page["run_id"], "cursor":page["next_cursor"]})
+    assert len(page["ndjson"].encode()) <= 65536
+    assert page["head"]["head_digest"] == digest(record)
+    assert page["ndjson"].encode() == rfc8785.dumps(record) + b"\n"
+    altered = copy.deepcopy(page)
+    altered["next_cursor"] = None
+    expect_invalid(validators["tail"], altered, "caught-up tail loses resume position")
+
+
 def reader_fixtures(validators, records, run):
     request = read("read-request.json")
     page = read("read-page.json")
@@ -185,6 +218,7 @@ def main():
     ledger_schemas = jail.load_schemas(ROOT)
     assert not set(jail_schemas) & set(ledger_schemas)
     validators = jail.build_validators(jail_schemas | ledger_schemas)
+    operator_tail_fixtures(validators)
     request = read("request.json")
     detached = copy.deepcopy(request)
     detached["owner_lifetime"] = "systemd_user_service"

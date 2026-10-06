@@ -28,8 +28,8 @@ use uuid::Uuid;
 use crate::{
     protocol::{
         AppendReceipt, ClaimedOwner, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
-        MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Request, Response, Result, RunRecord,
-        VerifyReport,
+        MAX_FRAME_BYTES, OperatorIntent, Peer, ReadPage, ReadRequest, Request, Response, Result,
+        RunRecord, TailPage, TailRequest, VerifyReport,
     },
     store::Store,
 };
@@ -81,6 +81,16 @@ impl Client {
     }
     pub fn ping(&mut self) -> Result<Value> {
         self.request(Request::Ping)
+    }
+    pub fn append(&mut self, intent: &OperatorIntent) -> Result<AppendReceipt> {
+        self.request(Request::Append {
+            intent: intent.clone(),
+        })
+    }
+    pub fn tail(&mut self, request: &TailRequest) -> Result<TailPage> {
+        self.request(Request::Tail {
+            request: request.clone(),
+        })
     }
     pub fn prepare(&mut self, request_id: &str, payload: &Value) -> Result<RunRecord> {
         self.request(Request::Prepare {
@@ -361,6 +371,10 @@ fn dispatch(
     peer: &Peer,
 ) -> Result<Value> {
     match request {
+        Request::Append { intent } => {
+            Ok(serde_json::to_value(store.append_operator(&intent, peer)?)?)
+        }
+        Request::Tail { request } => Ok(serde_json::to_value(store.tail(&request)?)?),
         Request::Prepare {
             request_id,
             payload,

@@ -248,8 +248,49 @@ pub struct ReadPage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorIntent {
+    pub run_id: String,
+    pub request_id: String,
+    pub kind: String,
+    pub effect_id: Option<String>,
+    pub body: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TailRequest {
+    pub run_id: String,
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TailPage {
+    pub schema: String,
+    pub run_id: String,
+    pub head: Chain,
+    pub state: String,
+    pub child_protection: String,
+    pub coverage: Value,
+    pub local_consistency: bool,
+    pub stream_status: String,
+    /// Exact canonical fragments; concatenate pages, including partial records.
+    pub ndjson: String,
+    pub next_cursor: String,
+    pub caught_up: bool,
+    pub scanned_through_seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    Append {
+        intent: OperatorIntent,
+    },
+    Tail {
+        request: TailRequest,
+    },
     Prepare {
         request_id: String,
         payload: Value,

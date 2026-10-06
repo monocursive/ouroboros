@@ -149,6 +149,16 @@ impl Store {
             if !stream.run.holds.is_empty() {
                 reasons.push("operator_hold");
             }
+            if stream.replay.keys().any(|key| {
+                key.strip_prefix("effect:operator/admitted:")
+                    .is_some_and(|effect| {
+                        !stream
+                            .replay
+                            .contains_key(&format!("effect:operator/settled:{effect}"))
+                    })
+            }) {
+                reasons.push("operator_effect_pending");
+            }
             match stream
                 .last_activity_at
                 .as_deref()

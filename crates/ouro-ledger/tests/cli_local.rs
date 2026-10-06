@@ -616,3 +616,184 @@ fn prepare_cli_refuses_raw_metadata_without_persisting_it() {
     }
     assert_consistent_unlaunched_report(&cli.json(&["verify", "--json"]), run_id);
 }
+
+#[test]
+fn operator_cli_and_follow_tail_preserve_bytes_across_late_appends_and_restart() {
+    use ouro_ledger::{daemon::Client, protocol::OperatorIntent};
+    let mut cli = LocalCli::new();
+    assert!(
+        !cli.invoke(&["tail", "run_00000000000000000000000000000000", "--json"])
+            .status
+            .success()
+    );
+    assert!(!cli.data.join("ledger").exists());
+    let writer = cli.start_writer();
+    let run = successful_preparation(&cli.prepare("tail-cli", &fixture_request()));
+    let run_id = run["run_id"].as_str().unwrap();
+    let body = cli.temp.path().join("body.json");
+    fs::write(&body, b"{\"message\":\"intent fixture\"}").unwrap();
+    let args = [
+        "append",
+        "--run",
+        run_id,
+        "--request-id",
+        "cli-admit",
+        "--kind",
+        "admitted",
+        "--effect",
+        "effect-1",
+        "--body-file",
+        body.to_str().unwrap(),
+        "--json",
+    ];
+    let receipt = cli.json(&args);
+    assert_eq!(cli.json(&args), receipt);
+    let first = cli.json(&["tail", run_id, "--json"]);
+    assert!(first["caught_up"].as_bool().unwrap());
+    assert_eq!(first["state"], "prepared");
+    assert_eq!(first["child_protection"], "unprotected");
+    drop(writer);
+    let _writer = cli.start_writer();
+    assert_eq!(cli.json(&args), receipt);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let stdout = cli.temp.path().join("follow.stdout");
+    let stderr = cli.temp.path().join("follow.stderr");
+    let mut follower = Process(
+        cli.command()
+            .args([
+                "tail",
+                run_id,
+                "--cursor",
+                cursor,
+                "--follow",
+                "--timeout",
+                "2",
+                "--json",
+            ])
+            .stdout(Stdio::from(private_file(&stdout)))
+            .stderr(Stdio::from(private_file(&stderr)))
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + WAIT_LIMIT;
+    while fs::metadata(&stdout).unwrap().len() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "tail did not flush its initial page"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut client = Client::connect(&cli.data).unwrap();
+    client
+        .append(&OperatorIntent {
+            run_id: run_id.into(),
+            request_id: "cli-settle".into(),
+            kind: "settled".into(),
+            effect_id: Some("effect-1".into()),
+            body: json!({"result":"external assertion"}),
+        })
+        .unwrap();
+    loop {
+        if let Some(status) = follower.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "tail did not honor timeout");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fs::read(&stderr).unwrap().is_empty());
+    let pages = fs::read_to_string(&stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .collect::<Vec<_>>();
+    assert!(pages.len() >= 2);
+    let mut combined = first["ndjson"].as_str().unwrap().to_owned();
+    for page in &pages {
+        combined.push_str(page["ndjson"].as_str().unwrap());
+    }
+    assert_eq!(
+        combined.as_bytes(),
+        fs::read(
+            cli.data
+                .join("ledger")
+                .join(run_id)
+                .join("events-0001.ndjson")
+        )
+        .unwrap()
+    );
+    let last = pages.last().unwrap();
+    let resumed = cli.json(&[
+        "tail",
+        run_id,
+        "--cursor",
+        last["next_cursor"].as_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(resumed["ndjson"], "");
+    assert_eq!(cli.json(&["show", run_id, "--json"])["state"], "prepared");
+    assert!(
+        cli.json(&["verify", run_id, "--json"])[0]["local_consistency"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(!cli.data.join("ledger/readers").exists());
+}
+
+#[test]
+fn concurrent_operator_ingress_and_lost_reply_keep_one_sequence_per_identity() {
+    use ouro_ledger::{
+        daemon::{Client, write_frame},
+        protocol::{OperatorIntent, Request},
+    };
+    let mut cli = LocalCli::new();
+    let _writer = cli.start_writer();
+    let run = successful_preparation(&cli.prepare("concurrent-operator", &fixture_request()));
+    let run_id = run["run_id"].as_str().unwrap().to_owned();
+    let request = OperatorIntent {
+        run_id: run_id.clone(),
+        request_id: "lost-reply".into(),
+        kind: "note".into(),
+        effect_id: Some("lost-effect".into()),
+        body: json!({"note":"retry fixture"}),
+    };
+    let mut socket = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
+    write_frame(
+        &mut socket,
+        &Request::Append {
+            intent: request.clone(),
+        },
+    )
+    .unwrap();
+    drop(socket);
+    // The disconnected request and the concurrent retries race through the real queue.
+    let handles = (0..8)
+        .map(|_| {
+            let data = cli.data.clone();
+            let request = request.clone();
+            thread::spawn(move || Client::connect(&data).unwrap().append(&request).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let receipts = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect::<Vec<_>>();
+    assert!(receipts.iter().all(|r| r == &receipts[0]));
+    assert_eq!(receipts[0].seq, 2);
+    assert_eq!(
+        cli.json(&["show", &run_id, "--json"])["chain"]["head_seq"],
+        2
+    );
+    let mut forged = serde_json::to_value(Request::Append { intent: request }).unwrap();
+    forged["intent"]["actor"] = json!("owner");
+    let mut socket = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
+    socket.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+    write_frame(&mut socket, &forged).unwrap();
+    assert!(
+        ouro_ledger::daemon::read_frame::<ouro_ledger::protocol::Response>(&mut socket).is_err()
+    );
+    assert_eq!(
+        cli.json(&["show", &run_id, "--json"])["chain"]["head_seq"],
+        2
+    );
+}

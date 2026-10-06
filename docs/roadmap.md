@@ -133,6 +133,9 @@ segments and captures with restart recovery. The
 failure boundaries and platform evidence. The writer now loads persistent retention settings at startup. Captures can
 expire earlier than canonical history through explicit GC, with independent
 inventories, restart recovery and preserved event queries.
+Independent operator intents now have replay-safe effect decisions and protect
+pending effects from retention. Live tail follows bounded canonical fragments
+across rotation and writer restart without changing launch-owner authority.
 
 ## Later: submit work to a team worker
 

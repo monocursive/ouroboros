@@ -83,7 +83,8 @@
             "note",
             "outcome_unknown",
             "hold",
-            "release"
+            "release",
+            "operator_intent"
           ]
         },
         "request_id": {
@@ -244,6 +245,97 @@
                 "effect_id"
               ]
             }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "operator_intent"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "properties": {
+                  "role": {
+                    "const": "operator"
+                  },
+                  "token_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "admitted",
+                      "denied",
+                      "settled",
+                      "note"
+                    ]
+                  },
+                  "fields": {
+                    "type": "object",
+                    "propertyNames": {
+                      "not": {
+                        "enum": [
+                          "actor",
+                          "role",
+                          "provenance",
+                          "run_id",
+                          "attempt_id",
+                          "seq",
+                          "prev",
+                          "received_at",
+                          "token_id"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "fields"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "effect_id"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "body": {
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "admitted",
+                            "denied",
+                            "settled"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "effect_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
           }
         }
       ]

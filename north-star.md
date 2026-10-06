@@ -690,6 +690,9 @@ inspection, verification and orphan reconciliation. Its schema is not frozen.
 Bounded single-run queries preserve source records and their evidence labels;
 plain NDJSON export preserves exact canonical bytes. Rotation, recoverable pruning,
 operator holds and persistent history/capture retention policies are implemented.
+Independent operator assertions use a separate effect lifecycle, and live tail
+preserves canonical bytes across rotation and writer restart. Operator decisions
+do not replace launch-owner admission, settlement or jail observations.
 Cross-run query, comparisons, signed bundles, best-effort recovery and managed authorization remain
 open; the complete milestone-2 contract below is not yet implemented.
 

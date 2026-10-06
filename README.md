@@ -183,6 +183,9 @@ records admission durably before releasing the jail's execution gate, stores
 source events and settlement, and supports `runs`, `show`, `verify`, and
 `settle-orphans`. Bounded single-run queries retain the stored source events and
 their evidence labels; NDJSON export preserves the exact canonical record bytes.
+Operator `append` records independent assertions and effect decisions without
+changing launch state. `tail -f RUN --json` follows canonical records with
+resumable byte positions and explicit coverage/protection labels.
 Output capture is opt-in and bounded. Linux owns execution;
 macOS supports local store inspection. The jail still works independently.
 

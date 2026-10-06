@@ -1,0 +1,12 @@
+{
+  "op": "append",
+  "intent": {
+    "run_id": "run_11111111111111111111111111111111",
+    "request_id": "operator-decision-1",
+    "kind": "admitted",
+    "effect_id": "external-effect-1",
+    "body": {
+      "reason": "operator-approved fixture"
+    }
+  }
+}

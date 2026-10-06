@@ -7,7 +7,10 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use ouro_ledger::{
     daemon,
-    protocol::{LedgerError, ReadFilter, ReadRequest, ReadSelector, ReadStage, Result},
+    protocol::{
+        LedgerError, OperatorIntent, ReadFilter, ReadRequest, ReadSelector, ReadStage, Result,
+        TailRequest,
+    },
     runner, service,
 };
 use serde_json::{Value, json};
@@ -83,6 +86,10 @@ enum Action {
     Query(Box<QueryArgs>),
     /// Stream an exact canonical snapshot; status is written to stderr.
     Export(Box<ExportArgs>),
+    /// Append an attributed operator assertion; never changes launch state.
+    Append(AppendArgs),
+    /// Read bounded canonical fragments, optionally following later appends.
+    Tail(TailArgs),
     /// Verify canonical bytes, hash chains, and durable projections.
     Verify {
         run_id: Option<String>,
@@ -121,6 +128,116 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Args)]
+struct AppendArgs {
+    #[arg(long)]
+    run: String,
+    /// Reuse the same identity and body when retrying an uncertain outcome.
+    #[arg(long)]
+    request_id: String,
+    #[arg(long, value_parser = ["admitted", "denied", "settled", "note"])]
+    kind: String,
+    /// Required for effect lifecycle decisions; optional for notes.
+    #[arg(long)]
+    effect: Option<String>,
+    /// Explicit operator metadata, limited to a 64 KiB JSON object.
+    #[arg(long)]
+    body_file: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct TailArgs {
+    run_id: String,
+    #[arg(short = 'f', long)]
+    follow: bool,
+    /// Resume at the next byte after the last fully consumed page.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Stop following after this many seconds; default follows until interrupted.
+    #[arg(long, requires = "follow", value_parser = clap::value_parser!(u64).range(1..=86400))]
+    timeout: Option<u64>,
+    /// Emit one JSON page per line, including provenance-preserving NDJSON fragments.
+    #[arg(long)]
+    json: bool,
+}
+
+fn append_command(data: &std::path::Path, args: AppendArgs) -> Result<i32> {
+    use std::io::Read as _;
+    let result = (|| -> Result<()> {
+        // Validate input size before bootstrapping a writer or making a mutation.
+        let mut bytes = Vec::new();
+        std::fs::File::open(&args.body_file)?
+            .take(65_537)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 65_536 {
+            return Err(LedgerError("operator body exceeds 64 KiB bound".into()));
+        }
+        let body = serde_json::from_slice(&bytes)?;
+        let mut client = runner::connect_or_start(data)?;
+        let receipt = client.append(&OperatorIntent {
+            run_id: args.run.clone(),
+            request_id: args.request_id.clone(),
+            kind: args.kind,
+            effect_id: args.effect,
+            body,
+        })?;
+        output(
+            &json!({"operation":"append","run_id":args.run,"request_id":args.request_id,"receipt":receipt}),
+            args.json,
+        )
+    })();
+    result.map_err(|e| {
+        LedgerError(format!(
+            "append request {}: {e}; inspect or retry with the same request id and body",
+            args.request_id
+        ))
+    })?;
+    Ok(0)
+}
+
+fn tail_command(data: &std::path::Path, args: TailArgs) -> Result<i32> {
+    use std::{
+        io::Write as _,
+        time::{Duration, Instant},
+    };
+    let mut request = TailRequest {
+        run_id: args.run_id,
+        cursor: args.cursor,
+    };
+    let mut client = daemon::Client::connect(data)?;
+    let started = Instant::now();
+    let mut first = true;
+    loop {
+        let page = match client.tail(&request) {
+            Ok(page) => page,
+            Err(_) => {
+                // Retry from the same byte on the existing writer only. Never
+                // start a replacement writer or silently reset to a new stream.
+                client = daemon::Client::connect(data)?;
+                client.tail(&request)?
+            }
+        };
+        if first || !page.ndjson.is_empty() {
+            output(&serde_json::to_value(&page)?, args.json)?;
+            std::io::stdout().flush()?;
+        }
+        first = false;
+        request.cursor = Some(page.next_cursor);
+        if !args.follow
+            || args
+                .timeout
+                .is_some_and(|s| started.elapsed() >= Duration::from_secs(s))
+        {
+            return Ok(0);
+        }
+        if page.caught_up {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
 }
 
 #[derive(Args)]
@@ -454,7 +571,7 @@ fn execute(cli: Cli) -> Result<i32> {
     match cli.command {
         Action::Version { json } => {
             output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1"},"schema_frozen":false,"execution_platform":"linux"}),
+                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1"},"schema_frozen":false,"execution_platform":"linux"}),
                 json,
             )?;
             Ok(0)
@@ -484,6 +601,8 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Action::Hold(args) => retention_command(&data, args, true),
+        Action::Append(args) => append_command(&data, args),
+        Action::Tail(args) => tail_command(&data, args),
         Action::Release(args) => retention_command(&data, args, false),
         Action::Gc {
             dry_run,
@@ -660,7 +779,11 @@ fn execute(cli: Cli) -> Result<i32> {
                 | Action::Owner { .. }
                 | Action::Wait { .. }
                 | Action::Cancel { .. } => unreachable!(),
-                Action::Hold(_) | Action::Release(_) | Action::Gc { .. } => unreachable!(),
+                Action::Append(_)
+                | Action::Tail(_)
+                | Action::Hold(_)
+                | Action::Release(_)
+                | Action::Gc { .. } => unreachable!(),
             }
             Ok(0)
         }

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-append-request:1",
+  "title": "Authenticated operator assertion",
+  "type": "object",
+  "properties": {
+    "op": {
+      "const": "append"
+    },
+    "intent": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9a-f]{32}$"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.:-]+$"
+        },
+        "kind": {
+          "enum": [
+            "admitted",
+            "denied",
+            "settled",
+            "note"
+          ]
+        },
+        "effect_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.:-]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body": {
+          "type": "object",
+          "propertyNames": {
+            "not": {
+              "enum": [
+                "actor",
+                "role",
+                "provenance",
+                "run_id",
+                "attempt_id",
+                "seq",
+                "prev",
+                "received_at",
+                "token_id"
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "run_id",
+        "request_id",
+        "kind",
+        "effect_id",
+        "body"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "admitted",
+                  "denied",
+                  "settled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effect_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "required": [
+    "op",
+    "intent"
+  ],
+  "additionalProperties": false
+}

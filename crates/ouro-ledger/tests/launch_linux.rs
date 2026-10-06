@@ -1034,3 +1034,92 @@ fn detached_writer_death_fails_closed_without_starting_a_session_writer() {
     fixture.client().settle_orphans().unwrap();
     fixture.assert_unknown(&run.run_id);
 }
+
+#[test]
+fn operator_intents_and_live_tail_preserve_real_jail_ownership_and_source_bytes() {
+    use ouro_ledger::protocol::{OperatorIntent, TailRequest};
+    use serde_json::json;
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let fixture = Fixture::new(&jail);
+    let mut command = fixture.command("operator-tail-real", true);
+    command.args(["--", "/bin/sh", "-c", "printf started > started; while test ! -f release; do sleep 0.05; done; printf x >> executions"]);
+    let mut process = Process::spawn(&mut command, true);
+    let run = fixture.wait_started(&mut process);
+    let mut client = fixture.client();
+    for kind in ["admitted", "settled"] {
+        client
+            .append(&OperatorIntent {
+                run_id: run.run_id.clone(),
+                request_id: format!("external-{kind}"),
+                kind: kind.into(),
+                effect_id: Some("external-work".into()),
+                body: json!({"operator_assertion":true}),
+            })
+            .unwrap();
+    }
+    let still_running = client.show(&run.run_id).unwrap();
+    assert_eq!(still_running.state, "admitted");
+    assert_eq!(still_running.owner, run.owner);
+    assert!(process.child.try_wait().unwrap().is_none());
+    let mut request = TailRequest {
+        run_id: run.run_id.clone(),
+        cursor: None,
+    };
+    let mut streamed = String::new();
+    loop {
+        let page = client.tail(&request).unwrap();
+        streamed.push_str(&page.ndjson);
+        request.cursor = Some(page.next_cursor);
+        if page.caught_up {
+            break;
+        }
+    }
+    fs::write(fixture.workspace.join("release"), b"go").unwrap();
+    let output = process.finish();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settled: RunRecord = serde_json::from_slice(&output.stdout).unwrap();
+    loop {
+        let page = client.tail(&request).unwrap();
+        assert_eq!(page.child_protection, "enforced");
+        assert_eq!(page.state, "settled");
+        assert!(page.local_consistency);
+        streamed.push_str(&page.ndjson);
+        request.cursor = Some(page.next_cursor);
+        if page.caught_up {
+            break;
+        }
+    }
+    let original = fs::read(
+        fixture
+            .data
+            .join("ledger")
+            .join(&run.run_id)
+            .join("events-0001.ndjson"),
+    )
+    .unwrap();
+    assert_eq!(streamed.as_bytes(), original);
+    let events = fixture.events(&settled);
+    assert!(events.iter().any(
+        |event| event["operation"] == "proc.exec" && event["provenance"]["role"] == "producer"
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["kind"] == "operator_intent")
+            .count(),
+        2
+    );
+    assert_eq!(events.last().unwrap()["kind"], "settled");
+    assert_eq!(events.last().unwrap()["provenance"]["role"], "owner");
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+    assert!(client.verify(Some(&run.run_id)).unwrap()[0].local_consistency);
+}

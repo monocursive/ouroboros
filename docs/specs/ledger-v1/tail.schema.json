@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-tail:1",
+  "title": "Bounded page in a growing canonical stream",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "admitted",
+        "denied",
+        "settled",
+        "outcome_unknown"
+      ]
+    },
+    "child_protection": {
+      "enum": [
+        "enforced",
+        "unprotected"
+      ]
+    },
+    "local_consistency": {
+      "type": "boolean"
+    },
+    "ndjson": {
+      "type": "string",
+      "maxLength": 65536
+    },
+    "scanned_through_seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "schema": {
+      "const": "ouro.ledger.tail/1"
+    },
+    "head": {
+      "$ref": "#/$defs/chain"
+    },
+    "coverage": {
+      "$ref": "#/$defs/coverage"
+    },
+    "next_cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "caught_up": {
+      "type": "boolean"
+    },
+    "stream_status": {
+      "enum": [
+        "active",
+        "complete"
+      ]
+    }
+  },
+  "required": [
+    "run_id",
+    "state",
+    "child_protection",
+    "local_consistency",
+    "ndjson",
+    "scanned_through_seq",
+    "schema",
+    "head",
+    "coverage",
+    "next_cursor",
+    "caught_up",
+    "stream_status"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "chain": {
+      "type": "object",
+      "properties": {
+        "head_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "head_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "head_seq",
+        "head_digest"
+      ],
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "const": "snapshot_run"
+        },
+        "status": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "classes": {
+          "type": "object",
+          "maxProperties": 7,
+          "propertyNames": {
+            "enum": [
+              "exec",
+              "fs.write",
+              "fs.deny",
+              "net",
+              "limits",
+              "proxy.net",
+              "ledger"
+            ]
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "sources": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "maxLength": 32
+                }
+              },
+              "observed_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "gap_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "status",
+              "sources",
+              "observed_count",
+              "gap_count"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "gap_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "selection_status": {
+          "enum": [
+            "active",
+            "degraded",
+            "unobserved"
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "status",
+        "classes",
+        "gap_count",
+        "selection_status"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
