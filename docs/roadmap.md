@@ -122,9 +122,11 @@ limits. Bounded run catalogs, filtered cross-run queries, event-count comparison
 and comparisons of recorded target labels are implemented. Unsigned portable
 bundles export canonical records, embedded receipts and selected captures with
 offline verification. Explicit Ed25519 signing and separately pinned public-key
-verification are also implemented. Best-effort recovery and managed project
-authorization remain planned. The complete
-milestone is still open. A plain local export does not establish external custody.
+verification are also implemented. Best-effort writer-outage recovery retains
+bounded pending evidence for already admitted runs, with explicit degraded
+coverage and conservative missing-exit handling. The full durability gate,
+historical-custody migration and managed project authorization remain open.
+A plain local export does not establish external custody.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
 SQLite run index and reader cursors that survive writer restart. Canonical

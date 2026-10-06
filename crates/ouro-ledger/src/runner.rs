@@ -1,5 +1,7 @@
 //! The launch owner: durably admit before opening the jail's existing gate.
 
+#[cfg(target_os = "linux")]
+mod evidence;
 use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "linux")]
@@ -603,11 +605,6 @@ fn run_linux(
     {
         return Err(error("this slice captures stdout/stderr only"));
     }
-    if options.best_effort {
-        return Err(error(
-            "best-effort ledger reconciliation is not implemented; use strict evidence",
-        ));
-    }
     let image = pinned_image(&options.jail)?;
     let expected_image = image_digest(&image)?;
     let plan = plan(options, &image)?;
@@ -658,7 +655,7 @@ fn run_linux(
         notify(&client.show(&run.run_id)?);
     }
     let result = run_owned(options, &image, &expected_image, &run, &claim, &mut client);
-    if result.is_err() {
+    if result.is_err() && !evidence::completion_pending(options, &run) {
         // Covers setup, finalization and lost mutation replies while this
         // library caller remains alive. Existing terminal evidence is preserved.
         record_unknown(
@@ -732,6 +729,7 @@ fn run_owned(
     claim: &ClaimedOwner,
     client: &mut Client,
 ) -> Result<RunResult> {
+    let mut evidence = evidence::Evidence::new(options, run, claim)?;
     let run_dir = options.data.join("ledger").join(&run.run_id);
     // Read the jail's canonical receipt. Its copy fence correctly forbids an
     // additional --receipt inside DATA; the unified DATA root protects the ledger too.
@@ -920,6 +918,7 @@ fn run_owned(
                             &json!({"receipt":receipt,"receipt_digest":message.receipt_digest}),
                             &claim.owner_token,
                         )?;
+                        evidence.admitted()?;
                         let release = GateFrame {
                             schema: records::SCHEMA_GATE.into(),
                             action: "release".into(),
@@ -945,14 +944,14 @@ fn run_owned(
                 }
             }
             for event in trace.drain()? {
-                client.append_source(&run.run_id, &event, &claim.producer_token)?;
+                evidence.source(client, &event)?;
                 last_trace = Some(event);
             }
             for capture in &mut captures {
                 capture.drain()?;
             }
             if last_heartbeat.elapsed() >= Duration::from_millis(250) {
-                client.ping()?;
+                evidence.heartbeat(client)?;
                 last_heartbeat = Instant::now();
             }
             if exit.is_none() {
@@ -1086,7 +1085,7 @@ fn run_owned(
     } else {
         "outcome_unknown"
     };
-    client.append_owner(&run.run_id,"settlement",kind,None,&json!({"receipt":receipt,"receipt_digest":digest,"outcome":typed.outcome,"coverage":typed.coverage,"capture":capture}),&claim.owner_token)?;
+    evidence.finish(client, kind, json!({"receipt":receipt,"receipt_digest":digest,"outcome":typed.outcome,"coverage":typed.coverage,"capture":capture}), final_control)?;
     let record = client.show(&run.run_id)?;
     let exit_code = exit.map_or(1, |s| {
         s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))

@@ -844,6 +844,291 @@ fn writer_death_stops_the_owner_and_recovery_remains_unknown() {
     );
 }
 
+fn wait_pending(fixture: &Fixture, run: &RunRecord, predicate: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + COMMAND_LIMIT;
+    let path = fixture
+        .data
+        .join("ledger")
+        .join(&run.run_id)
+        .join("owner-pending.json");
+    loop {
+        if let Ok(bytes) = fs::read(&path)
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+            && predicate(&value["state"])
+        {
+            return value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pending journal did not reach expected state"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    for profile in ["tool", "none"] {
+        let mut fixture = Fixture::new(&jail);
+        let mut command = fixture.command_with_profile("pending-live", true, profile);
+        command.args(["--evidence", "best-effort", "--capture", "stdout", "--", "/bin/sh", "-c",
+            "printf x >> executions; touch started; while test ! -f flood; do sleep 0.05; done; i=0; while test $i -lt 160; do echo x > item; i=$((i+1)); done; touch flooded; while test ! -f release; do sleep 0.05; done; printf recovered"]);
+        let mut owner = Process::spawn(&mut command, true);
+        let run = fixture.wait_started(&mut owner);
+        fixture.writer.kill();
+        wait_pending(&fixture, &run, |s| s["active"] == true);
+        fs::write(fixture.workspace.join("flood"), b"").unwrap();
+        wait_for_file(&fixture.workspace.join("flooded"));
+        if profile == "tool" {
+            let pending = wait_pending(&fixture, &run, |s| s["overflow"] == true);
+            assert!(pending["state"]["events"].as_array().unwrap().len() <= 32);
+            assert!(serde_json::to_vec(&pending).unwrap().len() < 6 * 1_048_576);
+        }
+        assert!(
+            owner.child.try_wait().unwrap().is_none(),
+            "admitted child must continue during writer outage"
+        );
+        fixture.writer = Fixture::start_writer(&fixture.data);
+        wait_pending(&fixture, &run, |s| s["active"] == false);
+        fs::write(fixture.workspace.join("release"), b"").unwrap();
+        let output = owner.finish();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let settled = fixture.client().show(&run.run_id).unwrap();
+        assert_eq!(settled.state, "settled");
+        assert_eq!(settled.coverage["ledger"]["status"], "degraded");
+        assert_eq!(
+            settled.child_protection,
+            if profile == "none" {
+                "unprotected"
+            } else {
+                "enforced"
+            }
+        );
+        assert_eq!(
+            fixture
+                .events(&settled)
+                .iter()
+                .filter(|e| e["kind"] == "evidence_gap")
+                .count(),
+            1
+        );
+        assert!(
+            fixture
+                .events(&settled)
+                .iter()
+                .any(|e| e["provenance"]["role"] == "recovery")
+        );
+        assert_eq!(
+            fs::read(fixture.workspace.join("executions")).unwrap(),
+            b"x"
+        );
+        assert!(
+            !fixture
+                .data
+                .join("ledger")
+                .join(&run.run_id)
+                .join("owner-pending.json")
+                .exists()
+        );
+        let bundle = fixture._temp.path().join("recovered-bundle");
+        ouro_ledger::bundle::create(
+            &mut fixture.client(),
+            &fixture.data,
+            &run.run_id,
+            &bundle,
+            &["stdout".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            ouro_ledger::bundle::verify(&bundle).unwrap()["coverage"],
+            settled.coverage
+        );
+    }
+}
+
+#[test]
+fn best_effort_exit_during_outage_recovers_after_owner_exit() {
+    pending_exit(false);
+}
+
+#[test]
+fn best_effort_rechecks_local_exit_even_with_a_recomputed_journal_checksum() {
+    pending_exit(true);
+}
+
+fn pending_exit(tamper: bool) {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let mut fixture = Fixture::new(&jail);
+    let mut command = fixture.command("pending-exit", true);
+    command.args(["--evidence", "best-effort", "--capture", "stdout", "--", "/bin/sh", "-c",
+        "printf x >> executions; touch started; while test ! -f release; do sleep 0.05; done; printf local-exit"]);
+    let mut owner = Process::spawn(&mut command, true);
+    let run = fixture.wait_started(&mut owner);
+    fixture.writer.kill();
+    wait_pending(&fixture, &run, |s| s["active"] == true);
+    fs::write(fixture.workspace.join("release"), b"").unwrap();
+    let output = owner.finish();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("canonical reconciliation is pending"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut pending = wait_pending(&fixture, &run, |s| s["completion"].is_object());
+    if tamper {
+        pending["state"]["completion"]["control"]["outcome"]["code"] = 42.into();
+        pending["digest"] = ouro_records::canonical::sha256_prefixed(
+            &ouro_records::canonical::to_jcs(&pending["state"]).unwrap(),
+        )
+        .into();
+        fs::write(
+            fixture
+                .data
+                .join("ledger")
+                .join(&run.run_id)
+                .join("owner-pending.json"),
+            serde_json::to_vec(&pending).unwrap(),
+        )
+        .unwrap();
+    }
+    fixture.writer = Fixture::start_writer(&fixture.data);
+    if tamper {
+        fixture.assert_unknown(&run.run_id);
+        assert_eq!(
+            fs::read(fixture.workspace.join("executions")).unwrap(),
+            b"x"
+        );
+        return;
+    }
+    let settled = fixture.client().show(&run.run_id).unwrap();
+    assert_eq!(settled.state, "settled", "{settled:?}");
+    assert_eq!(settled.outcome.as_ref().unwrap()["code"], 0);
+    assert_eq!(settled.coverage["ledger"]["status"], "degraded");
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+    let result = Process::spawn(&mut command, true).finish();
+    assert!(result.status.success());
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+}
+
+#[test]
+fn best_effort_local_journal_failure_stops_the_tree_and_never_settles() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let mut fixture = Fixture::new(&jail);
+    let mut command = fixture.command("pending-disk-error", true);
+    command.args([
+        "--evidence",
+        "best-effort",
+        "--",
+        "/bin/sh",
+        "-c",
+        "touch started; sleep 30",
+    ]);
+    let mut owner = Process::spawn(&mut command, true);
+    let run = fixture.wait_started(&mut owner);
+    // A real filesystem failure at atomic replacement, while the process lives.
+    let next = fixture
+        .data
+        .join("ledger")
+        .join(&run.run_id)
+        .join("owner-pending.next");
+    fs::create_dir(&next).unwrap();
+    fixture.writer.kill();
+    assert!(!owner.finish().status.success());
+    fixture.assert_tree_stopped(&run);
+    fixture.writer = Fixture::start_writer(&fixture.data);
+    fixture.assert_unknown(&run.run_id);
+}
+
+#[test]
+fn best_effort_local_exit_file_limit_never_fabricates_settlement() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let mut fixture = Fixture::new(&jail);
+    let mut command = fixture.command_with_profile("pending-exit-disk-limit", true, "none");
+    command.args([
+        "--evidence",
+        "best-effort",
+        "--",
+        "/bin/sh",
+        "-c",
+        "touch started; while test ! -f release; do sleep 0.05; done; touch finished",
+    ]);
+    let mut owner = Process::spawn(&mut command, true);
+    let run = fixture.wait_started(&mut owner);
+    fixture.writer.kill();
+    wait_pending(&fixture, &run, |s| s["active"] == true);
+    // Only the unreaped launch owner gets this actual kernel write limit. Its
+    // child can finish normally, but the larger local exit snapshot cannot fit.
+    let limit = libc::rlimit {
+        rlim_cur: 4096,
+        rlim_max: 4096,
+    };
+    assert_eq!(
+        unsafe {
+            libc::prlimit(
+                owner.child.id() as libc::pid_t,
+                libc::RLIMIT_FSIZE,
+                &limit,
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    fs::write(fixture.workspace.join("release"), b"").unwrap();
+    let output = owner.finish();
+    assert!(!output.status.success());
+    assert!(fixture.workspace.join("finished").exists());
+    fixture.writer = Fixture::start_writer(&fixture.data);
+    fixture.assert_unknown(&run.run_id);
+}
+
+#[test]
+fn best_effort_dead_owner_without_exit_record_stays_unknown() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    let mut fixture = Fixture::new(&jail);
+    let mut command = fixture.command("pending-dead-owner", true);
+    command.args([
+        "--evidence",
+        "best-effort",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf x >> executions; touch started; sleep 30",
+    ]);
+    let mut owner = Process::spawn(&mut command, true);
+    let run = fixture.wait_started(&mut owner);
+    fixture.writer.kill();
+    wait_pending(&fixture, &run, |s| s["active"] == true);
+    owner.kill();
+    fixture.writer = Fixture::start_writer(&fixture.data);
+    fixture.assert_unknown(&run.run_id);
+    assert!(!Process::spawn(&mut command, true).finish().status.success());
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+}
+
 #[test]
 fn an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever() {
     let Some(jail) = live_jail() else {

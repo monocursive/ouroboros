@@ -48,6 +48,7 @@ fn response_timeout(request: &Request) -> Duration {
 
 pub struct Client {
     stream: UnixStream,
+    transport_failed: bool,
 }
 
 impl Client {
@@ -66,19 +67,39 @@ impl Client {
                 "daemon peer uid is not the current user".into(),
             ));
         }
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            transport_failed: false,
+        })
     }
 
     fn request<T: DeserializeOwned>(&mut self, request: Request) -> Result<T> {
+        // Any incomplete exchange poisons this connection; never reuse it after
+        // a lost reply. Explicit writer refusals remain hard errors.
+        if self.transport_failed {
+            return Err(LedgerError("daemon connection requires reconnect".into()));
+        }
+        self.transport_failed = true;
         write_frame(&mut self.stream, &request)?;
         self.stream
             .set_read_timeout(Some(response_timeout(&request)))?;
         let response = read_frame::<Response>(&mut self.stream);
         self.stream.set_read_timeout(Some(TIMEOUT))?;
-        match response? {
+        let response = response?;
+        self.transport_failed = false;
+        match response {
             Response::Ok { value } => Ok(serde_json::from_value(value)?),
             Response::Error { message } => Err(LedgerError(message)),
         }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn transport_failed(&self) -> bool {
+        self.transport_failed
+    }
+    pub fn reconcile_pending(&mut self, run_id: &str) -> Result<RunRecord> {
+        self.request(Request::ReconcilePending {
+            run_id: run_id.into(),
+        })
     }
     pub fn ping(&mut self) -> Result<Value> {
         self.request(Request::Ping)
@@ -334,7 +355,20 @@ pub fn serve(data: &Path) -> Result<()> {
         }
     });
     let mut capabilities = BTreeMap::new();
-    while let Ok(message) = receiver.recv() {
+    #[cfg(target_os = "linux")]
+    let recovery_peer = peer_identity(unsafe { libc::geteuid() }, std::process::id())?;
+    let mut last_recovery = std::time::Instant::now() - Duration::from_secs(1);
+    loop {
+        if last_recovery.elapsed() >= Duration::from_secs(1) {
+            #[cfg(target_os = "linux")]
+            store.recover_pending_orphans(&recovery_peer);
+            last_recovery = std::time::Instant::now();
+        }
+        let message = match receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(message) => message,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let result = dispatch(
             &mut store,
             &mut capabilities,
@@ -447,6 +481,9 @@ fn dispatch(
         Request::Ping => Ok(
             json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),
         ),
+        Request::ReconcilePending { run_id } => Ok(serde_json::to_value(
+            store.reconcile_pending(&run_id, peer, &peer_alive)?,
+        )?),
         Request::SettleOrphans => Ok(serde_json::to_value(
             store.settle_orphans(peer, peer_alive)?,
         )?),
@@ -529,7 +566,7 @@ pub fn peer_credentials(socket: &UnixStream) -> Result<Peer> {
 }
 
 #[cfg(target_os = "linux")]
-fn peer_identity(uid: u32, pid: u32) -> Result<Peer> {
+pub(crate) fn peer_identity(uid: u32, pid: u32) -> Result<Peer> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
         .trim()
         .to_owned();

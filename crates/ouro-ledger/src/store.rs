@@ -35,6 +35,7 @@ mod catalog;
 #[cfg(test)]
 mod intent_tail_tests;
 mod operator;
+mod pending_recovery;
 mod pruning;
 mod retention;
 mod tail;
@@ -651,6 +652,17 @@ impl Store {
         peer: &Peer,
         token_id: &str,
     ) -> Result<AppendReceipt> {
+        self.append_source_as(run_id, event, peer, Some(token_id), "producer")
+    }
+
+    fn append_source_as(
+        &mut self,
+        run_id: &str,
+        event: &Value,
+        peer: &Peer,
+        token_id: Option<&str>,
+        role: &str,
+    ) -> Result<AppendReceipt> {
         let event_typed = validate_source(event, &self.stream(run_id)?.run.attempt_id)?;
         if event_typed.schema != records::SCHEMA_EVENT
             || event_typed.attempt_id != self.stream(run_id)?.run.attempt_id
@@ -690,9 +702,9 @@ impl Store {
         let receipt = self.append(
             run_id,
             json!({"kind":"source","body":event,"request_id":request_id}),
-            "producer",
+            role,
             peer,
-            Some(token_id),
+            token_id,
         )?;
         let stream = self.stream(run_id)?;
         if stream.run.payload["evidence"] == "strict" && !stream.source_gaps.is_empty() {
@@ -761,6 +773,7 @@ impl Store {
                 "capture pruning is incomplete; retry GC or restart before mutations".into(),
             ));
         }
+        validate_recovery(stream, &record, role)?;
         validate_transition(stream, &record)?;
         let seq = stream
             .run
@@ -1045,6 +1058,16 @@ impl Store {
             .collect();
         let mut reconciled = Vec::new();
         for id in orphans {
+            if self.pending_exists(&id) {
+                // Corrupt or incomplete local evidence must never imply settlement.
+                let _ = self.reconcile_pending(&id, peer, &alive);
+                if self.stream(&id)?.run.state != "admitted"
+                    && self.stream(&id)?.run.state != "prepared"
+                {
+                    reconciled.push(self.show(&id)?);
+                    continue;
+                }
+            }
             let owner = self.stream(&id)?.run.owner.clone();
             self.append(&id, json!({"kind":"outcome_unknown","request_id":"reconcile:owner-dead","body":{"owner":owner,"outcome":{"kind":"unknown","unknown":true,"unknown_reason":"owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"},"coverage":{"status":"degraded","gaps":[{"reason":"owner_lost"}]}}}), "operator", peer, None)?;
             reconciled.push(self.show(&id)?);
@@ -1331,6 +1354,11 @@ impl Stream {
             seq: expected_seq,
             digest: sha256_prefixed(bytes),
         };
+        validate_recovery(
+            self,
+            &payload,
+            decoded["provenance"]["role"].as_str().unwrap_or(""),
+        )?;
         validate_transition(self, &payload)?;
         validate_intent(self, &payload)?;
         apply_record(self, &payload, receipt.clone(), payload_digest.clone())?;
@@ -1603,6 +1631,18 @@ fn validate_transition(stream: &Stream, record: &Value) -> Result<()> {
         }
     }
     match kind {
+        "evidence_gap" => {
+            let body = &record["body"];
+            if stream.run.state != "admitted"
+                || stream.run.payload["evidence"] != "best-effort"
+                || body["reason"] != "writer_outage"
+                || body["episode"].as_u64().is_none_or(|n| n == 0)
+                || body["owner"] != serde_json::to_value(&stream.run.owner)?
+                || body.as_object().is_none_or(|o| o.len() != 3)
+            {
+                return Err(LedgerError("invalid best-effort outage marker".into()));
+            }
+        }
         "operator_intent" => operator::validate(stream, record)?,
         "admitted" | "denied" if stream.run.state != "prepared" => {
             return Err(LedgerError(
@@ -1698,6 +1738,7 @@ fn apply_record(
         head_digest: Some(receipt.digest),
     };
     match record["kind"].as_str().unwrap_or("") {
+        "evidence_gap" => stream.source_gaps.push(record["body"].clone()),
         "hold" => stream.run.holds = vec!["operator".into()],
         "release" => stream.run.holds.clear(),
         "owner_claimed" => {
@@ -1795,6 +1836,26 @@ fn apply_record(
     Ok(())
 }
 
+fn validate_recovery(stream: &Stream, record: &Value, role: &str) -> Result<()> {
+    if role == "recovery"
+        && (stream.run.payload["evidence"] != "best-effort"
+            || stream.run.state != "admitted"
+            || stream.run.owner.is_none()
+            || !["source", "evidence_gap", "settled", "outcome_unknown"]
+                .contains(&record["kind"].as_str().unwrap_or("")))
+    {
+        return Err(LedgerError(
+            "recovery requires an already admitted best-effort run".into(),
+        ));
+    }
+    if record["kind"] == "evidence_gap" && role != "recovery" {
+        return Err(LedgerError(
+            "outage markers require recovery provenance".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1843,6 +1904,83 @@ mod tests {
         .unwrap();
         receipt["attempt_id"] = json!(run.attempt_id);
         receipt
+    }
+
+    #[test]
+    fn pending_recovery_keeps_the_journal_through_canonical_persistence_failures() {
+        use crate::pending::Journal;
+        for fault in [
+            Fault::BeforeWrite,
+            Fault::PartialWrite,
+            Fault::EventSync,
+            Fault::Projection,
+            Fault::Manifest,
+            Fault::DirectorySync,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let data = temp.path().join("data");
+            let mut store = Store::open(&data).unwrap();
+            let mut plan = payload();
+            plan["evidence"] = "best-effort".into();
+            let run = store.prepare("pending-fault", &plan, &peer()).unwrap();
+            store.claim_owner(&run.run_id, &peer()).unwrap();
+            store
+                .append_owner(
+                    &run.run_id,
+                    "admission",
+                    "admitted",
+                    None,
+                    &json!({"receipt":prepared(&run)}),
+                    &peer(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap();
+            let run = store.show(&run.run_id).unwrap();
+            let dir = store.root.join(&run.run_id);
+            let journal = Journal::open(&dir).unwrap();
+            journal.create(&run, &peer()).unwrap();
+            let mut pending = journal.read(&run).unwrap();
+            pending
+                .push(
+                    serde_json::to_value(records::Event::lifecycle_note(
+                        &run.attempt_id,
+                        1,
+                        SystemTime::now(),
+                        1,
+                        "pending_test",
+                    ))
+                    .unwrap(),
+                )
+                .unwrap();
+            journal.save(&pending).unwrap();
+            let before = fs::read(dir.join("owner-pending.json")).unwrap();
+            drop(journal);
+            store.fault = Some(fault);
+            assert!(
+                store
+                    .reconcile_pending(&run.run_id, &peer(), &|_| true)
+                    .is_err()
+            );
+            assert_eq!(fs::read(dir.join("owner-pending.json")).unwrap(), before);
+            drop(store);
+            let mut store = Store::open(&data).unwrap();
+            let result = store.reconcile_pending(&run.run_id, &peer(), &|_| true);
+            if matches!(fault, Fault::PartialWrite) {
+                assert!(result.is_err());
+                assert!(!store.verify(None).unwrap()[0].local_consistency);
+            } else {
+                let recovered = result.unwrap();
+                assert_eq!(recovered.chain.head_seq, run.chain.head_seq + 2);
+                assert_eq!(
+                    store
+                        .reconcile_pending(&run.run_id, &peer(), &|_| true)
+                        .unwrap()
+                        .chain,
+                    recovered.chain
+                );
+                assert!(store.verify(None).unwrap()[0].local_consistency);
+            }
+        }
     }
     fn create() -> (tempfile::TempDir, Store, RunRecord) {
         let temp = tempfile::tempdir().unwrap();

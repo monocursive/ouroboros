@@ -35,7 +35,8 @@
             "role": {
               "enum": [
                 "operator",
-                "owner"
+                "owner",
+                "recovery"
               ]
             },
             "peer_uid": {
@@ -84,7 +85,8 @@
             "outcome_unknown",
             "hold",
             "release",
-            "operator_intent"
+            "operator_intent",
+            "evidence_gap"
           ]
         },
         "request_id": {
@@ -162,7 +164,6 @@
                   "owner_claimed",
                   "admitted",
                   "denied",
-                  "settled",
                   "note"
                 ]
               }
@@ -336,6 +337,104 @@
                 }
               }
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "settled"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "owner",
+                      "recovery"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "evidence_gap"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "properties": {
+                  "role": {
+                    "const": "recovery"
+                  },
+                  "token_id": {
+                    "type": "null"
+                  }
+                }
+              },
+              "body": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "const": "writer_outage"
+                  },
+                  "episode": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "owner": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "reason",
+                  "episode",
+                  "owner"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "provenance": {
+                "properties": {
+                  "role": {
+                    "const": "recovery"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "evidence_gap",
+                  "settled",
+                  "outcome_unknown"
+                ]
+              },
+              "provenance": {
+                "properties": {
+                  "token_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
           }
         }
       ]

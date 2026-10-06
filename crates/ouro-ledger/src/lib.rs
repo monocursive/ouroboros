@@ -5,6 +5,7 @@ pub mod config;
 pub mod daemon;
 pub mod discovery;
 mod manifest;
+mod pending;
 mod projection;
 pub mod protocol;
 mod reader;

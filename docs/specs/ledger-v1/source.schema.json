@@ -110,7 +110,10 @@
       "type": "object",
       "properties": {
         "role": {
-          "const": "producer"
+          "enum": [
+            "producer",
+            "recovery"
+          ]
         },
         "peer_uid": {
           "type": "integer",
@@ -145,7 +148,25 @@
         "peer_birth",
         "token_id"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "recovery"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "token_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "kind": {
       "const": "source"

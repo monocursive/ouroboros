@@ -116,9 +116,48 @@ the current jail operation inventory. Producers cannot emit `intent.*`,
 at 1; exact replays return their original acknowledgement, conflicts refuse,
 and missing source numbers are durably recorded before strict evidence returns
 a failure with no success acknowledgement. Retries retain that failure. The
-best-effort store representation retains degraded gaps for future reconciliation;
-the launch path does not yet enable that mode. A later receipt cannot erase a
-writer-established gap.
+best-effort launch mode continues an already admitted run through writer transport
+loss using the bounded owner journal described below. A later receipt cannot erase
+a writer-established gap.
+
+### Best-effort writer outages
+
+`run --evidence best-effort` retains the same durable admission gate. Before
+release, the owner creates a private journal bound to the prepared payload,
+attempt and claimed process birth identity. Before admission, writer loss always
+refuses execution. Explicit writer validation failures also stop the owner;
+only an incomplete transport exchange enables buffering after admission.
+
+The owner atomically replaces `owner-pending.json` inside the run directory,
+with file and directory synchronization and a nonblocking exclusive lock shared
+with reconciliation. It retains a prefix of at most 32 events and 256 KiB.
+Overflow retains only the latest event from each of the three sources, plus the
+first transport-loss note if necessary. Source sequences expose dropped
+intervals on import. Each retained event and local exit record is at most 1 MiB;
+the complete snapshot is bounded by 5 MiB + 272 KiB. Atomic replacement can
+briefly retain two snapshots. These files are pending evidence, not canonical
+history or a success acknowledgement.
+
+The live owner reconnects to the existing writer, reclaims capabilities for its
+same birth identity, and requests reconciliation. It does not start a writer
+inside the attempt's service. The writer records one permanent `evidence_gap`
+with reason `writer_outage` per outage episode, even if no source records were
+lost. Imported records carry `provenance.role: recovery` and the reconciler's
+identity, with no live producer token. Original source envelopes and request
+identities remain unchanged. A lost reply or interrupted import replays the
+original durable acknowledgement rather than duplicating records.
+
+The owner synchronizes its local terminal receipt, control message and capture
+summary before requesting canonical settlement. Recovery rechecks policy,
+argv, attempt, terminal control and final source/receipt correlation. If the
+writer is still unavailable, the command returns an error stating that local
+completion awaits canonical reconciliation. It does not print a fabricated
+settled run. The writer scans dead owners' pending journals on restart and once
+per second thereafter. A missing or invalid exit record leaves the outcome
+unknown; the writer never restarts an attempt. Journal persistence failure
+stops the owned tree and supplies no settlement acknowledgement. Successfully
+reconciled terminal journals are removed; invalid journals remain for inspection
+and conservatively block retention deletion.
 
 After verified jail settlement, the owner appends the matching terminal receipt
 and the observed outcome. A run admitted by the ledger can also settle a proved
@@ -1017,8 +1056,7 @@ they do not launch a jail or establish Linux containment.
 The [contract validator](ledger-v1/validate_contract.py) checks versioned schemas
 and fixtures only; it makes no runtime or custody claim.
 
-Milestone 2 is still gated on the full North Star durability suite and these
-unimplemented features: best-effort outage reconciliation and the
+Milestone 2 is still gated on the full North Star durability suite and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.

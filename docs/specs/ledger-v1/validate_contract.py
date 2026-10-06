@@ -606,6 +606,21 @@ def main():
     altered = copy.deepcopy(canonical_source)
     altered["fields"]["transition"] = "changed"
     assert digest(altered) != digest(canonical_source)
+    recovered = copy.deepcopy(canonical_source)
+    recovered["provenance"].update(role="recovery", token_id=None)
+    validators["source"].validate(recovered)
+    validators["record"].validate(recovered)
+    recovered["provenance"]["token_id"] = "a" * 32
+    expect_invalid(validators["source"], recovered, "recovery cannot claim a live producer token")
+    gap = copy.deepcopy(prepared)
+    gap.update(kind="evidence_gap", request_id="outage:1", body={"reason": "writer_outage", "episode": 1, "owner": owner["body"]["owner"]})
+    gap["provenance"].update(role="recovery", token_id=None)
+    validators["record"].validate(gap)
+    gap["provenance"]["role"] = "owner"
+    expect_invalid(validators["record"], gap, "outage marker requires recovery provenance")
+    admission = copy.deepcopy(prepared)
+    admission["provenance"].update(role="recovery", token_id=None)
+    expect_invalid(validators["record"], admission, "recovery cannot prepare a run")
     print("Ledger schemas, bounded readers, source preservation, canonical bytes, chain and privacy fixtures pass.")
     print("Document contract only; no live durability, launch or containment is tested.")
 

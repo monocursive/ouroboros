@@ -405,6 +405,9 @@ pub enum Request {
     },
     Ping,
     SettleOrphans,
+    ReconcilePending {
+        run_id: String,
+    },
     Hold {
         run_id: String,
         request_id: String,

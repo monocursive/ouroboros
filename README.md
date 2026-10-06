@@ -190,9 +190,10 @@ Output capture is opt-in and bounded. Linux owns execution;
 macOS supports local store inspection. The jail still works independently.
 
 See the [ledger specification and commands](docs/specs/ledger-v1.md). The full
-ledger milestone remains open: cross-run queries, comparisons,
-signed bundles, best-effort recovery and managed project authorization are not
-implemented. Local consistency is reported separately from coverage and
+ledger now includes bounded cross-run discovery and comparisons, signed portable
+bundles, and best-effort writer-outage recovery for already admitted runs. The
+full durability gate, historical-custody migration and managed project
+authorization remain open. Local consistency is reported separately from coverage and
 protection from the child.
 
 ## Planned work
