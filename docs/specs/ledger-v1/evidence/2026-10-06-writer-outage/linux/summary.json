@@ -1,0 +1,14 @@
+{
+  "source_revision": "704f6bcbbe1bbd30410be76d9121cafe57577d02",
+  "tests_passed": 179,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "real_launch_tests": 27,
+  "source_checks": "passed before and after",
+  "clippy": "passed",
+  "smoke_profiles": [
+    "tool",
+    "none"
+  ],
+  "macos_bundle_verification": "passed"
+}

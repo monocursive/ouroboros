@@ -1,0 +1,11 @@
+{
+  "revision": "704f6bcbbe1bbd30410be76d9121cafe57577d02",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "tests_passed": 151,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "clippy": "passed",
+  "scope": "local ledger stores, recovery, readers, contracts, and offline verification; Linux launches execute on native hosts",
+  "binary_sha256": "1b20498da2fe61dd536e8cc1f443df214ecda53ebcc933dd2e42a1b8a21f245a"
+}

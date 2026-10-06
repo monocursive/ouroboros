@@ -1,0 +1,8 @@
+   Compiling once_cell v1.21.4
+   Compiling ouro-records v0.1.0 (/home/monocursive/ouro-outage-704f6bcb/crates/ouro-records)
+   Compiling ahash v0.8.12
+   Compiling jsonschema-value v0.57.0
+   Compiling referencing v0.57.0
+   Compiling jsonschema v0.57.0
+   Compiling ouro-ledger v0.1.0 (/home/monocursive/ouro-outage-704f6bcb/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 5m 44s

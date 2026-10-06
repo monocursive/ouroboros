@@ -1,0 +1,50 @@
+[
+  {
+    "profile": "tool",
+    "run_id": "run_6e037dbae3b640759d77882182e465c2",
+    "state": "settled",
+    "coverage": {
+      "gaps": [
+        {
+          "episode": 1,
+          "owner": {
+            "birth": "boot:47a3956e-f44b-4139-a8fc-45418c38243f:start:125886043",
+            "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+            "pid": 300630,
+            "uid": 1000
+          },
+          "reason": "writer_outage"
+        }
+      ],
+      "status": "degraded"
+    },
+    "child_protection": "enforced",
+    "executions": 1,
+    "owner_exit": 1,
+    "portable_verification": "passed"
+  },
+  {
+    "profile": "none",
+    "run_id": "run_6a2e84a781744e189001336016748dc7",
+    "state": "settled",
+    "coverage": {
+      "gaps": [
+        {
+          "episode": 1,
+          "owner": {
+            "birth": "boot:47a3956e-f44b-4139-a8fc-45418c38243f:start:125886081",
+            "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+            "pid": 300673,
+            "uid": 1000
+          },
+          "reason": "writer_outage"
+        }
+      ],
+      "status": "degraded"
+    },
+    "child_protection": "unprotected",
+    "executions": 1,
+    "owner_exit": 1,
+    "portable_verification": "passed"
+  }
+]

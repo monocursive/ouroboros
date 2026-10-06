@@ -1,0 +1,440 @@
+{
+  "digest": "sha256:863a6ea49bd0924a64952716bc430ab3146b98471fa5d112aeb5d660c78df3d5",
+  "state": {
+    "active": true,
+    "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+    "completion": {
+      "body": {
+        "capture": {
+          "stderr": {
+            "observed_bytes": 0,
+            "state": "not_captured"
+          },
+          "stdout": {
+            "limit_bytes": 64,
+            "observed_bytes": 20,
+            "path": "artifacts/stdout.bin",
+            "state": "captured",
+            "stored_bytes": 20,
+            "truncated": false
+          }
+        },
+        "coverage": {
+          "exec": {
+            "gaps": [],
+            "observed_count": 8,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.deny": {
+            "gaps": [],
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "fs.write": {
+            "gaps": [],
+            "observed_count": 2,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "limits": {
+            "gaps": [],
+            "observed_count": 0,
+            "sources": [
+              "wrapper"
+            ],
+            "status": "active"
+          },
+          "net": {
+            "gaps": [],
+            "observed_count": 0,
+            "sources": [
+              "audit"
+            ],
+            "status": "active"
+          },
+          "proxy.net": {
+            "gaps": [],
+            "observed_count": null,
+            "sources": [],
+            "status": "unsupported"
+          }
+        },
+        "outcome": {
+          "cause": null,
+          "code": 0,
+          "error": null,
+          "kind": "exited",
+          "signal": null
+        },
+        "receipt": {
+          "applied": {
+            "environment_names": [
+              "DBUS_SESSION_BUS_ADDRESS",
+              "HOME",
+              "INVOCATION_ID",
+              "LANG",
+              "LC_ALL",
+              "LC_CTYPE",
+              "LOGNAME",
+              "PATH",
+              "PWD",
+              "SHELL",
+              "SHLVL",
+              "SSH_CLIENT",
+              "SSH_CONNECTION",
+              "USER",
+              "XDG_RUNTIME_DIR",
+              "XDG_SESSION_CLASS",
+              "XDG_SESSION_ID",
+              "XDG_SESSION_TYPE",
+              "_"
+            ],
+            "filesystem": null,
+            "limits": [
+              {
+                "applied": true,
+                "hit": false,
+                "key": "wall",
+                "mechanism": "boottime-deadline",
+                "requested": "20000",
+                "required": true,
+                "scope": "tree"
+              }
+            ],
+            "network": {
+              "allowed_hosts": [],
+              "mechanism": null,
+              "mode": "host"
+            },
+            "removed_environment_names": [
+              "OURO_CONFIG_DIR",
+              "OURO_DATA_DIR"
+            ],
+            "syscalls": null
+          },
+          "argv_digest": "sha256:e98b7783d96c5aed3c95e40f2a90ee0fa13a28ea94ebe58bf1d01b3be932a261",
+          "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+          "child_protection": "unprotected",
+          "cleanup_error": null,
+          "containment": "none",
+          "coverage": {
+            "exec": {
+              "gaps": [],
+              "observed_count": 8,
+              "sources": [
+                "audit"
+              ],
+              "status": "active"
+            },
+            "fs.deny": {
+              "gaps": [],
+              "observed_count": 0,
+              "sources": [
+                "audit"
+              ],
+              "status": "active"
+            },
+            "fs.write": {
+              "gaps": [],
+              "observed_count": 2,
+              "sources": [
+                "audit"
+              ],
+              "status": "active"
+            },
+            "limits": {
+              "gaps": [],
+              "observed_count": 0,
+              "sources": [
+                "wrapper"
+              ],
+              "status": "active"
+            },
+            "net": {
+              "gaps": [],
+              "observed_count": 0,
+              "sources": [
+                "audit"
+              ],
+              "status": "active"
+            },
+            "proxy.net": {
+              "gaps": [],
+              "observed_count": null,
+              "sources": [],
+              "status": "unsupported"
+            }
+          },
+          "created_at": "2026-10-06T17:12:38Z",
+          "credentials": [],
+          "errors": [],
+          "exec_observed": true,
+          "jail": {
+            "backend": "none",
+            "backend_version": null,
+            "component": "ouro-jail",
+            "version": "0.1.0"
+          },
+          "lifetime": {
+            "boundary": "supervisor_cgroup",
+            "integrity": "verified",
+            "native": {
+              "details": {
+                "child_subreaper": true,
+                "execution_cgroup": {
+                  "charged_helpers": [],
+                  "device": 29,
+                  "inode": 7989036,
+                  "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_4802ac33-e811-4246-aad4-72f724ca7526.leaf",
+                  "scope": "target_descendants_and_listed_helpers"
+                },
+                "launcher_pid": 300682,
+                "narrowing_filter_digest": "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181",
+                "observer_plan": {
+                  "backend": "ptrace",
+                  "event_bytes_max": 65536,
+                  "in_flight_max": 16384,
+                  "kernel_ring_bytes": null,
+                  "path_snapshot_max": 4096,
+                  "queue_bytes_max": 4194304,
+                  "queue_events_max": 16384,
+                  "queue_lifecycle_reserve_bytes": 65536,
+                  "queue_result_bytes_max": 4128768,
+                  "test_seams": {}
+                },
+                "supervisor_scope": {
+                  "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/run-p300626-i12880495.scope",
+                  "reason": null,
+                  "reason_code": null,
+                  "state": "already_delegated",
+                  "unit": null
+                }
+              },
+              "os": "linux"
+            },
+            "tree_empty": true,
+            "verification_scope": "registered_boundary",
+            "verified_at": "2026-10-06T17:12:38Z"
+          },
+          "observer": {
+            "attached": true,
+            "backend": "ptrace",
+            "gaps": [],
+            "set": "linux-closed-v1",
+            "sources": {
+              "audit": "active",
+              "proxy": "unsupported",
+              "wrapper": "active"
+            }
+          },
+          "outcome": {
+            "cause": null,
+            "code": 0,
+            "error": null,
+            "kind": "exited",
+            "signal": null
+          },
+          "phase": "settled",
+          "platform": {
+            "arch": "x86_64",
+            "kernel": "Linux 7.0.0-31-generic",
+            "os": "linux"
+          },
+          "policy": {
+            "digest": "sha256:0843dbd80dd70a9c63f6515f6be8f4fd0ed0b6195ee67e0c7786e84fba610639",
+            "evidence": "best-effort",
+            "grants": [],
+            "name": "none",
+            "observe": "on",
+            "requirements": [
+              "tree_termination",
+              "closed_set_observation",
+              "limit:wall",
+              "execution_boundary"
+            ]
+          },
+          "process": {
+            "identity": {
+              "kind": "linux_boot_start",
+              "value": {
+                "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+                "pid": 300682,
+                "start_time_ticks": 125886089
+              }
+            },
+            "pid": 300682
+          },
+          "revision": 3,
+          "schema": "ouro.jail.receipt/1",
+          "state_cleanup": "not_needed",
+          "updated_at": "2026-10-06T17:12:38Z"
+        },
+        "receipt_digest": "sha256:5c9dab8295299ba86f482a6e66f3ec26cc73abe38fe376cbef4e261f5e1d8504"
+      },
+      "control": {
+        "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+        "error": null,
+        "kind": "settled",
+        "outcome": {
+          "cause": null,
+          "code": 0,
+          "error": null,
+          "kind": "exited",
+          "signal": null
+        },
+        "receipt_digest": "sha256:5c9dab8295299ba86f482a6e66f3ec26cc73abe38fe376cbef4e261f5e1d8504",
+        "receipt_phase": "settled",
+        "schema": "ouro.jail.control/1",
+        "seq": 3
+      },
+      "kind": "settled"
+    },
+    "episode": 1,
+    "events": [
+      {
+        "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+        "decision": null,
+        "fields": {
+          "exit_code": 0,
+          "pid": 300685,
+          "pid_start_ticks": 125886092,
+          "signal": null,
+          "termination": "exited"
+        },
+        "monotonic_ns": "101992860",
+        "observed_at": "2026-10-06T17:12:38Z",
+        "operation": "proc.exit",
+        "outcome": {
+          "completion": "process_exit",
+          "errno": null,
+          "ok": true,
+          "return_value": 0
+        },
+        "schema": "ouro.event/1",
+        "source": "audit",
+        "source_seq": 7,
+        "stage": "result"
+      },
+      {
+        "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+        "decision": null,
+        "fields": {
+          "argv_digest": null,
+          "argv_digest_reason": "descendant_argv_not_captured",
+          "path": {
+            "digest": "sha256:7be77035ce14c2e90fab7ad9f51a6d30e6379b818074ed498f5983dbaec718fe",
+            "kind": "digest",
+            "reason": "outside_known_roots"
+          },
+          "path_basis": "argument_snapshot",
+          "path_complete": true,
+          "pid": 300687,
+          "pid_start_ticks": 125886097,
+          "syscall": "execve"
+        },
+        "monotonic_ns": "103102985",
+        "observed_at": "2026-10-06T17:12:38Z",
+        "operation": "proc.exec",
+        "outcome": {
+          "completion": "exec_transition",
+          "errno": null,
+          "ok": true,
+          "return_value": null
+        },
+        "schema": "ouro.event/1",
+        "source": "audit",
+        "source_seq": 8,
+        "stage": "result"
+      },
+      {
+        "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+        "decision": null,
+        "fields": {
+          "exit_code": 0,
+          "pid": 300687,
+          "pid_start_ticks": 125886097,
+          "signal": null,
+          "termination": "exited"
+        },
+        "monotonic_ns": "156976371",
+        "observed_at": "2026-10-06T17:12:38Z",
+        "operation": "proc.exit",
+        "outcome": {
+          "completion": "process_exit",
+          "errno": null,
+          "ok": true,
+          "return_value": 0
+        },
+        "schema": "ouro.event/1",
+        "source": "audit",
+        "source_seq": 9,
+        "stage": "result"
+      },
+      {
+        "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+        "decision": null,
+        "fields": {
+          "exit_code": 0,
+          "pid": 300682,
+          "pid_start_ticks": 125886089,
+          "signal": null,
+          "termination": "exited"
+        },
+        "monotonic_ns": "157456497",
+        "observed_at": "2026-10-06T17:12:38Z",
+        "operation": "proc.exit",
+        "outcome": {
+          "completion": "process_exit",
+          "errno": null,
+          "ok": true,
+          "return_value": 0
+        },
+        "schema": "ouro.event/1",
+        "source": "audit",
+        "source_seq": 10,
+        "stage": "result"
+      },
+      {
+        "attempt_id": "att_4802ac33-e811-4246-aad4-72f724ca7526",
+        "decision": null,
+        "fields": {
+          "phase": "settled",
+          "receipt_digest": "sha256:5c9dab8295299ba86f482a6e66f3ec26cc73abe38fe376cbef4e261f5e1d8504"
+        },
+        "monotonic_ns": "158127835",
+        "observed_at": "2026-10-06T17:12:38Z",
+        "operation": "jail.receipt",
+        "outcome": {
+          "completion": "wrapper",
+          "errno": null,
+          "ok": true,
+          "return_value": null
+        },
+        "schema": "ouro.event/1",
+        "source": "wrapper",
+        "source_seq": 5,
+        "stage": "result"
+      }
+    ],
+    "first_loss": null,
+    "overflow": false,
+    "owner": {
+      "birth": "boot:47a3956e-f44b-4139-a8fc-45418c38243f:start:125886081",
+      "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+      "pid": 300673,
+      "uid": 1000
+    },
+    "payload_digest": "sha256:bcf800237e3b08f99368eda7438386c629b54ebf13d54722addbe48215b5665b",
+    "run_id": "run_6a2e84a781744e189001336016748dc7",
+    "schema": "ouro.ledger.pending/1",
+    "tails": {}
+  }
+}

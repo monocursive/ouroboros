@@ -1,0 +1,254 @@
+{
+  "attempt_id": "att_5c07429a-c82c-4124-94c0-176ea8305165",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "state": "not_captured"
+    },
+    "stdout": {
+      "state": "not_captured"
+    }
+  },
+  "chain": {
+    "head_digest": "sha256:a327257918beb24e3e5dccd2740aaf88340fd79b7ab00d525d43cf48c5deb7ae",
+    "head_seq": 10
+  },
+  "child_protection": "unprotected",
+  "coverage": {
+    "status": "unobserved"
+  },
+  "outcome": null,
+  "owner": {
+    "birth": "boot:a560f47b-ddd0-4869-9d3d-11fbed907fbb:start:590268",
+    "boot_id": "a560f47b-ddd0-4869-9d3d-11fbed907fbb",
+    "pid": 9778,
+    "uid": 1000
+  },
+  "payload": {
+    "argv_digest": "sha256:e98b7783d96c5aed3c95e40f2a90ee0fa13a28ea94ebe58bf1d01b3be932a261",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout"
+      ]
+    },
+    "evidence": "best-effort",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:861a8c559cd00b07fceca27e90e9defd9ab317215b4f1092da52dea43bbe9a0f",
+    "policy_digest": "sha256:35f135d9fb2640e6eba6e26e91ab3f216d734083602fb04d6631ce22c0b5dad3",
+    "profile": "none",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "limit:wall",
+      "execution_boundary"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "receipts": [
+    {
+      "applied": {
+        "environment_names": [
+          "DBUS_SESSION_BUS_ADDRESS",
+          "HOME",
+          "INVOCATION_ID",
+          "LANG",
+          "LC_ALL",
+          "LC_CTYPE",
+          "LOGNAME",
+          "MOTD_SHOWN",
+          "PATH",
+          "PWD",
+          "SHELL",
+          "SHLVL",
+          "SSH_CLIENT",
+          "SSH_CONNECTION",
+          "USER",
+          "XDG_RUNTIME_DIR",
+          "XDG_SESSION_CLASS",
+          "XDG_SESSION_ID",
+          "XDG_SESSION_TYPE",
+          "_"
+        ],
+        "filesystem": null,
+        "limits": [
+          {
+            "applied": true,
+            "hit": false,
+            "key": "wall",
+            "mechanism": "boottime-deadline",
+            "requested": "20000",
+            "required": true,
+            "scope": "tree"
+          }
+        ],
+        "network": {
+          "allowed_hosts": [],
+          "mechanism": null,
+          "mode": "host"
+        },
+        "removed_environment_names": [
+          "OURO_CONFIG_DIR",
+          "OURO_DATA_DIR"
+        ],
+        "syscalls": null
+      },
+      "argv_digest": "sha256:e98b7783d96c5aed3c95e40f2a90ee0fa13a28ea94ebe58bf1d01b3be932a261",
+      "attempt_id": "att_5c07429a-c82c-4124-94c0-176ea8305165",
+      "child_protection": "unprotected",
+      "cleanup_error": null,
+      "containment": "none",
+      "coverage": {
+        "exec": {
+          "gaps": [],
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        },
+        "fs.deny": {
+          "gaps": [],
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        },
+        "fs.write": {
+          "gaps": [],
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        },
+        "limits": {
+          "gaps": [],
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        },
+        "net": {
+          "gaps": [],
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        },
+        "proxy.net": {
+          "gaps": [],
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "created_at": "2026-10-06T17:16:23Z",
+      "credentials": [],
+      "errors": [],
+      "exec_observed": false,
+      "jail": {
+        "backend": "none",
+        "backend_version": null,
+        "component": "ouro-jail",
+        "version": "0.1.0"
+      },
+      "lifetime": {
+        "boundary": "supervisor_cgroup",
+        "integrity": "verified",
+        "native": {
+          "details": {
+            "child_subreaper": true,
+            "execution_cgroup": {
+              "charged_helpers": [],
+              "device": 25,
+              "inode": 6590,
+              "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_5c07429a-c82c-4124-94c0-176ea8305165.leaf",
+              "scope": "target_descendants_and_listed_helpers"
+            },
+            "launcher_pid": 9787,
+            "narrowing_filter_digest": "sha256:f5353e3a8e29beeca5edb0e19952196e8c1b8b575c4d5aab1698a7017fefb56e",
+            "observer_plan": {
+              "backend": "ptrace",
+              "event_bytes_max": 65536,
+              "in_flight_max": 16384,
+              "kernel_ring_bytes": null,
+              "path_snapshot_max": 4096,
+              "queue_bytes_max": 4194304,
+              "queue_events_max": 16384,
+              "queue_lifecycle_reserve_bytes": 65536,
+              "queue_result_bytes_max": 4128768,
+              "test_seams": {}
+            },
+            "supervisor_scope": {
+              "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/run-p9730-i9731.scope",
+              "reason": null,
+              "reason_code": null,
+              "state": "already_delegated",
+              "unit": null
+            }
+          },
+          "os": "linux"
+        },
+        "tree_empty": null,
+        "verification_scope": "registered_boundary",
+        "verified_at": null
+      },
+      "observer": {
+        "attached": false,
+        "backend": null,
+        "gaps": [],
+        "set": null,
+        "sources": {
+          "audit": "unsupported",
+          "proxy": "unsupported",
+          "wrapper": "supported"
+        }
+      },
+      "outcome": {
+        "cause": null,
+        "code": null,
+        "error": null,
+        "kind": "pending",
+        "signal": null
+      },
+      "phase": "prepared",
+      "platform": {
+        "arch": "aarch64",
+        "kernel": "Linux 6.18.50+rpt-rpi-v8",
+        "os": "linux"
+      },
+      "policy": {
+        "digest": "sha256:35f135d9fb2640e6eba6e26e91ab3f216d734083602fb04d6631ce22c0b5dad3",
+        "evidence": "best-effort",
+        "grants": [],
+        "name": "none",
+        "observe": "on",
+        "requirements": [
+          "tree_termination",
+          "closed_set_observation",
+          "limit:wall",
+          "execution_boundary"
+        ]
+      },
+      "process": {
+        "identity": {
+          "kind": "linux_boot_start",
+          "value": {
+            "boot_id": "a560f47b-ddd0-4869-9d3d-11fbed907fbb",
+            "pid": 9787,
+            "start_time_ticks": 590303
+          }
+        },
+        "pid": 9787
+      },
+      "revision": 1,
+      "schema": "ouro.jail.receipt/1",
+      "state_cleanup": "not_needed",
+      "updated_at": "2026-10-06T17:16:23Z"
+    }
+  ],
+  "request_id": "outage-proof",
+  "run_id": "run_fe0e95a0a83d4b10b4bcc4e5ebddd2f5",
+  "schema": "ouro.ledger.run/1",
+  "settlement": "pending",
+  "state": "admitted"
+}

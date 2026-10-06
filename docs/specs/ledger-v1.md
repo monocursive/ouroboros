@@ -145,7 +145,8 @@ with reason `writer_outage` per outage episode, even if no source records were
 lost. Imported records carry `provenance.role: recovery` and the reconciler's
 identity, with no live producer token. Original source envelopes and request
 identities remain unchanged. A lost reply or interrupted import replays the
-original durable acknowledgement rather than duplicating records.
+original durable acknowledgement rather than duplicating records. If canonical
+settlement was already durable, reconciliation returns that existing terminal record.
 
 The owner synchronizes its local terminal receipt, control message and capture
 summary before requesting canonical settlement. Recovery rechecks policy,
@@ -1042,6 +1043,10 @@ refusal, independent OpenSSL checks and Linux-to-macOS verification.
 The [October 6 Raspberry Pi catch-up record](ledger-v1/evidence/2026-10-06-pi-catch-up/README.md)
 validates all those current ledger features natively on ARM64, including all
 21 real launch tests, signed-bundle portability and the installed commands.
+
+The [October 6 writer-outage record](ledger-v1/evidence/2026-10-06-writer-outage/README.md)
+covers bounded best-effort pending evidence, restart reconciliation, local exit
+failures, conservative unknown outcomes and portable recovered bundles.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

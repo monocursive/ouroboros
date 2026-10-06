@@ -1,0 +1,6 @@
+    Checking toml_edit v0.22.27
+    Checking ouro-records v0.1.0 (/home/ubuntu/ouro-outage-704f6bcb/crates/ouro-records)
+    Checking ouro-fixture v0.1.0 (/home/ubuntu/ouro-outage-704f6bcb/crates/ouro-fixture)
+    Checking toml v0.8.23
+    Checking ouro-ledger v0.1.0 (/home/ubuntu/ouro-outage-704f6bcb/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 6.43s
