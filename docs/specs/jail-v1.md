@@ -323,6 +323,9 @@ are bound only where present, with actual mounts recorded in the receipt.
 No promise is made about all kernels newer than a version.
 The [native ARM64 validation record](jail-v1/evidence/2026-10-05-arm64/README.md)
 contains the tested source, binaries, host limits and launch results.
+The [October 6 Pi catch-up](ledger-v1/evidence/2026-10-06-pi-catch-up/README.md)
+reruns the native filters, observer, freeze tables and capability refusals with
+the latest ledger features, and verifies the installed commands.
 
 The native macOS CI lane initially targets Apple Silicon; Intel compilation is
 additional evidence, not an execution support claim. CI compiles

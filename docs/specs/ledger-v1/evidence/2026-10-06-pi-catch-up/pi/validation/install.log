@@ -1,0 +1,14 @@
+{
+  "revision": "41e6457b009065bd4fe4040b3141da291fb29c9b",
+  "build_inputs": "sha256:4f45c7d14a754af0a72906747725c99cfadd8e673805e2b2412cf90c3e475512",
+  "target": "aarch64-unknown-linux-gnu",
+  "binaries": {
+    "ouro-jail": "861a8c559cd00b07fceca27e90e9defd9ab317215b4f1092da52dea43bbe9a0f",
+    "ouro-ledger": "022793bc3ea7aa8ddb80efbdcc13b20285aedc7ded02df8e327540ad29695556"
+  },
+  "release_directory": "/home/monocursive/.local/lib/ouroboros/41e6457b",
+  "commands": {
+    "ouro-jail": "/home/monocursive/.local/bin/ouro-jail",
+    "ouro-ledger": "/home/monocursive/.local/bin/ouro-ledger"
+  }
+}

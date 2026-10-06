@@ -1,0 +1,76 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/ouro-pi-41e6457b/crates/ouro-jail)
+    Finished `release` profile [optimized] target(s) in 2m 04s
+     Running tests/command_rules_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/command_rules_linux-05fe00fc78d1a518)
+
+running 3 tests
+test a_matching_child_command_is_still_forbidden ... ok
+test denied_execve_and_execveat_return_eperm_without_running_the_image ... ok
+test empty_arguments_do_not_turn_an_allowed_command_into_a_forbidden_one ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+
+     Running tests/j4_tracer_precision_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/j4_tracer_precision_linux-1172f32a0f5a68fa)
+
+running 26 tests
+test j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_none ... ok
+test j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_tool ... ok
+test j4_o1_read_only_opens_are_never_inflight_loss ... ok
+test j4_o2_a_default_ignored_signal_restarts_the_call ... ok
+test j4_o2_a_fatal_signal_inside_the_call_is_no_result_and_no_loss ... ok
+test j4_o2_a_handler_s_own_call_follows_the_eintr_it_interrupted ... ok
+test j4_o2_a_handler_with_sa_restart_gives_the_restarted_result_connect ... ok
+test j4_o2_a_handler_with_sa_restart_gives_the_restarted_result_open ... ok
+test j4_o2_a_handler_without_sa_restart_makes_eintr_the_result_connect ... ok
+test j4_o2_a_handler_without_sa_restart_makes_eintr_the_result_open ... ok
+test j4_o2_a_restart_then_an_eintr_in_one_call_is_one_result ... ok
+test j4_o2_an_ignored_signal_restarts_the_call ... ok
+test j4_o2_eintr_is_counted_through_the_product_none ... ok
+test j4_o2_eintr_is_counted_through_the_product_tool ... ok
+test j4_o2_eintr_through_sa_siginfo_on_an_alternate_stack ... ok
+test j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss ... ok
+test j4_w3_a_leaders_entry_is_never_paired_with_a_non_leader_execs_exit ... ok
+test j4_w3_a_listener_refused_a_slot_is_the_open_ended_gap_of_its_kind ... ok
+test j4_w3_a_non_leader_exec_invents_no_result_through_the_product_none ... ok
+test j4_w3_a_non_leader_exec_invents_no_result_through_the_product_tool ... ok
+test j4_w3_an_untraced_clone_refused_a_slot_is_the_open_ended_gap_of_its_kind ... ok
+test j4_w3_r1_a_covered_call_inside_an_sa_restart_handler_costs_one_gap ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_another_call_is_a_gap_first ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_connect ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_open ... ok
+test j4_w3_the_queue_budget_bounds_what_is_held_for_a_consumer_not_reading ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.53s
+
+     Running tests/j5_arch_refusal_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/j5_arch_refusal_linux-f05520aa87196a44)
+
+running 2 tests
+test j5_an_riscv64_build_is_not_ready_and_refuses_contained_runs_before_exec ... ok
+test j5_the_arch_seam_never_grants ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.43s
+
+     Running tests/j5_tracer_foreign_child_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/j5_tracer_foreign_child_linux-67c29979c172b705)
+
+running 10 tests
+test j5t_a_child_it_does_not_trace_that_exits_while_traced_is_delivered_not_lost ... ok
+test j5t_a_strict_tool_run_traced_to_an_inherited_reader_settles_verified ... ok
+test j5t_doctor_reports_the_observer_available_beside_an_inherited_child ... ok
+test j5t_none_leaves_an_inherited_child_alone_observed ... ok
+test j5t_none_leaves_an_inherited_child_alone_unobserved ... ok
+test j5t_none_traced_to_an_inherited_reader_delivers_the_whole_stream ... ok
+test j5t_none_unobserved_an_inherited_child_ending_mid_run_is_not_an_escape ... ok
+test j5t_orphans_adopted_while_traced_are_reaped_before_finished ... ok
+test j5t_the_backend_the_launcher_descends_through_is_awaited_and_delivered ... ok
+test j5t_the_tracer_finishes_beside_a_live_child_it_does_not_trace ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.93s
+
+     Running tests/native_capabilities_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/native_capabilities_linux-ff63705d534a4782)
+
+running 3 tests
+test a_requested_landlock_domain_is_installed_or_refuses_before_exec ... ok
+test a_required_memory_ceiling_runs_only_when_the_host_can_enforce_it ... ok
+test an_agent_requires_unix_socket_diagnostics_before_exec ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+

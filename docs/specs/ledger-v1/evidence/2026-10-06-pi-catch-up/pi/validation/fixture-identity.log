@@ -1,0 +1,15 @@
+   Compiling ouro-fixture v0.1.0 (/home/monocursive/ouro-pi-41e6457b/crates/ouro-fixture)
+    Finished `release` profile [optimized] target(s) in 1m 06s
+     Running tests/syscall_identity_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/syscall_identity_linux-673fa5fc712d8523)
+
+running 7 tests
+test a_refused_path_produces_no_syscall_at_all ... ok
+test a_refused_socket_address_produces_no_syscall_at_all ... ok
+test each_via_reaches_the_kernel_as_exactly_that_syscall ... ok
+test the_directory_and_link_variants_are_distinct_at_the_kernel ... ok
+test the_node_creation_variants_are_distinct_at_the_kernel ... ok
+test the_socket_modes_reach_the_kernel_as_the_syscalls_their_lines_name ... ok
+test truncate_names_a_path_to_the_kernel_and_ftruncate_names_only_a_descriptor ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.32s
+

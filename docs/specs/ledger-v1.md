@@ -1000,6 +1000,9 @@ verification of actual Linux bundles on Linux and macOS after source deletion.
 The [October 6 signed-bundle record](ledger-v1/evidence/2026-10-06-bundle-signing/README.md)
 covers explicit signing identities, pinned and untrusted verification, downgrade
 refusal, independent OpenSSL checks and Linux-to-macOS verification.
+The [October 6 Raspberry Pi catch-up record](ledger-v1/evidence/2026-10-06-pi-catch-up/README.md)
+validates all those current ledger features natively on ARM64, including all
+21 real launch tests, signed-bundle portability and the installed commands.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

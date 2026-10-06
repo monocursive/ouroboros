@@ -1,0 +1,6 @@
+   Compiling ouro-records v0.1.0 (/home/monocursive/ouro-pi-41e6457b/crates/ouro-records)
+   Compiling ouro-jail v0.1.0 (/home/monocursive/ouro-pi-41e6457b/crates/ouro-jail)
+   Compiling ouro-fixture v0.1.0 (/home/monocursive/ouro-pi-41e6457b/crates/ouro-fixture)
+   Compiling ouro-ledger v0.1.0 (/home/monocursive/ouro-pi-41e6457b/crates/ouro-ledger)
+   Compiling xtask v0.1.0 (/home/monocursive/ouro-pi-41e6457b/crates/xtask)
+    Finished `release` profile [optimized] target(s) in 8m 32s

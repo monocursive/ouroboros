@@ -1,0 +1,37 @@
+2026-10-06T15:42:12Z
+Linux 6.18.50+rpt-rpi-v8 aarch64 GNU/Linux
+Raspberry Pi 4 Model B Rev 1.2
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.7
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+rustc 1.98.1 (48a229cea 2026-09-01)
+bubblewrap 0.12.0
+OpenSSL 3.5.7 9 Jun 2026 (Library: OpenSSL 3.5.7 9 Jun 2026)
+revision=41e6457b009065bd4fe4040b3141da291fb29c9b
+dirty=false
+conformance=1
+SigIgn:	0000000000001004
+CONFIG_MEMCG=y
+# CONFIG_MEMCG_V1 is not set
+# CONFIG_UNIX_DIAG is not set
+# CONFIG_SECURITY_LANDLOCK is not set
+#subsys_name	hierarchy	num_cgroups	enabled
+cpuset	0	73	1
+cpu	0	73	1
+cpuacct	0	73	1
+blkio	0	73	1
+devices	0	73	1
+freezer	0	73	1
+net_cls	0	73	1
+perf_event	0	73	1
+net_prio	0	73	1
+pids	0	73	1
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/mmcblk0p2   58G  8.2G   48G  15% /

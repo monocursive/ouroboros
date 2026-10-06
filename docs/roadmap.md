@@ -23,6 +23,9 @@ Host capabilities still decide which profiles can run: the tested Pi kernel
 disables memory cgroups and omits Landlock and Unix socket diagnostics.
 `tool` and `none` pass native launch tests; required memory ceilings,
 requested Landlock domains and `agent` refuse before the command starts.
+The [October 6 Pi catch-up](specs/ledger-v1/evidence/2026-10-06-pi-catch-up/README.md)
+also validates the current retention, query, discovery, comparison and signed
+bundle features natively, including the installed CLI commands.
 
 Fourteen starter launch profiles are embedded. OpenCode has recorded live
 runs, but a bundled profile is not a promise that every version of that agent

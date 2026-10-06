@@ -1,0 +1,60 @@
+{
+  "revision": "41e6457b009065bd4fe4040b3141da291fb29c9b",
+  "target": "aarch64-unknown-linux-gnu",
+  "build_inputs": "sha256:4f45c7d14a754af0a72906747725c99cfadd8e673805e2b2412cf90c3e475512",
+  "stages": {
+    "ledger": {
+      "passed": 167,
+      "failed": 0,
+      "ignored": 0
+    },
+    "units": {
+      "passed": 622,
+      "failed": 0,
+      "ignored": 1
+    },
+    "xtask": {
+      "passed": 207,
+      "failed": 0,
+      "ignored": 0
+    },
+    "live": {
+      "passed": 44,
+      "failed": 0,
+      "ignored": 0
+    },
+    "matrix-tool": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "matrix-none": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "published": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "freeze-tables": {
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    "fixture-identity": {
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "total_passed": 1063,
+  "total_failed": 0,
+  "total_ignored": 1,
+  "live_capability_skips": 0,
+  "explicit_landlock_positive_exclusion": true,
+  "doctor_ready": true,
+  "agent_doctor_expected_exit": 125,
+  "frozen_build_inputs_match": true
+}
