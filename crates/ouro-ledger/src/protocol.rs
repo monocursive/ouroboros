@@ -83,6 +83,8 @@ pub struct RunRecord {
     pub holds: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<PrunedHistory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_history: Option<PrunedHistory>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,6 +107,16 @@ pub struct GcReceipt {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CaptureGcReceipt {
+    pub run_id: String,
+    pub chain: Chain,
+    pub capture_history: PrunedHistory,
+    pub removed_files: u32,
+    pub removed_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GcFailure {
     pub run_id: String,
     pub message: String,
@@ -115,7 +127,9 @@ pub struct GcFailure {
 pub struct GcResult {
     pub schema: String,
     pub retain_days: u32,
+    pub capture_retain_days: u32,
     pub pruned: Vec<GcReceipt>,
+    pub captures_pruned: Vec<CaptureGcReceipt>,
     pub kept: Vec<GcCandidate>,
     pub failed: Vec<GcFailure>,
     pub next_after: Option<String>,
@@ -131,6 +145,8 @@ pub struct GcCandidate {
     pub last_activity_at: Option<String>,
     pub candidate: bool,
     pub keep_reasons: Vec<String>,
+    pub captures_candidate: bool,
+    pub captures_keep_reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +157,8 @@ pub struct GcPlan {
     pub deletion_supported: bool,
     pub verification_required: bool,
     pub retain_days: u32,
+    pub capture_retain_days: u32,
+    pub capture_cutoff: String,
     pub evaluated_at: String,
     pub cutoff: String,
     pub runs: Vec<GcCandidate>,
@@ -274,7 +292,8 @@ pub enum Request {
     },
     Gc {
         dry_run: bool,
-        retain_days: u32,
+        retain_days: Option<u32>,
+        capture_retain_days: Option<u32>,
         after: Option<String>,
         limit: u32,
     },

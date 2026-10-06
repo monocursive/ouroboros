@@ -14,12 +14,12 @@ const MAX_REPLAYS: usize = 65_536;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RemovedFile {
-    path: String,
-    bytes: u64,
-    digest: String,
-    device: u64,
-    inode: u64,
+pub(super) struct RemovedFile {
+    pub(super) path: String,
+    pub(super) bytes: u64,
+    pub(super) digest: String,
+    pub(super) device: u64,
+    pub(super) inode: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ struct Envelope {
     retained: Retained,
 }
 
-fn digest_valid(value: &str) -> bool {
+pub(super) fn digest_valid(value: &str) -> bool {
     value.len() == 71
         && value.starts_with("sha256:")
         && value[7..]
@@ -53,7 +53,7 @@ fn digest_valid(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn directory(path: &Path) -> Result<File> {
+pub(super) fn directory(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
@@ -65,7 +65,7 @@ fn directory(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn safe_file(path: &Path) -> Result<File> {
+pub(super) fn safe_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
@@ -85,7 +85,7 @@ fn safe_metadata(m: &fs::Metadata) -> Result<()> {
     Ok(())
 }
 
-fn file_hash(file: &mut File, bytes: u64) -> Result<String> {
+pub(super) fn file_hash(file: &mut File, bytes: u64) -> Result<String> {
     let mut hash = Sha256::new();
     let mut remaining = bytes;
     let mut buffer = [0u8; 65_536];
@@ -107,7 +107,7 @@ fn file_hash(file: &mut File, bytes: u64) -> Result<String> {
 }
 
 /// Open relative to a pinned parent, never through a caller-supplied path.
-fn member(root: &Path, name: &str) -> Result<(File, CString, Option<File>)> {
+pub(super) fn member(root: &Path, name: &str) -> Result<(File, CString, Option<File>)> {
     let (parent, leaf) = if let Some(leaf) = name.strip_prefix("artifacts/") {
         if !["stdout.bin", "stderr.bin"].contains(&leaf) {
             return Err(LedgerError("unsafe GC capture path".into()));
@@ -149,7 +149,7 @@ fn member(root: &Path, name: &str) -> Result<(File, CString, Option<File>)> {
     Ok((parent, leaf, Some(file)))
 }
 
-fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CString, bool)> {
+pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CString, bool)> {
     let (parent, leaf, file) = member(root, &entry.path)?;
     let Some(mut file) = file else {
         return Ok((parent, leaf, false));
@@ -188,7 +188,7 @@ fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CString, bool
     Ok((parent, leaf, true))
 }
 
-fn read_json(path: &Path, max: usize) -> Result<Value> {
+pub(super) fn read_json(path: &Path, max: usize) -> Result<Value> {
     let mut bytes = Vec::new();
     safe_file(path)?
         .take(max as u64 + 1)
@@ -203,7 +203,7 @@ fn read_json(path: &Path, max: usize) -> Result<Value> {
     Ok(value)
 }
 
-fn publish(root: &Path, name: &str, value: &Value, max: usize) -> Result<()> {
+pub(super) fn publish(root: &Path, name: &str, value: &Value, max: usize) -> Result<()> {
     let bytes = canonical(value)?;
     if bytes.len() + 1 > max {
         return Err(LedgerError(
@@ -389,6 +389,7 @@ impl Retained {
     }
 
     fn check_remaining(&self, root: &Path, complete: bool) -> Result<()> {
+        capture_pruning::check_pruned_history(root, &self.run)?;
         // Extra successors must not disappear into a successful pruning report.
         for entry in fs::read_dir(root)? {
             let name = entry?.file_name();
@@ -445,9 +446,25 @@ impl Store {
         limit: u32,
         peer: &Peer,
     ) -> Result<GcResult> {
-        self.gc_at(retain_days, after, limit, peer, SystemTime::now())
+        self.gc_policy(Some(retain_days), None, after, limit, peer)
     }
 
+    pub fn gc_policy(
+        &mut self,
+        history: Option<u32>,
+        captures: Option<u32>,
+        after: Option<&str>,
+        limit: u32,
+        peer: &Peer,
+    ) -> Result<GcResult> {
+        let policy = self
+            .retention
+            .resolve(history, captures)
+            .map_err(|e| LedgerError(e.into()))?;
+        self.gc_policy_at(policy, after, limit, peer, SystemTime::now())
+    }
+
+    #[cfg(test)]
     pub(super) fn gc_at(
         &mut self,
         retain_days: u32,
@@ -456,6 +473,22 @@ impl Store {
         peer: &Peer,
         now: SystemTime,
     ) -> Result<GcResult> {
+        let policy = self
+            .retention
+            .resolve(Some(retain_days), None)
+            .map_err(|e| LedgerError(e.into()))?;
+        self.gc_policy_at(policy, after, limit, peer, now)
+    }
+
+    pub(super) fn gc_policy_at(
+        &mut self,
+        policy: ouro_records::retention::RetentionPolicy,
+        after: Option<&str>,
+        limit: u32,
+        peer: &Peer,
+        now: SystemTime,
+    ) -> Result<GcResult> {
+        let retain_days = policy.retain_days;
         // Full verification and fsync must not stall a live launch's strict channel.
         if self.streams.values().any(|s| {
             s.run.owner.is_some() && ["prepared", "admitted"].contains(&s.run.state.as_str())
@@ -465,18 +498,53 @@ impl Store {
                     .into(),
             ));
         }
-        let plan = self.gc_plan_at(retain_days, after, limit, now)?;
+        let plan = self.gc_plan_policy_at(policy, after, limit, now)?;
         let mut result = GcResult {
             schema: "ouro.ledger.gc-result/1".into(),
             retain_days,
+            capture_retain_days: policy.capture_retain_days,
             pruned: vec![],
+            captures_pruned: vec![],
             kept: vec![],
             failed: vec![],
             next_after: plan.next_after,
         };
         for candidate in plan.runs {
             let id = &candidate.run_id;
+            if self.stream(id)?.pruned.is_none()
+                && ((candidate.captures_candidate && !candidate.candidate)
+                    || self
+                        .stream(id)?
+                        .run
+                        .capture_history
+                        .as_ref()
+                        .is_some_and(|h| h.state == "pruning"))
+            {
+                match self.prune_captures(
+                    id,
+                    policy.capture_retain_days,
+                    &plan.evaluated_at,
+                    &plan.capture_cutoff,
+                    peer,
+                ) {
+                    Ok(receipt) => result.captures_pruned.push(receipt),
+                    Err(e) => {
+                        result.failed.push(GcFailure {
+                            run_id: id.clone(),
+                            message: e.to_string().chars().take(512).collect(),
+                        });
+                        continue;
+                    }
+                }
+            }
             if !candidate.candidate && self.stream(id)?.pruned.is_none() {
+                if result
+                    .captures_pruned
+                    .last()
+                    .is_some_and(|r| r.run_id == *id)
+                {
+                    continue;
+                }
                 result.kept.push(candidate);
                 continue;
             }
@@ -563,50 +631,7 @@ impl Store {
                 inode: m.ino(),
             });
         }
-        directory(&root.join("artifacts"))?;
-        for name in ["stdout", "stderr"] {
-            let path = format!("artifacts/{name}.bin");
-            let (_, _, file) = member(&root, &path)?;
-            let expected = verified.run.capture[name]["stored_bytes"]
-                .as_u64()
-                .unwrap_or(0);
-            if let Some(mut file) = file {
-                let m = file.metadata()?;
-                if !verified.run.payload["capture"]["streams"]
-                    .as_array()
-                    .is_some_and(|streams| streams.contains(&json!(name)))
-                    || m.len() > 16 * 1024 * 1024
-                    || m.len() != expected
-                    || !verified.run.capture[name].is_object()
-                    || verified.run.capture[name]["stored_bytes"]
-                        .as_u64()
-                        .is_none()
-                    || !matches!(
-                        verified.run.capture[name]["state"].as_str(),
-                        Some("captured" | "incomplete")
-                    )
-                {
-                    return Err(LedgerError(
-                        "GC capture does not match recorded selection and size".into(),
-                    ));
-                }
-                let digest = file_hash(&mut file, m.len())?;
-                files.push(RemovedFile {
-                    path,
-                    bytes: m.len(),
-                    digest,
-                    device: m.dev(),
-                    inode: m.ino(),
-                });
-            } else if expected != 0
-                || matches!(
-                    verified.run.capture[name]["state"].as_str(),
-                    Some("captured" | "incomplete")
-                )
-            {
-                return Err(LedgerError("GC recorded capture is missing".into()));
-            }
-        }
+        files.extend(capture_pruning::inventory(&root, &verified.run)?);
         let retained = Retained {
             schema: "ouro.ledger.gc-anchor/1".into(),
             run: verified.run.clone(),

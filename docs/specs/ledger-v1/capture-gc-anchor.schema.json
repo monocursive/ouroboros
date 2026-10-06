@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-capture-gc-anchor:1",
+  "title": "Capture-only pruning authority; canonical event history remains available",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "digest",
+    "retained"
+  ],
+  "properties": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "retained": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "run_id",
+        "attempt_id",
+        "chain",
+        "capture",
+        "last_activity_at",
+        "collected_at",
+        "cutoff",
+        "retain_days",
+        "operator",
+        "files"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ouro.ledger.capture-gc-anchor/1"
+        },
+        "run_id": {
+          "$ref": "urn:ouro:schema:ledger-run:1#/properties/run_id"
+        },
+        "attempt_id": {
+          "$ref": "urn:ouro:schema:ledger-run:1#/properties/attempt_id"
+        },
+        "chain": {
+          "$ref": "urn:ouro:schema:ledger-run:1#/properties/chain"
+        },
+        "capture": {
+          "type": "object"
+        },
+        "last_activity_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "collected_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "cutoff": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "retain_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 36500
+        },
+        "operator": {
+          "type": "object",
+          "properties": {
+            "uid": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "birth": {
+              "type": "string",
+              "minLength": 1
+            },
+            "boot_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "uid",
+            "pid",
+            "birth",
+            "boot_id"
+          ],
+          "additionalProperties": false
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "bytes",
+              "digest",
+              "device",
+              "inode"
+            ],
+            "properties": {
+              "path": {
+                "enum": [
+                  "artifacts/stdout.bin",
+                  "artifacts/stderr.bin"
+                ]
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777216
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              "device": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              },
+              "inode": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

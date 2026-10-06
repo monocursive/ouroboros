@@ -192,6 +192,102 @@ fn gc_cli_prunes_aged_fixture_history_and_preserves_preparation_identity_after_r
     assert_eq!(verified[0]["history"]["state"], "pruned");
 }
 
+#[test]
+fn writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart() {
+    use ouro_records::canonical::{sha256_prefixed, to_jcs};
+    use std::{io::Write, time::SystemTime};
+    let mut cli = LocalCli::new();
+    let config = cli.temp.path().join("config");
+    fs::create_dir(&config).unwrap();
+    let path = config.join("config.toml");
+    fs::write(&path, "[ledger]\nretain='30d'\ncapture_retain='1d'\n").unwrap();
+    let mut records =
+        include_str!("../../../docs/specs/ledger-v1/fixtures/exec-failure-records.ndjson")
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .collect::<Vec<_>>();
+    let id = records[0]["run_id"].as_str().unwrap().to_owned();
+    records[0]["body"]["payload"]["capture"]["streams"] = json!(["stdout"]);
+    records.last_mut().unwrap()["body"]["capture"] = json!({"stdout":{"state":"captured","stored_bytes":7,"path":"artifacts/stdout.bin"},"stderr":{"state":"not_captured"}});
+    let root = cli.data.join("ledger").join(&id);
+    for p in [
+        cli.data.join("ledger"),
+        root.clone(),
+        root.join("artifacts"),
+        root.join("receipts"),
+    ] {
+        fs::create_dir(&p).unwrap();
+        fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let timestamp =
+        ouro_records::records::rfc3339_utc(SystemTime::now() - Duration::from_secs(3 * 86_400));
+    let mut prev = None::<String>;
+    let mut bytes = Vec::new();
+    for r in &mut records {
+        r["prev"] = json!(prev);
+        r["received_at"] = json!(timestamp);
+        let line = to_jcs(r).unwrap();
+        prev = Some(sha256_prefixed(&line));
+        bytes.extend(line);
+        bytes.push(b'\n');
+    }
+    private_file(&root.join("events-0001.ndjson"))
+        .write_all(&bytes)
+        .unwrap();
+    private_file(&root.join("artifacts/stdout.bin"))
+        .write_all(b"capture")
+        .unwrap();
+    let writer = cli.start_writer();
+    fs::write(&path, "[ledger]\nretain='60d'\ncapture_retain='2d'\n").unwrap();
+    let plan = cli.json(&["gc", "--dry-run", "--json"]);
+    assert_eq!(plan["retain_days"], 30);
+    assert_eq!(plan["capture_retain_days"], 1);
+    assert!(
+        !cli.invoke(&[
+            "gc",
+            "--retain-days",
+            "1",
+            "--capture-retain-days",
+            "2",
+            "--json"
+        ])
+        .status
+        .success()
+    );
+    assert_eq!(fs::read(root.join("events-0001.ndjson")).unwrap(), bytes);
+    drop(writer);
+    let writer = cli.start_writer();
+    let plan = cli.json(&["gc", "--dry-run", "--json"]);
+    assert_eq!(plan["retain_days"], 60);
+    assert_eq!(plan["capture_retain_days"], 2);
+    assert_eq!(plan["runs"][0]["candidate"], false);
+    assert_eq!(plan["runs"][0]["captures_candidate"], true);
+    let result = cli.json(&["gc", "--json"]);
+    assert_eq!(result["failed"], json!([]));
+    assert_eq!(result["pruned"], json!([]));
+    assert_eq!(result["captures_pruned"][0]["removed_bytes"], 7);
+    assert!(!root.join("artifacts/stdout.bin").exists());
+    drop(writer);
+    let _writer = cli.start_writer();
+    let shown = cli.json(&["show", &id, "--json"]);
+    assert!(shown["history"].is_null());
+    assert_eq!(shown["capture_history"]["state"], "pruned");
+    let export = cli.invoke(&["export", &id, "--ndjson", "--json"]);
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    assert_eq!(export.stdout, bytes);
+    let verified = cli.json(&["verify", &id, "--json"]);
+    assert_eq!(verified[0]["local_consistency"], true);
+    assert_eq!(verified[0]["events"], records.len());
+    let repeated = cli.json(&["gc", "--json"]);
+    assert_eq!(repeated["failed"], json!([]));
+    assert_eq!(repeated["pruned"], json!([]));
+    assert_eq!(fs::read(root.join("events-0001.ndjson")).unwrap(), bytes);
+}
+
 /// Own every subprocess from spawn through wait, including assertion failures.
 struct Process(Child);
 
@@ -233,6 +329,7 @@ impl LocalCli {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
         command.arg("--data-dir").arg(&self.data);
+        command.env("OURO_CONFIG_DIR", self.temp.path().join("config"));
         command.stdin(Stdio::null());
         command
     }

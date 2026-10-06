@@ -6,6 +6,7 @@ use std::{
 
 use super::*;
 use crate::protocol::{GcCandidate, GcPlan};
+use ouro_records::retention::RetentionPolicy;
 
 impl Store {
     pub fn hold(&mut self, run_id: &str, request_id: &str, peer: &Peer) -> Result<AppendReceipt> {
@@ -43,9 +44,24 @@ impl Store {
     }
 
     pub fn gc_plan(&self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcPlan> {
-        self.gc_plan_at(retain_days, after, limit, SystemTime::now())
+        self.gc_plan_policy(Some(retain_days), None, after, limit)
     }
 
+    pub fn gc_plan_policy(
+        &self,
+        history: Option<u32>,
+        captures: Option<u32>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<GcPlan> {
+        let policy = self
+            .retention
+            .resolve(history, captures)
+            .map_err(|e| LedgerError(e.into()))?;
+        self.gc_plan_policy_at(policy, after, limit, SystemTime::now())
+    }
+
+    #[cfg(test)]
     pub(super) fn gc_plan_at(
         &self,
         retain_days: u32,
@@ -53,7 +69,29 @@ impl Store {
         limit: u32,
         now: SystemTime,
     ) -> Result<GcPlan> {
-        if !(1..=36_500).contains(&retain_days) || !(1..=100).contains(&limit) {
+        let policy = self
+            .retention
+            .resolve(Some(retain_days), None)
+            .map_err(|e| LedgerError(e.into()))?;
+        self.gc_plan_policy_at(policy, after, limit, now)
+    }
+
+    pub(super) fn gc_plan_policy_at(
+        &self,
+        policy: RetentionPolicy,
+        after: Option<&str>,
+        limit: u32,
+        now: SystemTime,
+    ) -> Result<GcPlan> {
+        let RetentionPolicy {
+            retain_days,
+            capture_retain_days,
+        } = policy;
+        if capture_retain_days > retain_days
+            || !(1..=36_500).contains(&capture_retain_days)
+            || !(1..=36_500).contains(&retain_days)
+            || !(1..=100).contains(&limit)
+        {
             return Err(LedgerError(
                 "GC preview requires 1..36500 retention days and 1..100 runs per page".into(),
             ));
@@ -69,8 +107,15 @@ impl Store {
             .checked_sub(Duration::from_secs(u64::from(retain_days) * 86_400))
             .ok_or_else(|| LedgerError("retention cutoff is outside the clock range".into()))?;
         let cutoff = records::rfc3339_utc(cutoff);
+        let capture_cutoff = records::rfc3339_utc(
+            now.checked_sub(Duration::from_secs(u64::from(capture_retain_days) * 86_400))
+                .ok_or_else(|| LedgerError("capture cutoff outside clock range".into()))?,
+        );
         let evaluated_at = records::rfc3339_utc(now);
-        if !crate::reader::utc_second(&cutoff) || !crate::reader::utc_second(&evaluated_at) {
+        if !crate::reader::utc_second(&cutoff)
+            || !crate::reader::utc_second(&capture_cutoff)
+            || !crate::reader::utc_second(&evaluated_at)
+        {
             return Err(LedgerError(
                 "retention clock is outside the supported UTC range".into(),
             ));
@@ -124,6 +169,28 @@ impl Store {
             if stream.pruned.is_none() && !self.retention_layout_matches(id, stream) {
                 reasons.push("canonical_layout_changed");
             }
+            let mut capture_reasons: Vec<_> = reasons
+                .iter()
+                .copied()
+                .filter(|r| *r != "retention_window")
+                .collect();
+            if stream
+                .last_activity_at
+                .as_deref()
+                .is_some_and(|t| t > capture_cutoff.as_str())
+            {
+                capture_reasons.push("retention_window");
+            }
+            if stream.run.capture_history.is_some() {
+                capture_reasons.push("captures_pruned");
+            } else if !["stdout", "stderr"].iter().any(|name| {
+                matches!(
+                    stream.run.capture[name]["state"].as_str(),
+                    Some("captured" | "incomplete")
+                )
+            }) {
+                capture_reasons.push("no_captures");
+            }
             runs.push(GcCandidate {
                 run_id: id.clone(),
                 state: stream.run.state.clone(),
@@ -131,6 +198,8 @@ impl Store {
                 chain: stream.run.chain.clone(),
                 last_activity_at: stream.last_activity_at.clone(),
                 candidate: reasons.is_empty(),
+                captures_candidate: capture_reasons.is_empty(),
+                captures_keep_reasons: capture_reasons.into_iter().map(str::to_owned).collect(),
                 keep_reasons: reasons.into_iter().map(str::to_owned).collect(),
             });
         }
@@ -145,6 +214,8 @@ impl Store {
             deletion_supported: true,
             verification_required: true,
             retain_days,
+            capture_retain_days,
+            capture_cutoff,
             evaluated_at,
             cutoff,
             runs,

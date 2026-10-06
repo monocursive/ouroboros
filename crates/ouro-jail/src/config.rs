@@ -188,6 +188,8 @@ pub struct JailHostSection {
 #[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorConfig {
+    /// Local ledger retention settings; execution does not apply them.
+    pub ledger: Option<ouro_records::retention::LedgerRetention>,
     /// Jail defaults.
     pub jail: Option<JailSection>,
     /// Host configuration.
@@ -641,6 +643,22 @@ pub fn env_settings(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<EnvSett
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_operator_retention_settings_do_not_become_jail_policy() {
+        let config = parse_operator_config("[ledger]\nretain='90d'\ncapture_retain='7d'").unwrap();
+        assert!(config.jail.is_none());
+        assert_eq!(
+            config
+                .ledger
+                .unwrap()
+                .resolve(None, None)
+                .unwrap()
+                .capture_retain_days,
+            7
+        );
+        assert!(parse_operator_config("[ledger]\nretian='7d'").is_err());
+    }
 
     #[test]
     fn wall_units_scale_and_a_bare_integer_refuses() {

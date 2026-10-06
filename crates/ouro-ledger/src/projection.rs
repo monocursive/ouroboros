@@ -347,6 +347,7 @@ mod tests {
         RunRecord {
             holds: vec![],
             history: None,
+            capture_history: None,
             schema: "ouro.ledger.run/1".into(),
             run_id: id.into(),
             attempt_id: format!("attempt_{id}"),

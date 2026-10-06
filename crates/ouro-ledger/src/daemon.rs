@@ -159,7 +159,38 @@ impl Client {
     pub fn gc_plan(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcPlan> {
         self.request(Request::Gc {
             dry_run: true,
+            retain_days: Some(retain_days),
+            capture_retain_days: None,
+            after: after.map(str::to_owned),
+            limit,
+        })
+    }
+    pub fn gc_plan_policy(
+        &mut self,
+        retain_days: Option<u32>,
+        capture_retain_days: Option<u32>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<GcPlan> {
+        self.request(Request::Gc {
+            dry_run: true,
             retain_days,
+            capture_retain_days,
+            after: after.map(str::to_owned),
+            limit,
+        })
+    }
+    pub fn gc_policy(
+        &mut self,
+        retain_days: Option<u32>,
+        capture_retain_days: Option<u32>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<GcResult> {
+        self.request(Request::Gc {
+            dry_run: false,
+            retain_days,
+            capture_retain_days,
             after: after.map(str::to_owned),
             limit,
         })
@@ -167,7 +198,8 @@ impl Client {
     pub fn gc(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcResult> {
         self.request(Request::Gc {
             dry_run: false,
-            retain_days,
+            retain_days: Some(retain_days),
+            capture_retain_days: None,
             after: after.map(str::to_owned),
             limit,
         })
@@ -216,7 +248,9 @@ struct Message {
 }
 
 pub fn serve(data: &Path) -> Result<()> {
+    let retention = crate::config::load()?;
     let mut store = Store::open(data)?;
+    store.retention = retention;
     let path = store.root().join("serve.sock");
     if let Ok(meta) = fs::symlink_metadata(&path) {
         use std::os::unix::fs::FileTypeExt as _;
@@ -384,7 +418,7 @@ fn dispatch(
         Request::Verify { run_id } => Ok(serde_json::to_value(store.verify(run_id.as_deref())?)?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
-            json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status()}),
+            json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),
         ),
         Request::SettleOrphans => Ok(serde_json::to_value(
             store.settle_orphans(peer, peer_alive)?,
@@ -402,19 +436,22 @@ fn dispatch(
         Request::Gc {
             dry_run,
             retain_days,
+            capture_retain_days,
             after,
             limit,
         } => {
             if !dry_run {
-                return Ok(serde_json::to_value(store.gc(
+                return Ok(serde_json::to_value(store.gc_policy(
                     retain_days,
+                    capture_retain_days,
                     after.as_deref(),
                     limit,
                     peer,
                 )?)?);
             }
-            Ok(serde_json::to_value(store.gc_plan(
+            Ok(serde_json::to_value(store.gc_plan_policy(
                 retain_days,
+                capture_retain_days,
                 after.as_deref(),
                 limit,
             )?)?)
@@ -582,7 +619,8 @@ mod tests {
             &mut tokens,
             Request::Gc {
                 dry_run: false,
-                retain_days: 90,
+                retain_days: Some(90),
+                capture_retain_days: None,
                 after: None,
                 limit: 25,
             },

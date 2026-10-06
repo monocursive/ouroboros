@@ -432,7 +432,7 @@ The [read request schema](ledger-v1/read-request.schema.json),
 interface. Their fixtures are document contracts, not a production contract
 freeze or proof of an external custody boundary.
 
-## 8. Retention holds and preview
+## 8. Retention policies, holds and pruning
 
 `hold RUN [--request-id ID]` and `release RUN [--request-id ID]` append canonical
 operator records through the authenticated local writer. Their bodies are empty;
@@ -458,10 +458,32 @@ ouro-ledger gc --dry-run --json
 ouro-ledger release RUN_ID --request-id release-investigation-1 --json
 ```
 
+The writer reads the operator's `~/.config/ouro/config.toml` (or
+`$OURO_CONFIG_DIR/config.toml`) at startup. Restart the writer after changing it;
+clients cannot replace an existing writer's configuration by changing their own
+environment. Detached writer services preserve an explicit absolute
+`OURO_CONFIG_DIR`. A missing file uses 90 days for history and captures. Invalid,
+oversized, linked or group/other-writable configuration refuses startup rather
+than silently selecting defaults. A `[ledger]` section is also accepted by the
+jail, which does not apply retention itself.
+
+```toml
+[ledger]
+retain = "90d"
+capture_retain = "7d"
+```
+
+Both values accept whole days `1d..36500d`. Omitted `capture_retain` follows the
+resolved history policy; an explicit capture policy cannot exceed history
+retention. This keeps capture bytes from outliving the records that explain
+them. `doctor` includes the writer's configured days. `gc --retain-days N` and
+`--capture-retain-days N` override their respective settings for one invocation;
+the resolved pair is validated together and reported in the plan/result. No
+configuration setting schedules automatic deletion.
+
 `gc --dry-run` returns one page described by the
-[GC plan schema](ledger-v1/gc-plan.schema.json). It defaults to 90 days, with
-`--retain-days 1..36500` selecting a policy for this invocation only. Persistent
-`[ledger] retain` configuration remains pending. A page defaults to 25 runs,
+[GC plan schema](ledger-v1/gc-plan.schema.json), with separate history/capture
+cutoffs, candidate flags and keep reasons. A page defaults to 25 runs,
 at most 100; pass `next_after` as `--after RUN_ID` to continue in run-id order.
 Each page reflects current writer state, not a cross-page frozen snapshot or a
 reusable deletion authorization. The preview requires an existing writer:
@@ -490,10 +512,10 @@ its chain head and `child_protection`. It always says `dry_run: true`,
 retention assessment against accepted writer state and current layout; the
 preview does not hash all canonical bytes again or inventory capture sizes.
 
-`gc` without `--dry-run` deletes eligible whole-run history through the existing
-writer. It uses the same retention policy and pagination and returns a
-[GC result](ledger-v1/gc-result.schema.json) with `pruned`, `kept`, `failed` and
-`next_after`. A per-run failure gives a nonzero CLI exit; other runs in the page
+`gc` without `--dry-run` deletes eligible captures or whole-run history through
+the existing writer. It uses the same retention policy and pagination and returns a
+[GC result](ledger-v1/gc-result.schema.json) with `pruned`, `captures_pruned`, `kept`, `failed` and
+`next_after`. Whole-run expiry takes precedence when both are eligible. A per-run failure gives a nonzero CLI exit; other runs in the page
 can have completed. Repeating GC returns the same retained receipt for an
 already-pruned run. Receipt counters describe the original inventory, not fresh
 bytes removed by each retry. This is an explicit operation, not automatic expiry.
@@ -542,6 +564,44 @@ reports zero available events and the history marker: its local consistency
 result covers retained metadata, matching completion and projection, not deleted
 event bytes. The original `none` label remains `unprotected`.
 
+### 8.1 Capture-only expiry
+
+Before history is eligible, GC can remove the selected stdout/stderr captures
+while preserving canonical events, manifests, replay identities and all query
+and export bytes. The same known-terminal-outcome, hold, reader-pin, clock and
+layout checks apply. Empty selected captures are still inventoried and removed;
+unselected streams are not candidates. Both captured streams share one policy.
+Age uses the latest canonical writer activity, just like history retention.
+
+The writer verifies canonical history and inventories at most two regular,
+owned, unlinked capture files of at most 16 MiB each. It synchronizes the
+checksummed [capture inventory](ledger-v1/capture-gc-anchor.schema.json) as
+`captures-gc.json` before unlinking anything. That inventory binds the terminal
+canonical chain, original capture metadata, operator, times, policy and exact
+file hashes/inodes. Its size is capped at 64 KiB. It cannot name canonical
+segments or arbitrary paths. Restart validates the anchor against canonical
+history and resumes the inventory; changed files, unsafe links, missing authority
+and reappearing completed files refuse deletion. Corrupt canonical history
+keeps its existing poisoned-stream behavior and cannot authorize capture deletion.
+
+A synchronized [completion marker](ledger-v1/capture-gc-complete.schema.json),
+`captures-gc-done.json`, follows the unlink and directory-sync barriers.
+`run.json` exposes a separate `capture_history` marker (`pruning` or `pruned`);
+event `history` stays absent until whole-run pruning. Collected streams report
+`pruned`, zero stored bytes and their original `pruned_bytes`. The projection
+and SQLite index can be rebuilt from canonical history and the capture anchor.
+`verify` reports incomplete deletion without resuming it. New mutations refuse
+while capture deletion is pending; completed capture expiry permits later holds,
+notes and eventual whole-run pruning. It does not change canonical activity time.
+The capture anchors remain after whole-run pruning so loss or reappearance is
+still detectable. Existing `none` protection labels remain unchanged.
+
+Capture receipts describe the original inventory, not bytes removed by a retry.
+After completed capture expiry, subsequent previews report `captures_pruned`
+(and no new capture candidate); whole-run deletion continues to use its own
+retention clock. A reader's checkpoint protects both history and captures even
+though canonical export contains no capture bytes.
+
 ## 9. Acceptance and remaining milestone 2 scope
 
 The Rust store tests exercise process-lifetime writer exclusion; lost replies
@@ -577,8 +637,7 @@ and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
 unimplemented verbs/features: `append` for independent operator intents,
-`tail`, cross-run query and comparison, `diff`, `bundle`, persistent retention
-configuration, separate capture retention policies,
+`tail`, cross-run query and comparison, `diff`, `bundle`,
 best-effort outage reconciliation, signed bundles and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,

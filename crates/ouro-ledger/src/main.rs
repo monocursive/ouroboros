@@ -102,9 +102,12 @@ enum Action {
     Gc {
         #[arg(long)]
         dry_run: bool,
-        /// Retention policy for this invocation; does not save configuration.
-        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u32).range(1..=36500))]
-        retain_days: u32,
+        /// Override the writer's history retention for this invocation.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        retain_days: Option<u32>,
+        /// Override capture retention; cannot exceed history retention.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        capture_retain_days: Option<u32>,
         /// Continue after the last run id returned by the previous page.
         #[arg(long)]
         after: Option<String>,
@@ -485,6 +488,7 @@ fn execute(cli: Cli) -> Result<i32> {
         Action::Gc {
             dry_run,
             retain_days,
+            capture_retain_days,
             after,
             limit,
             json,
@@ -493,12 +497,18 @@ fn execute(cli: Cli) -> Result<i32> {
             let mut client = daemon::Client::connect(&data)?;
             if dry_run {
                 output(
-                    &serde_json::to_value(client.gc_plan(retain_days, after.as_deref(), limit)?)?,
+                    &serde_json::to_value(client.gc_plan_policy(
+                        retain_days,
+                        capture_retain_days,
+                        after.as_deref(),
+                        limit,
+                    )?)?,
                     json,
                 )?;
                 Ok(0)
             } else {
-                let result = client.gc(retain_days, after.as_deref(), limit)?;
+                let result =
+                    client.gc_policy(retain_days, capture_retain_days, after.as_deref(), limit)?;
                 let passed = result.failed.is_empty();
                 output(&serde_json::to_value(result)?, json)?;
                 Ok(if passed { 0 } else { 1 })

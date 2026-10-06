@@ -187,7 +187,7 @@ Output capture is opt-in and bounded. Linux owns execution;
 macOS supports local store inspection. The jail still works independently.
 
 See the [ledger specification and commands](docs/specs/ledger-v1.md). The full
-ledger milestone remains open: cross-run queries, comparisons, retention,
+ledger milestone remains open: cross-run queries, comparisons,
 signed bundles, best-effort recovery and managed project authorization are not
 implemented. Local consistency is reported separately from coverage and
 protection from the child.
@@ -201,7 +201,7 @@ protection from the child.
 - **Research:** native macOS execution, including process-tree cleanup when the
   supervising helper dies. Apple entitlement approval is also pending; approval
   alone does not resolve the cleanup blocker.
-- **Later:** ledger retention and signed export bundles, and company-managed Linux
+- **Later:** signed ledger export bundles, and company-managed Linux
   workers, starting with one worker before a fleet.
 
 These are planned features with no release dates. See the [roadmap](docs/roadmap.md),

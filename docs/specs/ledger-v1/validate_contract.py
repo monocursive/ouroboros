@@ -132,6 +132,21 @@ def pruning_fixtures(validators, run, records):
     validators["gc-anchor"].validate(envelope)
     complete = {"schema": "ouro.ledger.gc-complete/1", "anchor_digest": envelope["digest"]}
     validators["gc-complete"].validate(complete)
+    # Capture-only authority binds a terminal chain but never inventories events.
+    capture = {"stdout": {"state": "captured", "stored_bytes": 0},
+               "stderr": {"state": "not_captured"}}
+    captured = {"schema": "ouro.ledger.capture-gc-anchor/1", "run_id": run["run_id"],
+                "attempt_id": run["attempt_id"], "chain": run["chain"], "capture": capture,
+                **{k: retained[k] for k in ["last_activity_at", "collected_at", "cutoff", "retain_days", "operator"]},
+                "files": [{"path": "artifacts/stdout.bin", "bytes": 0,
+                           "digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "device": 1, "inode": 2}]}
+    capture_envelope = {"digest": digest(captured), "retained": captured}
+    validators["capture-gc-anchor"].validate(capture_envelope)
+    validators["capture-gc-complete"].validate({"schema": "ouro.ledger.capture-gc-complete/1", "anchor_digest": digest(captured)})
+    for path in ["events-0001.ndjson", "../escape", "artifacts/vendor-state"]:
+        altered = copy.deepcopy(capture_envelope)
+        altered["retained"]["files"][0]["path"] = path
+        expect_invalid(validators["capture-gc-anchor"], altered, "capture-only authority may not delete other files")
     history = {"state": "pruned", "anchor_digest": envelope["digest"],
                "collected_at": retained["collected_at"]}
     result = {"schema": "ouro.ledger.gc-result/1", "retain_days": 1,
@@ -139,6 +154,12 @@ def pruning_fixtures(validators, run, records):
                           "removed_files": 1, "removed_bytes": len(data)}],
               "kept": [], "failed": [], "next_after": None}
     validators["gc-result"].validate(result)
+    capture_result = {**result, "pruned": [], "capture_retain_days": 1,
+                      "captures_pruned": [{"run_id": run["run_id"], "chain": run["chain"],
+                                           "capture_history": {**history, "anchor_digest": digest(captured)},
+                                           "removed_files": 1, "removed_bytes": 0}]}
+    validators["gc-result"].validate(capture_result)
+    validators["run"].validate({**run, "capture_history": history})
     for state in ["pruning", "pruned"]:
         validators["run"].validate({**run, "history": {**history, "state": state}})
     for path in ["../escape", "artifacts/../stdout.bin", "artifacts/vendor-state", "run.json"]:
@@ -206,6 +227,13 @@ def main():
         expect_invalid(validators["run"], held, "invalid operator holds")
     gc = read("gc-plan.json")
     validators["gc-plan"].validate(gc)
+    captured_gc = copy.deepcopy(gc)
+    captured_gc.update(capture_retain_days=7, capture_cutoff=gc["cutoff"])
+    for candidate in captured_gc["runs"]:
+        candidate.update(captures_candidate=False, captures_keep_reasons=["operator_hold"])
+    validators["gc-plan"].validate(captured_gc)
+    captured_gc["runs"][0]["captures_candidate"] = True
+    expect_invalid(validators["gc-plan"], captured_gc, "capture candidate has keep reasons")
     for key, value in [("dry_run", False), ("deletion_supported", False),
                        ("verification_required", False), ("retain_days", 0),
                        ("retain_days", 36501), ("next_after", "../escape"),

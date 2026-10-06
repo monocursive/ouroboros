@@ -37,7 +37,7 @@ pub const INPUT_DIR: &str = "crates/ouro-jail/src";
 /// The other build inputs, relative to the repository root. Dependencies
 /// are pinned by `Cargo.lock` (crates.io sources are immutable per version
 /// and checksum), the compiler by `rust-toolchain.toml`.
-pub const INPUT_FILES: [&str; 35] = include!("../profiles/inputs.rs");
+pub const INPUT_FILES: [&str; 36] = include!("../profiles/inputs.rs");
 
 /// A validated build environment.
 #[derive(Clone, Debug, PartialEq, Eq)]

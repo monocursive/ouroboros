@@ -216,8 +216,20 @@ mod linux {
         );
         let unit = format!("ouro-ledger-writer-{}.service", &digest[7..39]);
         if Client::connect(data).is_err() {
+            let mut command = unit_command(&unit);
+            if let Some(config) = std::env::var_os("OURO_CONFIG_DIR") {
+                let config = PathBuf::from(config);
+                if !config.is_absolute() {
+                    return Err(LedgerError(
+                        "OURO_CONFIG_DIR must be absolute for a detached writer".into(),
+                    ));
+                }
+                let mut setting = std::ffi::OsString::from("--setenv=OURO_CONFIG_DIR=");
+                setting.push(config);
+                command.arg(setting);
+            }
             let started = command_output(
-                unit_command(&unit)
+                command
                     .arg("--")
                     .arg(std::env::current_exe()?)
                     .arg("--data-dir")

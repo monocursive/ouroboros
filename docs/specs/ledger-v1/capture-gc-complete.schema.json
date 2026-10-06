@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-capture-gc-complete:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "anchor_digest"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.capture-gc-complete/1"
+    },
+    "anchor_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

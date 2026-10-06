@@ -28,6 +28,7 @@ use crate::protocol::{
 
 use crate::manifest::{self, STREAM};
 
+mod capture_pruning;
 mod pruning;
 mod retention;
 
@@ -69,6 +70,7 @@ struct Stream {
 }
 
 pub struct Store {
+    pub(crate) retention: ouro_records::retention::LedgerRetention,
     root: PathBuf,
     _lock: File,
     streams: BTreeMap<String, Stream>,
@@ -391,6 +393,7 @@ fn initial_run(run_id: &str, request_id: &str, attempt_id: &str, payload: Value)
         },
         holds: vec![],
         history: None,
+        capture_history: None,
     }
 }
 
@@ -413,6 +416,7 @@ impl Store {
             ));
         }
         let mut store = Self {
+            retention: Default::default(),
             root,
             _lock: lock,
             streams: BTreeMap::new(),
@@ -437,11 +441,15 @@ impl Store {
             }
             check_run_id(&name)?;
             private_directory(&entry.path())?;
-            let stream = if let Some(retained) = pruning::read(&store.root.join(&name), &name)? {
+            let mut stream = if let Some(retained) = pruning::read(&store.root.join(&name), &name)?
+            {
                 store.restore_pruned(&name, retained)?
             } else {
                 store.load_stream_with_sync(&name, &recovery_sync)?.0
             };
+            if stream.poisoned.is_empty() && stream.pruned.is_none() {
+                store.recover_captures(&name, &mut stream)?;
+            }
             if !stream.poisoned.is_empty() {
                 store.recovery_ambiguous = true;
             }
@@ -721,6 +729,16 @@ impl Store {
         if stream.pruned.is_some() {
             return Err(LedgerError(
                 "run history was pruned; new mutations are refused".into(),
+            ));
+        }
+        if stream
+            .run
+            .capture_history
+            .as_ref()
+            .is_some_and(|h| h.state == "pruning")
+        {
+            return Err(LedgerError(
+                "capture pruning is incomplete; retry GC or restart before mutations".into(),
             ));
         }
         validate_transition(stream, &record)?;
@@ -1029,6 +1047,16 @@ impl Store {
                 }
                 let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
                 let mut problems = stream.poisoned.clone();
+                if stream
+                    .run
+                    .capture_history
+                    .as_ref()
+                    .is_some_and(|h| h.state == "pruning")
+                {
+                    problems.push(
+                        "capture deletion is incomplete; retry GC or restart the writer".into(),
+                    );
+                }
                 if stream.poisoned.is_empty() {
                     let projection = (|| -> Result<Value> {
                         use std::io::Read as _;
@@ -1307,6 +1335,9 @@ impl Store {
             // Sync the exact descriptor just verified, not a reopened path. A
             // failure aborts startup before any repaired metadata is published.
             sync(reader.get_ref())?;
+        }
+        if stream.poisoned.is_empty() {
+            capture_pruning::apply(&directory, &mut stream)?;
         }
         Ok((stream, events))
     }
@@ -2118,11 +2149,16 @@ mod tests {
     }
 
     fn gc_fixture() -> (tempfile::TempDir, Store, RunRecord) {
+        gc_fixture_captures(&[("stdout", b"private-capture")])
+    }
+
+    fn gc_fixture_captures(captures: &[(&str, &[u8])]) -> (tempfile::TempDir, Store, RunRecord) {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         let mut plan = payload();
         plan["profile"] = json!("none");
-        plan["capture"]["streams"] = json!(["stdout"]);
+        plan["capture"]["streams"] =
+            json!(captures.iter().map(|(name, _)| *name).collect::<Vec<_>>());
         let run = store.prepare("gc-prepare", &plan, &peer()).unwrap();
         store.claim_owner(&run.run_id, &peer()).unwrap();
         store.segment_limit = 1;
@@ -2138,18 +2174,314 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .unwrap();
-        let path = store.root.join(&run.run_id).join("artifacts/stdout.bin");
-        let mut file = private_file(&path, true, false).unwrap();
-        file.write_all(b"private-capture").unwrap();
-        file.sync_all().unwrap();
-        store.append_owner(&run.run_id, "gc-denial", "denied", None,
-            &json!({"outcome":{"kind":"refused"},"capture":{"stdout":{"state":"captured","stored_bytes":15,"path":"artifacts/stdout.bin"},"stderr":{"state":"not_captured"}}}),
-            &peer(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let mut metadata =
+            json!({"stdout":{"state":"not_captured"},"stderr":{"state":"not_captured"}});
+        for (name, contents) in captures {
+            let path = format!("artifacts/{name}.bin");
+            let mut file =
+                private_file(&store.root.join(&run.run_id).join(&path), true, false).unwrap();
+            file.write_all(contents).unwrap();
+            file.sync_all().unwrap();
+            metadata[name] = json!({"state":"captured","stored_bytes":contents.len(),"path":path});
+        }
+        store
+            .append_owner(
+                &run.run_id,
+                "gc-denial",
+                "denied",
+                None,
+                &json!({"outcome":{"kind":"refused"},"capture":metadata}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
         (temp, store, run)
     }
 
     fn gc_future() -> SystemTime {
         SystemTime::now() + std::time::Duration::from_secs(2 * 86_400)
+    }
+
+    fn capture_policy() -> ouro_records::retention::RetentionPolicy {
+        ouro_records::retention::RetentionPolicy {
+            retain_days: 90,
+            capture_retain_days: 1,
+        }
+    }
+
+    #[test]
+    fn capture_expiry_preserves_canonical_bytes_queries_replays_and_later_history_gc() {
+        let (temp, mut store, run) = gc_fixture();
+        let directory = store.root.join(&run.run_id);
+        let snapshots: Vec<_> = manifest::names(&directory)
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.clone(), fs::read(directory.join(n)).unwrap()))
+            .collect();
+        let before = store.show(&run.run_id).unwrap();
+        let plan = store
+            .gc_plan_policy_at(capture_policy(), None, 100, gc_future())
+            .unwrap();
+        assert!(!plan.runs[0].candidate);
+        assert!(plan.runs[0].captures_candidate);
+        let result = store
+            .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
+            .unwrap();
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert!(result.pruned.is_empty());
+        assert_eq!(result.captures_pruned[0].removed_bytes, 15);
+        assert!(!directory.join("artifacts/stdout.bin").exists());
+        let after = store.show(&run.run_id).unwrap();
+        assert_eq!(after.chain, before.chain);
+        assert!(after.history.is_none());
+        assert_eq!(after.capture_history.as_ref().unwrap().state, "pruned");
+        assert_eq!(after.capture["stdout"]["pruned_bytes"], 15);
+        assert_eq!(after.child_protection, "unprotected");
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+        for (name, bytes) in &snapshots {
+            assert_eq!(fs::read(directory.join(name)).unwrap(), *bytes);
+        }
+        let held = store
+            .hold(&run.run_id, "after-capture-expiry", &peer())
+            .unwrap();
+        drop(store);
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(
+            store
+                .hold(&run.run_id, "after-capture-expiry", &peer())
+                .unwrap(),
+            held
+        );
+        assert_eq!(
+            store.show(&run.run_id).unwrap().capture["stdout"]["state"],
+            "pruned"
+        );
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+        store
+            .release(&run.run_id, "release-after-expiry", &peer())
+            .unwrap();
+        let whole = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+        assert!(whole.failed.is_empty(), "{:?}", whole.failed);
+        assert_eq!(whole.pruned.len(), 1);
+        drop(store);
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(
+            store.show(&run.run_id).unwrap().capture["stdout"]["pruned_bytes"],
+            15
+        );
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn capture_expiry_recovers_each_deletion_boundary_and_never_removes_history() {
+        for fault in [
+            Fault::GcIntentWrite,
+            Fault::GcIntentSync,
+            Fault::GcBeforeUnlink,
+            Fault::GcAfterUnlink,
+            Fault::GcDirectorySync,
+            Fault::GcCompletion,
+            Fault::GcCompletionSync,
+            Fault::GcProjection,
+        ] {
+            let (temp, mut store, run) =
+                gc_fixture_captures(&[("stdout", b"private-capture"), ("stderr", b"second")]);
+            let directory = store.root.join(&run.run_id);
+            let names = manifest::names(&directory).unwrap();
+            let original: Vec<_> = names
+                .iter()
+                .map(|n| fs::read(directory.join(n)).unwrap())
+                .collect();
+            store.fault = Some(fault);
+            let result = store
+                .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
+                .unwrap();
+            assert_eq!(result.failed.len(), 1);
+            if matches!(
+                fault,
+                Fault::GcIntentWrite | Fault::GcIntentSync | Fault::GcBeforeUnlink
+            ) {
+                assert_eq!(
+                    fs::read(directory.join("artifacts/stdout.bin")).unwrap(),
+                    b"private-capture"
+                );
+            }
+            if matches!(fault, Fault::GcIntentSync | Fault::GcBeforeUnlink) {
+                assert!(store.hold(&run.run_id, "during-expiry", &peer()).is_err());
+                let _ = store.verify(None); // A verifier cannot delete the pending capture.
+                assert!(directory.join("artifacts/stdout.bin").exists());
+            }
+            drop(store);
+            let mut store = Store::open(&temp.path().join("data")).unwrap();
+            let retry = store
+                .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
+                .unwrap();
+            assert!(retry.failed.is_empty(), "{:?}", retry.failed);
+            assert!(!directory.join("artifacts/stdout.bin").exists());
+            assert!(!directory.join("artifacts/stderr.bin").exists());
+            assert!(store.verify(None).unwrap()[0].local_consistency);
+            for (name, bytes) in names.iter().zip(original) {
+                assert_eq!(fs::read(directory.join(name)).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn capture_expiry_refuses_changed_reappearing_or_unanchored_files() {
+        for mode in [
+            "changed",
+            "symlink",
+            "hardlink",
+            "anchor",
+            "reappeared",
+            "canonical",
+            "chain",
+            "segment",
+        ] {
+            let (temp, mut store, run) = gc_fixture();
+            let directory = store.root.join(&run.run_id);
+            store.fault = Some(Fault::GcBeforeUnlink);
+            assert_eq!(
+                store
+                    .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
+                    .unwrap()
+                    .failed
+                    .len(),
+                1
+            );
+            store.fault = None;
+            let path = directory.join("artifacts/stdout.bin");
+            match mode {
+                "changed" => fs::write(&path, b"changed-capture").unwrap(),
+                "symlink" => {
+                    fs::remove_file(&path).unwrap();
+                    std::os::unix::fs::symlink("../events-0001.ndjson", &path).unwrap();
+                }
+                "hardlink" => {
+                    fs::remove_file(&path).unwrap();
+                    fs::hard_link(directory.join(STREAM), &path).unwrap();
+                }
+                "anchor" => fs::write(directory.join("captures-gc.json"), b"corrupt").unwrap(),
+                "chain" | "segment" => {
+                    let path = directory.join("captures-gc.json");
+                    let mut anchor: Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    if mode == "chain" {
+                        anchor["retained"]["chain"]["head_digest"] =
+                            json!(format!("sha256:{}", "a".repeat(64)));
+                    } else {
+                        anchor["retained"]["files"][0]["path"] = json!(STREAM);
+                    }
+                    anchor["digest"] = json!(digest(&anchor["retained"]).unwrap());
+                    let mut bytes = canonical(&anchor).unwrap();
+                    bytes.push(b'\n');
+                    fs::write(path, bytes).unwrap();
+                }
+                "canonical" => fs::write(directory.join(STREAM), b"corrupt\n").unwrap(),
+                "reappeared" => {
+                    store
+                        .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
+                        .unwrap();
+                    private_file(&path, true, false)
+                        .unwrap()
+                        .write_all(b"private-capture")
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            drop(store);
+            let opened = Store::open(&temp.path().join("data"));
+            if matches!(mode, "canonical" | "hardlink") {
+                assert!(!opened.unwrap().verify(None).unwrap()[0].local_consistency);
+            } else {
+                assert!(opened.is_err(), "{mode}");
+            }
+            assert!(fs::symlink_metadata(path).is_ok());
+        }
+    }
+
+    #[test]
+    fn capture_expiry_removes_empty_selected_files_without_claiming_removed_bytes() {
+        let (_temp, mut store, run) = gc_fixture_captures(&[("stdout", b"")]);
+        let result = store
+            .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
+            .unwrap();
+        assert!(result.failed.is_empty());
+        assert_eq!(result.captures_pruned[0].removed_files, 1);
+        assert_eq!(result.captures_pruned[0].removed_bytes, 0);
+        assert!(
+            !store
+                .root
+                .join(&run.run_id)
+                .join("artifacts/stdout.bin")
+                .exists()
+        );
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins() {
+        for reason in [
+            "operator_hold",
+            "outcome_unknown",
+            "active_run",
+            "reader_snapshot",
+        ] {
+            let (_temp, mut store, run) = gc_fixture();
+            match reason {
+                "operator_hold" => {
+                    store.hold(&run.run_id, "keep-captures", &peer()).unwrap();
+                }
+                "outcome_unknown" => {
+                    store.streams.get_mut(&run.run_id).unwrap().run.state = "outcome_unknown".into()
+                }
+                "active_run" => {
+                    store.streams.get_mut(&run.run_id).unwrap().run.state = "admitted".into()
+                }
+                "reader_snapshot" => {
+                    let request = ReadRequest {
+                        run_id: run.run_id.clone(),
+                        filter: crate::protocol::ReadFilter {
+                            selector: crate::protocol::ReadSelector::All,
+                            stage: None,
+                            since: None,
+                            until: None,
+                        },
+                        limit: 1,
+                        cursor: None,
+                    };
+                    store.read(&request).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            // Reader expiry must not be simulated by moving the wall clock ahead.
+            let plan = store
+                .gc_plan_policy_at(
+                    capture_policy(),
+                    None,
+                    100,
+                    if reason == "reader_snapshot" {
+                        SystemTime::now()
+                    } else {
+                        gc_future()
+                    },
+                )
+                .unwrap();
+            assert!(!plan.runs[0].captures_candidate);
+            assert!(
+                plan.runs[0]
+                    .captures_keep_reasons
+                    .iter()
+                    .any(|s| s == reason)
+            );
+            assert!(
+                store
+                    .root
+                    .join(&run.run_id)
+                    .join("artifacts/stdout.bin")
+                    .exists()
+            );
+        }
     }
 
     #[test]
@@ -2358,7 +2690,7 @@ mod tests {
                 fs::read(outside.join("stdout.bin")).unwrap(),
                 b"must be kept"
             );
-            if mode == "canonical" {
+            if matches!(mode, "canonical" | "hardlink") {
                 assert!(!directory.join("gc.json").exists());
             } else {
                 drop(store);

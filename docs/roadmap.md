@@ -116,7 +116,7 @@ cancellation, owner death and writer loss. `wait` reads the durable outcome;
 
 The [ledger specification](specs/ledger-v1.md) names its current acceptance and
 limits. The complete milestone remains open: cross-run queries, comparisons,
-retention configuration, signed bundles, best-effort recovery and managed project authorization
+signed bundles, best-effort recovery and managed project authorization
 are still planned. A plain local export does not establish external custody.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
@@ -130,8 +130,9 @@ unknown outcomes and reader snapshots. Whole-run `gc` now verifies canonical
 history, persists replay identities and chain anchors, then removes inventoried
 segments and captures with restart recovery. The
 [pruning checks](specs/ledger-v1/evidence/2026-10-05-pruning/README.md) record its
-failure boundaries and platform evidence. Persistent retention configuration and
-separate capture policies remain pending.
+failure boundaries and platform evidence. The writer now loads persistent retention settings at startup. Captures can
+expire earlier than canonical history through explicit GC, with independent
+inventories, restart recovery and preserved event queries.
 
 ## Later: submit work to a team worker
 
