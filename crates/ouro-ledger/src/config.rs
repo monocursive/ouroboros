@@ -85,6 +85,12 @@ mod tests {
                 .retain_days,
             90
         );
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
         for text in [
             "[ledger]\nretain='0d'",
             "[ledger]\nretain='36501d'",
@@ -115,6 +121,7 @@ mod tests {
         assert!(load_path(&path).is_err());
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, " ".repeat(65_537)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(load_path(&path).is_err());
     }
 }

@@ -201,6 +201,7 @@ fn writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_r
     fs::create_dir(&config).unwrap();
     let path = config.join("config.toml");
     fs::write(&path, "[ledger]\nretain='30d'\ncapture_retain='1d'\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     let mut records =
         include_str!("../../../docs/specs/ledger-v1/fixtures/exec-failure-records.ndjson")
             .lines()

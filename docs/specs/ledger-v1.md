@@ -473,6 +473,9 @@ retain = "90d"
 capture_retain = "7d"
 ```
 
+Create this file with mode `0600` (for example,
+`chmod 600 ~/.config/ouro/config.toml`, adjusting a relocated path).
+
 Both values accept whole days `1d..36500d`. Omitted `capture_retain` follows the
 resolved history policy; an explicit capture policy cannot exceed history
 retention. This keeps capture bytes from outliving the records that explain
