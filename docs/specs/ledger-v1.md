@@ -766,6 +766,9 @@ launch using a custom policy on the VPS.
 The [October 6 operator and tail record](ledger-v1/evidence/2026-10-06-operator-tail/README.md)
 covers independent effect decisions, pending-effect retention, lost replies,
 bounded live reads and operator appends during an actual contained launch.
+The [October 6 cross-run record](ledger-v1/evidence/2026-10-06-cross-run/README.md)
+covers independent query continuation, bounded count comparisons, coverage
+incomparability and a real protected-versus-unprotected launch comparison.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

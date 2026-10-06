@@ -1,0 +1,7 @@
+{
+  "revision": "eb84b9ec3db5a0be8efd9a777835aff64995a8ab",
+  "archive_sha256": "8c5f7f67f901d484fbe9d5b6b754bc23edc8c2946a2d16ad90d86fa656b1c5db",
+  "native_directory": "/home/ubuntu/ouro-cross-run-eb84b9ec",
+  "native_command": "bash validate.sh",
+  "source_dirty": false
+}
