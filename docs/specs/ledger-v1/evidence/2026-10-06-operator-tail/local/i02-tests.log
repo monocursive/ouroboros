@@ -1,0 +1,17 @@
+   Compiling xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.05s
+     Running unittests src/main.rs (target/debug/deps/xtask-d1a5d4e084a997d9)
+
+running 9 tests
+test i02::tests::line_numbers_are_one_based_and_exact ... ok
+test i02::tests::a_token_inside_an_identifier_still_counts ... ok
+test i02::tests::every_forbidden_token_is_found_in_any_case ... ok
+test i02::tests::an_absent_root_is_reported_as_absent_not_as_clean ... ok
+test i02::tests::clean_content_and_non_utf8_bytes_produce_nothing ... ok
+test i02::tests::a_directory_symlink_is_named_and_not_followed ... ok
+test i02::tests::a_vendor_named_dependency_and_a_build_script_are_caught ... ok
+test i02::tests::a_planted_hit_in_a_temp_tree_is_reported_and_a_clean_tree_is_not ... ok
+test i02::tests::pagination_exceptions_are_exact_and_file_scoped ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 191 filtered out; finished in 0.02s
+

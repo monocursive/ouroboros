@@ -1,0 +1,9 @@
+{
+  "implementation_revision": "9fc690e5a5eb2174ebbf59d5f0b7079362fe44a8",
+  "scan_followup_revision": "9f021b256a57fd981847e64b5e607d1d1b213b45",
+  "native_archive_sha256": "57151089183aedc928d786300d0b5bf2a658ecc09992fee7a6b65766719db0bd",
+  "native_source_checks": "linux/source-check.log",
+  "runtime_manifest": "implementation.sha256",
+  "pi_status": "SSH unreachable",
+  "jail_freeze": "unchanged; frozen inputs still match the tested revision 2dd1c3b4"
+}

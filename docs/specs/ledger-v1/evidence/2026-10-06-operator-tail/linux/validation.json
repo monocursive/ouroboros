@@ -1,0 +1,9 @@
+{
+  "implementation_revision": "9fc690e5a5eb2174ebbf59d5f0b7079362fe44a8",
+  "passed": 122,
+  "failed": 0,
+  "ignored": 0,
+  "result_count": 7,
+  "live_linux_launch_tests": 16,
+  "scope": "Native Linux with OURO_CONFORMANCE=1"
+}

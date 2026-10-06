@@ -209,6 +209,8 @@ For example, an operator `settled` assertion about a report does not mean the
 contained command finished. Owner admission and settlement still require their
 existing authenticated lifecycle and corroborating jail receipts. Inspection
 and export distinguish the two kinds of record without inferring execution.
+Operator intents appear in tail and export; source-class queries continue to
+select observations and owner denials.
 
 Lifecycle decisions require an effect id. An effect can be admitted then settled,
 or denied before admission. Repeated or conflicting decisions under new request
@@ -717,6 +719,9 @@ changed-file refusal and actual CLI pruning of a synthetic aged run.
 The [October 6 retention-policy record](ledger-v1/evidence/2026-10-06-retention-policy/README.md)
 adds persistent settings, capture-only deletion/recovery and a real detached
 launch using a custom policy on the VPS.
+The [October 6 operator and tail record](ledger-v1/evidence/2026-10-06-operator-tail/README.md)
+covers independent effect decisions, pending-effect retention, lost replies,
+bounded live reads and operator appends during an actual contained launch.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

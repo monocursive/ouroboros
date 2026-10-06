@@ -1,0 +1,5 @@
+   Compiling ouro-records v0.1.0 (/home/ubuntu/ouro-intent-tail-9fc690e5/crates/ouro-records)
+   Compiling ouro-jail v0.1.0 (/home/ubuntu/ouro-intent-tail-9fc690e5/crates/ouro-jail)
+   Compiling ouro-fixture v0.1.0 (/home/ubuntu/ouro-intent-tail-9fc690e5/crates/ouro-fixture)
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/ouro-intent-tail-9fc690e5/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 1m 23s
