@@ -517,8 +517,11 @@ A missing, unavailable or incomplete required path (including either rename
 endpoint), or a missing/empty proxy destination, makes that entire class
 incomparable for target mode. Each side reports `unavailable_targets` with the
 count and first canonical sequence/provenance reference for affected classes.
-This does not alter the original coverage report. Healthy classes can still be
-compared; an empty change list must be read with the per-class status. Oversized
+This does not alter the original coverage report. For example, a relative
+shell path can be recorded as `relative_to_unobserved_cwd`; a complete argument
+snapshot does not make that an identified workspace path. Explicit absolute
+arguments under a known root can yield workspace-relative labels. Healthy
+classes can still be compared; an empty change list must be read with the per-class status. Oversized
 target keys fail under the existing 8 KiB key/8 MiB aggregate budgets, never get
 truncated or silently omitted. The ordinary snapshot, corruption, read budget,
 output pagination and protection rules above apply to both modes.
@@ -868,6 +871,9 @@ incomparability and a real protected-versus-unprotected launch comparison.
 The [October 6 discovery record](ledger-v1/evidence/2026-10-06-discovery/README.md)
 covers bounded run catalogs, combined filters, restart-safe selection, stale
 head refusal and automatic traversal of per-run evidence pages.
+The [October 6 target-comparison record](ledger-v1/evidence/2026-10-06-target-comparison/README.md)
+covers recorded path and proxy target grouping, unavailable-identity handling,
+mode-bound pagination and canonical references from real contained launches.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

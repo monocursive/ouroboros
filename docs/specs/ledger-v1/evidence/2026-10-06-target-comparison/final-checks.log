@@ -1,0 +1,9 @@
+$ uv run docs/specs/validate_links.py
+Checked 58 documents; 0 broken links or anchors.
+Document contract only; no runtime behavior is tested.
+EXIT 0
+$ cargo +1.98.1 run -q -p xtask -- freeze --check
+xtask freeze --check: the freeze file is this tree's, and its tested run passed: inputs_match_tree, revision_is_ancestor_of_head, inputs_match_revision, frozen_inputs_unchanged_since_revision
+EXIT 0
+$ git diff --check
+EXIT 0

@@ -1,0 +1,11 @@
+{
+  "passed": 146,
+  "failed": 0,
+  "ignored": 0,
+  "real_launch_tests": 19,
+  "revision": "a2af4cc9f85e934a4cf4da7b6b052d5d2e7be6e7",
+  "target": "x86_64-unknown-linux-gnu",
+  "conformance_environment": true,
+  "source_files_checked": 396,
+  "source_check_passed": true
+}

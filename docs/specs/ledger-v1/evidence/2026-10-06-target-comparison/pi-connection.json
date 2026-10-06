@@ -1,0 +1,8 @@
+{
+  "date": "2026-10-06",
+  "host": "100.83.203.10",
+  "method": "SSH with BatchMode and ConnectTimeout=8",
+  "exit_code": 255,
+  "result": "ssh: connect to host 100.83.203.10 port 22: Operation timed out",
+  "arm64_linux_tests_run": false
+}

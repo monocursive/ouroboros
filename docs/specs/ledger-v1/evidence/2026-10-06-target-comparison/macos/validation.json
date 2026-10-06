@@ -1,0 +1,10 @@
+{
+  "revision": "96cfef728841171fe2bd052f81f926641ad82993",
+  "target": "aarch64-apple-darwin",
+  "toolchain": "1.98.1",
+  "passed": 126,
+  "failed": 0,
+  "ignored": 0,
+  "linux_launch_suite": "excluded on macOS",
+  "checks": "format, clippy, ledger/jail/managed contracts, documentation links, I02, existing Jail freeze"
+}
