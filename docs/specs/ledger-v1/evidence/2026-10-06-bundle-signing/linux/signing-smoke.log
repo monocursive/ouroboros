@@ -1,0 +1,3 @@
+tool: pinned signature and independent OpenSSL verification passed; altered message refused
+none: pinned signature and independent OpenSSL verification passed; altered message refused
+Two real signed launches: selected captures, exact receipts, preserved protection/coverage, offline verification after private-key/store deletion, and OpenSSL interoperability passed.

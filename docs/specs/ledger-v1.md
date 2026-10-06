@@ -997,6 +997,9 @@ mode-bound pagination and canonical references from real contained launches.
 The [October 6 portable-bundle record](ledger-v1/evidence/2026-10-06-portable-bundles/README.md)
 covers unsigned snapshots, selected captures, tampering refusal and offline
 verification of actual Linux bundles on Linux and macOS after source deletion.
+The [October 6 signed-bundle record](ledger-v1/evidence/2026-10-06-bundle-signing/README.md)
+covers explicit signing identities, pinned and untrusted verification, downgrade
+refusal, independent OpenSSL checks and Linux-to-macOS verification.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

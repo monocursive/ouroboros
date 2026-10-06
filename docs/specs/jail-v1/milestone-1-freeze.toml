@@ -1116,6 +1116,64 @@ id = "urn:ouro:schema:learned-policy:1"
 identifier = "ouro.jail.learned-policy/1"
 sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 
-# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
-# records the milestone conformance run, and `cargo xtask freeze --check`
-# fails until it is.
+# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---
+[tested]
+debug_assertions = false
+dirty = false
+inputs = "sha256:4f45c7d14a754af0a72906747725c99cfadd8e673805e2b2412cf90c3e475512"
+opt_level = "3"
+ouro_jail_sha256 = "b0da2642713ff86a4d1493551954d81feca44b2f97d33ecdbc0e58059c47430b"
+platform_arch = "x86_64"
+platform_kernel = "Linux 7.0.0-31-generic"
+platform_os = "linux"
+ready = true
+revision = "86e4194e5e60b90aff3d57e87ba1fa13547f9c9c"
+rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
+target = "x86_64-unknown-linux-gnu"
+unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
+verification = ["inputs_match_tree", "revision_is_ancestor_of_head", "inputs_match_revision", "frozen_inputs_unchanged_since_revision"]
+
+[tested.backend]
+path = "/usr/bin/bwrap"
+sha256 = "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6"
+version = "bubblewrap 0.11.1"
+
+[tested.host]
+apparmor_enabled = true
+cpus_online = 4
+distribution = "Ubuntu 26.04.1 LTS"
+kernel_release = "7.0.0-31-generic"
+kernel_version = "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026"
+linger = true
+operator_identity = "unprivileged"
+privileged_groups = []
+systemd_version = "systemd 259 (259.5-0ubuntu3.4)"
+virtualization = "kvm"
+
+[tested.host.apparmor_userns_restriction]
+local_files = ["README"]
+profile_files = ["bwrap-userns-restrict", "glycin.bwrap", "lxc-usernsexec", "unprivileged_userns"]
+state = "on"
+unpackaged_files = []
+
+[tested.host.cgroup]
+controllers = ["cpu", "memory", "pids"]
+delegated_root = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service"
+root_controllers = ["cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem"]
+subtree_control = ["cpu", "memory", "pids"]
+
+[tested.host.memory]
+mem_total_kib = 3905584
+swap_total_kib = 8388604
+
+[tested.host.sysctls]
+"kernel.apparmor_restrict_unprivileged_userns" = "1"
+"kernel.io_uring_disabled" = "0"
+"kernel.perf_event_paranoid" = "4"
+"kernel.unprivileged_bpf_disabled" = "2"
+"kernel.yama.ptrace_scope" = "1"
+"user.max_user_namespaces" = "11829"
+
+[tested.supervisor_scope]
+cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p102371-i12680706.scope"
+state = "already_delegated"
