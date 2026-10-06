@@ -260,6 +260,10 @@ fn writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_r
     let plan = cli.json(&["gc", "--dry-run", "--json"]);
     assert_eq!(plan["retain_days"], 60);
     assert_eq!(plan["capture_retain_days"], 2);
+    assert_eq!(
+        cli.json(&["doctor", "--json"])["retention"],
+        json!({"retain_days":60,"capture_retain_days":2})
+    );
     assert_eq!(plan["runs"][0]["candidate"], false);
     assert_eq!(plan["runs"][0]["captures_candidate"], true);
     let result = cli.json(&["gc", "--json"]);

@@ -528,11 +528,11 @@ fn execute(cli: Cli) -> Result<i32> {
                     return Ok(1);
                 }
             };
-            client.ping()?;
+            let writer = client.ping()?;
             let reports = client.verify(None)?;
             let ready = reports.iter().all(|r| r.local_consistency);
             output(
-                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":reports,"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":reports,"retention":writer["retention"],"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
                 json,
             )?;
             Ok(if ready { 0 } else { 1 })
