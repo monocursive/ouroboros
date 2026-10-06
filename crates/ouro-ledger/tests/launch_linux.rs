@@ -1233,6 +1233,12 @@ fn real_launch_labels_drive_filtered_discovery_without_changing_replay_identity(
         b"x"
     );
     let mut other = fixture.command_with_profile("discovery-other", true, "none");
+    // An uncontained child could alter this UID's trusted launch profile, so
+    // give the explicit none run its own empty configuration root.
+    let empty_config = fixture._temp.path().join("none-config");
+    fs::create_dir(&empty_config).unwrap();
+    fs::set_permissions(&empty_config, fs::Permissions::from_mode(0o700)).unwrap();
+    other.env("OURO_CONFIG_DIR", &empty_config);
     other.args(["--tag", "green", "--", "/bin/true"]);
     let (output, unprotected) = fixture.run(&mut other);
     assert!(output.status.success());
