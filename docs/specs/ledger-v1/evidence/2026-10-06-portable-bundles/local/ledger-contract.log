@@ -1,0 +1,2 @@
+Ledger schemas, bounded readers, source preservation, canonical bytes, chain and privacy fixtures pass.
+Document contract only; no live durability, launch or containment is tested.

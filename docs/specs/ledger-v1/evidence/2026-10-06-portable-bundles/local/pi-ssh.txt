@@ -1,0 +1,4 @@
+ssh -o BatchMode=yes -o ConnectTimeout=8 monocursive@100.83.203.10 uname -m
+exit=255
+ssh: connect to host 100.83.203.10 port 22: Operation timed out
+No fresh ARM64 result obtained.
