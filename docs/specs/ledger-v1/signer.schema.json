@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-signer:1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "ouro.ledger.signer/1"
+    },
+    "algorithm": {
+      "const": "ed25519"
+    },
+    "key_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "public_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "schema",
+    "algorithm",
+    "key_id",
+    "public_key"
+  ],
+  "additionalProperties": false
+}

@@ -336,6 +336,46 @@ def bundle_fixtures(validators):
         expect_invalid(validators["bundle-verification"], altered, "invalid successful verification claim")
 
 
+def signed_bundle_fixtures(validators):
+    manifest = read("bundle-v2.json")
+    envelope = read("bundle-signature.json")
+    public = read("signer.json")
+    trusted = read("bundle-verification-v2.json")
+    untrusted = read("bundle-verification-untrusted.json")
+    for name, value in [("bundle-v2", manifest), ("bundle-signature", envelope),
+                        ("signer", public), ("bundle-verification-v2", trusted),
+                        ("bundle-verification-v2", untrusted)]:
+        validators[name].validate(value)
+    assert trusted["signature"]["trust"] == "pinned"
+    assert untrusted["signature"]["trust"] == "untrusted"
+    assert trusted["external_custody"] is False
+    expected = "sha256:" + hashlib.sha256(rfc8785.dumps(manifest) + b"\n").hexdigest()
+    assert envelope["manifest_digest"] == trusted["manifest_digest"] == expected
+    assert envelope["public_key"] == public["public_key"] == trusted["signature"]["public_key"]
+    assert envelope["key_id"] == public["key_id"] == "sha256:" + hashlib.sha256(bytes.fromhex(public["public_key"])).hexdigest()
+    events = (ROOT / "fixtures" / "bundle-v2-events.ndjson").read_bytes()
+    member = next(f for f in manifest["files"] if f["name"] == "events.ndjson")
+    assert member["digest"] == "sha256:" + hashlib.sha256(events).hexdigest()
+    for line in events.splitlines():
+        validators["record"].validate(json.loads(line))
+    altered = copy.deepcopy(manifest)
+    altered["authenticity"] = "unsigned"
+    expect_invalid(validators["bundle-v2"], altered, "v2 signature downgrade")
+    for name, value in [("signer", public), ("bundle-signature", envelope)]:
+        altered = copy.deepcopy(value)
+        altered["algorithm"] = "rsa"
+        expect_invalid(validators[name], altered, "unsupported signer algorithm")
+        altered = copy.deepcopy(value)
+        altered["public_key"] += "00"
+        expect_invalid(validators[name], altered, "oversized public key")
+    altered = copy.deepcopy(trusted)
+    del altered["signature"]
+    expect_invalid(validators["bundle-verification-v2"], altered, "signature status omitted")
+    altered = copy.deepcopy(trusted)
+    altered["external_custody"] = True
+    expect_invalid(validators["bundle-verification-v2"], altered, "signature upgrades custody")
+
+
 def main():
     jail_schemas = jail.load_schemas(JAIL)
     ledger_schemas = jail.load_schemas(ROOT)
@@ -345,6 +385,7 @@ def main():
     discovery_fixtures(validators)
     target_comparison_fixtures(validators)
     bundle_fixtures(validators)
+    signed_bundle_fixtures(validators)
     query = read("query-page.json")
     comparison = read("diff-page.json")
     validators["query"].validate(query)

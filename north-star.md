@@ -695,8 +695,9 @@ preserves canonical bytes across rotation and writer restart. Operator decisions
 do not replace launch-owner admission, settlement or jail observations.
 Bounded catalogs and filtered cross-run queries are implemented. Comparisons
 cover event counts and recorded target labels, retaining coverage and protection;
-they do not establish object or content equivalence. Bundles, signatures,
-best-effort recovery and managed authorization remain open; the complete
+they do not establish object or content equivalence. Portable bundles, explicit
+node signing and pinned offline verification are implemented. Best-effort
+recovery and managed authorization remain open; the complete
 milestone-2 contract below is not yet implemented.
 
 The ledger joins authorisation and attributed observation into one ordered record,
@@ -772,10 +773,12 @@ roles are recorded in `run.json`; raw output is never mixed into a JSON control
 response. Foreground JSON control uses `--control-fd` if child output is present.
 
 Implemented bundle slice: `bundle RUN --output DIR [--capture stdout|stderr]`
-exports a bounded unsigned snapshot; `verify-bundle DIR` checks it offline.
+exports a bounded snapshot; `--signing-key` adds an explicit Ed25519 signature.
+`bundle-keygen --output DIR` provisions a new key without replacing any existing
+identity. `verify-bundle DIR --trusted-key FILE` requires that exact signer.
 The [portable bundle contract](docs/specs/ledger-v1.md#84-unsigned-portable-evidence-bundles)
-preserves protection, coverage and capture limits. Node signatures and external
-custody remain unimplemented.
+preserves protection, coverage and capture limits. Unpinned signatures stay
+untrusted; node signatures do not establish independent custody.
 
 | # | Functionality | Contract |
 |---|---|---|

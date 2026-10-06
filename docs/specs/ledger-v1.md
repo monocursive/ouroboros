@@ -308,7 +308,7 @@ by `doctor`; they cannot authorize execution, poison a sound canonical stream
 or revoke a durable append receipt. SQLite lock contention fails immediately,
 so an unavailable projection does not stall the next writer request.
 Pruned runs recover their replay identities from the retained GC anchor described
-in §8. Signed bundles remain deferred.
+in §8. Portable bundles and explicit signer verification are described in §8.4–8.5.
 
 The owner reads the jail's canonical receipt at
 `<data>/attempts/<attempt_id>/jail.json`. It does not request another receipt copy
@@ -895,11 +895,70 @@ unless they match canonical history. The
 `local_consistency`, original coverage, and `child_protection`. A consistent
 `none` run remains `unprotected`.
 
-This format is **unsigned**, with `external_custody: false`. Someone able to
+The v1 format is **unsigned**, with `external_custody: false`. Someone able to
 rewrite the complete bundle can recompute its hashes. Neither this manifest nor
 its digest establishes a trusted signer, independent witness, current storage
-availability, managed authorization or production readiness. Signatures and
-historical-custody migration remain separate milestones.
+availability, managed authorization or production readiness. The signed v2 format is described below; historical-custody migration remains
+a separate milestone.
+
+## 8.5. Explicit node signing and pinned verification
+
+```sh
+# Choose a directory outside agent workspaces. Nothing is generated implicitly.
+ouro-ledger bundle-keygen --output /private/node-signing-key --json
+ouro-ledger bundle RUN --output /absolute/new-bundle --capture stdout \
+  --signing-key /private/node-signing-key/private-key.pk8 --json
+# Obtain this public key separately from the node operator.
+ouro-ledger verify-bundle /absolute/new-bundle \
+  --trusted-key /trusted/node-public-key.json --json
+```
+
+Key provisioning is explicit and refuses an existing destination. A new 0700
+identity directory contains a 0600 Ed25519 PKCS#8 v2 private key and a canonical
+[public-key record](ledger-v1/signer.schema.json) in `public-key.json`. The
+`key_id` is SHA-256 of the 32 raw public-key bytes. Signing requires an owned,
+private, regular, single-link key file in a private directory, read through
+pinned descriptors with no symbolic-link following and a 4 KiB input bound.
+Public pins have the same bound and file/link checks, but can be publicly readable.
+No SSH, release, fleet or ambient credential is reused, and keys are never
+silently generated, replaced, copied into bundles or sent to the writer.
+
+Signed bundles use the [v2 manifest](ledger-v1/bundle-v2.schema.json):
+`schema: ouro.ledger.bundle/2`, `authenticity: signed`. All v1 record, receipt,
+capture, resource, publication and offline replay rules still apply. One
+mandatory [signature envelope](ledger-v1/bundle-signature.schema.json),
+`signature.json`, is added to the flat directory. It is bounded to 4 KiB and
+contains the algorithm, raw public key, key fingerprint, manifest digest and
+64-byte signature, encoded as lowercase hexadecimal. It is not a data inventory
+member. Old unsigned v1 bundles and verification reports remain supported.
+
+The signed message is the ASCII bytes `ouro.ledger.bundle-signature/1`, one NUL
+byte, then the **exact canonical `bundle.json` bytes including its final LF**.
+This domain binds the schema, authentication mode, complete historical run
+projection and all member hashes. Ed25519 uses the existing locked `ring`
+implementation; no custom signature primitive or prehash mode is introduced.
+The verifier checks the signature over the same manifest value whose member
+bytes and canonical replay it verifies. Missing signatures, changed manifests,
+unsupported algorithms, malformed identities and mismatched member bytes refuse.
+
+Without `--trusted-key`, a valid signed bundle reports `signature.valid: true`
+and `signature.trust: untrusted`. Its bundled public key identifies the claimed
+signer but supplies no trust. With that option, the command requires a valid
+signature from **exactly that independently supplied public key**, reports
+`trust: pinned`, and rejects unsigned bundles, removed signatures, downgraded
+manifests and substituted signers. The signing command itself pins the public
+key derived from its explicitly supplied private key when checking publication.
+The [v2 verification report](ledger-v1/bundle-verification-v2.schema.json)
+keeps signer verification separate from coverage and `child_protection`.
+
+A node key identifies a signer, not hardware, a managed principal, trustworthy
+capture contents before packaging, current storage, a timestamp authority or an
+independent witness. `external_custody` remains false, and `none` remains
+unprotected even with a pinned signature. An operator holding the private key
+can sign fabricated history. To rotate a key, provision a new directory and
+communicate its public key through the operator's trusted channel; verification
+never learns new trust from a bundle. Revocation, certificate chains, key escrow,
+managed identity and independent custody are outside this slice.
 
 ## 9. Acceptance and remaining milestone 2 scope
 
@@ -953,7 +1012,7 @@ The [contract validator](ledger-v1/validate_contract.py) checks versioned schema
 and fixtures only; it makes no runtime or custody claim.
 
 Milestone 2 is still gated on the full North Star durability suite and these
-unimplemented features: best-effort outage reconciliation, signed bundles and the
+unimplemented features: best-effort outage reconciliation and the
 historical-custody migration at removal of the in-tree stores. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.

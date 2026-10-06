@@ -18,6 +18,66 @@ use serde_json::{Value, json};
 const WAIT_LIMIT: Duration = Duration::from_secs(5);
 
 #[test]
+fn signed_bundle_cli_requires_a_separate_public_key_for_trust() {
+    let mut cli = LocalCli::new();
+    let keys = cli.temp.path().join("signer");
+    let keypath = keys.to_str().unwrap();
+    let public = cli.json(&["bundle-keygen", "--output", keypath, "--json"]);
+    assert_eq!(public["algorithm"], "ed25519");
+    assert!(!cli.data.join("ledger").exists());
+    assert!(
+        !cli.invoke(&["bundle-keygen", "--output", keypath])
+            .status
+            .success()
+    );
+    let writer = cli.start_writer();
+    let run = successful_preparation(&cli.prepare("signed-bundle-cli", &fixture_request()));
+    let path = cli.temp.path().join("signed-bundle");
+    let output = path.to_str().unwrap();
+    let private = keys.join("private-key.pk8");
+    let pin = keys.join("public-key.json");
+    let signed = cli.json(&[
+        "bundle",
+        run["run_id"].as_str().unwrap(),
+        "--output",
+        output,
+        "--signing-key",
+        private.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(signed["signature"]["trust"], "pinned");
+    assert_eq!(signed["signature"]["key_id"], public["key_id"]);
+    drop(writer);
+    fs::remove_dir_all(&cli.data).unwrap();
+    fs::remove_file(private).unwrap();
+    let untrusted = cli.json(&["verify-bundle", output, "--json"]);
+    assert_eq!(untrusted["signature"]["trust"], "untrusted");
+    assert_eq!(
+        cli.json(&[
+            "verify-bundle",
+            output,
+            "--trusted-key",
+            pin.to_str().unwrap(),
+            "--json"
+        ]),
+        signed
+    );
+    assert!(!cli.data.exists());
+    fs::remove_file(path.join("signature.json")).unwrap();
+    assert!(
+        !cli.invoke(&[
+            "verify-bundle",
+            output,
+            "--trusted-key",
+            pin.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    assert!(!cli.data.exists());
+}
+
+#[test]
 fn bundle_cli_is_portable_and_verifies_without_a_writer_or_data_directory() {
     let mut cli = LocalCli::new();
     let output = cli.temp.path().join("portable");

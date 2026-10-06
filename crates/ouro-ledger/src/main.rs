@@ -98,7 +98,7 @@ enum Action {
     },
     /// Stream an exact canonical snapshot; status is written to stderr.
     Export(Box<ExportArgs>),
-    /// Export an unsigned portable snapshot; captures require explicit selection.
+    /// Export a portable snapshot, optionally signed with an explicit node key.
     Bundle {
         run_id: String,
         /// New directory; existing destinations are never overwritten.
@@ -107,12 +107,25 @@ enum Action {
         /// Include a terminal capture, which may contain secrets.
         #[arg(long, value_parser = ["stdout", "stderr"])]
         capture: Vec<String>,
+        /// Private Ed25519 PKCS#8 file from bundle-keygen; no automatic identity.
+        #[arg(long)]
+        signing_key: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Provision a fresh Ed25519 identity in a new private directory.
+    BundleKeygen {
+        #[arg(long)]
+        output: PathBuf,
         #[arg(long)]
         json: bool,
     },
     /// Verify a portable bundle offline without opening a node store or writer.
     VerifyBundle {
         path: PathBuf,
+        /// Require this separately obtained signer; rejects unsigned bundles.
+        #[arg(long)]
+        trusted_key: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -718,15 +731,31 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
 }
 
 fn execute(cli: Cli) -> Result<i32> {
-    if let Action::VerifyBundle { path, json } = &cli.command {
-        output(&ouro_ledger::bundle::verify(path)?, *json)?;
+    if let Action::VerifyBundle {
+        path,
+        trusted_key,
+        json,
+    } = &cli.command
+    {
+        output(
+            &ouro_ledger::bundle::verify_with_key(path, trusted_key.as_deref())?,
+            *json,
+        )?;
+        return Ok(0);
+    }
+    if let Action::BundleKeygen {
+        output: destination,
+        json,
+    } = &cli.command
+    {
+        output(&ouro_ledger::bundle::keygen(destination)?, *json)?;
         return Ok(0);
     }
     let data = data_dir(cli.data_dir)?;
     match cli.command {
         Action::Version { json } => {
             output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1","bundle":"ouro.ledger.bundle/1","bundle_verification":"ouro.ledger.bundle-verification/1"},"schema_frozen":false,"execution_platform":"linux"}),
+                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1","bundle":"ouro.ledger.bundle/1","bundle_verification":"ouro.ledger.bundle-verification/1","signed_bundle":"ouro.ledger.bundle/2","signed_bundle_verification":"ouro.ledger.bundle-verification/2","bundle_signature":"ouro.ledger.bundle-signature/1","signer":"ouro.ledger.signer/1"},"schema_frozen":false,"execution_platform":"linux"}),
                 json,
             )?;
             Ok(0)
@@ -739,13 +768,23 @@ fn execute(cli: Cli) -> Result<i32> {
             run_id,
             output: destination,
             capture,
+            signing_key,
             json,
         } => {
             let mut client = daemon::Client::connect(&data)?;
-            output(
-                &ouro_ledger::bundle::create(&mut client, &data, &run_id, &destination, &capture)?,
-                json,
-            )?;
+            let report = if let Some(key) = signing_key {
+                ouro_ledger::bundle::create_signed(
+                    &mut client,
+                    &data,
+                    &run_id,
+                    &destination,
+                    &capture,
+                    &key,
+                )?
+            } else {
+                ouro_ledger::bundle::create(&mut client, &data, &run_id, &destination, &capture)?
+            };
+            output(&report, json)?;
             Ok(0)
         }
         Action::Owner { bootstrap, unit } => {
@@ -993,7 +1032,8 @@ fn execute(cli: Cli) -> Result<i32> {
                 | Action::Release(_)
                 | Action::Gc { .. }
                 | Action::Bundle { .. }
-                | Action::VerifyBundle { .. } => unreachable!(),
+                | Action::VerifyBundle { .. }
+                | Action::BundleKeygen { .. } => unreachable!(),
             }
             Ok(0)
         }

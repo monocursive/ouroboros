@@ -106,6 +106,65 @@ fn real_launch_bundles_verify_offline_with_selected_truncated_captures() {
     }
 }
 
+#[test]
+fn real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_removal() {
+    let Some(jail) = live_jail() else {
+        return;
+    };
+    for profile in ["tool", "none"] {
+        let mut fixture = Fixture::new(&jail);
+        let keys = fixture._temp.path().join("signer");
+        let public = ouro_ledger::bundle::keygen(&keys).unwrap();
+        let mut command = fixture.command_with_profile("signed-launch", true, profile);
+        command.args([
+            "--capture",
+            "stdout",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf 'signed output'",
+        ]);
+        let (result, run) = fixture.run(&mut command);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let path = fixture._temp.path().join("signed");
+        let report = ouro_ledger::bundle::create_signed(
+            &mut fixture.client(),
+            &fixture.data,
+            &run.run_id,
+            &path,
+            &["stdout".into()],
+            &keys.join("private-key.pk8"),
+        )
+        .unwrap();
+        assert_eq!(report["signature"]["key_id"], public["key_id"]);
+        assert_eq!(report["signature"]["trust"], "pinned");
+        assert_eq!(report["child_protection"], run.child_protection);
+        assert_eq!(report["coverage"], run.coverage);
+        assert_eq!(report["external_custody"], false);
+        fixture.writer.kill();
+        fs::remove_dir_all(&fixture.data).unwrap();
+        fs::remove_file(keys.join("private-key.pk8")).unwrap();
+        assert_eq!(
+            ouro_ledger::bundle::verify_with_key(&path, Some(&keys.join("public-key.json")))
+                .unwrap(),
+            report
+        );
+        assert_eq!(
+            ouro_ledger::bundle::verify(&path).unwrap()["signature"]["trust"],
+            "untrusted"
+        );
+        fs::write(path.join("stdout.bin"), b"changed output").unwrap();
+        assert!(
+            ouro_ledger::bundle::verify_with_key(&path, Some(&keys.join("public-key.json")))
+                .is_err()
+        );
+    }
+}
+
 fn live_jail() -> Option<PathBuf> {
     static JAIL: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     let result = JAIL.get_or_init(|| {

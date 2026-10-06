@@ -1,4 +1,4 @@
-//! Bounded unsigned evidence bundles, independently replayable without a writer.
+//! Bounded portable evidence bundles, independently replayable without a writer.
 use crate::{
     daemon::Client,
     protocol::{LedgerError, ReadFilter, ReadPage, ReadRequest, ReadSelector, Result, RunRecord},
@@ -17,6 +17,7 @@ use std::{
 };
 
 mod files;
+mod signing;
 pub const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RECORDS: u64 = 10_000;
 const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
@@ -211,11 +212,42 @@ pub fn create(
     })
 }
 
+/// Sign using an explicitly supplied private key; provisioning is separate.
+pub fn create_signed(
+    client: &mut Client,
+    data: &Path,
+    run_id: &str,
+    output: &Path,
+    captures: &[String],
+    key: &Path,
+) -> Result<Value> {
+    let signer = signing::Signer::load(key)?;
+    assemble(data, run_id, output, captures, Some(&signer), |request| {
+        client.read(request)
+    })
+}
+
+/// Create a new private key directory without touching a node store.
+pub fn keygen(output: &Path) -> Result<Value> {
+    signing::keygen(output)
+}
+
 pub(crate) fn create_with_reader(
     data: &Path,
     run_id: &str,
     output: &Path,
     captures: &[String],
+    read: impl FnMut(&ReadRequest) -> Result<ReadPage>,
+) -> Result<Value> {
+    assemble(data, run_id, output, captures, None, read)
+}
+
+fn assemble(
+    data: &Path,
+    run_id: &str,
+    output: &Path,
+    captures: &[String],
+    signer: Option<&signing::Signer>,
     mut read: impl FnMut(&ReadRequest) -> Result<ReadPage>,
 ) -> Result<Value> {
     let start = Instant::now();
@@ -335,14 +367,32 @@ pub(crate) fn create_with_reader(
         }
     }
     let manifest = Manifest {
-        schema: "ouro.ledger.bundle/1".into(),
-        authenticity: "unsigned".into(),
+        schema: if signer.is_some() {
+            "ouro.ledger.bundle/2"
+        } else {
+            "ouro.ledger.bundle/1"
+        }
+        .into(),
+        authenticity: if signer.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        }
+        .into(),
         capture_digest_basis: "bundle_time".into(),
         run,
         files: members,
     };
     write_json(&stage.dir, "bundle.json", &manifest)?;
-    let report = verify_directory(&stage.dir, start)?;
+    if let Some(signer) = signer {
+        write_json(
+            &stage.dir,
+            "signature.json",
+            &signer.sign(&canonical_json(&manifest)?),
+        )?;
+    }
+    let public = signer.map(signing::Signer::public);
+    let report = verify_directory(&stage.dir, start, public.as_ref())?;
     check_time(start)?;
     stage.publish()?;
     Ok(report)
@@ -350,20 +400,49 @@ pub(crate) fn create_with_reader(
 
 /// Opens only bundle members; never opens a node store, writer, or vendor state.
 pub fn verify(input: &Path) -> Result<Value> {
-    verify_directory(&files::directory(input)?, Instant::now())
+    verify_with_key(input, None)
 }
 
-fn verify_directory(dir: &File, start: Instant) -> Result<Value> {
+/// A supplied key is mandatory trust: unsigned bundles and other signers refuse.
+pub fn verify_with_key(input: &Path, trusted_key: Option<&Path>) -> Result<Value> {
+    let key = trusted_key.map(signing::trusted_key).transpose()?;
+    verify_directory(&files::directory(input)?, Instant::now(), key.as_ref())
+}
+
+fn verify_directory(
+    dir: &File,
+    start: Instant,
+    trusted: Option<&signing::PublicKey>,
+) -> Result<Value> {
     let value = read_json(files::member(dir, "bundle.json", false)?)?;
     let manifest: Manifest = serde_json::from_value(value.clone())?;
-    if manifest.schema != "ouro.ledger.bundle/1"
-        || manifest.authenticity != "unsigned"
+    let signed = manifest.schema == "ouro.ledger.bundle/2" && manifest.authenticity == "signed";
+    if !(signed
+        || (manifest.schema == "ouro.ledger.bundle/1" && manifest.authenticity == "unsigned"))
         || manifest.capture_digest_basis != "bundle_time"
         || !(2..=4).contains(&manifest.files.len())
     {
         return Err(error("unsupported bundle manifest"));
     }
     let mut expected = BTreeSet::from(["bundle.json".to_owned()]);
+    let signature = if signed {
+        expected.insert("signature.json".into());
+        // The envelope itself is bounded independently of the 4 MiB manifest.
+        let mut file = files::member(dir, "signature.json", false)?;
+        if file.metadata()?.len() > 4096 {
+            return Err(error("bundle signature exceeds 4 KiB"));
+        }
+        Some(signing::verify(
+            read_json((&mut file).take(4097))?,
+            &canonical_json(&value)?,
+            trusted,
+        )?)
+    } else {
+        if trusted.is_some() {
+            return Err(error("trusted-key verification requires a signed bundle"));
+        }
+        None
+    };
     let mut captures = vec![];
     let mut replayed = None;
     let mut receipts = None;
@@ -406,7 +485,7 @@ fn verify_directory(dir: &File, start: Instant) -> Result<Value> {
         return Err(error("bundle has missing or uninventoried members"));
     }
     let run = replayed.ok_or_else(|| error("bundle has no canonical records"))?;
-    if serde_json::to_value(&run)? != serde_json::to_value(&manifest.run)? {
+    if serde_json::to_value(&run)? != value["run"] {
         return Err(error("bundle run labels differ from canonical replay"));
     }
     if receipts != Some(json!(run.receipts)) {
@@ -415,13 +494,17 @@ fn verify_directory(dir: &File, start: Instant) -> Result<Value> {
         ));
     }
     check_time(start)?;
-    Ok(
-        json!({"schema":"ouro.ledger.bundle-verification/1", "run_id":run.run_id,
+    let mut report = json!({"schema":"ouro.ledger.bundle-verification/1", "run_id":run.run_id,
         "snapshot":run.chain, "state":run.state, "child_protection":run.child_protection,
         "coverage":run.coverage, "local_consistency":true, "authenticity":"unsigned",
         "external_custody":false, "capture_digest_basis":"bundle_time", "captures":captures,
-        "manifest_digest":sha256_prefixed(&canonical_json(&value)?)}),
-    )
+        "manifest_digest":sha256_prefixed(&canonical_json(&value)?)});
+    if let Some(signature) = signature {
+        report["schema"] = json!("ouro.ledger.bundle-verification/2");
+        report["authenticity"] = json!("signed");
+        report["signature"] = signature;
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

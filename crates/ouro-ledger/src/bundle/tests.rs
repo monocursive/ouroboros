@@ -323,3 +323,129 @@ fn multi_page_snapshot_excludes_later_appends_and_rejects_changed_labels() {
     );
     assert!(!output.exists());
 }
+
+fn signed(f: &mut Fixture, key: &Path) -> PathBuf {
+    let path = f
+        .temp
+        .path()
+        .join(format!("signed-{}", uuid::Uuid::new_v4()));
+    let signer = signing::Signer::load(key).unwrap();
+    let report = assemble(
+        &f.data,
+        &f.run.run_id,
+        &path,
+        &["stdout".into()],
+        Some(&signer),
+        |q| f.store.read(q),
+    )
+    .unwrap();
+    assert_eq!(report["signature"]["trust"], "pinned");
+    path
+}
+
+#[test]
+fn signed_bundle_preserves_none_and_gaps_and_requires_explicit_trust() {
+    let mut f = Fixture::new();
+    let keys = f.temp.path().join("keys");
+    keygen(&keys).unwrap();
+    let path = signed(&mut f, &keys.join("private-key.pk8"));
+    let ordinary = verify(&path).unwrap();
+    assert_eq!(ordinary["authenticity"], "signed");
+    assert_eq!(ordinary["signature"]["trust"], "untrusted");
+    assert_eq!(ordinary["child_protection"], "unprotected");
+    assert_eq!(ordinary["coverage"]["status"], "degraded");
+    assert_eq!(ordinary["external_custody"], false);
+    assert_eq!(
+        verify_with_key(&path, Some(&keys.join("public-key.json"))).unwrap()["signature"]["trust"],
+        "pinned"
+    );
+    assert!(!path.join("private-key.pk8").exists());
+    let other = f.temp.path().join("other");
+    keygen(&other).unwrap();
+    assert!(verify_with_key(&path, Some(&other.join("public-key.json"))).is_err());
+    let unsigned = f.bundle(&[]);
+    assert!(verify_with_key(&unsigned, Some(&keys.join("public-key.json"))).is_err());
+    assert_eq!(
+        verify(&unsigned).unwrap()["schema"],
+        "ouro.ledger.bundle-verification/1"
+    );
+}
+
+#[test]
+fn signed_manifest_capture_inventory_and_signature_tampering_refuse() {
+    let mut f = Fixture::new();
+    let keys = f.temp.path().join("keys");
+    keygen(&keys).unwrap();
+    for mutation in 0..6 {
+        let path = signed(&mut f, &keys.join("private-key.pk8"));
+        match mutation {
+            0 => alter_manifest(&path, |v| v["run"]["child_protection"] = json!("enforced")),
+            1 => {
+                fs::write(path.join("stdout.bin"), b"changed").unwrap();
+                rehash(&path, "stdout.bin");
+            }
+            2 => {
+                fs::remove_file(path.join("signature.json")).unwrap();
+            }
+            3 => {
+                fs::write(path.join("signature.json"), vec![b' '; 4097]).unwrap();
+            }
+            4 => {
+                let other = f.bundle(&[]);
+                fs::copy(other.join("bundle.json"), path.join("bundle.json")).unwrap();
+            }
+            _ => {
+                fs::rename(path.join("signature.json"), keys.join("signature-saved")).unwrap();
+                symlink(keys.join("signature-saved"), path.join("signature.json")).unwrap();
+            }
+        }
+        assert!(verify(&path).is_err(), "mutation {mutation}");
+        assert!(
+            verify_with_key(&path, Some(&keys.join("public-key.json"))).is_err(),
+            "mutation {mutation}"
+        );
+    }
+}
+
+#[test]
+fn stripping_or_replacing_signer_never_satisfies_a_pinned_verification() {
+    let mut f = Fixture::new();
+    let keys = f.temp.path().join("keys");
+    keygen(&keys).unwrap();
+    let path = signed(&mut f, &keys.join("private-key.pk8"));
+    fs::remove_file(path.join("signature.json")).unwrap();
+    alter_manifest(&path, |v| {
+        v["schema"] = json!("ouro.ledger.bundle/1");
+        v["authenticity"] = json!("unsigned");
+    });
+    assert_eq!(verify(&path).unwrap()["authenticity"], "unsigned");
+    assert!(verify_with_key(&path, Some(&keys.join("public-key.json"))).is_err());
+    let other = f.temp.path().join("other");
+    keygen(&other).unwrap();
+    let replacement = signed(&mut f, &other.join("private-key.pk8"));
+    assert_eq!(
+        verify(&replacement).unwrap()["signature"]["trust"],
+        "untrusted"
+    );
+    assert!(verify_with_key(&replacement, Some(&keys.join("public-key.json"))).is_err());
+}
+
+#[test]
+fn valid_pinned_signature_never_overrides_canonical_semantic_checks() {
+    let mut f = Fixture::new();
+    let keys = f.temp.path().join("keys");
+    keygen(&keys).unwrap();
+    let path = signed(&mut f, &keys.join("private-key.pk8"));
+    alter_manifest(&path, |v| v["run"]["child_protection"] = json!("enforced"));
+    let signer = signing::Signer::load(&keys.join("private-key.pk8")).unwrap();
+    let bytes = fs::read(path.join("bundle.json")).unwrap();
+    let signature = signer.sign(&bytes);
+    fs::write(
+        path.join("signature.json"),
+        canonical_json(&signature).unwrap(),
+    )
+    .unwrap();
+    assert!(signing::verify(signature, &bytes, Some(&signer.public())).is_ok());
+    let error = verify_with_key(&path, Some(&keys.join("public-key.json"))).unwrap_err();
+    assert!(error.to_string().contains("canonical replay"));
+}

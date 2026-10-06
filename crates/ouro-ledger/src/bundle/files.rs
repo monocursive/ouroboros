@@ -49,7 +49,7 @@ pub(super) fn private(file: &File) -> Result<()> {
     let m = file.metadata()?;
     if m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
         return Err(LedgerError(
-            "capture source must be owned and private".into(),
+            "sensitive source must be owned and private".into(),
         ));
     }
     Ok(())
@@ -139,7 +139,7 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
             continue;
         }
         result.insert(leaf.to_owned());
-        if result.len() > 5 {
+        if result.len() > 6 {
             return Err(LedgerError("unexpected bundle members".into()));
         }
     }
@@ -239,6 +239,9 @@ impl Drop for Staging {
             "receipts.json",
             "stdout.bin",
             "stderr.bin",
+            "signature.json",
+            "private-key.pk8",
+            "public-key.json",
         ] {
             let leaf = CString::new(leaf).expect("literal");
             // SAFETY: only fixed members of our pinned temporary directory are removed.

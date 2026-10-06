@@ -816,6 +816,7 @@ dependencies = [
  "libc",
  "ouro-fixture",
  "ouro-records",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
