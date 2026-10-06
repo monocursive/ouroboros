@@ -1,0 +1,47 @@
+$ cargo +1.98.1 fmt --all --check
+EXIT 0
+$ uv run docs/specs/ledger-v1/validate_contract.py
+Ledger schemas, bounded readers, source preservation, canonical bytes, chain and privacy fixtures pass.
+Document contract only; no live durability, launch or containment is tested.
+EXIT 0
+$ uv run docs/specs/jail-v1/validate_contract.py
+PASS: 8 schemas (29 frozen files), 37 examples, 5 evidence receipts, 198 validation cases,
+      102 semantic cases, 24 gate frames, policy/argv golden bytes,
+      native codec, and 26 address cases.
+No live containment, observer, proxy, or platform execution was tested.
+EXIT 0
+$ uv run docs/specs/managed-teams-v1/validate_policy.py
+Validated 1 managed-policy schema, 2 policy examples and 35 cases.
+Document contracts only; identity, policy authorization and runtime containment are not tested.
+EXIT 0
+$ uv run docs/specs/validate_links.py
+Checked 56 documents; 0 broken links or anchors.
+Document contract only; no runtime behavior is tested.
+EXIT 0
+$ cargo +1.98.1 run -q -p xtask -- i02-scan
+i02-scan: /Users/monocursive/code/ouroboros/crates/ouro-ledger/build.rs is absent (nothing scanned there)
+i02-scan: 112 file(s) in 7 root(s), 0 hit(s)
+EXIT 0
+$ cargo +1.98.1 test -p xtask i02
+   Compiling xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.72s
+     Running unittests src/main.rs (target/debug/deps/xtask-d1a5d4e084a997d9)
+
+running 10 tests
+test i02::tests::a_token_inside_an_identifier_still_counts ... ok
+test i02::tests::clean_content_and_non_utf8_bytes_produce_nothing ... ok
+test i02::tests::line_numbers_are_one_based_and_exact ... ok
+test i02::tests::an_absent_root_is_reported_as_absent_not_as_clean ... ok
+test i02::tests::every_forbidden_token_is_found_in_any_case ... ok
+test i02::tests::a_directory_symlink_is_named_and_not_followed ... ok
+test i02::tests::a_vendor_named_dependency_and_a_build_script_are_caught ... ok
+test i02::tests::a_planted_hit_in_a_temp_tree_is_reported_and_a_clean_tree_is_not ... ok
+test conformance::tests::the_i02_scan_gates_the_run ... ok
+test i02::tests::pagination_exceptions_are_exact_and_file_scoped ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 190 filtered out; finished in 0.02s
+
+EXIT 0
+$ cargo +1.98.1 run -q -p xtask -- freeze --check
+xtask freeze --check: the freeze file is this tree's, and its tested run passed: inputs_match_tree, revision_is_ancestor_of_head, inputs_match_revision, frozen_inputs_unchanged_since_revision
+EXIT 0

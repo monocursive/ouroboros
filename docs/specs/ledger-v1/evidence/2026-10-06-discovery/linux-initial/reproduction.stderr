@@ -1,0 +1,1 @@
+ouro-jail: error unsafe_config_path at resolving [configuration]: an uncontained child can change trusted configuration: /home/ubuntu/ouro-discovery-repro-20261006/config/launch/fixture-discovery.toml; move it aside or run contained (key: OURO_CONFIG_DIR)

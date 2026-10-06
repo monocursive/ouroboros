@@ -1,0 +1,12 @@
+{
+  "revision": "6a8c23c461e1a9e0f0f0edd72497198cb8d3f754",
+  "target": "aarch64-apple-darwin",
+  "toolchain": "1.98.1",
+  "command": "cargo +1.98.1 test -p ouro-ledger --no-fail-fast",
+  "passed": 121,
+  "failed": 0,
+  "ignored": 0,
+  "linux_launch_suite": "excluded on macOS",
+  "checks": "format, clippy, ledger/jail/managed schemas, document links, I02 scan and tests, existing Jail freeze",
+  "source_binding": "Runtime source matches the implementation commit; schema fixture validation followed the ledger tests."
+}

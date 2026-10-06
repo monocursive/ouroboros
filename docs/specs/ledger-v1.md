@@ -836,6 +836,9 @@ bounded live reads and operator appends during an actual contained launch.
 The [October 6 cross-run record](ledger-v1/evidence/2026-10-06-cross-run/README.md)
 covers independent query continuation, bounded count comparisons, coverage
 incomparability and a real protected-versus-unprotected launch comparison.
+The [October 6 discovery record](ledger-v1/evidence/2026-10-06-discovery/README.md)
+covers bounded run catalogs, combined filters, restart-safe selection, stale
+head refusal and automatic traversal of per-run evidence pages.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
