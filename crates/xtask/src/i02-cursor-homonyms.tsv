@@ -64,3 +64,57 @@ crates/ouro-ledger/src/store.rs	assert_eq!(envelope["checkpoint"]["prior"]["toke
 crates/ouro-ledger/src/store.rs	corrupt_request.cursor = initial.next_cursor;
 crates/ouro-ledger/src/store.rs	let cursor = corrupt_request.cursor.as_ref().unwrap();
 crates/ouro-ledger/src/store.rs	let checkpoint_path = directory.join(format!("{}.json", &cursor[..32]));
+crates/ouro-ledger/src/main.rs	request.cursor = Some(page.next_cursor);
+crates/ouro-ledger/src/protocol.rs	pub next_cursor: String,
+crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor: None
+crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor: None,
+crates/ouro-ledger/src/store/intent_tail_tests.rs	req.cursor = Some(page.next_cursor);
+crates/ouro-ledger/src/store/intent_tail_tests.rs	"cursor-digest",
+crates/ouro-ledger/src/store/intent_tail_tests.rs	"cursor-run",
+crates/ouro-ledger/src/store/intent_tail_tests.rs	"cursor-offset",
+crates/ouro-ledger/src/store/intent_tail_tests.rs	let mut cursor: Value = serde_json::from_str(&page.next_cursor).unwrap();
+crates/ouro-ledger/src/store/intent_tail_tests.rs	"cursor-digest" => {
+crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor["after"]["head_digest"] = json!(format!("sha256:{}", "0".repeat(64)))
+crates/ouro-ledger/src/store/intent_tail_tests.rs	"cursor-run" => cursor["run_id"] = json!("run_00000000000000000000000000000000"),
+crates/ouro-ledger/src/store/intent_tail_tests.rs	"cursor-offset" => {
+crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor["emitted"] = json!(3);
+crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor["pending_digest"] = json!("wrong");
+crates/ouro-ledger/src/store/intent_tail_tests.rs	if damage.starts_with("cursor") {
+crates/ouro-ledger/src/store/intent_tail_tests.rs	req.cursor = Some(cursor.to_string());
+crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor: Some(tail.next_cursor)
+crates/ouro-ledger/src/store/tail.rs	struct Cursor {
+crates/ouro-ledger/src/store/tail.rs	let mut cursor = if let Some(text) = &request.cursor {
+crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError("tail cursor exceeds bounded size".into()));
+crates/ouro-ledger/src/store/tail.rs	serde_json::from_str::<Cursor>(text)
+crates/ouro-ledger/src/store/tail.rs	.map_err(|_| LedgerError("invalid tail cursor".into()))?
+crates/ouro-ledger/src/store/tail.rs	Cursor {
+crates/ouro-ledger/src/store/tail.rs	if cursor.version != 1
+crates/ouro-ledger/src/store/tail.rs	|| cursor.run_id != request.run_id
+crates/ouro-ledger/src/store/tail.rs	|| cursor.emitted >= MAX_FRAME_BYTES
+crates/ouro-ledger/src/store/tail.rs	|| ((cursor.emitted == 0) != cursor.pending_digest.is_none())
+crates/ouro-ledger/src/store/tail.rs	"tail cursor identity or position is invalid".into(),
+crates/ouro-ledger/src/store/tail.rs	let mut offset = if cursor.after.head_seq == 0 {
+crates/ouro-ledger/src/store/tail.rs	if cursor.after.head_digest.is_some() {
+crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError("tail cursor empty anchor is invalid".into()));
+crates/ouro-ledger/src/store/tail.rs	.get(&cursor.after.head_seq)
+crates/ouro-ledger/src/store/tail.rs	.filter(|a| Some(&a.digest) == cursor.after.head_digest.as_ref())
+crates/ouro-ledger/src/store/tail.rs	.ok_or_else(|| LedgerError("tail cursor does not match accepted history".into()))?;
+crates/ouro-ledger/src/store/tail.rs	if cursor.after.head_seq == stream.run.chain.head_seq {
+crates/ouro-ledger/src/store/tail.rs	if cursor.emitted != 0 {
+crates/ouro-ledger/src/store/tail.rs	"tail cursor points beyond the accepted head".into(),
+crates/ouro-ledger/src/store/tail.rs	let seq = cursor
+crates/ouro-ledger/src/store/tail.rs	if cursor.emitted >= size
+crates/ouro-ledger/src/store/tail.rs	|| cursor
+crates/ouro-ledger/src/store/tail.rs	|| record["prev"] != json!(cursor.after.head_digest)
+crates/ouro-ledger/src/store/tail.rs	if !text.is_char_boundary(cursor.emitted) {
+crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError("tail cursor splits UTF-8".into()));
+crates/ouro-ledger/src/store/tail.rs	let mut end = size.min(cursor.emitted + READ_CHUNK_BYTES - ndjson.len());
+crates/ouro-ledger/src/store/tail.rs	ndjson.push_str(&text[cursor.emitted..end]);
+crates/ouro-ledger/src/store/tail.rs	cursor.after = Chain {
+crates/ouro-ledger/src/store/tail.rs	cursor.emitted = 0;
+crates/ouro-ledger/src/store/tail.rs	cursor.pending_digest = None;
+crates/ouro-ledger/src/store/tail.rs	cursor.emitted = end;
+crates/ouro-ledger/src/store/tail.rs	cursor.pending_digest = Some(anchor.digest.clone());
+crates/ouro-ledger/src/store/tail.rs	let caught_up = cursor.emitted == 0 && cursor.after == stream.run.chain;
+crates/ouro-ledger/src/store/tail.rs	next_cursor: serde_json::to_string(&cursor)?,
+crates/ouro-ledger/src/store/tail.rs	scanned_through_seq: cursor.after.head_seq,
