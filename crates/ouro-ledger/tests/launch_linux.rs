@@ -1307,7 +1307,12 @@ fn real_target_diff_distinguishes_created_paths_and_preserves_producer_reference
     let mut runs = Vec::new();
     for name in ["target-left", "target-right"] {
         let mut command = fixture.command(name, true);
-        command.args(["--", "/bin/sh", "-c", &format!("printf x > {name}")]);
+        command.args([
+            "--",
+            "/bin/sh",
+            "-c",
+            &format!(r#"printf x > "$PWD/{name}""#),
+        ]);
         let (output, run) = fixture.run(&mut command);
         assert!(
             output.status.success(),
@@ -1363,6 +1368,33 @@ fn real_target_diff_distinguishes_created_paths_and_preserves_producer_reference
         );
         assert_eq!(record["provenance"], reference["provenance"]);
     }
+    // The observer cannot turn a relative argument into a workspace identity
+    // without cwd observation. Target comparison must retain that limitation.
+    let mut relative = fixture.command("target-relative", true);
+    relative.args(["--", "/bin/sh", "-c", "printf x > relative-target"]);
+    let (output, relative) = fixture.run(&mut relative);
+    assert!(output.status.success());
+    let report = ouro_ledger::comparison::compare_mode(
+        &mut fixture.client(),
+        &runs[0].run_id,
+        &relative.run_id,
+        None,
+        100,
+        ouro_ledger::comparison::ComparisonMode::TargetCounts,
+    )
+    .unwrap();
+    assert_eq!(
+        report["classes"]["fs.write"]["right_reason"],
+        "target_identity_unavailable"
+    );
+    let missing = &report["right"]["unavailable_targets"]["fs.write"];
+    assert!(missing["count"].as_u64().unwrap() > 0);
+    let events = fixture.events(&relative);
+    let record = &events[missing["first_record"]["seq"].as_u64().unwrap() as usize - 1];
+    assert_eq!(
+        record["fields"]["path"]["reason"],
+        "relative_to_unobserved_cwd"
+    );
     assert!(
         fixture
             .client()
