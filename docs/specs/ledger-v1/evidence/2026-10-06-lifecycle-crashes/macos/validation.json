@@ -1,0 +1,9 @@
+{
+  "revision": "e7c7a1693fcd111cea6d3934d438b1928712a82b",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "tests_passed": 153,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "scope": "Full ledger suite; 70 I/O errors and 70 real process SIGKILLs. Linux launch matrix is executed on native hosts."
+}

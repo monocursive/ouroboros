@@ -1,0 +1,4 @@
+    Checking ouro-records v0.1.0 (/home/ubuntu/ouro-lifecycle-e7c7a169/crates/ouro-records)
+    Checking ouro-fixture v0.1.0 (/home/ubuntu/ouro-lifecycle-e7c7a169/crates/ouro-fixture)
+    Checking ouro-ledger v0.1.0 (/home/ubuntu/ouro-lifecycle-e7c7a169/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 6.42s
