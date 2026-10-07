@@ -428,6 +428,9 @@ struct RunArgs {
     /// Store a bounded output or NUL-delimited argv prefix; may contain secrets.
     #[arg(long,value_parser=["stdout","stderr","argv"])]
     capture: Vec<String>,
+    /// Minimize structured source metadata before storage; capture bytes are unchanged.
+    #[arg(long, value_parser=["paths","destinations"])]
+    redact: Vec<String>,
     #[arg(long, default_value_t = 1_048_576)]
     capture_limit: u64,
     /// Send one final JSON run record to this exclusively handed-over descriptor.
@@ -938,6 +941,7 @@ fn execute(cli: Cli) -> Result<i32> {
                 separate_control: control.is_some(),
                 detached: args.detach,
                 captures: args.capture,
+                redact: args.redact,
                 capture_limit: args.capture_limit,
                 best_effort: args.evidence == "best-effort",
                 launch: args.launch,

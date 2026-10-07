@@ -110,6 +110,36 @@
         "maxLength": 64,
         "pattern": "^[A-Za-z0-9_.:-]+$"
       }
+    },
+    "redact": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "destinations",
+          "paths"
+        ]
+      },
+      "description": "Sorted immutable selectors; captured bytes and operator fields are outside this policy.",
+      "allOf": [
+        {
+          "if": {
+            "minItems": 2
+          },
+          "then": {
+            "prefixItems": [
+              {
+                "const": "destinations"
+              },
+              {
+                "const": "paths"
+              }
+            ]
+          }
+        }
+      ]
     }
   },
   "additionalProperties": false,

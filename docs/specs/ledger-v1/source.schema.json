@@ -176,6 +176,34 @@
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "redaction": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "ouro.ledger.redaction/1"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "connected_address",
+              "destination",
+              "origin",
+              "path",
+              "path2"
+            ]
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "fields"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -202,7 +230,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ouro:schema:ledger-source:1",
   "title": "Canonical source envelope plus authenticated writer metadata",
-  "description": "Frozen at jail milestone 1 (jail-v1 §13, §17). The shared envelope and the meaning of the audit and proxy sources; jail-event.schema.json restricts it to what the jail writes. Stream rules (source_seq, one attempt, receipt-note order) and native byte strings are ouro_jail::records::semantic and validate_contract.py over fixtures/semantic-cases.json.",
+  "description": "Frozen source envelope with authenticated writer metadata. Optional redaction identifies ledger minimization; policy binding and marker semantics are checked on append and replay.",
   "allOf": [
     {
       "if": {

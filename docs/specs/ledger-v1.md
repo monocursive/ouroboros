@@ -109,7 +109,9 @@ permits one gate release. A gate write failure or lost acknowledgement never
 justifies launching another child.
 
 The owner relays the jail's source events without changing their attempt ids,
-source sequence numbers or observations. Source events are parsed using the
+source sequence numbers. Without `--redact`, observations are unchanged; an
+explicit immutable policy minimizes only selected fields as described in §6.
+Source events are parsed using the
 shared jail event type, checked against its semantic rules and restricted to
 the current jail operation inventory. Producers cannot emit `intent.*`,
 `net.dns` or `limit.hit` as new claimed observations. Per-source sequences start
@@ -145,7 +147,7 @@ same birth identity, and requests reconciliation. It does not start a writer
 inside the attempt's service. The writer records one permanent `evidence_gap`
 with reason `writer_outage` per outage episode, even if no source records were
 lost. Imported records carry `provenance.role: recovery` and the reconciler's
-identity, with no live producer token. Original source envelopes and request
+identity, with no live producer token. Source envelopes retain any explicit ledger redaction marker and request
 identities remain unchanged. A lost reply or interrupted import replays the
 original durable acknowledgement rather than duplicating records. If canonical
 settlement was already durable, reconciliation returns that existing terminal record.
@@ -352,9 +354,10 @@ without deleting history. Preparation and owner bookkeeping records have
 `schema: ouro.ledger.event/1`, `run_id`, `attempt_id`, `seq`, `prev`,
 `received_at`, `provenance`, `kind`, `request_id`, `body` and, for owner intents,
 `effect_id`. Canonical source records retain `schema: ouro.event/1` and every
-original source field directly on the record, adding `run_id`, `seq`, `prev`,
+validated source field directly on the record, adding `run_id`, `seq`, `prev`,
 `received_at`, `provenance`, `kind: source` and the derived replay request id.
-They do not nest or replace the frozen source envelope.
+They do not nest the source envelope. Explicit structured minimization changes
+only the selected fields and adds a `redaction` marker (§6).
 Preparation and ownership are in the same ordered stream as admission and
 observations, so recovery can rebuild immutable identities from one authority.
 The [record schema](ledger-v1/record.schema.json) accepts the writer fields and
@@ -464,8 +467,44 @@ cannot block the owner's evidence and lifetime loop.
 Default metadata uses argv digests and existing jail-redacted observation fields.
 The ledger does not archive vendor state. Whole-run GC removes inventoried
 stdout/stderr/argv captures with canonical history. Capture-only expiry retains
-canonical history and records a deletion anchor. Structured minimization
-options remain future work.
+canonical history and records a deletion anchor.
+
+`run --redact paths --redact destinations` selects explicit structured
+minimization. Either selector may be used alone. The sorted unique selection is
+stored in the immutable request's optional `redact` array; changing it under the
+same request id refuses. The policy is passed to detached owners too.
+
+- `paths` replaces audit `fields.path` and `fields.path2` values or digests with
+  `{"kind":"unavailable","reason":"ledger_redacted"}`. Already unavailable
+  observations retain their original reason. Path basis and completeness still
+  describe the original observation, not the retained identity.
+- `destinations` replaces non-null proxy `fields.destination`,
+  `fields.connected_address` and `fields.origin` with null.
+
+Each changed source event gains a ledger-owned top-level `redaction` containing
+`schema: ouro.ledger.redaction/1` and the sorted names of changed fields. This
+marker states that the envelope was transformed; it does not claim the retained
+bytes are the original Jail event. No digest of the removed values is retained.
+Other source facts, outcomes, decisions, counters, sequence and receipt
+correlation are unchanged. Target comparisons count these identities as
+unavailable, making the affected class incomparable; event counts remain usable
+subject to their existing coverage checks. Redaction is not a transport gap.
+
+The owner validates the frozen source contract before minimization, then sends
+or journals the minimized event. The writer independently enforces the prepared
+policy before canonical append. Outage prefixes and overflow tails therefore
+contain the same minimized form. Canonical replay, recovery and offline bundle
+verification reject policy bypass or invalid markers; they never repair stored
+bytes by rewriting them. Retries compare minimized payloads: differences only
+in removed values are intentionally indistinguishable, while changes to retained
+facts conflict. Unselected legacy requests preserve their existing bytes.
+
+This is a fixed field policy, not arbitrary text scrubbing: capture bytes,
+operator annotations, tags, profile names, receipts and external Jail outputs
+are outside its scope. `--capture` and transcript/bundle selection can expose the
+original secrets even when `--redact` is enabled. Invalid private metadata is
+still refused before transformation; redaction does not make raw environment
+values or model payloads admissible.
 
 `run --capture argv` stores a private `artifacts/argv.bin` containing each
 requested argument's native bytes followed by NUL, including the executable.
@@ -1181,10 +1220,10 @@ and fixtures only; it makes no runtime or custody claim.
 The [October 7 transcript record](ledger-v1/evidence/2026-10-07-transcript/README.md)
 documents bounded opt-in display and native Pi/VPS validation. The
 [argv capture record](ledger-v1/evidence/2026-10-07-argv/README.md) covers bounded
-raw arguments, retention and explicit bundle selection. Milestone 2 still
-requires the CLI/privacy contracts identified by the
-[acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts):
-structured `--redact`. Historical custody remains an obligation at the
+raw arguments, retention and explicit bundle selection. Structured `--redact`
+implements the final CLI/privacy slice listed in the
+[acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts).
+Historical custody remains an obligation at the
 later legacy-store removal cut; this tooling checkout does not perform it. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.

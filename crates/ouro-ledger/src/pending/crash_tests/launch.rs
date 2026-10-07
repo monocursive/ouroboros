@@ -47,6 +47,7 @@ fn options(root: &Path, kind: &str) -> RunOptions {
         separate_control: false,
         detached: false,
         captures: vec![],
+        redact: vec![],
         capture_limit: 1024,
         best_effort: true,
         launch: None,

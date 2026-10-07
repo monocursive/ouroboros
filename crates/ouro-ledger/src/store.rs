@@ -277,7 +277,7 @@ fn validate_receipt(receipt: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_source(event: &Value, attempt_id: &str) -> Result<records::Event> {
+pub(crate) fn validate_source(event: &Value, attempt_id: &str) -> Result<records::Event> {
     validate_frozen("jail-event", event)?;
     let typed: records::Event = serde_json::from_value(event.clone())?;
     if typed.attempt_id != attempt_id || !records::semantic::event(event).is_empty() {
@@ -313,7 +313,8 @@ fn validate_payload(payload: &Value) -> Result<()> {
     let Some(object) = payload.as_object() else {
         return Err(LedgerError("prepare payload must be an object".into()));
     };
-    let optional = ["owner_lifetime", "launch", "tags"];
+    let optional = ["owner_lifetime", "launch", "tags", "redact"];
+    crate::redaction::validate_policy(payload)?;
     let detached = object.contains_key("owner_lifetime");
     if keys.iter().any(|key| !object.contains_key(*key))
         || object
@@ -674,7 +675,10 @@ impl Store {
         token_id: Option<&str>,
         role: &str,
     ) -> Result<AppendReceipt> {
-        let event_typed = validate_source(event, &self.stream(run_id)?.run.attempt_id)?;
+        let run = &self.stream(run_id)?.run;
+        let minimized = crate::redaction::minimize(event, &run.payload, &run.attempt_id)?;
+        let event = &minimized;
+        let event_typed = validate_source(&crate::redaction::envelope(event), &run.attempt_id)?;
         if event_typed.schema != records::SCHEMA_EVENT
             || event_typed.attempt_id != self.stream(run_id)?.run.attempt_id
             || event_typed.source_seq == 0
@@ -806,7 +810,7 @@ impl Store {
                 .clone();
             let object = record.as_object_mut().expect("record object");
             object.remove("body");
-            // Preserve the complete frozen source envelope, including its schema.
+            // Preserve the validated source envelope and any explicit ledger redaction marker.
             object.extend(source);
         }
         validate_frozen("record", &record)?;
@@ -1378,7 +1382,12 @@ impl Stream {
         }
         let payload = original_payload(&decoded);
         if decoded["kind"] == "source" {
-            validate_source(&payload["body"], &self.run.attempt_id).map_err(|_| {
+            crate::redaction::validate_stored(
+                &payload["body"],
+                &self.run.payload,
+                &self.run.attempt_id,
+            )
+            .map_err(|_| {
                 LedgerError("canonical producer violates the frozen source contract".into())
             })?;
         }
@@ -1897,6 +1906,7 @@ fn validate_recovery(stream: &Stream, record: &Value, role: &str) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod redaction;
 
     pub(super) fn peer() -> Peer {
         Peer {

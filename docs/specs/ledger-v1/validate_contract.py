@@ -516,6 +516,24 @@ def main():
     altered["runs"][0]["keep_reasons"] = []
     validators["gc-plan"].validate(altered)
 
+    # Redaction extends writer metadata, not the frozen Jail schema.
+    redacted = copy.deepcopy(canonical_source)
+    redacted.update(json.loads((JAIL / "examples/event-open.json").read_text()))
+    redacted["fields"]["path"] = {"kind":"unavailable", "reason":"ledger_redacted"}
+    redacted["redaction"] = {"schema":"ouro.ledger.redaction/1", "fields":["path"]}
+    validators["record"].validate(redacted)
+    for marker in [{"schema":"wrong", "fields":["path"]},
+                   {"schema":"ouro.ledger.redaction/1", "fields":["outcome"]},
+                   {"schema":"ouro.ledger.redaction/1", "fields":["path","path"]}]:
+        redacted["redaction"] = marker
+        expect_invalid(validators["record"], redacted, "invalid redaction marker")
+    for selectors in [["paths"], ["destinations"], ["destinations","paths"]]:
+        policy = read("request.json") | {"redact":selectors}
+        validators["request"].validate(policy)
+    for selectors in [[], ["paths","paths"], ["paths","destinations"], ["all"], None]:
+        policy = read("request.json") | {"redact":selectors}
+        expect_invalid(validators["request"], policy, "invalid redaction policy")
+
     # Source composition preserves every value in the frozen producer envelope.
     writer_keys = {"run_id", "seq", "prev", "received_at", "provenance", "kind", "request_id"}
     recovered_source = {k: v for k, v in canonical_source.items() if k not in writer_keys}

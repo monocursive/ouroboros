@@ -11,6 +11,7 @@ mod pending;
 mod projection;
 pub mod protocol;
 mod reader;
+mod redaction;
 pub mod runner;
 mod segments;
 pub mod service;

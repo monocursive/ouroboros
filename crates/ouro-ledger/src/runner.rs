@@ -60,6 +60,8 @@ pub struct RunOptions {
     pub separate_control: bool,
     pub detached: bool,
     pub captures: Vec<String>,
+    #[serde(default)]
+    pub redact: Vec<String>,
     pub capture_limit: u64,
     pub best_effort: bool,
     pub launch: Option<String>,
@@ -222,6 +224,12 @@ fn payload(options: &RunOptions, plan: &Value, image_digest: &str) -> Result<Val
         "io":{"mode":if options.batch {"batch"} else {"foreground"},"pty":false},
         "capture":{"streams":options.captures,"limit_bytes":options.capture_limit},
         "evidence":if options.best_effort {"best-effort"} else {"strict"}});
+    if !options.redact.is_empty() {
+        let mut selectors = options.redact.clone();
+        selectors.sort();
+        request["redact"] = json!(selectors);
+        crate::redaction::validate_policy(&request)?;
+    }
     if options.separate_control {
         request["io"]["control"] = "separate_fd".into();
     }

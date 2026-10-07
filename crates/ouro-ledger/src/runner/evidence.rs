@@ -51,6 +51,8 @@ impl Evidence {
         Ok(())
     }
     pub fn source(&mut self, client: &mut Client, event: &Value) -> Result<()> {
+        let minimized = crate::redaction::minimize(event, &self.run.payload, &self.run.attempt_id)?;
+        let event = &minimized;
         if !self.offline {
             match client.append_source(&self.run.run_id, event, &self.claim.producer_token) {
                 Ok(_) => return Ok(()),

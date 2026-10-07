@@ -57,7 +57,7 @@ impl Store {
         }
         let events = state.pending();
         for event in &events {
-            validate_source(event, &run.attempt_id)?;
+            crate::redaction::validate_stored(event, &run.payload, &run.attempt_id)?;
         }
         if state.active || state.completion.is_some() {
             state.outage()?;

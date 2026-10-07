@@ -27,6 +27,8 @@ use serde_json::Value;
 mod argv_capture;
 #[path = "launch_linux/control_output.rs"]
 mod control_output;
+#[path = "launch_linux/redaction.rs"]
+mod redaction;
 #[path = "launch_linux/transcript.rs"]
 mod transcript;
 #[path = "launch_linux/vendor_state.rs"]
@@ -907,7 +909,7 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
     for profile in ["tool", "none"] {
         let mut fixture = Fixture::new(&jail);
         let mut command = fixture.command_with_profile("pending-live", true, profile);
-        command.args(["--evidence", "best-effort", "--capture", "stdout", "--", "/bin/sh", "-c",
+        command.args(["--evidence", "best-effort", "--redact", "paths", "--redact", "destinations", "--capture", "stdout", "--", "/bin/sh", "-c",
             "printf x >> executions; touch started; while test ! -f flood; do sleep 0.05; done; i=0; while test $i -lt 160; do echo x > item; i=$((i+1)); done; touch flooded; while test ! -f release; do sleep 0.05; done; printf recovered"]);
         let mut owner = Process::spawn(&mut command, true);
         let run = fixture.wait_started(&mut owner);
@@ -919,6 +921,27 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
             let pending = wait_pending(&fixture, &run, |s| s["overflow"] == true);
             assert!(pending["state"]["events"].as_array().unwrap().len() <= 32);
             assert!(serde_json::to_vec(&pending).unwrap().len() < 6 * 1_048_576);
+            for event in pending["state"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(pending["state"]["tails"].as_object().unwrap().values())
+            {
+                redaction::assert_minimized(event);
+            }
+            let journal = fs::read(
+                fixture
+                    .data
+                    .join("ledger")
+                    .join(&run.run_id)
+                    .join("owner-pending.json"),
+            )
+            .unwrap();
+            assert!(!String::from_utf8_lossy(&journal).contains("\"value\":\"item\""));
+            assert!(String::from_utf8_lossy(&journal).contains("ouro.ledger.redaction/1"));
+            println!(
+                "redaction/outage: bounded journal prefix and overflow tails minimized before storage"
+            );
         }
         assert!(
             owner.child.try_wait().unwrap().is_none(),
@@ -984,6 +1007,9 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
             String::from_utf8_lossy(&output.stderr)
         );
         let settled = fixture.client().show(&run.run_id).unwrap();
+        for event in fixture.events(&settled) {
+            redaction::assert_minimized(&event);
+        }
         assert_eq!(settled.state, "settled");
         assert_eq!(settled.coverage["ledger"]["status"], "degraded");
         assert_eq!(
