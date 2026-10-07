@@ -1,0 +1,22 @@
+{
+  "proxy_status": "unsupported_host_refusal_verified",
+  "tests_passed": 220,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "journal_io_failure_cases": 44,
+  "journal_sigkill_cases": 44,
+  "native_pending_owner_cases": 72,
+  "existing_lifecycle_cases": 66,
+  "redaction_launch_tests": 2,
+  "redaction_portable_tests": 5,
+  "control_launch_tests": 3,
+  "control_portable_tests": 7,
+  "vendor_cleanup_scenarios": 3,
+  "source_checks": "passed before and after",
+  "production_test_controls": "absent",
+  "binaries_sha256": {
+    "ouro-jail": "861a8c559cd00b07fceca27e90e9defd9ab317215b4f1092da52dea43bbe9a0f",
+    "ouro-fixture": "d892cb6d0d3a67c81d8a423af00a75c52555e5b1388e7d6d1d4be0c894a2c102",
+    "ouro-ledger": "a001bc90c575ced7eebb97f6b7bf3ced411672e1cd6b7a0f11de8a86d4ca6128"
+  }
+}

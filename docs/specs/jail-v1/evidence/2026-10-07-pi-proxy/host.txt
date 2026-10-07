@@ -1,0 +1,18 @@
+Linux raspberrypi 6.18.50+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11) aarch64 GNU/Linux
+filename:       /lib/modules/6.18.50+rpt-rpi-v8/updates/ouro/unix_diag.ko
+alias:          net-pf-16-proto-4-type-1
+description:    UNIX socket monitoring via SOCK_DIAG
+license:        GPL
+srcversion:     47FE26FE9656979EFD47D85
+depends:        
+name:           unix_diag
+vermagic:       6.18.50+rpt-rpi-v8 SMP preempt mod_unload modversions aarch64
+b5a74f7e8a492cf5a31d7b52fa7d260b65cc5d96ea5ec7a4b4b813bd5c21cbc7  /home/monocursive/ouro-unix-diag-20261007/diag.c
+86fdf00233bd1ad743b94751858d9a449afcb8886ca1dabe9f7d75f97f04fbc7  /home/monocursive/ouro-unix-diag-20261007/af_unix.h
+74c16602f2da18bcbb0d1f347c2a9beeb83fbb12b44316a74b3ae3a074185cb3  /home/monocursive/ouro-unix-diag-20261007/unix_diag.ko
+CONFIG_MEMCG=y
+# CONFIG_MEMCG_V1 is not set
+# CONFIG_UNIX_DIAG is not set
+# CONFIG_SECURITY_LANDLOCK is not set
+coherent_pool=1M 8250.nr_uarts=0 snd_bcm2835.enable_headphones=0 cgroup_disable=memory numa_policy=interleave nvme.max_host_mem_size_mb=32 snd_bcm2835.enable_headphones=1 snd_bcm2835.enable_hdmi=1 snd_bcm2835.enable_hdmi=0  numa=fake=2 system_heap.max_order=0 iommu_dma_numa_policy=interleave smsc95xx.macaddr=DC:A6:32:A7:92:0F vc_mem.mem_base=0x3ec00000 vc_mem.mem_size=0x40000000  console=ttyS0,115200 console=tty1 root=PARTUUID=fb11c322-02 rootfstype=ext4 fsck.repair=yes rootwait quiet splash plymouth.ignore-serial-consoles cfg80211.ieee80211_regdom=FR
+unix_diag
