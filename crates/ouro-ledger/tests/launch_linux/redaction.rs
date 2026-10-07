@@ -122,13 +122,40 @@ fn real_redaction_preserves_capture_bytes_and_replay_and_verifies_offline() {
 }
 
 #[test]
-fn real_proxy_redaction_removes_destination_without_changing_denial_or_counters() {
+fn real_proxy_redaction_preserves_denial_or_refuses_missing_host_capability() {
     let Some(jail) = live_jail() else { return };
     let fixture = Fixture::new(&jail);
     let mut command = fixture.command_with_profile("redaction-proxy", true, "agent");
     command.args(["--redact", "destinations", "--", "/bin/sh", "-c",
-        "curl --silent --max-time 3 --noproxy '' --proxy \"$HTTP_PROXY\" --proxytunnel https://redaction-private.invalid/ >/dev/null; test $? -ne 0"]);
+        "touch proxy-child-executed; curl --silent --max-time 3 --noproxy '' --proxy \"$HTTP_PROXY\" --proxytunnel https://redaction-private.invalid/ >/dev/null; test $? -ne 0"]);
     let (output, run) = fixture.run(&mut command);
+    if run.state == "denied" {
+        // The reference Pi lacks CONFIG_UNIX_DIAG. Prove that the policy
+        // refuses before admission; this is not proxy-redaction proof.
+        assert_eq!(output.status.code(), Some(125));
+        assert_eq!(
+            run.outcome.as_ref().unwrap()["error"]["code"],
+            "missing_capability"
+        );
+        assert_eq!(
+            run.outcome.as_ref().unwrap()["error"]["message"],
+            "the host does not provide `network_proxy` (unix_socket_diagnostics_unavailable)"
+        );
+        assert!(!fixture.workspace.join("proxy-child-executed").exists());
+        assert!(
+            run.receipts
+                .iter()
+                .all(|r| r["exec_observed"] == false && r["process"].is_null())
+        );
+        assert!(!fixture.events(&run).iter().any(|e| e["kind"] == "admitted"));
+        let (output, replay) = fixture.run(&mut command);
+        assert_eq!(output.status.code(), Some(125));
+        assert_eq!(run.chain, replay.chain);
+        println!(
+            "redaction/proxy: host capability unavailable, launch denied before child execution"
+        );
+        return;
+    }
     assert!(
         output.status.success(),
         "{}",

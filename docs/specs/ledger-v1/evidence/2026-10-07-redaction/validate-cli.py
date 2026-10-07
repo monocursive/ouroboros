@@ -17,9 +17,10 @@ validators = contract.jail.build_validators(
 )
 for name in sys.argv[1:]:
     directory = Path(name)
-    validators["run"].validate(json.loads((directory / "redaction-cli.json").read_text()))
-    for line in (directory / "events-cli.ndjson").read_bytes().splitlines():
-        record = json.loads(line)
-        validators["record"].validate(record)
-        assert contract.rfc8785.dumps(record) == line
-    print(f"{directory.name}: actual redaction run response and canonical events conform")
+    for run_name, events_name in [("redaction-cli.json", "events-cli.ndjson"), ("proxy-cli.json", "proxy-events-cli.ndjson")]:
+        validators["run"].validate(json.loads((directory / run_name).read_text()))
+        for line in (directory / events_name).read_bytes().splitlines():
+            record = json.loads(line)
+            validators["record"].validate(record)
+            assert contract.rfc8785.dumps(record) == line
+    print(f"{directory.name}: actual redaction run responses and canonical events conform")

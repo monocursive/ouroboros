@@ -58,10 +58,13 @@ for profile in ("tool", "none"):
 assert log.count("control/modes: foreground without --json and batch both use only the separate result fd") == 1
 for marker in (
     "redaction/outage: bounded journal prefix and overflow tails minimized before storage",
-    "redaction/proxy: real local denial retained, destination removed, byte counters unchanged",
     *[f"redaction/{p}: canonical metadata minimized, explicit captures unchanged, restart replay once, offline bundle verified" for p in ("tool", "none")],
 ):
     assert log.count(marker) == 1, marker
+proxy_observed = "redaction/proxy: real local denial retained, destination removed, byte counters unchanged"
+proxy_refused = "redaction/proxy: host capability unavailable, launch denied before child execution"
+assert log.count(proxy_observed) + log.count(proxy_refused) == 1
+proxy_status = "proxy_redaction_verified" if proxy_observed in log else "unsupported_host_refusal_verified"
 binaries = {}
 for line in (root / "binaries.sha256").read_text().splitlines():
     digest, path = line.split(maxsplit=1)
@@ -72,7 +75,7 @@ for line in (root / "binaries.sha256").read_text().splitlines():
         for control in (b"OURO_PENDING_TEST_WORKER", b"OURO_LEDGER_TEST_WORKER", b"SIGKILL returned unexpectedly"):
             assert control not in data, "test instrumentation in production ledger"
 print(json.dumps({
-    "tests_passed": 220, "tests_failed": 0, "tests_ignored": 0,
+    "proxy_status": proxy_status, "tests_passed": 220, "tests_failed": 0, "tests_ignored": 0,
     "journal_io_failure_cases": 44, "journal_sigkill_cases": 44,
     "native_pending_owner_cases": len(expected), "existing_lifecycle_cases": 66,
     "redaction_launch_tests": 2, "redaction_portable_tests": 5, "control_launch_tests": 3, "control_portable_tests": 7, "vendor_cleanup_scenarios": 3, "source_checks": "passed before and after",
