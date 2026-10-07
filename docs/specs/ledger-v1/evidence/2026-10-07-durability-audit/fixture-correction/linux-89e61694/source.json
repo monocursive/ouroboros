@@ -1,0 +1,11 @@
+{
+  "revision": "89e616944c3a3638a83dfafbd0335e2ab3ee1247",
+  "source_kind": "git archive",
+  "archive_sha256": "6c6fb7e1a32db988f1a5560edcc6c03bccf08ab28eb427bbab01bb907f123124",
+  "source_files": 419,
+  "runtime_inputs_match_working_tree": true,
+  "uncommitted_changes": "evidence and acceptance documentation only; excluded from this archive",
+  "working_tree_differences": [
+    "docs/specs/ledger-v1/durability-acceptance.md"
+  ]
+}

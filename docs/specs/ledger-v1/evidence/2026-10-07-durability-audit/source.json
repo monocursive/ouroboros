@@ -1,0 +1,12 @@
+{
+  "revision": "1b7e4ac2c63e2b93c5906ca943eef9813b11ab38",
+  "source_kind": "Git archive; byte-equivalent update of the existing 89e61694 validation checkout",
+  "archive_sha256": "80a7a700a6e0aa94749815cb277c220737f0894eda4f2feef25d13f2781c844a",
+  "source_files": 419,
+  "updated_from_revision": "89e616944c3a3638a83dfafbd0335e2ab3ee1247",
+  "changed_files": [
+    "crates/ouro-ledger/tests/launch_linux/vendor_state.rs"
+  ],
+  "runtime_inputs_match_working_tree": true,
+  "uncommitted_changes": "evidence and acceptance documentation only; excluded from archive"
+}

@@ -1,0 +1,53 @@
+   Compiling ouro-ledger v0.1.0 (/home/monocursive/ouro-vendor-89e61694/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 16.74s
+     Running tests/launch_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/launch_linux-9e4ea4dc899bca5f)
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.07s
+
+    Finished `release` profile [optimized] target(s) in 0.33s
+     Running tests/launch_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/launch_linux-9e4ea4dc899bca5f)
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.05s
+
+    Finished `release` profile [optimized] target(s) in 0.30s
+     Running tests/launch_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/launch_linux-9e4ea4dc899bca5f)
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.07s
+
+    Finished `release` profile [optimized] target(s) in 0.30s
+     Running tests/launch_linux.rs (/home/monocursive/ouro-ledger-pruning-20261005-pi-r1/target/release/deps/launch_linux-9e4ea4dc899bca5f)
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+
+thread 'vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death' (20755) panicked at crates/ouro-ledger/tests/launch_linux/vendor_state.rs:112:9:
+writer-death: [VerifyReport { run_id: "run_f0fd697eeb2b4bdcbeb64a97226e6a9e", local_consistency: false, child_protection: "enforced", coverage: Object {"status": String("unobserved")}, events: 8, problems: ["oversized or interrupted canonical frame; bytes retained"], history: None }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 2.27s
+
+error: test failed, to rerun pass `-p ouro-ledger --test launch_linux`

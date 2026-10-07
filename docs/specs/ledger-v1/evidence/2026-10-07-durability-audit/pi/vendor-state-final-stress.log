@@ -1,0 +1,91 @@
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: interrupted frame retained and reported
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.25s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.06s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.07s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.11s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.05s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.10s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.06s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.09s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.08s
+
+
+running 1 test
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 3.02s
+

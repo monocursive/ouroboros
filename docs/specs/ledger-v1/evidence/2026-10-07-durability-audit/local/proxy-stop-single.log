@@ -1,0 +1,9 @@
+   Compiling ouro-jail v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.86s
+     Running tests/portable_proxy.rs (target/debug/deps/portable_proxy-e498a0560d7b574a)
+
+running 1 test
+test n04_stop_closes_a_tunnel_to_a_silent_destination ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.11s
+

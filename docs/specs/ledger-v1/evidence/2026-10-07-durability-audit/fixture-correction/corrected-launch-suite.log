@@ -1,0 +1,39 @@
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/ouro-vendor-preflight-20261007/crates/ouro-ledger)
+    Finished `release` profile [optimized] target(s) in 3.72s
+     Running tests/launch_linux.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/launch_linux-153248905173cb55)
+
+running 28 tests
+test an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever ... ok
+test best_effort_dead_owner_without_exit_record_stays_unknown ... ok
+test best_effort_exit_during_outage_recovers_after_owner_exit ... ok
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... ok
+test best_effort_local_journal_failure_stops_the_tree_and_never_settles ... ok
+test best_effort_rechecks_local_exit_even_with_a_recomputed_journal_checksum ... ok
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+test contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer ... ok
+test detached_cancel_requests_stop_then_waits_for_verified_settlement ... ok
+test detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt ... ok
+test detached_mode_refuses_a_session_bound_existing_writer ... ok
+test detached_owner_death_stops_tree_and_replay_preserves_unknown ... ok
+test detached_submitter_exit_preserves_owner_output_and_one_execution ... ok
+test detached_writer_death_fails_closed_without_starting_a_session_writer ... ok
+test durable_admission_precedes_real_exec_and_replay_never_executes_twice ... ok
+test explicit_none_profile_remains_unprotected_after_real_launch_and_verification ... ok
+test failed_exec_retains_corroborated_error_without_a_second_attempt ... ok
+test invalid_inherited_stdout_is_denied_before_admission_and_never_executes ... ok
+test operator_intents_and_live_tail_preserve_real_jail_ownership_and_source_bytes ... ok
+test opted_capture_stops_storing_at_the_cap_and_keeps_draining_the_real_child ... ok
+test owner_death_is_reconciled_as_unknown_and_never_relaunched ... ok
+test real_launch_bundles_verify_offline_with_selected_truncated_captures ... ok
+test real_launch_labels_drive_filtered_discovery_without_changing_replay_identity ... ok
+test real_run_diff_keeps_none_unprotected_and_separates_unobserved_coverage ... ok
+test real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_removal ... ok
+test real_target_diff_distinguishes_created_paths_and_preserves_producer_references ... ok
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+vendor-state/owner-death: populated, tree empty, removed, replay unchanged
+ok
+test writer_death_stops_the_owner_and_recovery_remains_unknown ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.89s
+

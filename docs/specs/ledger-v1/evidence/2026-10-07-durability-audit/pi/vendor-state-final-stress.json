@@ -1,0 +1,8 @@
+{
+  "revision": "1b7e4ac2c63e2b93c5906ca943eef9813b11ab38",
+  "test": "vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death",
+  "passed": 10,
+  "scenarios": 30,
+  "interrupted_frame_cases": 1,
+  "seconds": 30.93043049300013
+}

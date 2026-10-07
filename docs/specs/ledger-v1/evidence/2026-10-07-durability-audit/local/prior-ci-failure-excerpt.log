@@ -1,0 +1,8 @@
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:30.0469660Z test n04_start_refuses_a_descriptor_budget_that_does_not_fit_and_names_it ... ok
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:35.1985790Z test n04_stop_closes_a_tunnel_to_a_silent_destination ... 
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:35.2060250Z thread 'n04_stop_closes_a_tunnel_to_a_silent_destination' (52579) panicked at crates/ouro-jail/tests/portable_proxy.rs:1867:5:
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:35.2061270Z ProxySummary { accepted: 1, results_emitted: 0, results_missing: 1, without_request: 0, listener_closed: true }
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:35.2062210Z FAILED
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:35.3033110Z test n04_stop_closes_every_connection_and_accounts_for_each ... ok
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:35.3037370Z test n04_stop_closes_the_listener_after_its_path_was_removed ... ok
+gates (macos-latest)	UNKNOWN STEP	2026-10-07T07:35:37.3168490Z test n04_stop_ends_a_relay_blocked_writing_to_the_destination ... ok

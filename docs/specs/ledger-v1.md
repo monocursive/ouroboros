@@ -1072,6 +1072,10 @@ binds the tested revision, full-suite logs and native crash-case checks. The
 [October 7 pending-journal record](ledger-v1/evidence/2026-10-07-pending-journal/README.md)
 adds owner save/cleanup faults, recovery barriers and a negative control for
 ambiguous local completion, with host coverage recorded explicitly.
+The [October 7 durability audit](ledger-v1/evidence/2026-10-07-durability-audit/README.md)
+completes the Pi validation and adds explicit real-launch vendor-state cleanup
+checks after normal exit, writer death and owner death. The acceptance map now
+cross-checks every §5.4 runtime property and acceptance clause.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record
@@ -1086,8 +1090,11 @@ they do not launch a jail or establish Linux containment.
 The [contract validator](ledger-v1/validate_contract.py) checks versioned schemas
 and fixtures only; it makes no runtime or custody claim.
 
-Milestone 2 is still gated on the full North Star durability suite and the
-historical-custody migration at removal of the in-tree stores. Managed
+Milestone 2 still requires the CLI/privacy contracts identified by the
+[acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts):
+bounded opt-in transcript display, argv capture, foreground `--control-fd`
+and structured `--redact`. Historical custody remains an obligation at the
+later legacy-store removal cut; this tooling checkout does not perform it. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.
 

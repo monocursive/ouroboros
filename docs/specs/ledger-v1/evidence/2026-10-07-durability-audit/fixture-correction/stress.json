@@ -1,0 +1,7 @@
+{
+  "test": "vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death",
+  "passed": 20,
+  "scenarios": 60,
+  "seconds": 40.02481743902899,
+  "scope": "VPS stress rerun after fixing the cleanup publication race in the test"
+}

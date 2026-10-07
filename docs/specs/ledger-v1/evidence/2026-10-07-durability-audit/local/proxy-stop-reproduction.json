@@ -1,0 +1,14 @@
+{
+  "test": "n04_stop_closes_a_tunnel_to_a_silent_destination",
+  "source_revision": "ea67e8c609606d3d9fb28ab8c5a72f8f80efa2b1",
+  "jail_sources_unchanged_from_ci_failure": true,
+  "binary": "target/debug/deps/portable_proxy-e498a0560d7b574a",
+  "subprocess_repetitions": 100,
+  "passed": 100,
+  "failed": 0,
+  "elapsed_seconds": 9.807816957996693,
+  "timeout_per_process_seconds": 30,
+  "scope": "Local macOS reproduction attempt; no proxy repair or causal diagnosis claimed.",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+}

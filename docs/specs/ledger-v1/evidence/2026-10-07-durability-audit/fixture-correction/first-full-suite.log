@@ -1,0 +1,387 @@
+   Compiling ouro-ledger v0.1.0 (/home/ubuntu/ouro-vendor-ea67e8c6/crates/ouro-ledger)
+   Compiling ouro-fixture v0.1.0 (/home/ubuntu/ouro-vendor-ea67e8c6/crates/ouro-fixture)
+    Finished `release` profile [optimized] target(s) in 1m 35s
+     Running unittests src/lib.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/ouro_ledger-a11ffff2ceea85d8)
+
+running 121 tests
+test bundle::signing::tests::generated_keys_are_private_unique_and_never_overwritten_or_exported ... ok
+test bundle::signing::tests::public_key_is_a_bounded_explicit_pin_and_refuses_forged_fingerprint ... ok
+test bundle::signing::tests::signature_binds_exact_bytes_domain_and_supplied_identity ... ok
+test bundle::signing::tests::unsafe_malformed_and_oversized_private_keys_refuse ... ok
+test bundle::tests::altered_projection_receipts_and_inventory_refuse_even_with_new_hashes ... ok
+test bundle::tests::broken_canonical_chain_and_interrupted_frame_refuse_rehashed_inventory ... ok
+test bundle::tests::failed_exports_remove_staging_and_never_replace_destination ... ok
+test bundle::tests::multi_page_snapshot_excludes_later_appends_and_rejects_changed_labels ... ok
+test bundle::tests::portable_bundle_preserves_bytes_and_labels_without_implicit_captures ... ok
+test bundle::tests::selected_capture_is_exact_private_and_blocks_retention ... ok
+test bundle::tests::signed_bundle_preserves_none_and_gaps_and_requires_explicit_trust ... ok
+test bundle::tests::signed_manifest_capture_inventory_and_signature_tampering_refuse ... ok
+test bundle::tests::stripping_or_replacing_signer_never_satisfies_a_pinned_verification ... ok
+test bundle::tests::unsafe_capture_source_and_bad_selection_refuse ... ok
+test bundle::tests::unsafe_missing_or_oversized_members_refuse_without_following_links ... ok
+test bundle::tests::valid_pinned_signature_never_overrides_canonical_semantic_checks ... ok
+test comparison::tests::count_keys_separate_sources_stages_and_outcomes_and_enforce_budget ... ok
+test comparison::tests::different_sources_are_incomparable_without_changing_protection_labels ... ok
+test comparison::tests::incomplete_target_makes_its_class_incomparable_with_a_canonical_reference ... ok
+test comparison::tests::page_budget_exhaustion_and_partial_records_fail_closed ... ok
+test comparison::tests::proxy_targets_use_original_destinations_and_path_targets_obey_key_budget ... ok
+test comparison::tests::target_keys_preserve_both_rename_paths_native_bytes_and_namespaces ... ok
+test comparison::tests::unsupported_gapped_and_live_classes_cannot_be_compared ... ok
+test config::tests::config_is_bounded_strict_and_does_not_silently_default_invalid_retention ... ok
+test daemon::tests::forged_producer_role_attempt_and_peer_are_all_refused ... ok
+test daemon::tests::frame_roundtrip_handles_interrupted_transport_without_accepting_partial_json ... ok
+test daemon::tests::gc_wire_collects_an_empty_store_without_starting_readers ... ok
+test daemon::tests::protocol_refuses_caller_claimed_roles_and_oversized_frames ... ok
+test pending::crash_tests::cleanup_keeps_the_same_mutex_inode_for_future_openers ... ok
+test pending::crash_tests::journal_io_error_matrix_preserves_previous_or_complete_replacements ... ok
+test pending::crash_tests::journal_sigkill_matrix_preserves_pending_and_canonical_history ... ok
+test pending::crash_tests::launch::real_owner_journal_crashes_never_bypass_admission_or_repeat_execution ... pending launch case passed: error/pending.create/snapshot.before_temp_unlink
+pending launch case passed: error/pending.create/snapshot.before_open
+pending launch case passed: error/pending.create/snapshot.before_write
+pending launch case passed: error/pending.create/snapshot.partial_write
+pending launch case passed: error/pending.create/snapshot.before_file_sync
+pending launch case passed: error/pending.create/snapshot.before_rename
+pending launch case passed: error/pending.create/snapshot.before_directory_sync
+pending launch case passed: error/pending.create/snapshot.after_directory_sync
+pending launch case passed: error/pending.outage/snapshot.before_temp_unlink
+pending launch case passed: error/pending.outage/snapshot.before_open
+pending launch case passed: error/pending.outage/snapshot.before_write
+pending launch case passed: error/pending.outage/snapshot.partial_write
+pending launch case passed: error/pending.outage/snapshot.before_file_sync
+pending launch case passed: error/pending.outage/snapshot.before_rename
+pending launch case passed: error/pending.outage/snapshot.before_directory_sync
+pending launch case passed: error/pending.outage/snapshot.after_directory_sync
+pending launch case passed: error/pending.source/snapshot.before_temp_unlink
+pending launch case passed: error/pending.source/snapshot.before_open
+pending launch case passed: error/pending.source/snapshot.before_write
+pending launch case passed: error/pending.source/snapshot.partial_write
+pending launch case passed: error/pending.source/snapshot.before_file_sync
+pending launch case passed: error/pending.source/snapshot.before_rename
+pending launch case passed: error/pending.source/snapshot.before_directory_sync
+pending launch case passed: error/pending.source/snapshot.after_directory_sync
+pending launch case passed: error/pending.completion/snapshot.before_temp_unlink
+pending launch case passed: error/pending.completion/snapshot.before_open
+pending launch case passed: error/pending.completion/snapshot.before_write
+pending launch case passed: error/pending.completion/snapshot.partial_write
+pending launch case passed: error/pending.completion/snapshot.before_file_sync
+pending launch case passed: error/pending.completion/snapshot.before_rename
+pending launch case passed: error/pending.completion/snapshot.before_directory_sync
+pending launch case passed: error/pending.completion/snapshot.after_directory_sync
+pending launch case passed: error/pending.remove/cleanup.before_temp_unlink
+pending launch case passed: error/pending.remove/cleanup.before_state_unlink
+pending launch case passed: error/pending.remove/cleanup.before_directory_sync
+pending launch case passed: error/pending.remove/cleanup.after_directory_sync
+pending launch case passed: kill/pending.create/snapshot.before_temp_unlink
+pending launch case passed: kill/pending.create/snapshot.before_open
+pending launch case passed: kill/pending.create/snapshot.before_write
+pending launch case passed: kill/pending.create/snapshot.partial_write
+pending launch case passed: kill/pending.create/snapshot.before_file_sync
+pending launch case passed: kill/pending.create/snapshot.before_rename
+pending launch case passed: kill/pending.create/snapshot.before_directory_sync
+pending launch case passed: kill/pending.create/snapshot.after_directory_sync
+pending launch case passed: kill/pending.outage/snapshot.before_temp_unlink
+pending launch case passed: kill/pending.outage/snapshot.before_open
+pending launch case passed: kill/pending.outage/snapshot.before_write
+pending launch case passed: kill/pending.outage/snapshot.partial_write
+pending launch case passed: kill/pending.outage/snapshot.before_file_sync
+pending launch case passed: kill/pending.outage/snapshot.before_rename
+pending launch case passed: kill/pending.outage/snapshot.before_directory_sync
+pending launch case passed: kill/pending.outage/snapshot.after_directory_sync
+pending launch case passed: kill/pending.source/snapshot.before_temp_unlink
+pending launch case passed: kill/pending.source/snapshot.before_open
+pending launch case passed: kill/pending.source/snapshot.before_write
+pending launch case passed: kill/pending.source/snapshot.partial_write
+pending launch case passed: kill/pending.source/snapshot.before_file_sync
+pending launch case passed: kill/pending.source/snapshot.before_rename
+pending launch case passed: kill/pending.source/snapshot.before_directory_sync
+pending launch case passed: kill/pending.source/snapshot.after_directory_sync
+pending launch case passed: kill/pending.completion/snapshot.before_temp_unlink
+pending launch case passed: kill/pending.completion/snapshot.before_open
+pending launch case passed: kill/pending.completion/snapshot.before_write
+pending launch case passed: kill/pending.completion/snapshot.partial_write
+pending launch case passed: kill/pending.completion/snapshot.before_file_sync
+pending launch case passed: kill/pending.completion/snapshot.before_rename
+pending launch case passed: kill/pending.completion/snapshot.before_directory_sync
+pending launch case passed: kill/pending.completion/snapshot.after_directory_sync
+pending launch case passed: kill/pending.remove/cleanup.before_temp_unlink
+pending launch case passed: kill/pending.remove/cleanup.before_state_unlink
+pending launch case passed: kill/pending.remove/cleanup.before_directory_sync
+pending launch case passed: kill/pending.remove/cleanup.after_directory_sync
+ok
+test pending::crash_tests::recovery_sync_errors_do_not_import_or_acknowledge_a_complete_journal ... ok
+test pending::tests::failed_snapshot_replacement_preserves_previous_pending_evidence ... ok
+test pending::tests::journal_rejects_rebinding_corruption_unsafe_members_and_competing_writer ... ok
+test pending::tests::lost_source_and_reconciliation_replies_replay_once_across_writer_restart ... ok
+test pending::tests::queue_is_bounded_and_retains_latest_sequence_for_explicit_loss ... ok
+test pending::tests::recovery_cannot_admit_strict_runs_or_impersonate_a_live_owner ... ok
+test projection::tests::corrupt_or_missing_index_is_disposable_and_does_not_touch_canonical_bytes ... ok
+test projection::tests::foreign_identity_schema_and_extra_triggers_are_discarded ... ok
+test projection::tests::oversized_payload_rolls_back_rebuild_and_keeps_the_previous_projection ... ok
+test projection::tests::rebuild_and_upsert_survive_reopen_with_truthful_labels_and_u64_sequence ... ok
+test projection::tests::replacing_or_linking_an_open_index_prevents_further_updates ... ok
+test projection::tests::replacing_the_root_and_growing_sidecars_prevents_updates ... ok
+test projection::tests::unsafe_database_and_sidecars_are_refused_without_following_targets ... ok
+test reader::tests::summaries_are_bounded_even_for_arbitrary_owner_coverage_and_keep_gaps_unknown ... ok
+test reader::tests::time_filters_reject_invalid_dates_offsets_fractional_times_and_non_ascii ... ok
+test runner::tests::capture_keeps_the_exact_short_write_count_before_disk_failure ... ok
+test runner::tests::prepared_gate_compares_each_identity_and_receipt_digest ... ok
+test store::bundle_replay::tests::rotated_records_bundle_after_capture_expiry_but_pruned_history_refuses ... ok
+test store::catalog::tests::catalog_metadata_is_bounded_immutable_and_preserves_legacy_absence ... ok
+test store::catalog::tests::catalog_omits_large_receipts_while_legacy_response_and_catalog_scan_are_bounded ... ok
+test store::catalog::tests::catalog_pages_survive_restart_but_refuse_scope_and_matching_membership_changes ... ok
+test store::catalog::tests::pruned_runs_remain_discoverable_with_labels_but_query_reports_unavailable_history ... ok
+test store::intent_tail_tests::operator_append_faults_recover_exactly_once_or_preserve_ambiguity ... ok
+test store::intent_tail_tests::operator_effects_replay_without_claiming_launch_state_or_observation ... ok
+test store::intent_tail_tests::operator_forgery_conflicts_and_unadmitted_settlement_refuse ... ok
+test store::intent_tail_tests::pending_operator_effects_pin_gc_and_pruned_history_refuses_tail_but_replays_intents ... ok
+test store::intent_tail_tests::tail_chunks_rotation_restart_and_growth_preserve_exact_bytes ... ok
+test store::intent_tail_tests::tail_refuses_forged_positions_mutated_records_and_partial_tails ... ok
+test store::lifecycle_tests::io_errors_at_every_lifecycle_boundary_refuse_ack_until_recovery ... ok
+test store::lifecycle_tests::launch::real_launch_gate_survives_admission_settlement_and_lost_reply_crashes ... lifecycle launch case passed: strict/admitted/event.before_write
+lifecycle launch case passed: strict/admitted/event.partial_write
+lifecycle launch case passed: strict/admitted/event.before_sync
+lifecycle launch case passed: strict/admitted/event.after_sync
+lifecycle launch case passed: strict/admitted/projection.before_write
+lifecycle launch case passed: strict/admitted/projection.before_sync
+lifecycle launch case passed: strict/admitted/projection.before_rename
+lifecycle launch case passed: strict/admitted/projection.before_directory_sync
+lifecycle launch case passed: strict/admitted/manifest.before_write
+lifecycle launch case passed: strict/admitted/manifest.before_sync
+lifecycle launch case passed: strict/admitted/manifest.before_rename
+lifecycle launch case passed: strict/admitted/manifest.before_directory_sync
+lifecycle launch case passed: strict/admitted/append.before_directory_sync
+lifecycle launch case passed: strict/admitted/append.after_directory_sync
+lifecycle launch case passed: strict/settled/event.before_write
+lifecycle launch case passed: strict/settled/event.partial_write
+lifecycle launch case passed: strict/settled/event.before_sync
+lifecycle launch case passed: strict/settled/event.after_sync
+lifecycle launch case passed: strict/settled/projection.before_write
+lifecycle launch case passed: strict/settled/projection.before_sync
+lifecycle launch case passed: strict/settled/projection.before_rename
+lifecycle launch case passed: strict/settled/projection.before_directory_sync
+lifecycle launch case passed: strict/settled/manifest.before_write
+lifecycle launch case passed: strict/settled/manifest.before_sync
+lifecycle launch case passed: strict/settled/manifest.before_rename
+lifecycle launch case passed: strict/settled/manifest.before_directory_sync
+lifecycle launch case passed: strict/settled/append.before_directory_sync
+lifecycle launch case passed: strict/settled/append.after_directory_sync
+lifecycle launch case passed: strict/prepared/reply.before_send
+lifecycle launch case passed: strict/owner_claimed/reply.before_send
+lifecycle launch case passed: strict/admitted/reply.before_send
+lifecycle launch case passed: strict/source/reply.before_send
+lifecycle launch case passed: strict/settled/reply.before_send
+lifecycle launch case passed: best-effort/admitted/event.before_write
+lifecycle launch case passed: best-effort/admitted/event.partial_write
+lifecycle launch case passed: best-effort/admitted/event.before_sync
+lifecycle launch case passed: best-effort/admitted/event.after_sync
+lifecycle launch case passed: best-effort/admitted/projection.before_write
+lifecycle launch case passed: best-effort/admitted/projection.before_sync
+lifecycle launch case passed: best-effort/admitted/projection.before_rename
+lifecycle launch case passed: best-effort/admitted/projection.before_directory_sync
+lifecycle launch case passed: best-effort/admitted/manifest.before_write
+lifecycle launch case passed: best-effort/admitted/manifest.before_sync
+lifecycle launch case passed: best-effort/admitted/manifest.before_rename
+lifecycle launch case passed: best-effort/admitted/manifest.before_directory_sync
+lifecycle launch case passed: best-effort/admitted/append.before_directory_sync
+lifecycle launch case passed: best-effort/admitted/append.after_directory_sync
+lifecycle launch case passed: best-effort/settled/event.before_write
+lifecycle launch case passed: best-effort/settled/event.partial_write
+lifecycle launch case passed: best-effort/settled/event.before_sync
+lifecycle launch case passed: best-effort/settled/event.after_sync
+lifecycle launch case passed: best-effort/settled/projection.before_write
+lifecycle launch case passed: best-effort/settled/projection.before_sync
+lifecycle launch case passed: best-effort/settled/projection.before_rename
+lifecycle launch case passed: best-effort/settled/projection.before_directory_sync
+lifecycle launch case passed: best-effort/settled/manifest.before_write
+lifecycle launch case passed: best-effort/settled/manifest.before_sync
+lifecycle launch case passed: best-effort/settled/manifest.before_rename
+lifecycle launch case passed: best-effort/settled/manifest.before_directory_sync
+lifecycle launch case passed: best-effort/settled/append.before_directory_sync
+lifecycle launch case passed: best-effort/settled/append.after_directory_sync
+lifecycle launch case passed: best-effort/prepared/reply.before_send
+lifecycle launch case passed: best-effort/owner_claimed/reply.before_send
+lifecycle launch case passed: best-effort/admitted/reply.before_send
+lifecycle launch case passed: best-effort/source/reply.before_send
+lifecycle launch case passed: best-effort/settled/reply.before_send
+ok
+test store::lifecycle_tests::sigkill_at_every_lifecycle_boundary_preserves_identity_and_canonical_bytes ... ok
+test store::tests::admission_cannot_change_reserved_policy_or_argv ... ok
+test store::tests::admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt ... ok
+test store::tests::admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_loss ... ok
+test store::tests::capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins ... ok
+test store::tests::capture_expiry_preserves_canonical_bytes_queries_replays_and_later_history_gc ... ok
+test store::tests::capture_expiry_recovers_each_deletion_boundary_and_never_removes_history ... ok
+test store::tests::capture_expiry_refuses_changed_reappearing_or_unanchored_files ... ok
+test store::tests::capture_expiry_removes_empty_selected_files_without_claiming_removed_bytes ... ok
+test store::tests::corrupt_reader_checkpoint_is_isolated_bounded_and_expires ... ok
+test store::tests::detached_request_lifetime_is_validated_and_cannot_rebind_a_request ... ok
+test store::tests::different_payload_cannot_rebind_prepare_or_effect_identity ... ok
+test store::tests::durable_reader_preserves_snapshot_labels_after_a_later_state_change ... ok
+test store::tests::durable_reader_refuses_a_rechecksummed_empty_snapshot_template ... ok
+test store::tests::durable_reader_refuses_rechecksummed_forged_snapshot_labels ... ok
+test store::tests::durable_reader_sync_failure_refuses_retries_until_recovery_barrier_succeeds ... ok
+test store::tests::every_persistence_failure_stops_acknowledgements_until_recovery ... ok
+test store::tests::flattened_source_is_the_original_frozen_envelope_plus_writer_fields ... ok
+test store::tests::full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state ... ok
+test store::tests::gc_keeps_held_unknown_recent_and_live_reader_runs_and_refuses_active_launches ... ok
+test store::tests::gc_never_removes_files_reappearing_after_completion ... ok
+test store::tests::gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels ... ok
+test store::tests::gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors ... ok
+test store::tests::gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directories ... ok
+test store::tests::index_failure_after_acknowledgement_does_not_poison_or_reexecute ... ok
+test store::tests::interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery ... ok
+test store::tests::legacy_manifest_and_reader_checkpoint_migrate_before_rotation ... ok
+test store::tests::lifetime_lock_refuses_a_second_writer ... ok
+test store::tests::lost_replies_replay_same_run_and_exact_receipt_after_recovery ... ok
+test store::tests::none_verify_retains_unprotected_even_if_receipt_claims_enforced ... ok
+test store::tests::owner_death_records_unknown_without_restart_or_tree_claim ... ok
+test store::tests::pending_recovery_keeps_the_journal_through_canonical_persistence_failures ... ok
+test store::tests::reader_cursor_cannot_change_scope_and_survives_restart ... ok
+test store::tests::reader_cursor_refuses_replaced_later_segment_after_restart ... ok
+test store::tests::reader_filters_original_source_operations_stage_and_writer_time ... ok
+test store::tests::reader_large_utf8_records_are_fully_verified_before_chunks_and_query_block_replays ... ok
+test store::tests::reader_new_page_refuses_truncation_of_a_previously_verified_cached_large_frame ... ok
+test store::tests::reader_refuses_filtered_corruption_and_reports_extra_tails_without_mutation ... ok
+test store::tests::reader_snapshot_and_lost_reply_survive_rotation_with_partial_utf8_export ... ok
+test store::tests::reader_snapshot_export_is_exact_bounded_and_retries_the_identical_prior_page ... ok
+test store::tests::recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain ... ok
+test store::tests::recovery_sync_failure_cannot_publish_or_acknowledge_an_unflushed_tail ... ok
+test store::tests::refused_receipt_requires_the_same_attempt_and_final_source_note ... ok
+test store::tests::retention_faults_preserve_history_and_recover_one_original_receipt ... ok
+test store::tests::retention_holds_replay_without_reapplying_an_old_intent_after_release ... ok
+test store::tests::retention_preview_keeps_active_unknown_held_recent_and_damaged_runs ... ok
+test store::tests::retention_preview_pins_durable_readers_without_expiring_or_repairing_files ... ok
+test store::tests::rotated_queries_preserve_source_filters_and_effect_identity ... ok
+test store::tests::rotated_streams_refuse_missing_changed_reordered_and_unanchored_segments ... ok
+test store::tests::rotation_failure_boundaries_never_duplicate_or_truncate_history ... ok
+test store::tests::rotation_preserves_exact_export_global_chain_and_original_replay_after_restart ... ok
+test store::tests::rotation_recovery_syncs_each_segment_before_publishing_promoted_metadata ... ok
+test store::tests::settlement_requires_matching_final_receipt_and_trace_and_closes_observations ... ok
+test store::tests::source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery ... ok
+test store::tests::source_replay_and_gap_are_preserved_when_projection_is_updated ... ok
+test store::tests::strict_transport_gap_and_private_metadata_refuse_without_an_ack ... ok
+test store::tests::unresolved_run_keeps_a_proven_child_exit_separate_from_unknown_outcome ... ok
+test store::tests::unsafe_store_paths_and_oversized_events_are_refused ... ok
+test store::tests::verification_detects_projection_drift_and_recovery_rebuilds_it ... ok
+
+test result: ok. 121 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 50.43s
+
+     Running unittests src/main.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/ouro_ledger-18c8e227f4f5d11b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_local.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/cli_local-5065ba26baaa85a2)
+
+running 11 tests
+test bundle_cli_is_portable_and_verifies_without_a_writer_or_data_directory ... ok
+test concurrent_operator_ingress_and_lost_reply_keep_one_sequence_per_identity ... ok
+test doctor_does_not_start_a_session_writer ... ok
+test gc_cli_prunes_aged_fixture_history_and_preserves_preparation_identity_after_restart ... ok
+test locked_disposable_index_does_not_delay_the_next_daemon_request ... ok
+test operator_cli_and_follow_tail_preserve_bytes_across_late_appends_and_restart ... ok
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+test retention_cli_persists_holds_and_preview_never_starts_or_mutates_a_writer ... ok
+test signed_bundle_cli_requires_a_separate_public_key_for_trust ... ok
+test writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.35s
+
+     Running tests/evidence_reader.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/evidence_reader-a11690b7c75b7f58)
+
+running 19 tests
+test catalog_cli_filters_labels_outcome_and_activity_then_resumes_after_restart ... ok
+test closed_export_sink_exits_nonzero_without_finished_success ... ok
+test cross_run_pages_keep_attribution_and_resume_independently_after_restart ... ok
+test cross_run_rejects_duplicate_runs_and_malformed_continuations ... ok
+test daemon_restart_preserves_query_progress_and_rejects_forged_or_corrupt_cursors ... ok
+test daemon_restart_refuses_public_symlinked_and_hardlinked_checkpoint_files ... ok
+test diff_corrupt_or_missing_history_never_returns_a_successful_empty_comparison ... ok
+test diff_counts_preserve_provenance_and_paginate_without_claiming_entity_equivalence ... ok
+test discovered_query_reports_corrupt_history_and_empty_selection_separately ... ok
+test discovered_query_walks_runs_and_retries_per_run_pages_across_writer_restarts ... ok
+test discovery_refuses_changed_catalogs_and_old_reader_heads_without_relabelling_history ... ok
+test dropped_socket_reply_replays_the_checkpointed_page_after_restart ... ok
+test durable_session_capacity_and_expiry_survive_daemon_restart ... ok
+test export_keeps_large_canonical_record_bytes_out_of_status_metadata ... ok
+test incomplete_history_exports_only_verified_prefix_and_exits_nonzero ... ok
+test live_writer_detects_unexpected_tail_before_export ... ok
+test query_filters_paginate_exact_attribution_and_refuse_cursor_rebinding ... ok
+test target_diff_finds_changed_paths_with_equal_counts_and_binds_mode_across_restart ... ok
+test target_diff_reports_unavailable_identity_and_refuses_corrupt_evidence ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.58s
+
+     Running tests/launch_linux.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/launch_linux-153248905173cb55)
+
+running 28 tests
+test an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever ... ok
+test best_effort_dead_owner_without_exit_record_stays_unknown ... ok
+test best_effort_exit_during_outage_recovers_after_owner_exit ... ok
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... ok
+test best_effort_local_journal_failure_stops_the_tree_and_never_settles ... ok
+test best_effort_rechecks_local_exit_even_with_a_recomputed_journal_checksum ... ok
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+test contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer ... ok
+test detached_cancel_requests_stop_then_waits_for_verified_settlement ... ok
+test detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt ... ok
+test detached_mode_refuses_a_session_bound_existing_writer ... ok
+test detached_owner_death_stops_tree_and_replay_preserves_unknown ... ok
+test detached_submitter_exit_preserves_owner_output_and_one_execution ... ok
+test detached_writer_death_fails_closed_without_starting_a_session_writer ... ok
+test durable_admission_precedes_real_exec_and_replay_never_executes_twice ... ok
+test explicit_none_profile_remains_unprotected_after_real_launch_and_verification ... ok
+test failed_exec_retains_corroborated_error_without_a_second_attempt ... ok
+test invalid_inherited_stdout_is_denied_before_admission_and_never_executes ... ok
+test operator_intents_and_live_tail_preserve_real_jail_ownership_and_source_bytes ... ok
+test opted_capture_stops_storing_at_the_cap_and_keeps_draining_the_real_child ... ok
+test owner_death_is_reconciled_as_unknown_and_never_relaunched ... ok
+test real_launch_bundles_verify_offline_with_selected_truncated_captures ... ok
+test real_launch_labels_drive_filtered_discovery_without_changing_replay_identity ... ok
+test real_run_diff_keeps_none_unprotected_and_separates_unobserved_coverage ... ok
+test real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_removal ... ok
+test real_target_diff_distinguishes_created_paths_and_preserves_producer_references ... ok
+test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... vendor-state/normal: populated, tree empty, removed, replay unchanged
+vendor-state/writer-death: populated, tree empty, removed, replay unchanged
+
+thread 'vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death' (849838) panicked at crates/ouro-ledger/tests/launch_linux/vendor_state.rs:64:9:
+assertion `left == right` failed: owner-death: {"arch":"x86_64","attempt_id":"att_5d182667-d000-425e-8eca-ac0d4306940d","boundary":{"backend":"bubblewrap","backend_version":"bubblewrap 0.11.1","kind":"pid_namespace","process":{"identity":{"kind":"linux_boot_start","value":{"boot_id":"47a3956e-f44b-4139-a8fc-45418c38243f","pid":849982,"start_time_ticks":132166339}},"pid":849982},"verification_scope":"attempt_tree"},"claimed_at":"2026-10-07T10:39:21Z","cleanup_reason":null,"component_version":"0.1.0","execution_cgroup":{"device":29,"inode":8480975,"path":"/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_5d182667-d000-425e-8eca-ac0d4306940d.leaf"},"kernel":"Linux 7.0.0-31-generic","os":"linux","owner":{"boot_id":"47a3956e-f44b-4139-a8fc-45418c38243f","pid":849957,"start_time_ticks":132166331},"schema":"ouro.jail.state/1","state_cleanup":"pending","vendor_state":{"credentials":[],"dev":"44","ino":"46931362","name":"vendor-state","registered_at":"2026-10-07T10:39:21Z"}}
+  left: String("pending")
+ right: "complete"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test writer_death_stops_the_owner_and_recovery_remains_unknown ... ok
+
+failures:
+
+failures:
+    vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death
+
+test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.21s
+
+error: test failed, to rerun pass `-p ouro-ledger --test launch_linux`
+     Running tests/storage_recovery.rs (/home/ubuntu/ouro-ledger-storage-20261004-r1/target/release/deps/storage_recovery-9a83d2684e3b007b)
+
+running 9 tests
+test complete_unacknowledged_tail_promotes_manifest_and_replays_original_receipt ... ok
+test disposable_projections_rebuild_without_rebinding_owner_requests_or_effects ... ok
+test durable_cursor_refuses_changed_checkpoint_and_replaced_canonical_inode ... ok
+test durable_cursor_retry_keeps_original_page_and_snapshot_after_restart_and_append ... ok
+test incomplete_tail_is_retained_and_does_not_rewrite_committed_manifest ... ok
+test legacy_stream_without_manifest_migrates_without_duplicating_history ... ok
+test poisoned_durable_snapshot_cannot_resume_with_clean_consistency_labels ... ok
+test recomputing_a_valid_local_chain_cannot_override_durable_manifest_history ... ok
+test valid_prefix_truncation_below_manifest_refuses_replay_and_new_preparations ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+   Doc-tests ouro_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 1 target failed:
+    `-p ouro-ledger --test launch_linux`

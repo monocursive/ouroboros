@@ -1,0 +1,16 @@
+2026-10-07T10:30:00Z
+Linux 6.18.50+rpt-rpi-v8 aarch64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.7
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+rustc 1.98.1 (48a229cea 2026-09-01)
+bubblewrap 0.12.0
+OURO_CONFORMANCE=1
+CARGO_INCREMENTAL=0

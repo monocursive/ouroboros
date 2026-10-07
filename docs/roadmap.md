@@ -124,11 +124,15 @@ bundles export canonical records, embedded receipts and selected captures with
 offline verification. Explicit Ed25519 signing and separately pinned public-key
 verification are also implemented. Best-effort writer-outage recovery retains
 bounded pending evidence for already admitted runs, with explicit degraded
-coverage and conservative missing-exit handling. The full durability gate,
-historical-custody migration and managed project authorization remain open.
+coverage and conservative missing-exit handling. The scripted durability audit
+now includes vendor-state cleanup after unknown outcomes. Transcript display,
+opt-in argv capture, foreground JSON control and structured redaction still
+remain in the milestone-2 contract; historical custody at the legacy cut and
+managed project authorization remain separate requirements.
 A plain local export does not establish external custody.
 The [durability acceptance map](specs/ledger-v1/durability-acceptance.md) tracks
-lifecycle and pending-journal crash coverage and the remaining acceptance audit.
+lifecycle and pending-journal crash coverage, the completed acceptance cross-check
+and those remaining CLI/privacy contracts.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
 SQLite run index and reader cursors that survive writer restart. Canonical
