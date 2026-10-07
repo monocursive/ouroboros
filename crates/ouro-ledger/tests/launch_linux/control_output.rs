@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::Write,
     os::{
-        fd::{AsRawFd, FromRawFd as _, RawFd},
+        fd::{AsRawFd, RawFd},
         unix::process::CommandExt,
     },
 };
