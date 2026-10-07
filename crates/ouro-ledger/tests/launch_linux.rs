@@ -23,6 +23,8 @@ use ouro_ledger::{
 use ouro_records::records;
 use serde_json::Value;
 
+#[path = "launch_linux/transcript.rs"]
+mod transcript;
 #[path = "launch_linux/vendor_state.rs"]
 mod vendor_state;
 

@@ -390,6 +390,9 @@ pub enum Request {
     Show {
         run_id: String,
     },
+    ShowWithTranscript {
+        run_id: String,
+    },
     Runs,
     Catalog {
         request: CatalogRequest,

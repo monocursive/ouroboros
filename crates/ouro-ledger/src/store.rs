@@ -41,6 +41,7 @@ mod pending_recovery;
 mod pruning;
 mod retention;
 mod tail;
+mod transcript;
 
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -1894,7 +1895,7 @@ fn validate_recovery(stream: &Stream, record: &Value, role: &str) -> Result<()> 
 mod tests {
     use super::*;
 
-    fn peer() -> Peer {
+    pub(super) fn peer() -> Peer {
         Peer {
             uid: unsafe { libc::geteuid() },
             pid: std::process::id(),
@@ -2315,7 +2316,9 @@ mod tests {
         gc_fixture_captures(&[("stdout", b"private-capture")])
     }
 
-    fn gc_fixture_captures(captures: &[(&str, &[u8])]) -> (tempfile::TempDir, Store, RunRecord) {
+    pub(super) fn gc_fixture_captures(
+        captures: &[(&str, &[u8])],
+    ) -> (tempfile::TempDir, Store, RunRecord) {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         let mut plan = payload();

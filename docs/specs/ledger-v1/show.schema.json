@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ouro:schema:ledger-show:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run", "transcript"],
+  "properties": {
+    "schema": {"const": "ouro.ledger.show/1"},
+    "run": {"$ref": "urn:ouro:schema:ledger-run:1"},
+    "transcript": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "limit_bytes_per_stream", "encoding", "integrity", "streams"],
+      "properties": {
+        "schema": {"const": "ouro.ledger.transcript/1"},
+        "limit_bytes_per_stream": {"const": 65536},
+        "encoding": {"const": "escaped_bytes"},
+        "integrity": {"const": "unverified_local_artifact"},
+        "streams": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stdout", "stderr", "argv"],
+          "properties": {
+            "stdout": {"$ref": "#/$defs/stream"},
+            "stderr": {"$ref": "#/$defs/stream"},
+            "argv": {"$ref": "#/$defs/stream", "properties": {"state": {"const": "not_captured"}}}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "displayed_bytes", "display_truncated"],
+      "properties": {
+        "state": {"enum": ["not_captured", "captured", "truncated", "incomplete", "pruned", "pruning", "unavailable"]},
+        "displayed_bytes": {"type": "integer", "minimum": 0, "maximum": 65536},
+        "display_truncated": {"type": "boolean"},
+        "recorded_state": {"type": ["string", "null"]},
+        "capture_truncated": {"type": ["boolean", "null"]},
+        "stored_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "text": {"type": "string", "maxLength": 262144, "pattern": "^[ -~]*$"},
+        "reason": {"enum": ["capture_not_finalized", "invalid_capture_metadata", "missing_unsafe_or_changed_capture"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"enum": ["not_captured", "pruned", "pruning", "unavailable"]}}},
+          "then": {
+            "not": {"required": ["text"]},
+            "properties": {"displayed_bytes": {"const": 0}, "display_truncated": {"const": false}}
+          }
+        },
+        {
+          "if": {"properties": {"state": {"enum": ["captured", "truncated"]}}},
+          "then": {"required": ["text", "stored_bytes"]}
+        }
+      ]
+    }
+  }
+}

@@ -427,6 +427,28 @@ sink fails strict execution; forwarding completion has a two-second grace.
 Capture or forwarding failure records incomplete capture evidence and an unknown
 run outcome when the writer is reachable. Batch output uses independent sinks.
 
+`show RUN --with-transcript` explicitly displays private capture content. The
+ordinary `show` response remains metadata only. With the flag, the CLI returns
+an [`ouro.ledger.show/1`](ledger-v1/show.schema.json) envelope containing the
+unchanged `run` projection and a `transcript`. Both pretty and `--json` output
+read at most 65,536 source bytes from each terminal stdout/stderr artifact.
+`text` uses reversible ASCII byte escapes (`\n`, `\r`, `\t`, `\\`, `\"`,
+`\'` and `\xNN`); non-ASCII bytes are escaped too. This prevents child output
+from executing terminal controls or inserting misleading display formatting.
+JSON adds its usual string escaping around these byte escapes.
+
+Each stream says `not_captured`, `captured`, `truncated`, `incomplete`, `pruned`,
+`pruning` or `unavailable`. `capture_truncated` describes lost source output;
+`display_truncated` separately says the display omitted retained bytes. Live or
+unfinalized selected captures remain `incomplete` without text. A terminal
+incomplete capture with recorded byte counts can display its retained prefix.
+Missing, changed-size, unsafe or linked artifacts are `unavailable`, never
+empty successful captures. The authenticated writer serializes inspection
+with GC and opens private regular files through pinned directories without
+following symlinks. Capture content is labelled `unverified_local_artifact`:
+size/stability checks are not a canonical content hash or external custody.
+Outcome, coverage and child protection are preserved, including `none`.
+
 ## 7. Bounded evidence readers
 
 `query` reads one run at a time through the authenticated local writer. Select

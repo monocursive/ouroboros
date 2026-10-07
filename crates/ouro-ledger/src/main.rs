@@ -76,6 +76,9 @@ enum Action {
     /// Inspect a run's outcome, coverage and protection independently.
     Show {
         run_id: String,
+        /// Display up to 64 KiB per recorded terminal stream; may reveal secrets.
+        #[arg(long)]
+        with_transcript: bool,
         #[arg(long)]
         json: bool,
     },
@@ -981,8 +984,17 @@ fn execute(cli: Cli) -> Result<i32> {
                     })?;
                     output(&serde_json::to_value(page)?, args.json)?;
                 }
-                Action::Show { run_id, json } => {
-                    output(&serde_json::to_value(client.show(&run_id)?)?, json)?
+                Action::Show {
+                    run_id,
+                    with_transcript,
+                    json,
+                } => {
+                    let value = if with_transcript {
+                        client.show_with_transcript(&run_id)?
+                    } else {
+                        serde_json::to_value(client.show(&run_id)?)?
+                    };
+                    output(&value, json)?
                 }
                 Action::Query(args) => return query(&mut client, *args),
                 Action::Diff {

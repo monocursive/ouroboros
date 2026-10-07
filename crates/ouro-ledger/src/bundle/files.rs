@@ -26,14 +26,14 @@ fn owned(fd: libc::c_int) -> Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-pub(super) fn directory(path: &Path) -> Result<File> {
+pub(crate) fn directory(path: &Path) -> Result<File> {
     Ok(OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?)
 }
 
-pub(super) fn child_dir(parent: &File, leaf: &str) -> Result<File> {
+pub(crate) fn child_dir(parent: &File, leaf: &str) -> Result<File> {
     let leaf = name(leaf)?;
     // SAFETY: parent and the C string remain live through openat.
     owned(unsafe {
@@ -45,7 +45,7 @@ pub(super) fn child_dir(parent: &File, leaf: &str) -> Result<File> {
     })
 }
 
-pub(super) fn private(file: &File) -> Result<()> {
+pub(crate) fn private(file: &File) -> Result<()> {
     let m = file.metadata()?;
     if m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
         return Err(LedgerError(
@@ -55,7 +55,7 @@ pub(super) fn private(file: &File) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn member(parent: &File, leaf: &str, create: bool) -> Result<File> {
+pub(crate) fn member(parent: &File, leaf: &str, create: bool) -> Result<File> {
     let leaf = name(leaf)?;
     let mode = if create {
         libc::O_RDWR | libc::O_CREAT | libc::O_EXCL

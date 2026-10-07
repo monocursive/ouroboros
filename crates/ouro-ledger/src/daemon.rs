@@ -160,6 +160,11 @@ impl Client {
             run_id: run_id.into(),
         })
     }
+    pub fn show_with_transcript(&mut self, run_id: &str) -> Result<Value> {
+        self.request(Request::ShowWithTranscript {
+            run_id: run_id.into(),
+        })
+    }
     pub fn runs(&mut self) -> Result<Vec<RunRecord>> {
         self.request(Request::Runs)
     }
@@ -479,6 +484,7 @@ fn dispatch(
             )?)
         }
         Request::Show { run_id } => Ok(serde_json::to_value(store.show(&run_id)?)?),
+        Request::ShowWithTranscript { run_id } => store.show_with_transcript(&run_id),
         Request::Runs => Ok(serde_json::to_value(store.legacy_runs()?)?),
         Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
         Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),

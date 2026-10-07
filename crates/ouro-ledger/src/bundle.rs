@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod files;
+pub(crate) mod files;
 mod signing;
 pub const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RECORDS: u64 = 10_000;

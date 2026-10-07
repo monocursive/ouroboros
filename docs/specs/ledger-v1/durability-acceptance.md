@@ -66,7 +66,7 @@ records the tested revision and platform coverage.
   schemas. The vendor-state test also checks its private content never enters
   canonical metadata.
 - Writer death, child isolation, honest `none`, truncated capture and vendor
-cleanup each have explicit real-launch checks in the table. A clean hash
+  cleanup each have explicit real-launch checks in the table. A clean hash
   chain never upgrades coverage, unknown outcomes or child protection.
 
 A writer SIGKILL can leave an interrupted canonical frame even when vendor
@@ -85,7 +85,7 @@ features absent from the current CLI. Durability coverage must not hide these:
 
 | Contract | Current behavior | Remaining work |
 | --- | --- | --- |
-| L5 `show --with-transcript` | `show` returns metadata; capture files and bundle selection exist. | Opt-in bounded transcript rendering with explicit `not_captured`, truncated and incomplete labels. |
+| L5 `show --with-transcript` | Implemented: opt-in terminal display, 64 KiB per stream, reversible byte escaping, explicit capture/retention/availability states. | Native validation is recorded with the implementation evidence; live streaming is outside this bounded display. |
 | L5 `--capture argv` | `run --capture` accepts only stdout/stderr; argv is digested by default. | Explicit opt-in, bounded argv artifact with retention, export and privacy tests. |
 | Foreground `--control-fd` | JSON control requires batch mode. | A separate control channel that never mixes JSON with child output, with descriptor and disconnect tests. |
 | L9 `--redact` | Existing Jail-redacted metadata and private-field refusal are implemented. | Explicit structured minimization before append; preserve a truthful coverage/provenance record and make no claim to sanitize capture bytes. |

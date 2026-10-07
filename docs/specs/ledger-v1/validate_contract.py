@@ -376,6 +376,29 @@ def signed_bundle_fixtures(validators):
     expect_invalid(validators["bundle-verification-v2"], altered, "signature upgrades custody")
 
 
+def transcript_fixtures(validators):
+    absent = {"state": "not_captured", "displayed_bytes": 0, "display_truncated": False}
+    report = {"schema": "ouro.ledger.show/1", "run": read("run.json"), "transcript": {
+        "schema": "ouro.ledger.transcript/1", "limit_bytes_per_stream": 65536,
+        "encoding": "escaped_bytes", "integrity": "unverified_local_artifact",
+        "streams": {name: copy.deepcopy(absent) for name in ("stdout", "stderr", "argv")},
+    }}
+    validators["show"].validate(report)
+    for state in ("captured", "truncated", "incomplete"):
+        report["transcript"]["streams"]["stdout"] = {
+            "state": state, "displayed_bytes": 4, "display_truncated": False,
+            "stored_bytes": 4, "text": r"hi\n\xff",
+        }
+        validators["show"].validate(report)
+    for key, value in (("text", "\x1b[31m"), ("displayed_bytes", 65537), ("state", "pruned")):
+        altered = copy.deepcopy(report)
+        altered["transcript"]["streams"]["stdout"][key] = value
+        expect_invalid(validators["show"], altered, "unsafe or unbounded transcript")
+    altered = copy.deepcopy(report)
+    altered["transcript"]["integrity"] = "verified"
+    expect_invalid(validators["show"], altered, "transcript invents integrity")
+
+
 def main():
     jail_schemas = jail.load_schemas(JAIL)
     ledger_schemas = jail.load_schemas(ROOT)
@@ -386,6 +409,7 @@ def main():
     target_comparison_fixtures(validators)
     bundle_fixtures(validators)
     signed_bundle_fixtures(validators)
+    transcript_fixtures(validators)
     query = read("query-page.json")
     comparison = read("diff-page.json")
     validators["query"].validate(query)

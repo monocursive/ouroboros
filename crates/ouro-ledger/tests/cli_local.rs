@@ -18,6 +18,25 @@ use serde_json::{Value, json};
 const WAIT_LIMIT: Duration = Duration::from_secs(5);
 
 #[test]
+fn show_transcript_requires_explicit_opt_in_and_preserves_metadata() {
+    let mut cli = LocalCli::new();
+    let _writer = cli.start_writer();
+    let mut request = fixture_request();
+    request["capture"]["streams"] = json!([]);
+    let run = successful_preparation(&cli.prepare("transcript-cli", &request));
+    let id = run["run_id"].as_str().unwrap();
+    let plain = cli.json(&["show", id, "--json"]);
+    assert!(plain.get("transcript").is_none());
+    let shown = cli.json(&["show", id, "--with-transcript", "--json"]);
+    let transcript = &shown["transcript"];
+    assert_eq!(shown["run"], plain);
+    for name in ["stdout", "stderr", "argv"] {
+        assert_eq!(transcript["streams"][name]["state"], "not_captured");
+        assert!(transcript["streams"][name].get("text").is_none());
+    }
+}
+
+#[test]
 fn signed_bundle_cli_requires_a_separate_public_key_for_trust() {
     let mut cli = LocalCli::new();
     let keys = cli.temp.path().join("signer");
