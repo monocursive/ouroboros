@@ -294,6 +294,48 @@ The [append request schema](ledger-v1/append-request.schema.json) and
 Writers predating `operator_intent` cannot read these records and must not write
 such stores.
 
+### 3.2 Foreground control output
+
+`run --control-fd N` sends one compact, newline-terminated `ouro.ledger.run/1`
+record to the supplied descriptor when the CLI has a run result. It implies
+JSON for that descriptor; adding `--json` is allowed. The frame matches batch
+JSON output and retains its actual outcome, coverage, settlement and protection
+labels. This is a final CLI response, not a stream of lifecycle notifications.
+There is no second result or summary on stdout/stderr. Child stdout and stderr
+retain the normal foreground behavior, including selected capture teeing.
+Diagnostics still use stderr; a launch error need not produce a control frame.
+
+The caller must hand over an exclusively used, writable descriptor numbered
+at least 3. Regular files, pipes and connected Unix stream sockets are accepted.
+Closed/read-only descriptors, stdio aliases (including duplicated/reopened
+files), devices, directories, datagrams, listeners, non-Unix sockets and already
+disconnected consumers refuse before preparation. The descriptor is marked
+close-on-exec before starting any writer, policy resolver or Jail. Shared
+open-file status flags, including nonblocking mode, are not changed.
+
+The immutable request records only `io.control: separate_fd`; the process-local
+number is never stored. Changing that role changes the request identity. A retry
+with a different descriptor number but the same role can retrieve the same run
+without reexecution. Batch mode also accepts this separate result channel;
+`--detach --control-fd` refuses because detached owners have no client-descriptor
+dependency. Foreground `--json` without `--control-fd` continues to refuse.
+
+Control results are bounded to 1 MiB including their terminating newline.
+Delivery has a two-second deadline and retries nonblocking backpressure. A
+stalled regular-file write cannot hold the CLI beyond that delivery wait.
+If the consumer disconnects or the deadline expires, the CLI exits 1 with a
+result-delivery diagnostic naming the run and request. The durable child
+outcome is unchanged. A destination can contain a partial frame; discard it and
+inspect or replay the same request ID instead of creating a replacement run.
+Successful delivery preserves the normal child exit code or signal mapping.
+This transport acknowledgement is not a disk synchronization or custody claim.
+
+```sh
+umask 077
+ouro-ledger run --request-id foreground-001 --control-fd 3 -- \
+  /bin/sh -c 'printf "child output\n"; exit 7' 3> run-control.ndjson
+```
+
 ## 4. Store and canonical record
 
 The store uses ordered `events-0001.ndjson`, `events-0002.ndjson`, … segments
@@ -1139,8 +1181,7 @@ documents bounded opt-in display and native Pi/VPS validation. The
 raw arguments, retention and explicit bundle selection. Milestone 2 still
 requires the CLI/privacy contracts identified by the
 [acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts):
-foreground `--control-fd`
-and structured `--redact`. Historical custody remains an obligation at the
+structured `--redact`. Historical custody remains an obligation at the
 later legacy-store removal cut; this tooling checkout does not perform it. Managed
 single-worker submission additionally needs its own principal, authorization,
 provenance and project-scoped reader gates. None is implied by this slice.
@@ -1184,8 +1225,8 @@ its independent outcome, coverage, protection and chain results:
 ```
 
 Batch JSON control has independent output sinks and is not mixed with raw child
-output. Foreground I/O is the inherited default when `--io` is omitted; this
-slice requires batch mode for `run --json`. Repeating the exact request uses its
+output. Foreground I/O is the inherited default when `--io` is omitted;
+`run --json` requires batch mode or a separate `--control-fd`. Repeating the exact request uses its
 durable run identity and does not execute a settled child again. Local Linux
 capability requirements still apply: a refused jail preparation is a refusal,
 not a reason to switch to `none` silently.

@@ -25,6 +25,8 @@ use serde_json::Value;
 
 #[path = "launch_linux/argv_capture.rs"]
 mod argv_capture;
+#[path = "launch_linux/control_output.rs"]
+mod control_output;
 #[path = "launch_linux/transcript.rs"]
 mod transcript;
 #[path = "launch_linux/vendor_state.rs"]

@@ -365,7 +365,10 @@ fn validate_payload(payload: &Value) -> Result<()> {
     let io = payload["io"]
         .as_object()
         .ok_or_else(|| LedgerError("io must be an object".into()))?;
-    if io.len() != 2
+    if io.len() != 2 + usize::from(io.contains_key("control"))
+        || io
+            .get("control")
+            .is_some_and(|role| role != "separate_fd" || detached)
         || !["foreground", "batch"].contains(&payload["io"]["mode"].as_str().unwrap_or(""))
         || payload["io"]["pty"] != false
     {

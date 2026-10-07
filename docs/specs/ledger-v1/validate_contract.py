@@ -629,6 +629,16 @@ def main():
         selected = copy.deepcopy(request)
         selected["capture"]["streams"] = names
         validators["request"].validate(selected)
+    for mode in ("foreground", "batch"):
+        control = copy.deepcopy(request)
+        control["io"] = {"mode": mode, "pty": False, "control": "separate_fd"}
+        validators["request"].validate(control)
+    control["owner_lifetime"] = "systemd_user_service"
+    expect_invalid(validators["request"], control, "detached owner cannot depend on client fd")
+    for role in (3, None, "stdout", "separate"):
+        control = copy.deepcopy(request)
+        control["io"]["control"] = role
+        expect_invalid(validators["request"], control, "control role must be separate fd without process-local number")
     altered = copy.deepcopy(request)
     altered["raw_argv"] = ["secret"]
     expect_invalid(validators["request"], altered, "raw argv in prepare")

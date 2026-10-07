@@ -774,6 +774,9 @@ stdout/stderr, with selected captures teeing those streams. `--io batch` applies
 starts its owner with `--io batch`. The resolved mode and descriptors' intended
 roles are recorded in `run.json`; raw output is never mixed into a JSON control
 response. Foreground JSON control uses `--control-fd` if child output is present.
+The implemented CLI emits one final run record on that descriptor, bounded to
+1 MiB and a two-second delivery wait. Delivery failure preserves the durable
+outcome; descriptor roles, not process-local numbers, are part of the request.
 
 Implemented bundle slice: `bundle RUN --output DIR [--capture stdout|stderr|argv]`
 exports a bounded snapshot; `--signing-key` adds an explicit Ed25519 signature.

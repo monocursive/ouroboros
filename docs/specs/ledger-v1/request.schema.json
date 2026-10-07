@@ -56,6 +56,9 @@
         },
         "pty": {
           "const": false
+        },
+        "control": {
+          "const": "separate_fd"
         }
       },
       "required": [
@@ -135,6 +138,11 @@
               "mode": {
                 "const": "batch"
               }
+            },
+            "not": {
+              "required": [
+                "control"
+              ]
             }
           }
         }

@@ -44,6 +44,7 @@ fn options(root: &Path, kind: &str) -> RunOptions {
         ],
         argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
         batch: true,
+        separate_control: false,
         detached: false,
         captures: vec![],
         capture_limit: 1024,

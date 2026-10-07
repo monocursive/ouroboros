@@ -55,6 +55,9 @@ pub struct RunOptions {
     pub policy_args: Vec<OsString>,
     pub argv: Vec<OsString>,
     pub batch: bool,
+    /// Descriptor role only; never serialize a process-local fd number.
+    #[serde(default)]
+    pub separate_control: bool,
     pub detached: bool,
     pub captures: Vec<String>,
     pub capture_limit: u64,
@@ -219,6 +222,9 @@ fn payload(options: &RunOptions, plan: &Value, image_digest: &str) -> Result<Val
         "io":{"mode":if options.batch {"batch"} else {"foreground"},"pty":false},
         "capture":{"streams":options.captures,"limit_bytes":options.capture_limit},
         "evidence":if options.best_effort {"best-effort"} else {"strict"}});
+    if options.separate_control {
+        request["io"]["control"] = "separate_fd".into();
+    }
     if options.detached {
         request["owner_lifetime"] = "systemd_user_service".into();
     }
@@ -593,6 +599,11 @@ fn run_linux(
     options: &RunOptions,
     mut notify: Option<&mut dyn FnMut(&RunRecord)>,
 ) -> Result<RunResult> {
+    if options.detached && options.separate_control {
+        return Err(error(
+            "detached owners cannot depend on a client control descriptor",
+        ));
+    }
     if options.argv.is_empty() {
         return Err(error("run needs a program after --"));
     }

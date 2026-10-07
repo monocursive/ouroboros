@@ -1,5 +1,7 @@
 //! CLI for the local evidence writer and gated launch owner.
 
+mod control_output;
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -428,7 +430,10 @@ struct RunArgs {
     capture: Vec<String>,
     #[arg(long, default_value_t = 1_048_576)]
     capture_limit: u64,
-    /// JSON control requires batch mode so it cannot mix with child output.
+    /// Send one final JSON run record to this exclusively handed-over descriptor.
+    #[arg(long, value_name = "N", conflicts_with = "detach")]
+    control_fd: Option<i32>,
+    /// JSON requires batch mode or a separate --control-fd.
     #[arg(long)]
     json: bool,
     #[arg(last = true, required = true, allow_hyphen_values = true)]
@@ -755,6 +760,15 @@ fn execute(cli: Cli) -> Result<i32> {
         output(&ouro_ledger::bundle::keygen(destination)?, *json)?;
         return Ok(0);
     }
+    // Claim the handed-over fd before any invocation files or subprocesses open.
+    let control = if let Action::Run(args) = &cli.command {
+        // SAFETY: this raw fd comes exclusively from the operator at process entry.
+        args.control_fd
+            .map(|fd| unsafe { control_output::ControlOutput::take(fd) })
+            .transpose()?
+    } else {
+        None
+    };
     let data = data_dir(cli.data_dir)?;
     match cli.command {
         Action::Version { json } => {
@@ -872,9 +886,9 @@ fn execute(cli: Cli) -> Result<i32> {
             if args.detach && args.io != "batch" {
                 return Err(LedgerError("--detach requires --io batch".into()));
             }
-            if args.json && args.io != "batch" {
+            if args.json && args.io != "batch" && control.is_none() {
                 return Err(LedgerError(
-                    "run --json requires --io batch so child output has an independent sink".into(),
+                    "run --json requires --io batch or --control-fd so child output has an independent sink".into(),
                 ));
             }
             let mut policy: Vec<OsString> = vec![
@@ -921,6 +935,7 @@ fn execute(cli: Cli) -> Result<i32> {
                 policy_args: policy,
                 argv: args.argv,
                 batch: args.io == "batch",
+                separate_control: control.is_some(),
                 detached: args.detach,
                 captures: args.capture,
                 capture_limit: args.capture_limit,
@@ -937,7 +952,12 @@ fn execute(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             let result = runner::run(&options)?;
-            if args.json {
+            if let Some(control) = control {
+                control.deliver(&result.record).map_err(|problem| LedgerError(format!(
+                    "run {} (request {}): {problem}; result delivery failed; inspect or replay this same request id",
+                    result.record.run_id, result.record.request_id
+                )))?;
+            } else if args.json {
                 output(&serde_json::to_value(&result.record)?, true)?;
             } else {
                 eprintln!(

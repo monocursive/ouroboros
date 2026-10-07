@@ -87,10 +87,9 @@ following completed slices and remaining CLI work:
 | --- | --- | --- |
 | L5 `show --with-transcript` | Implemented: opt-in terminal display, 64 KiB per stream, reversible byte escaping, explicit capture/retention/availability states. | [Pi/VPS native validation](evidence/2026-10-07-transcript/README.md); live streaming is outside this bounded display. |
 | L5 `--capture argv` | Implemented: bounded private NUL-delimited native bytes, admission metadata, explicit bundle selection and both retention paths. Default metadata contains only the digest. | [Encoding/privacy/retention and native launch evidence](evidence/2026-10-07-argv/README.md): real `tool`/`none` launch, cap, replay and owner-death tests. |
-| Foreground `--control-fd` | JSON control requires batch mode. | A separate control channel that never mixes JSON with child output, with descriptor and disconnect tests. |
+| Foreground `--control-fd` | Implemented: one bounded final JSON record on a separate descriptor; invalid destinations refuse before launch and failed delivery preserves the durable outcome. | Portable descriptor/deadline tests and native output, descriptor inheritance, disconnect, backpressure and replay tests. |
 | L9 `--redact` | Existing Jail-redacted metadata and private-field refusal are implemented. | Explicit structured minimization before append; preserve a truthful coverage/provenance record and make no claim to sanitize capture bytes. |
 
-Next implementation slice: foreground control-FD output with descriptor and
-disconnect tests. Historical custody remains required before the legacy cut in
+Next implementation slice: explicit structured redaction before append. Historical custody remains required before the legacy cut in
 North Star §9; this checkout does not perform that cut. Independent custody, managed authorization and
 real-agent/provider acceptance remain separate gates.
