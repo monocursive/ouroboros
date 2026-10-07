@@ -74,6 +74,31 @@ pub struct RunResult {
     pub exit_code: i32,
 }
 
+/// Resolve the same immutable metadata the owner checks at admission, without
+/// preparing or executing a child. Fleet can bind it before dispatch.
+pub fn resolve_request(options: &RunOptions) -> Result<Value> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = options;
+        Err(error("launch planning requires Linux"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if options.argv.is_empty() || options.capture_limit > CAPTURE_MAX {
+            return Err(error("invalid launch arguments or capture limit"));
+        }
+        let image = pinned_image(&options.jail)?;
+        let digest = image_digest(&image)?;
+        let resolved = plan(options, &image)?;
+        if image_digest(&image)? != digest {
+            return Err(error("jail image changed during policy resolution"));
+        }
+        let request = payload(options, &resolved, &digest)?;
+        crate::store::validate_payload(&request)?;
+        Ok(request)
+    }
+}
+
 fn error(message: impl Into<String>) -> LedgerError {
     LedgerError(message.into())
 }

@@ -18,6 +18,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff  # v6, pinned by SHA (third-party toolchain installer: highest-risk unpinned action)
       - run: uv run docs/specs/jail-v1/validate_contract.py
       - run: uv run docs/specs/ledger-v1/validate_contract.py
+      - run: python3 -m unittest discover -s docs/specs/ledger-v1 -p test_freeze.py
       - run: uv run docs/specs/managed-teams-v1/validate_policy.py
       - run: uv run docs/specs/validate_links.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_performance.py

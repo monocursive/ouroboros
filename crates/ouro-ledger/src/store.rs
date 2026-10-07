@@ -298,7 +298,7 @@ fn is_digest(value: &Value) -> bool {
     })
 }
 
-fn validate_payload(payload: &Value) -> Result<()> {
+pub(crate) fn validate_payload(payload: &Value) -> Result<()> {
     let keys = [
         "schema",
         "argv_digest",

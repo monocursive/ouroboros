@@ -2,9 +2,8 @@
 
 This maps [North Star §5.4](../../../north-star.md#54-durability) to executable
 checks. The October 7 audit covers all five runtime properties and the acceptance
-paragraph; historical custody is a separate obligation at the legacy cut. This
-does not declare milestone 2 complete: the remaining CLI/privacy contracts are
-listed below. Native evidence must identify the tested revision and host. The
+paragraph; historical custody is a separate obligation at the legacy cut. The [milestone-2 closeout](milestone-2-acceptance.md) includes the
+completed CLI/privacy contracts below and freezes their schemas and fixtures. Native evidence must identify the tested revision and host. The
 [lifecycle crash record](evidence/2026-10-06-lifecycle-crashes/README.md)
 binds the implementation below to its full-suite logs and per-case checks.
 
@@ -78,17 +77,17 @@ binds this cross-check and the added vendor-state test to native host results.
 This closes the missing integration coverage identified by the audit; it is
 scripted-child evidence, not physical power-loss or real-agent/provider proof.
 
-## Remaining milestone-2 contracts
+## Completed CLI and privacy contracts
 
 The broader [§5.2](../../../north-star.md#52-verbs) contract includes the
-following completed slices and remaining CLI work:
+following completed slices:
 
-| Contract | Current behavior | Remaining work |
+| Contract | Current behavior | Evidence and limits |
 | --- | --- | --- |
 | L5 `show --with-transcript` | Implemented: opt-in terminal display, 64 KiB per stream, reversible byte escaping, explicit capture/retention/availability states. | [Pi/VPS native validation](evidence/2026-10-07-transcript/README.md); live streaming is outside this bounded display. |
 | L5 `--capture argv` | Implemented: bounded private NUL-delimited native bytes, admission metadata, explicit bundle selection and both retention paths. Default metadata contains only the digest. | [Encoding/privacy/retention and native launch evidence](evidence/2026-10-07-argv/README.md): real `tool`/`none` launch, cap, replay and owner-death tests. |
 | Foreground `--control-fd` | Implemented: one bounded final JSON record on a separate descriptor; invalid destinations refuse before launch and failed delivery preserves the durable outcome. | [Descriptor/deadline and native launch evidence](evidence/2026-10-07-control-fd/README.md): output, inheritance, disconnect, backpressure and replay tests. |
-| L9 `--redact` | Implemented: immutable `paths`/`destinations` selectors, explicit per-event markers, minimization before canonical append and outage journal writes. Captures remain unchanged. | [Native evidence](evidence/2026-10-07-redaction/README.md): path/capture/replay and outage tests on Pi/VPS; live proxy redaction on VPS, explicit kernel-capability refusal on Pi. |
+| L9 `--redact` | Implemented: immutable `paths`/`destinations` selectors, explicit per-event markers, minimization before canonical append and outage journal writes. Captures remain unchanged. | [Native evidence](evidence/2026-10-07-redaction/README.md): path/capture/replay and outage tests on Pi/VPS; live proxy redaction on VPS. The [Pi module follow-up](../jail-v1/evidence/2026-10-07-pi-proxy/README.md) adds the same live proxy check on Pi. |
 
 The listed CLI/privacy slices are implemented. Historical custody remains required before the legacy cut in
 North Star §9; this checkout does not perform that cut. Independent custody, managed authorization and

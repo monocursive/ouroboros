@@ -39,7 +39,11 @@ enum Action {
         json: bool,
     },
     /// Run the single local writer in the foreground.
-    Serve,
+    Serve {
+        /// Start or inspect an independent writer under a provisioned user manager.
+        #[arg(long)]
+        detach: bool,
+    },
     /// Reserve a durable request id without launching any child.
     Prepare {
         #[arg(long)]
@@ -425,6 +429,12 @@ struct RunArgs {
     /// Start an independent user service and return its durable run identity.
     #[arg(long)]
     detach: bool,
+    /// Resolve immutable request metadata without starting a writer or a child.
+    #[arg(long, conflicts_with_all = ["prepare_only", "prepared", "control_fd"])]
+    plan_only: bool,
+    /// Reserve a detached batch run without claiming an owner or executing.
+    #[arg(long, requires = "detach", conflicts_with_all = ["prepared", "control_fd"])]
+    prepare_only: bool,
     /// Store a bounded output or NUL-delimited argv prefix; may contain secrets.
     #[arg(long,value_parser=["stdout","stderr","argv"])]
     capture: Vec<String>,
@@ -776,13 +786,21 @@ fn execute(cli: Cli) -> Result<i32> {
     match cli.command {
         Action::Version { json } => {
             output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1","bundle":"ouro.ledger.bundle/1","bundle_verification":"ouro.ledger.bundle-verification/1","signed_bundle":"ouro.ledger.bundle/2","signed_bundle_verification":"ouro.ledger.bundle-verification/2","bundle_signature":"ouro.ledger.bundle-signature/1","signer":"ouro.ledger.signer/1"},"schema_frozen":false,"execution_platform":"linux"}),
+                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1","bundle":"ouro.ledger.bundle/1","bundle_verification":"ouro.ledger.bundle-verification/1","signed_bundle":"ouro.ledger.bundle/2","signed_bundle_verification":"ouro.ledger.bundle-verification/2","bundle_signature":"ouro.ledger.bundle-signature/1","signer":"ouro.ledger.signer/1"},"schema_frozen":true,"execution_platform":"linux"}),
                 json,
             )?;
             Ok(0)
         }
-        Action::Serve => {
-            daemon::serve(&data)?;
+        Action::Serve { detach } => {
+            if detach {
+                service::start_writer(&data)?;
+                output(
+                    &json!({"writer":"ready","owner_lifetime":"systemd_user_service"}),
+                    true,
+                )?;
+            } else {
+                daemon::serve(&data)?;
+            }
             Ok(0)
         }
         Action::Bundle {
@@ -947,6 +965,17 @@ fn execute(cli: Cli) -> Result<i32> {
                 launch: args.launch,
                 tags: args.tag,
             };
+            if args.plan_only {
+                output(&runner::resolve_request(&options)?, args.json)?;
+                return Ok(0);
+            }
+            if args.prepare_only {
+                output(
+                    &serde_json::to_value(service::prepare(&options)?)?,
+                    args.json,
+                )?;
+                return Ok(0);
+            }
             if args.detach {
                 let record = service::launch(&options).map_err(|error| LedgerError(format!(
                     "detached request {}: {}; inspect or replay this same request id, never invent a replacement",
@@ -1056,7 +1085,7 @@ fn execute(cli: Cli) -> Result<i32> {
                 Action::SettleOrphans { json } => {
                     output(&serde_json::to_value(client.settle_orphans()?)?, json)?
                 }
-                Action::Serve
+                Action::Serve { .. }
                 | Action::Run(_)
                 | Action::Doctor { .. }
                 | Action::Version { .. }

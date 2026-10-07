@@ -16,6 +16,9 @@ from pathlib import Path
 import rfc8785
 
 ROOT = Path(__file__).resolve().parent
+freeze_spec = importlib.util.spec_from_file_location("ledger_freeze", ROOT / "freeze.py")
+freeze = importlib.util.module_from_spec(freeze_spec)
+freeze_spec.loader.exec_module(freeze)
 JAIL = ROOT.parent / "jail-v1"
 spec = importlib.util.spec_from_file_location("jail_contract", JAIL / "validate_contract.py")
 jail = importlib.util.module_from_spec(spec)
@@ -410,6 +413,7 @@ def transcript_fixtures(validators):
 
 
 def main():
+    print(f"ledger milestone-2 contract freeze: {freeze.check()} files match")
     jail_schemas = jail.load_schemas(JAIL)
     ledger_schemas = jail.load_schemas(ROOT)
     assert not set(jail_schemas) & set(ledger_schemas)

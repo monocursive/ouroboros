@@ -1346,6 +1346,82 @@ fn signal_birth(peer: &ouro_ledger::protocol::Peer, signal: i32) {
 }
 
 #[test]
+fn fleet_planning_and_reservation_never_launch_until_the_prepared_owner_starts() {
+    let Some(fixture) = detached_fixture() else {
+        return;
+    };
+    let make = |mode: &str| {
+        let mut command = fixture.command("fleet-reservation", true);
+        command.args([
+            "--detach",
+            mode,
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf x >> executions",
+        ]);
+        command
+    };
+    let output = make("--plan-only").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["owner_lifetime"], "systemd_user_service");
+    assert!(!fixture.workspace.join("executions").exists());
+    let (output, prepared) = fixture.run(&mut make("--prepare-only"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(prepared.payload, plan);
+    assert_eq!(prepared.state, "prepared");
+    assert!(prepared.owner.is_none());
+    assert!(!fixture.workspace.join("executions").exists());
+    let (_, replay) = fixture.run(&mut make("--prepare-only"));
+    assert_eq!(prepared.run_id, replay.run_id);
+    let mut command = fixture.command("fleet-reservation", true);
+    command.args([
+        "--detach",
+        "--prepared",
+        &prepared.run_id,
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf x >> executions",
+    ]);
+    let (output, started) = fixture.run(&mut command);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(started.run_id, prepared.run_id);
+    let settled =
+        ouro_ledger::service::wait(&fixture.data, &prepared.run_id, COMMAND_LIMIT).unwrap();
+    assert_eq!(settled.state, "settled");
+    let (_, replay) = fixture.run(&mut command);
+    assert_eq!(replay.run_id, prepared.run_id);
+    assert_eq!(
+        fs::read(fixture.workspace.join("executions")).unwrap(),
+        b"x"
+    );
+    let mut conflicting = fixture.command("fleet-reservation", true);
+    conflicting.args([
+        "--detach",
+        "--prepare-only",
+        "--capture",
+        "stdout",
+        "--",
+        "/bin/true",
+    ]);
+    assert!(!conflicting.output().unwrap().status.success());
+}
+
+#[test]
 fn detached_submitter_exit_preserves_owner_output_and_one_execution() {
     let Some(fixture) = detached_fixture() else {
         return;

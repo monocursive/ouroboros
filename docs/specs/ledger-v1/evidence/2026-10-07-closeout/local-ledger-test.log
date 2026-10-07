@@ -1,0 +1,230 @@
+   Compiling ouro-ledger v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-ledger)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.62s
+     Running unittests src/lib.rs (target/debug/deps/ouro_ledger-3bcf078db7dff087)
+
+running 133 tests
+test comparison::tests::count_keys_separate_sources_stages_and_outcomes_and_enforce_budget ... ok
+test comparison::tests::different_sources_are_incomparable_without_changing_protection_labels ... ok
+test comparison::tests::incomplete_target_makes_its_class_incomparable_with_a_canonical_reference ... ok
+test bundle::signing::tests::public_key_is_a_bounded_explicit_pin_and_refuses_forged_fingerprint ... ok
+test comparison::tests::proxy_targets_use_original_destinations_and_path_targets_obey_key_budget ... ok
+test comparison::tests::target_keys_preserve_both_rename_paths_native_bytes_and_namespaces ... ok
+test comparison::tests::unsupported_gapped_and_live_classes_cannot_be_compared ... ok
+test bundle::signing::tests::signature_binds_exact_bytes_domain_and_supplied_identity ... ok
+test bundle::signing::tests::unsafe_malformed_and_oversized_private_keys_refuse ... ok
+test daemon::tests::forged_producer_role_attempt_and_peer_are_all_refused ... ok
+test daemon::tests::frame_roundtrip_handles_interrupted_transport_without_accepting_partial_json ... ok
+test daemon::tests::protocol_refuses_caller_claimed_roles_and_oversized_frames ... ok
+test bundle::signing::tests::generated_keys_are_private_unique_and_never_overwritten_or_exported ... ok
+test comparison::tests::page_budget_exhaustion_and_partial_records_fail_closed ... ok
+test config::tests::config_is_bounded_strict_and_does_not_silently_default_invalid_retention ... ok
+test daemon::tests::gc_wire_collects_an_empty_store_without_starting_readers ... ok
+test bundle::tests::portable_bundle_preserves_bytes_and_labels_without_implicit_captures ... ok
+test bundle::tests::selected_capture_is_exact_private_and_blocks_retention ... ok
+test bundle::tests::unsafe_capture_source_and_bad_selection_refuse ... ok
+test pending::crash_tests::cleanup_keeps_the_same_mutex_inode_for_future_openers ... ok
+test bundle::tests::valid_pinned_signature_never_overrides_canonical_semantic_checks ... ok
+test bundle::tests::failed_exports_remove_staging_and_never_replace_destination ... ok
+test bundle::tests::signed_bundle_preserves_none_and_gaps_and_requires_explicit_trust ... ok
+test pending::tests::failed_snapshot_replacement_preserves_previous_pending_evidence ... ok
+test bundle::tests::stripping_or_replacing_signer_never_satisfies_a_pinned_verification ... ok
+test bundle::tests::broken_canonical_chain_and_interrupted_frame_refuse_rehashed_inventory ... ok
+test bundle::tests::argv_is_exported_only_by_selection_and_all_three_signed_members_verify_offline ... ok
+test projection::tests::rebuild_and_upsert_survive_reopen_with_truthful_labels_and_u64_sequence ... ok
+test reader::tests::summaries_are_bounded_even_for_arbitrary_owner_coverage_and_keep_gaps_unknown ... ok
+test reader::tests::time_filters_reject_invalid_dates_offsets_fractional_times_and_non_ascii ... ok
+test redaction::tests::both_native_paths_and_digests_are_removed_but_unknown_paths_remain_unknown ... ok
+test bundle::tests::unsafe_missing_or_oversized_members_refuse_without_following_links ... ok
+test redaction::tests::redaction_cannot_launder_private_fields_invalid_native_bytes_or_policy ... ok
+test redaction::tests::selective_redaction_is_idempotent_and_preserves_nonselected_facts ... ok
+test projection::tests::oversized_payload_rolls_back_rebuild_and_keeps_the_previous_projection ... ok
+test projection::tests::corrupt_or_missing_index_is_disposable_and_does_not_touch_canonical_bytes ... ok
+test runner::argv_capture::tests::argv_short_writes_keep_the_exact_prefix_before_storage_failure ... ok
+test runner::tests::prepared_gate_compares_each_identity_and_receipt_digest ... ok
+test runner::argv_capture::tests::argv_capture_refuses_symlinked_storage_and_nul_arguments ... ok
+test pending::tests::journal_rejects_rebinding_corruption_unsafe_members_and_competing_writer ... ok
+test projection::tests::replacing_or_linking_an_open_index_prevents_further_updates ... ok
+test projection::tests::replacing_the_root_and_growing_sidecars_prevents_updates ... ok
+test bundle::tests::altered_projection_receipts_and_inventory_refuse_even_with_new_hashes ... ok
+test bundle::tests::multi_page_snapshot_excludes_later_appends_and_rejects_changed_labels ... ok
+test projection::tests::unsafe_database_and_sidecars_are_refused_without_following_targets ... ok
+test store::catalog::tests::catalog_metadata_is_bounded_immutable_and_preserves_legacy_absence ... ok
+test bundle::tests::signed_manifest_capture_inventory_and_signature_tampering_refuse ... ok
+test pending::tests::lost_source_and_reconciliation_replies_replay_once_across_writer_restart ... ok
+test store::intent_tail_tests::operator_effects_replay_without_claiming_launch_state_or_observation ... ok
+test store::catalog::tests::pruned_runs_remain_discoverable_with_labels_but_query_reports_unavailable_history ... ok
+test store::intent_tail_tests::operator_forgery_conflicts_and_unadmitted_settlement_refuse ... ok
+test store::catalog::tests::catalog_pages_survive_restart_but_refuse_scope_and_matching_membership_changes ... ok
+test projection::tests::foreign_identity_schema_and_extra_triggers_are_discarded ... ok
+test store::catalog::tests::catalog_omits_large_receipts_while_legacy_response_and_catalog_scan_are_bounded ... ok
+test pending::tests::recovery_cannot_admit_strict_runs_or_impersonate_a_live_owner ... ok
+test pending::crash_tests::recovery_sync_errors_do_not_import_or_acknowledge_a_complete_journal ... ok
+test store::bundle_replay::tests::rotated_records_bundle_after_capture_expiry_but_pruned_history_refuses ... ok
+test store::tests::admission_cannot_change_reserved_policy_or_argv ... ok
+test runner::argv_capture::tests::argv_capture_preserves_native_bytes_empty_arguments_and_every_truncation_boundary ... ok
+test store::tests::admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt ... ok
+test store::intent_tail_tests::pending_operator_effects_pin_gc_and_pruned_history_refuses_tail_but_replays_intents ... ok
+test store::tests::detached_request_lifetime_is_validated_and_cannot_rebind_a_request ... ok
+test store::tests::different_payload_cannot_rebind_prepare_or_effect_identity ... ok
+test store::tests::capture_expiry_removes_empty_selected_files_without_claiming_removed_bytes ... ok
+test store::tests::capture_expiry_preserves_canonical_bytes_queries_replays_and_later_history_gc ... ok
+test store::intent_tail_tests::tail_refuses_forged_positions_mutated_records_and_partial_tails ... ok
+test store::tests::flattened_source_is_the_original_frozen_envelope_plus_writer_fields ... ok
+test store::tests::full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state ... ok
+test pending::tests::queue_is_bounded_and_retains_latest_sequence_for_explicit_loss ... ok
+test store::tests::admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_loss ... ok
+test store::tests::capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins ... ok
+test store::intent_tail_tests::operator_append_faults_recover_exactly_once_or_preserve_ambiguity ... ok
+test store::tests::gc_never_removes_files_reappearing_after_completion ... ok
+test store::tests::gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels ... ok
+test store::tests::index_failure_after_acknowledgement_does_not_poison_or_reexecute ... ok
+test store::tests::gc_keeps_held_unknown_recent_and_live_reader_runs_and_refuses_active_launches ... ok
+test store::tests::every_persistence_failure_stops_acknowledgements_until_recovery ... ok
+test store::tests::interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery ... ok
+test store::tests::lifetime_lock_refuses_a_second_writer ... ok
+test store::tests::none_verify_retains_unprotected_even_if_receipt_claims_enforced ... ok
+test store::tests::durable_reader_refuses_a_rechecksummed_empty_snapshot_template ... ok
+test store::tests::legacy_manifest_and_reader_checkpoint_migrate_before_rotation ... ok
+test store::tests::lost_replies_replay_same_run_and_exact_receipt_after_recovery ... ok
+test store::tests::durable_reader_preserves_snapshot_labels_after_a_later_state_change ... ok
+test store::tests::owner_death_records_unknown_without_restart_or_tree_claim ... ok
+test store::tests::durable_reader_sync_failure_refuses_retries_until_recovery_barrier_succeeds ... ok
+test store::tests::corrupt_reader_checkpoint_is_isolated_bounded_and_expires ... ok
+test store::tests::reader_cursor_refuses_replaced_later_segment_after_restart ... ok
+test store::tests::reader_refuses_filtered_corruption_and_reports_extra_tails_without_mutation ... ok
+test store::tests::reader_new_page_refuses_truncation_of_a_previously_verified_cached_large_frame ... ok
+test store::tests::reader_filters_original_source_operations_stage_and_writer_time ... ok
+test store::tests::gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directories ... ok
+test store::intent_tail_tests::tail_chunks_rotation_restart_and_growth_preserve_exact_bytes ... ok
+test store::tests::recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain ... ok
+test store::tests::recovery_sync_failure_cannot_publish_or_acknowledge_an_unflushed_tail ... ok
+test store::tests::reader_large_utf8_records_are_fully_verified_before_chunks_and_query_block_replays ... ok
+test store::tests::reader_snapshot_and_lost_reply_survive_rotation_with_partial_utf8_export ... ok
+test store::tests::redaction::canonical_replay_refuses_policy_bypass_and_false_redaction_markers ... ok
+test store::tests::capture_expiry_refuses_changed_reappearing_or_unanchored_files ... ok
+test store::tests::refused_receipt_requires_the_same_attempt_and_final_source_note ... ok
+test store::tests::redaction::redaction_is_durable_before_append_and_replay_preserves_minimized_bytes ... ok
+test store::tests::retention_preview_pins_durable_readers_without_expiring_or_repairing_files ... ok
+test store::tests::retention_holds_replay_without_reapplying_an_old_intent_after_release ... ok
+test store::tests::retention_preview_keeps_active_unknown_held_recent_and_damaged_runs ... ok
+test store::tests::rotation_recovery_syncs_each_segment_before_publishing_promoted_metadata ... ok
+test store::tests::rotated_queries_preserve_source_filters_and_effect_identity ... ok
+test store::tests::capture_expiry_recovers_each_deletion_boundary_and_never_removes_history ... ok
+test store::tests::settlement_requires_matching_final_receipt_and_trace_and_closes_observations ... ok
+test store::tests::strict_transport_gap_and_private_metadata_refuse_without_an_ack ... ok
+test store::tests::source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery ... ok
+test store::tests::source_replay_and_gap_are_preserved_when_projection_is_updated ... ok
+test store::tests::unresolved_run_keeps_a_proven_child_exit_separate_from_unknown_outcome ... ok
+test store::tests::unsafe_store_paths_and_oversized_events_are_refused ... ok
+test store::tests::rotation_preserves_exact_export_global_chain_and_original_replay_after_restart ... ok
+test store::tests::verification_detects_projection_drift_and_recovery_rebuilds_it ... ok
+test store::transcript::tests::transcript_keeps_capture_loss_separate_from_display_limits ... ok
+test store::transcript::tests::transcript_is_opt_in_bounded_and_lossless_for_hostile_bytes ... ok
+test store::transcript::tests::transcript_reports_empty_captures_and_retention_without_changing_history ... ok
+test store::tests::pending_recovery_keeps_the_journal_through_canonical_persistence_failures ... ok
+test store::tests::gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors ... ok
+test store::tests::rotation_failure_boundaries_never_duplicate_or_truncate_history ... ok
+test store::transcript::tests::transcript_never_opens_live_unfinalized_or_unselected_artifacts ... ok
+test store::transcript::tests::argv_only_and_all_captures_follow_both_retention_paths ... ok
+test store::tests::rotated_streams_refuse_missing_changed_reordered_and_unanchored_segments ... ok
+test store::tests::reader_snapshot_export_is_exact_bounded_and_retries_the_identical_prior_page ... ok
+test store::tests::reader_cursor_cannot_change_scope_and_survives_restart ... ok
+test store::transcript::tests::transcript_refuses_missing_changed_linked_and_public_files_without_blocking ... ok
+test store::tests::retention_faults_preserve_history_and_recover_one_original_receipt ... ok
+test store::tests::durable_reader_refuses_rechecksummed_forged_snapshot_labels ... ok
+test store::lifecycle_tests::io_errors_at_every_lifecycle_boundary_refuse_ack_until_recovery ... ok
+test pending::crash_tests::journal_io_error_matrix_preserves_previous_or_complete_replacements ... ok
+test pending::crash_tests::journal_sigkill_matrix_preserves_pending_and_canonical_history ... ok
+test store::lifecycle_tests::sigkill_at_every_lifecycle_boundary_preserves_identity_and_canonical_bytes ... ok
+
+test result: ok. 133 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.52s
+
+     Running unittests src/main.rs (target/debug/deps/ouro_ledger-802f87e4904115b7)
+
+running 5 tests
+test control_output::tests::control_disconnect_after_validation_reports_failure_without_success_frame ... ok
+test control_output::tests::invalid_control_descriptors_refuse_before_delivery ... ok
+test control_output::tests::control_file_and_socket_deliver_one_exact_frame_without_changing_shared_flags ... ok
+test control_output::tests::nonblocking_control_backpressure_retries_without_changing_caller_flags ... ok
+test control_output::tests::stalled_control_delivery_has_a_deadline_and_bounded_frame_size ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/cli_local.rs (target/debug/deps/cli_local-2a7d0f066a3f5ed6)
+
+running 12 tests
+test doctor_does_not_start_a_session_writer ... ok
+test locked_disposable_index_does_not_delay_the_next_daemon_request ... ok
+test prepare_cli_refuses_raw_metadata_without_persisting_it ... ok
+test show_transcript_requires_explicit_opt_in_and_preserves_metadata ... ok
+test concurrent_operator_ingress_and_lost_reply_keep_one_sequence_per_identity ... ok
+test bundle_cli_is_portable_and_verifies_without_a_writer_or_data_directory ... ok
+test preparation_replay_and_inspection_survive_writer_restart ... ok
+test gc_cli_prunes_aged_fixture_history_and_preserves_preparation_identity_after_restart ... ok
+test signed_bundle_cli_requires_a_separate_public_key_for_trust ... ok
+test retention_cli_persists_holds_and_preview_never_starts_or_mutates_a_writer ... ok
+test writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_restart ... ok
+test operator_cli_and_follow_tail_preserve_bytes_across_late_appends_and_restart ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.19s
+
+     Running tests/control_descriptors.rs (target/debug/deps/control_descriptors-d49165be8dd6a947)
+
+running 2 tests
+test foreground_json_without_a_control_fd_still_refuses_before_launch ... ok
+test invalid_control_destinations_never_prepare_or_execute ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/evidence_reader.rs (target/debug/deps/evidence_reader-3b443c992d40a689)
+
+running 19 tests
+test cross_run_rejects_duplicate_runs_and_malformed_continuations ... ok
+test discovered_query_reports_corrupt_history_and_empty_selection_separately ... ok
+test dropped_socket_reply_replays_the_checkpointed_page_after_restart ... ok
+test discovery_refuses_changed_catalogs_and_old_reader_heads_without_relabelling_history ... ok
+test diff_corrupt_or_missing_history_never_returns_a_successful_empty_comparison ... ok
+test live_writer_detects_unexpected_tail_before_export ... ok
+test incomplete_history_exports_only_verified_prefix_and_exits_nonzero ... ok
+test query_filters_paginate_exact_attribution_and_refuse_cursor_rebinding ... ok
+test catalog_cli_filters_labels_outcome_and_activity_then_resumes_after_restart ... ok
+test daemon_restart_preserves_query_progress_and_rejects_forged_or_corrupt_cursors ... ok
+test target_diff_reports_unavailable_identity_and_refuses_corrupt_evidence ... ok
+test cross_run_pages_keep_attribution_and_resume_independently_after_restart ... ok
+test diff_counts_preserve_provenance_and_paginate_without_claiming_entity_equivalence ... ok
+test target_diff_finds_changed_paths_with_equal_counts_and_binds_mode_across_restart ... ok
+test discovered_query_walks_runs_and_retries_per_run_pages_across_writer_restarts ... ok
+test daemon_restart_refuses_public_symlinked_and_hardlinked_checkpoint_files ... ok
+test closed_export_sink_exits_nonzero_without_finished_success ... ok
+test export_keeps_large_canonical_record_bytes_out_of_status_metadata ... ok
+test durable_session_capacity_and_expiry_survive_daemon_restart ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.38s
+
+     Running tests/launch_linux.rs (target/debug/deps/launch_linux-6833cf4d8c0bbf59)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/storage_recovery.rs (target/debug/deps/storage_recovery-09ffcf09a1553baa)
+
+running 9 tests
+test valid_prefix_truncation_below_manifest_refuses_replay_and_new_preparations ... ok
+test recomputing_a_valid_local_chain_cannot_override_durable_manifest_history ... ok
+test incomplete_tail_is_retained_and_does_not_rewrite_committed_manifest ... ok
+test legacy_stream_without_manifest_migrates_without_duplicating_history ... ok
+test complete_unacknowledged_tail_promotes_manifest_and_replays_original_receipt ... ok
+test poisoned_durable_snapshot_cannot_resume_with_clean_consistency_labels ... ok
+test durable_cursor_retry_keeps_original_page_and_snapshot_after_restart_and_append ... ok
+test disposable_projections_rebuild_without_rebinding_owner_requests_or_effects ... ok
+test durable_cursor_refuses_changed_checkpoint_and_replaced_canonical_inode ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+
+   Doc-tests ouro_ledger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

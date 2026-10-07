@@ -1,12 +1,13 @@
 # Ledger v1: durable local admission and bounded evidence readers
 
-This specification implements the first vertical slice of [North Star §5](../../north-star.md#5-ouro-ledger)
+This specification implements [North Star §5](../../north-star.md#5-ouro-ledger)
 and its [launch handshake](../../north-star.md#71-process-tree-and-admission).
-It does not declare milestone 2 complete. The jail still builds and runs without
+The [milestone-2 acceptance map](ledger-v1/milestone-2-acceptance.md) binds the
+completed contracts to native evidence and the schema/fixture freeze. The jail still builds and runs without
 the ledger; the ledger consumes its existing receipts, control frames and audit
 events without attaching a probe or inventing an observation.
 
-The current slice provides a single local writer, stable preparation identities,
+The implementation provides a single local writer, stable preparation identities,
 one birth-identified launch owner, durable admission before gate release,
 authenticated event ingestion, canonical settlement, opt-in bounded captures,
 inspection, local chain verification, conservative orphan reconciliation,
@@ -19,6 +20,14 @@ Independent operator intents and resumable live tail are also available.
 Linux execution is the acceptance target. macOS clients can read the local
 protocol and verify stores, but native launch ownership currently refuses because
 its birth-identity mechanism has not been implemented.
+
+Fleet adapters can use `run --plan-only` to resolve and validate immutable
+request metadata without preparing a run, then `run --prepare-only --detach` to
+reserve it without starting an owner. `run --prepared RUN --detach` uses that
+same reservation. These paths enforce the same request identity, policy and
+capture rules as direct launch. `serve --detach` explicitly provisions the
+independent writer on an already lingering Linux user manager; it does not
+provision the manager itself.
 
 ## 1. Processes and authority
 

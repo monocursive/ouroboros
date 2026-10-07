@@ -42,7 +42,19 @@ pub fn wait(data: &Path, run_id: &str, timeout: std::time::Duration) -> Result<R
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{cancel, cancel_requested, launch, probe, serve};
+pub use linux::{cancel, cancel_requested, launch, prepare, probe, serve, start_writer};
+
+#[cfg(not(target_os = "linux"))]
+pub fn start_writer(_: &Path) -> Result<()> {
+    Err(LedgerError(
+        "independent writer service requires Linux".into(),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare(_: &runner::RunOptions) -> Result<RunRecord> {
+    Err(LedgerError("detached preparation requires Linux".into()))
+}
 
 #[cfg(not(target_os = "linux"))]
 pub fn probe() -> Value {
@@ -206,6 +218,23 @@ mod linux {
             ])
             .arg(unit);
         command
+    }
+
+    pub fn prepare(options: &runner::RunOptions) -> Result<RunRecord> {
+        if !options.batch || !options.detached || options.prepared.is_some() {
+            return Err(LedgerError(
+                "preparation requires detached batch mode and a request id".into(),
+            ));
+        }
+        ready()?;
+        let request = runner::resolve_request(options)?;
+        ensure_writer(&options.data)?;
+        Client::connect(&options.data)?.prepare(&options.request_id, &request)
+    }
+
+    pub fn start_writer(data: &Path) -> Result<()> {
+        ready()?;
+        ensure_writer(data)
     }
 
     fn ensure_writer(data: &Path) -> Result<()> {
