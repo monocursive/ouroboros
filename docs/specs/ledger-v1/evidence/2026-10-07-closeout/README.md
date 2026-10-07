@@ -35,8 +35,13 @@ The local macOS ledger suite passes 180 tests with no failures or ignored tests;
 its [log](local-ledger-test.log) is portable/refusal evidence, not native launch
 proof. The build-headroom regression and conformance-driver tests pass 69 tests
 in [this log](ci/preflight-tests.log). Contract freeze and fixture validation pass.
-Native final logs, source/binary hashes and final CI results are recorded alongside
-this report as they complete.
+The final native Raspberry Pi suite passes **221 tests**, with no failures,
+ignored tests or capability skips: [log](pi/ledger.log), [summary](pi/summary.json).
+This includes the real proxy path with Unix diagnostics and the fleet reservation
+bridge. The [source and binary hashes](../../../fleet-v1/evidence/2026-10-07-two-node/pi-source-binaries.json)
+bind the production sources; only fleet formatter compatibility and documentation
+changed after those execution tests. Final CI evidence is recorded below when
+the reference run completes.
 
 The [Pi proxy follow-up](../../../jail-v1/evidence/2026-10-07-pi-proxy/README.md)
 records the exact-kernel module, all 220 ledger tests at the pre-bridge source,

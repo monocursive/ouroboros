@@ -10,7 +10,10 @@ not full milestone-3 closure or external-agent/provider support.
 [Pi source and binary hashes](pi-source-binaries.json).
 The source manifests were compared with the local tree after testing: no mismatch
 on either node. The ledger/Jail/CLI source files, manifests and lockfile are bound
-by exact hashes; the build is a working-tree validation preceding the final commit.
+by exact hashes; those sources match implementation commit `f933105e`. A later
+formatter-compatibility change factors the same preparation flag into a local
+variable; all nine tests and formatting checks pass with native Elixir 1.18 and
+local 1.20 after that change. No launch or protocol behavior changed.
 
 | Case, on each node | Required result |
 | --- | --- |

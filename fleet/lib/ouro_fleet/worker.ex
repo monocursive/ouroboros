@@ -99,9 +99,11 @@ defmodule OuroFleet.Worker do
 
     # Persist the run cross-reference before any owner start. On a lost reply,
     # retry this deterministic ledger request, never allocate another attempt.
+    preparation = ["--prepare-only"]
+
     with {:ok, resolved, 0} <- launch_command(config, key, request, workspace, ["--plan-only"]),
          true <- resolved == expected,
-         {:ok, prepared, 0} <- launch_command(config, key, request, workspace, ["--prepare-only"]),
+         {:ok, prepared, 0} <- launch_command(config, key, request, workspace, preparation),
          true <- prepared["payload"] == expected,
          true <- is_nil(record["run_id"]) or record["run_id"] == prepared["run_id"] do
       record =

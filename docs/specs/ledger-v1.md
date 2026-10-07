@@ -1232,7 +1232,7 @@ documents bounded opt-in display and native Pi/VPS validation. The
 [argv capture record](ledger-v1/evidence/2026-10-07-argv/README.md) covers bounded
 raw arguments, retention and explicit bundle selection. Structured `--redact`
 implements the final CLI/privacy slice listed in the
-[acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts).
+[acceptance audit](ledger-v1/durability-acceptance.md#completed-cli-and-privacy-contracts).
 The [redaction evidence](ledger-v1/evidence/2026-10-07-redaction/README.md)
 records native path, capture, replay and outage checks, plus live proxy redaction
 on VPS and the Pi kernel's explicit proxy-capability refusal.
