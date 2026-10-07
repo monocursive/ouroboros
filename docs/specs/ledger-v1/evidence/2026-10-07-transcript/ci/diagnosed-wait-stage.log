@@ -1,0 +1,287 @@
+repetition 1
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.83s
+
+repetition 2
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.75s
+
+repetition 3
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.53s
+
+repetition 4
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.74s
+
+repetition 5
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.75s
+
+repetition 6
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.70s
+
+repetition 7
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.69s
+
+repetition 8
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.71s
+
+repetition 9
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.65s
+
+repetition 10
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.58s
+
+repetition 11
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.96s
+
+repetition 12
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.79s
+
+repetition 13
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.71s
+
+repetition 14
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.78s
+
+repetition 15
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.59s
+
+repetition 16
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.70s
+
+repetition 17
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.51s
+
+repetition 18
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.72s
+
+repetition 19
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.58s
+
+repetition 20
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.65s
+
+repetition 21
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.73s
+
+repetition 22
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.54s
+
+repetition 23
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.56s
+
+repetition 24
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.60s
+
+repetition 25
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.71s
+
+repetition 26
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.57s
+
+repetition 27
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.59s
+
+repetition 28
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.69s
+
+repetition 29
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.76s
+
+repetition 30
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.72s
+
+repetition 31
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.79s
+
+repetition 32
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.63s
+
+repetition 33
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.62s
+
+repetition 34
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.82s
+
+repetition 35
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.56s
+
+repetition 36
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.74s
+
+repetition 37
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.68s
+
+repetition 38
+
+running 1 test
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 1.73s
+
+repetition 39
+
+running 1 test
+
+thread 'best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution' (1130334) panicked at crates/ouro-ledger/tests/launch_linux.rs:919:9:
+pending journal timeout: profile="tool" active=true overflow=true completion=null events=32 jail=null projection="admitted" caller=crates/ouro-ledger/tests/launch_linux.rs:919:9
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: launch_linux::best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution
+   3: <launch_linux::best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... FAILED
+
+failures:
+
+failures:
+    best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 20.70s
+

@@ -418,8 +418,9 @@ incomplete capture. Final forwarding has a two-second drain deadline so it
 cannot block the owner's evidence and lifetime loop.
 Default metadata uses argv digests and existing jail-redacted observation fields.
 The ledger does not archive vendor state. Whole-run GC removes inventoried
-stdout/stderr captures with canonical history; separate capture-age policies and
-structured minimization options remain future work.
+stdout/stderr captures with canonical history. Capture-only expiry retains
+canonical history and records a deletion anchor. Structured minimization
+options remain future work.
 
 Selected foreground streams are forwarded through separate queues of at most
 128 chunks of 8192 bytes each (1 MiB queued per stream). Queue overflow or a lost
@@ -1112,9 +1113,11 @@ they do not launch a jail or establish Linux containment.
 The [contract validator](ledger-v1/validate_contract.py) checks versioned schemas
 and fixtures only; it makes no runtime or custody claim.
 
-Milestone 2 still requires the CLI/privacy contracts identified by the
+The [October 7 transcript record](ledger-v1/evidence/2026-10-07-transcript/README.md)
+documents bounded opt-in display and native Pi/VPS validation. Milestone 2 still
+requires the CLI/privacy contracts identified by the
 [acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts):
-bounded opt-in transcript display, argv capture, foreground `--control-fd`
+argv capture, foreground `--control-fd`
 and structured `--redact`. Historical custody remains an obligation at the
 later legacy-store removal cut; this tooling checkout does not perform it. Managed
 single-worker submission additionally needs its own principal, authorization,

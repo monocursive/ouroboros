@@ -1,0 +1,16 @@
+repetition 1
+
+running 1 test
+
+thread 'best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution' (1153065) panicked at crates/ouro-ledger/tests/launch_linux.rs:919:9:
+pending journal timeout: profile="tool" active=true overflow=true completion=null events=32 projection="admitted" verification=Ok([VerifyReport { run_id: "run_39125438a83d4af893656b2e3942690d", local_consistency: false, child_protection: "enforced", coverage: Object {"status": String("unobserved")}, events: 10, problems: ["oversized or interrupted canonical frame; bytes retained"], history: None }]) caller=crates/ouro-ledger/tests/launch_linux.rs:919:9
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... FAILED
+
+failures:
+
+failures:
+    best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 20.72s
+

@@ -1,0 +1,47 @@
+reference-host	Conformance suite	2026-10-07T11:55:03.0841358Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0841455Z running 28 tests
+reference-host	Conformance suite	2026-10-07T11:55:03.0841831Z test an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0842363Z test best_effort_dead_owner_without_exit_record_stays_unknown ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0842850Z test best_effort_exit_during_outage_recovers_after_owner_exit ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0843344Z test best_effort_local_exit_file_limit_never_fabricates_settlement ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0843883Z test best_effort_local_journal_failure_stops_the_tree_and_never_settles ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0844447Z test best_effort_rechecks_local_exit_even_with_a_recomputed_journal_checksum ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0845045Z test best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution ... FAILED
+reference-host	Conformance suite	2026-10-07T11:55:03.0845658Z test contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0846339Z test detached_cancel_requests_stop_then_waits_for_verified_settlement ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0846889Z test detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0847405Z test detached_mode_refuses_a_session_bound_existing_writer ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0847896Z test detached_owner_death_stops_tree_and_replay_preserves_unknown ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0848421Z test detached_submitter_exit_preserves_owner_output_and_one_execution ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0848967Z test detached_writer_death_fails_closed_without_starting_a_session_writer ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0849532Z test durable_admission_precedes_real_exec_and_replay_never_executes_twice ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0850135Z test explicit_none_profile_remains_unprotected_after_real_launch_and_verification ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0850725Z test failed_exec_retains_corroborated_error_without_a_second_attempt ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0851283Z test invalid_inherited_stdout_is_denied_before_admission_and_never_executes ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0851881Z test operator_intents_and_live_tail_preserve_real_jail_ownership_and_source_bytes ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0852477Z test opted_capture_stops_storing_at_the_cap_and_keeps_draining_the_real_child ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0853019Z test owner_death_is_reconciled_as_unknown_and_never_relaunched ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0853672Z test real_launch_bundles_verify_offline_with_selected_truncated_captures ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0854264Z test real_launch_labels_drive_filtered_discovery_without_changing_replay_identity ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0854865Z test real_run_diff_keeps_none_unprotected_and_separates_unobserved_coverage ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0855481Z test real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_removal ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0856241Z test real_target_diff_distinguishes_created_paths_and_preserves_producer_references ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0856902Z test vendor_state::vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0857481Z test writer_death_stops_the_owner_and_recovery_remains_unknown ... ok
+reference-host	Conformance suite	2026-10-07T11:55:03.0857777Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0857871Z failures:
+reference-host	Conformance suite	2026-10-07T11:55:03.0857994Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0858279Z ---- best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution stdout ----
+reference-host	Conformance suite	2026-10-07T11:55:03.0858665Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0859163Z thread 'best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution' (1084981) panicked at crates/ouro-ledger/tests/launch_linux.rs:864:9:
+reference-host	Conformance suite	2026-10-07T11:55:03.0860056Z pending journal did not reach expected state
+reference-host	Conformance suite	2026-10-07T11:55:03.0860503Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+reference-host	Conformance suite	2026-10-07T11:55:03.0860833Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0860838Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0860931Z failures:
+reference-host	Conformance suite	2026-10-07T11:55:03.0861267Z     best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution
+reference-host	Conformance suite	2026-10-07T11:55:03.0861595Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0861886Z test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.52s
+reference-host	Conformance suite	2026-10-07T11:55:03.0862271Z 
+reference-host	Conformance suite	2026-10-07T11:55:03.0862505Z error: test failed, to rerun pass `-p ouro-ledger --test launch_linux`
+reference-host	Conformance suite	2026-10-07T11:55:03.0863090Z      Running tests/storage_recovery.rs (target/release/deps/storage_recovery-661e89f956ea7569)
