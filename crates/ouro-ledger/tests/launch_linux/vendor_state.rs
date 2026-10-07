@@ -55,13 +55,21 @@ fn vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death() {
             _ => unreachable!(),
         }
         fixture.assert_tree_stopped(&run);
-        assert!(
-            !vendor.try_exists().unwrap(),
-            "{ending}: verified tree termination must clean vendor state"
-        );
-        let state: Value =
-            serde_json::from_slice(&fs::read(attempt.join("jail-state.json")).unwrap()).unwrap();
-        assert_eq!(state["state_cleanup"], "complete", "{ending}: {state}");
+        // Jail persists a terminal receipt with cleanup pending before
+        // removing state. With the owner killed, there is no foreground join
+        // to wait for those remaining writes; require both cleanup facts
+        // within a bound instead of racing the separate publications.
+        let deadline = Instant::now() + COMMAND_LIMIT;
+        loop {
+            let state: Value =
+                serde_json::from_slice(&fs::read(attempt.join("jail-state.json")).unwrap())
+                    .unwrap();
+            if state["state_cleanup"] == "complete" && !vendor.try_exists().unwrap() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{ending}: {state}");
+            thread::sleep(Duration::from_millis(10));
+        }
         if ending == "writer-death" {
             fixture.writer = Fixture::start_writer(&fixture.data);
         }
