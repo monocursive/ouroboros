@@ -1,0 +1,4 @@
+{
+  "exit_code": 1,
+  "reason": "ouro: {\"nodes\":[{\"machine\":\"pi\",\"reason\":\"worker_required_capability_unavailable\"}],\"reason\":\"no_eligible_worker\"}"
+}

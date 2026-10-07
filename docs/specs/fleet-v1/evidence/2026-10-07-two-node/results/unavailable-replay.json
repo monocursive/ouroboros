@@ -1,0 +1,8 @@
+{
+  "admission": "unconfirmed",
+  "job_id": "job_289c5a9dfd9ff3be4bd9ac1ea02d56855d5adf9f47aacea8cf78bbbd48a731c3",
+  "reason": "worker_unreachable_or_reply_lost",
+  "retry": "same_request_id_only",
+  "settlement": "unknown",
+  "worker": "pi"
+}

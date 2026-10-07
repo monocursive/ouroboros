@@ -1,0 +1,38 @@
+{
+  "arch": "x86_64",
+  "attempt_id": "att_fbd2a351-23a0-4183-a203-2a3145d602aa",
+  "boundary": {
+    "backend": "none",
+    "backend_version": null,
+    "kind": "supervisor_cgroup",
+    "process": {
+      "identity": {
+        "kind": "linux_boot_start",
+        "value": {
+          "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+          "pid": 1721578,
+          "start_time_ticks": 134990490
+        }
+      },
+      "pid": 1721578
+    },
+    "verification_scope": "registered_boundary"
+  },
+  "claimed_at": "2026-10-07T18:30:02Z",
+  "component_version": "0.1.0",
+  "execution_cgroup": {
+    "device": 29,
+    "inode": 9503805,
+    "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_fbd2a351-23a0-4183-a203-2a3145d602aa.leaf"
+  },
+  "kernel": "Linux 7.0.0-31-generic",
+  "os": "linux",
+  "owner": {
+    "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+    "pid": 1721572,
+    "start_time_ticks": 134990485
+  },
+  "schema": "ouro.jail.state/1",
+  "state_cleanup": "not_needed",
+  "vendor_state": null
+}

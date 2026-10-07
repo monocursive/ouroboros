@@ -1,0 +1,125 @@
+{
+  "attempt_id": "att_1d4781af-20a8-4c43-b421-613f19512f47",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "observed_bytes": 0,
+      "state": "not_captured"
+    },
+    "stdout": {
+      "limit_bytes": 64,
+      "observed_bytes": 5003,
+      "path": "artifacts/stdout.bin",
+      "state": "captured",
+      "stored_bytes": 64,
+      "truncated": true
+    }
+  },
+  "child_protection": "enforced",
+  "coverage": {
+    "exec": {
+      "gaps": [],
+      "observed_count": 340,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.deny": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.write": {
+      "gaps": [],
+      "observed_count": 5,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "limits": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "wrapper"
+      ],
+      "status": "active"
+    },
+    "net": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "proxy.net": {
+      "gaps": [],
+      "observed_count": null,
+      "sources": [],
+      "status": "unsupported"
+    }
+  },
+  "evidence_health": "ok",
+  "job_id": "job_bb43f79de5b83b7cc72007f7cf5c179501d05d30884c0f235feb9080b11856da",
+  "ledger_settlement": "recorded",
+  "ledger_state": "settled",
+  "outcome": {
+    "cause": null,
+    "code": 0,
+    "error": null,
+    "kind": "exited",
+    "signal": null
+  },
+  "owner": {
+    "birth": "boot:47a3956e-f44b-4139-a8fc-45418c38243f:start:134988767",
+    "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+    "pid": 1719885,
+    "uid": 1000
+  },
+  "reachability": "reachable",
+  "request_digest": "sha256:8cf1f0ac73ce7ad1b2cc7a7dedd9b9b16f149e3039779d0ba55c1462c7575389",
+  "resolved": {
+    "argv_digest": "sha256:b38d775b5d82a7429ad9f29826bf731d79b88796deb8d4195908baa1d251c860",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout"
+      ]
+    },
+    "evidence": "strict",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:5c14b6c399ea5d5a4e5114358840d1db69741a471c3de30c72641d330206e935",
+    "launch": "fleet-fixture",
+    "owner_lifetime": "systemd_user_service",
+    "policy_digest": "sha256:a7cb4b39832a6e5f72178d00a605657716d40f210548003cfbd9898b19002628",
+    "profile": "tool",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "run_id": "run_bfa069649df34af5b4308b028e4f52b7",
+  "schema": "ouro.fleet.attempt/1",
+  "settlement": "recorded",
+  "stale": false,
+  "state": "exited",
+  "state_cleanup": "complete",
+  "worker": "vps",
+  "workspace": "/home/ubuntu/ouro-fleet-lab-20261007/state/scratch/job_bb43f79de5b83b7cc72007f7cf5c179501d05d30884c0f235feb9080b11856da"
+}

@@ -1,0 +1,45 @@
+{
+  "arch": "aarch64",
+  "attempt_id": "att_200ec9d3-34b1-405f-971f-ec65a3ff2ad6",
+  "boundary": {
+    "backend": "bubblewrap",
+    "backend_version": "bubblewrap 0.12.0",
+    "kind": "pid_namespace",
+    "process": {
+      "identity": {
+        "kind": "linux_boot_start",
+        "value": {
+          "boot_id": "9c1b4d50-1376-4da9-83da-1d58a793b465",
+          "pid": 125390,
+          "start_time_ticks": 2921412
+        }
+      },
+      "pid": 125390
+    },
+    "verification_scope": "attempt_tree"
+  },
+  "claimed_at": "2026-10-07T18:33:08Z",
+  "cleanup_reason": null,
+  "component_version": "0.1.0",
+  "execution_cgroup": {
+    "device": 25,
+    "inode": 89150,
+    "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_200ec9d3-34b1-405f-971f-ec65a3ff2ad6.leaf"
+  },
+  "kernel": "Linux 6.18.50+rpt-rpi-v8",
+  "os": "linux",
+  "owner": {
+    "boot_id": "9c1b4d50-1376-4da9-83da-1d58a793b465",
+    "pid": 125364,
+    "start_time_ticks": 2921379
+  },
+  "schema": "ouro.jail.state/1",
+  "state_cleanup": "complete",
+  "vendor_state": {
+    "credentials": [],
+    "dev": "45826",
+    "ino": "797776",
+    "name": "vendor-state",
+    "registered_at": "2026-10-07T18:33:08Z"
+  }
+}

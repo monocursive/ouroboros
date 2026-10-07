@@ -1,0 +1,68 @@
+{
+  "attempt_id": "att_46c8a55d-d274-4e98-95e8-0478e0a2daf3",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "state": "not_captured"
+    },
+    "stdout": {
+      "state": "not_captured"
+    }
+  },
+  "child_protection": "enforced",
+  "coverage": {
+    "status": "unobserved"
+  },
+  "evidence_health": "ok",
+  "job_id": "job_8a9aa97f57f0fad29f519dc2943d346fd619c1d5cc3a92f73f7c33112bcbdce2",
+  "ledger_settlement": "pending",
+  "ledger_state": "admitted",
+  "outcome": null,
+  "owner": {
+    "birth": "boot:9c1b4d50-1376-4da9-83da-1d58a793b465:start:2916059",
+    "boot_id": "9c1b4d50-1376-4da9-83da-1d58a793b465",
+    "pid": 124429,
+    "uid": 1000
+  },
+  "reachability": "reachable",
+  "request_digest": "sha256:383f9c7c09733f560368e8bc8756187278889214680543c97765988a402a48ce",
+  "resolved": {
+    "argv_digest": "sha256:b38d775b5d82a7429ad9f29826bf731d79b88796deb8d4195908baa1d251c860",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout"
+      ]
+    },
+    "evidence": "strict",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:10b53fa587fe7fb0f6a69d6d5050513c987fb811d1521a99666b4414c137fab9",
+    "launch": "fleet-fixture",
+    "owner_lifetime": "systemd_user_service",
+    "policy_digest": "sha256:7ca4849fc1002987f248dcd36f5c80e7c72d13bc4fa7c8dd33c76659b33d9e37",
+    "profile": "tool",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "run_id": "run_317200410d0b423c9aeb0690451af4b9",
+  "schema": "ouro.fleet.attempt/1",
+  "settlement": "pending",
+  "stale": false,
+  "state": "running",
+  "state_cleanup": "pending",
+  "worker": "pi",
+  "workspace": "/home/monocursive/ouro-fleet-lab-20261007/state/scratch/job_8a9aa97f57f0fad29f519dc2943d346fd619c1d5cc3a92f73f7c33112bcbdce2"
+}

@@ -1,0 +1,82 @@
+{
+  "attempt_id": "att_16a776b8-c71c-4e20-8acc-1834ab42f501",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "state": "not_captured"
+    },
+    "stdout": {
+      "state": "not_captured"
+    }
+  },
+  "child_protection": "enforced",
+  "coverage": {
+    "gaps": [
+      {
+        "reason": "owner_lost"
+      }
+    ],
+    "status": "degraded"
+  },
+  "evidence_health": "degraded",
+  "job_id": "job_740d62762528581ee3a030b5106959a44d9ddc6a819fcb08ec75e93e71db0a88",
+  "ledger_settlement": "recorded",
+  "ledger_state": "outcome_unknown",
+  "outcome": {
+    "kind": "unknown",
+    "observed_child_outcome": {
+      "kind": "unknown",
+      "unknown": true,
+      "unknown_reason": "owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"
+    },
+    "unknown": true,
+    "unknown_reason": "owner or reconciliation reported an unresolved run outcome"
+  },
+  "owner": {
+    "birth": "boot:9c1b4d50-1376-4da9-83da-1d58a793b465:start:2922858",
+    "boot_id": "9c1b4d50-1376-4da9-83da-1d58a793b465",
+    "pid": 125587,
+    "uid": 1000
+  },
+  "reachability": "reachable",
+  "request_digest": "sha256:b34a304516337fc734b8788f568188b4c0319b78a159b3a7ba1d00ce428ab041",
+  "resolved": {
+    "argv_digest": "sha256:b38d775b5d82a7429ad9f29826bf731d79b88796deb8d4195908baa1d251c860",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout"
+      ]
+    },
+    "evidence": "strict",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:10b53fa587fe7fb0f6a69d6d5050513c987fb811d1521a99666b4414c137fab9",
+    "launch": "fleet-fixture",
+    "owner_lifetime": "systemd_user_service",
+    "policy_digest": "sha256:b6ab1af6fd33606f18a9741e7d6748c203c3b78746504dfd4b1390ad57d7fe8d",
+    "profile": "tool",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "run_id": "run_0ef7ffbc81484f1caecc07df4675f2b2",
+  "schema": "ouro.fleet.attempt/1",
+  "settlement": "unknown",
+  "stale": false,
+  "state": "outcome_unknown",
+  "state_cleanup": "pending",
+  "worker": "pi",
+  "workspace": "/home/monocursive/ouro-fleet-lab-20261007/state/scratch/job_740d62762528581ee3a030b5106959a44d9ddc6a819fcb08ec75e93e71db0a88"
+}

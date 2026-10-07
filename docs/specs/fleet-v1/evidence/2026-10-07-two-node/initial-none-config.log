@@ -1,0 +1,8 @@
+vps-tool PASS settled
+Traceback (most recent call last):
+  File "/Users/monocursive/code/ouroboros/docs/specs/fleet-v1/evidence/2026-10-07-two-node/probe.py", line 83, in <module>
+    row=cli(args); assert row.get('run_id'), row
+  File "/Users/monocursive/code/ouroboros/docs/specs/fleet-v1/evidence/2026-10-07-two-node/probe.py", line 20, in cli
+    if check and r.returncode: raise AssertionError((args[:4],r.returncode,r.stdout,r.stderr))
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: (['run', '--request-id', 'native-r3-vps-none', '--on'], 1, '', 'ouro: {"nodes":[{"machine":"vps","reason":"worker_required_capability_unavailable"}],"reason":"no_eligible_worker"}\n')

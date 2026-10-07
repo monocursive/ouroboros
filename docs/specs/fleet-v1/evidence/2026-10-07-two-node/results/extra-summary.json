@@ -1,0 +1,10 @@
+{
+  "routed_readers": true,
+  "selector_override_refused": true,
+  "wait": true,
+  "missing_memory_capability_refused": true,
+  "worker_unavailable_preserves_observation": true,
+  "no_replacement_or_second_child": true,
+  "reattached_same_owner": true,
+  "cancel_observed_signal": true
+}

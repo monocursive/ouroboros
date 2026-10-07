@@ -1,0 +1,154 @@
+{
+  "attempt_id": "att_cf8bc80a-271a-445b-8904-68989aff0b92",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "observed_bytes": 0,
+      "state": "not_captured"
+    },
+    "stdout": {
+      "limit_bytes": 64,
+      "observed_bytes": 5003,
+      "path": "artifacts/stdout.bin",
+      "state": "captured",
+      "stored_bytes": 64,
+      "truncated": true
+    }
+  },
+  "child_protection": "enforced",
+  "coverage": {
+    "exec": {
+      "gaps": [],
+      "observed_count": 68,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.deny": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.write": {
+      "gaps": [],
+      "observed_count": 5,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "ledger": {
+      "gaps": [
+        {
+          "episode": 1,
+          "owner": {
+            "birth": "boot:9c1b4d50-1376-4da9-83da-1d58a793b465:start:2925066",
+            "boot_id": "9c1b4d50-1376-4da9-83da-1d58a793b465",
+            "pid": 125931,
+            "uid": 1000
+          },
+          "reason": "writer_outage"
+        },
+        {
+          "at_source_seq": 73,
+          "from_source_seq": 60,
+          "reason": "source sequence gap",
+          "source": "audit",
+          "to_source_seq": 72
+        },
+        {
+          "at_source_seq": 6,
+          "from_source_seq": 5,
+          "reason": "source sequence gap",
+          "source": "wrapper",
+          "to_source_seq": 5
+        }
+      ],
+      "status": "degraded"
+    },
+    "limits": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "wrapper"
+      ],
+      "status": "active"
+    },
+    "net": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "proxy.net": {
+      "gaps": [],
+      "observed_count": null,
+      "sources": [],
+      "status": "unsupported"
+    }
+  },
+  "evidence_health": "degraded",
+  "job_id": "job_381da90da3fb66813294f11f752366c6a29147ce2ee30e45d14ed1efb46532d0",
+  "ledger_settlement": "recorded",
+  "ledger_state": "settled",
+  "outcome": {
+    "cause": null,
+    "code": 0,
+    "error": null,
+    "kind": "exited",
+    "signal": null
+  },
+  "owner": {
+    "birth": "boot:9c1b4d50-1376-4da9-83da-1d58a793b465:start:2925066",
+    "boot_id": "9c1b4d50-1376-4da9-83da-1d58a793b465",
+    "pid": 125931,
+    "uid": 1000
+  },
+  "reachability": "reachable",
+  "request_digest": "sha256:835c4763cc4e65297a5251b8bf0328bc745b23b924ebd8ba5ec68b953a964570",
+  "resolved": {
+    "argv_digest": "sha256:b38d775b5d82a7429ad9f29826bf731d79b88796deb8d4195908baa1d251c860",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout"
+      ]
+    },
+    "evidence": "best-effort",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:10b53fa587fe7fb0f6a69d6d5050513c987fb811d1521a99666b4414c137fab9",
+    "launch": "fleet-fixture",
+    "owner_lifetime": "systemd_user_service",
+    "policy_digest": "sha256:56755dfd9143cf42a21f820482a5a4c2834ba61205d79d4b71f8464509e34ebc",
+    "profile": "tool",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "run_id": "run_b6810f68030c47b59ec03a3b657cae44",
+  "schema": "ouro.fleet.attempt/1",
+  "settlement": "recorded",
+  "stale": false,
+  "state": "exited",
+  "state_cleanup": "complete",
+  "worker": "pi",
+  "workspace": "/home/monocursive/ouro-fleet-lab-20261007/state/scratch/job_381da90da3fb66813294f11f752366c6a29147ce2ee30e45d14ed1efb46532d0"
+}

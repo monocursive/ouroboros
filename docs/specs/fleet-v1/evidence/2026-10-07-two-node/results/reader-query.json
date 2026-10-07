@@ -1,0 +1,202 @@
+{
+  "exit_code": 0,
+  "result": {
+    "child_protection": "enforced",
+    "coverage": {
+      "classes": {
+        "exec": {
+          "gap_count": 0,
+          "observed_count": 386,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gap_count": 0,
+          "observed_count": 5,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gap_count": 0,
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gap_count": 0,
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "gap_count": 0,
+      "scope": "snapshot_run",
+      "selection_status": "active",
+      "status": "by_class"
+    },
+    "done": false,
+    "local_consistency": true,
+    "ndjson": "",
+    "next_cursor": "34556e4febac456b9e4f1efba8eddb0192177028f05d4ba6813e4b6f6b9cbe21",
+    "oversized_record": null,
+    "problems": [],
+    "records": [
+      {
+        "attempt_id": "att_46c8a55d-d274-4e98-95e8-0478e0a2daf3",
+        "decision": null,
+        "fields": {
+          "argv_digest": null,
+          "argv_digest_reason": "descendant_argv_not_captured",
+          "path": {
+            "digest": "sha256:77bafa9e3a8a092afc4f1dd84e6e1cc58b68f42eb934bf0f6b73deb2518f78a3",
+            "kind": "digest",
+            "reason": "outside_known_roots"
+          },
+          "path_basis": "argument_snapshot",
+          "path_complete": true,
+          "pid": 124460,
+          "pid_start_ticks": 2916119,
+          "syscall": "execve"
+        },
+        "kind": "source",
+        "monotonic_ns": "473472379",
+        "observed_at": "2026-10-07T18:32:15Z",
+        "operation": "proc.exec",
+        "outcome": {
+          "completion": "exec_transition",
+          "errno": null,
+          "ok": true,
+          "return_value": null
+        },
+        "prev": "sha256:02b198f654d4bdc4f1571628a1e9125f6fe79dc57089a18e9386055f099dd3cc",
+        "provenance": {
+          "peer_birth": "boot:9c1b4d50-1376-4da9-83da-1d58a793b465:start:2916059",
+          "peer_pid": 124429,
+          "peer_uid": 1000,
+          "role": "producer",
+          "token_id": "9f11c662351a4f3ebc666dc92b6747c9"
+        },
+        "received_at": "2026-10-07T18:32:15Z",
+        "request_id": "source:audit:1",
+        "run_id": "run_317200410d0b423c9aeb0690451af4b9",
+        "schema": "ouro.event/1",
+        "seq": 6,
+        "source": "audit",
+        "source_seq": 1,
+        "stage": "result"
+      },
+      {
+        "attempt_id": "att_46c8a55d-d274-4e98-95e8-0478e0a2daf3",
+        "decision": null,
+        "fields": {
+          "argv_digest": null,
+          "argv_digest_reason": "descendant_argv_not_captured",
+          "path": {
+            "digest": "sha256:31be69e3615989e602261307522910ec8b49f440c5bcf6fafb39fc78104726ab",
+            "kind": "digest",
+            "reason": "outside_known_roots"
+          },
+          "path_basis": "argument_snapshot",
+          "path_complete": true,
+          "pid": 124464,
+          "pid_start_ticks": 2916143,
+          "syscall": "execve"
+        },
+        "kind": "source",
+        "monotonic_ns": "481427570",
+        "observed_at": "2026-10-07T18:32:15Z",
+        "operation": "proc.exec",
+        "outcome": {
+          "completion": "exec_transition",
+          "errno": null,
+          "ok": true,
+          "return_value": null
+        },
+        "prev": "sha256:4aebee7cbc991578e54668d4bb2d40c35c464e5eed4ff89d75c886ae33f9f222",
+        "provenance": {
+          "peer_birth": "boot:9c1b4d50-1376-4da9-83da-1d58a793b465:start:2916059",
+          "peer_pid": 124429,
+          "peer_uid": 1000,
+          "role": "producer",
+          "token_id": "9f11c662351a4f3ebc666dc92b6747c9"
+        },
+        "received_at": "2026-10-07T18:32:16Z",
+        "request_id": "source:audit:5",
+        "run_id": "run_317200410d0b423c9aeb0690451af4b9",
+        "schema": "ouro.event/1",
+        "seq": 11,
+        "source": "audit",
+        "source_seq": 5,
+        "stage": "result"
+      },
+      {
+        "attempt_id": "att_46c8a55d-d274-4e98-95e8-0478e0a2daf3",
+        "decision": null,
+        "fields": {
+          "exit_code": 0,
+          "pid": 124464,
+          "pid_start_ticks": 2916143,
+          "signal": null,
+          "termination": "exited"
+        },
+        "kind": "source",
+        "monotonic_ns": "490451196",
+        "observed_at": "2026-10-07T18:32:15Z",
+        "operation": "proc.exit",
+        "outcome": {
+          "completion": "process_exit",
+          "errno": null,
+          "ok": true,
+          "return_value": 0
+        },
+        "prev": "sha256:ce0e3bed251addde2bab7f9eb35e994202909e8985bea71776cfc4b9c314c47e",
+        "provenance": {
+          "peer_birth": "boot:9c1b4d50-1376-4da9-83da-1d58a793b465:start:2916059",
+          "peer_pid": 124429,
+          "peer_uid": 1000,
+          "role": "producer",
+          "token_id": "9f11c662351a4f3ebc666dc92b6747c9"
+        },
+        "received_at": "2026-10-07T18:32:16Z",
+        "request_id": "source:audit:7",
+        "run_id": "run_317200410d0b423c9aeb0690451af4b9",
+        "schema": "ouro.event/1",
+        "seq": 13,
+        "source": "audit",
+        "source_seq": 7,
+        "stage": "result"
+      }
+    ],
+    "run_id": "run_317200410d0b423c9aeb0690451af4b9",
+    "scanned_through_seq": 13,
+    "schema": "ouro.ledger.read/1",
+    "snapshot": {
+      "head_digest": "sha256:bb584d7b6bab62fd1a342b8cde8c7620b5758e3e22c1b3a88a53f774be03c663",
+      "head_seq": 401
+    },
+    "state": "settled",
+    "stream_status": "complete"
+  }
+}

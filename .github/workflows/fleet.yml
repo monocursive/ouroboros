@@ -1,0 +1,30 @@
+name: fleet
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: fleet-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  contracts:
+    # BEAM belongs only to the fleet lane. The Jail reference host must remain
+    # free of it so I01 continues to prove independent composition.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: fleet
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          otp-version: '27.3'
+          elixir-version: '1.18.3'
+          install-hex: false
+          install-rebar: false
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix test

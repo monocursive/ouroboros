@@ -1,0 +1,433 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_86f787d0-0a03-4c71-bb4c-44ba838586db",
+  "revision": 4,
+  "phase": "settled",
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "Linux 7.0.0-31-generic"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": "bubblewrap",
+    "backend_version": "bubblewrap 0.11.1"
+  },
+  "policy": {
+    "name": "tool",
+    "digest": "sha256:cb468cdf3dcda6cbb37b0765bf60dc63b80caf8ce1ff0c01bbb7a6004314593a",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "grants": []
+  },
+  "containment": "enforced",
+  "child_protection": "enforced",
+  "exec_observed": true,
+  "argv_digest": "sha256:b38d775b5d82a7429ad9f29826bf731d79b88796deb8d4195908baa1d251c860",
+  "applied": {
+    "filesystem": {
+      "mechanism": "bubblewrap-binds",
+      "protected_coverage": "existing_and_root",
+      "mounts": [
+        {
+          "path": "/",
+          "mode": "ro"
+        },
+        {
+          "path": "/usr",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/ssl",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/resolv.conf",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/passwd",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/group",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/hosts",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/localtime",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/ld.so.cache",
+          "mode": "ro"
+        },
+        {
+          "path": "/proc",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/null",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/zero",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/full",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/random",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/urandom",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/tty",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/pts",
+          "mode": "rw"
+        },
+        {
+          "path": "/tmp",
+          "mode": "rw"
+        },
+        {
+          "path": "/home/ubuntu/ouro-fleet-lab-20261007/state/scratch/job_e89d3a962899299ec0073f2696f0fd450bdf6e245e7c18536272d0c7db04b730",
+          "mode": "rw"
+        },
+        {
+          "path": "/tmp/.git",
+          "mode": "ro"
+        },
+        {
+          "path": "/tmp/.ouroboros",
+          "mode": "ro"
+        },
+        {
+          "path": "/home/ubuntu/ouro-fleet-lab-20261007/state/scratch/job_e89d3a962899299ec0073f2696f0fd450bdf6e245e7c18536272d0c7db04b730/.git",
+          "mode": "ro"
+        },
+        {
+          "path": "/home/ubuntu/ouro-fleet-lab-20261007/state/scratch/job_e89d3a962899299ec0073f2696f0fd450bdf6e245e7c18536272d0c7db04b730/.ouroboros",
+          "mode": "ro"
+        },
+        {
+          "path": "/run/ouro/state",
+          "mode": "rw"
+        },
+        {
+          "path": "/run/ouro/jail",
+          "mode": "ro"
+        }
+      ]
+    },
+    "network": {
+      "mode": "none",
+      "mechanism": "network-namespace",
+      "allowed_hosts": []
+    },
+    "syscalls": {
+      "mechanism": "seccomp-bpf",
+      "digest": "sha256:6be154d0d902309f8918b03bddd6a3dae656926dbf827ccbbe551e5f73ffb2ec"
+    },
+    "limits": [
+      {
+        "key": "wall",
+        "requested": "90000",
+        "required": true,
+        "applied": true,
+        "mechanism": "boottime-deadline",
+        "scope": "tree",
+        "hit": false
+      },
+      {
+        "key": "pids",
+        "requested": "256",
+        "required": false,
+        "applied": true,
+        "mechanism": "pids.max",
+        "scope": "tree",
+        "hit": false
+      }
+    ],
+    "environment_names": [
+      "FIX_HOME",
+      "LANG",
+      "PATH",
+      "PWD",
+      "TMPDIR"
+    ],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": "ptrace",
+    "set": "linux-closed-v1",
+    "attached": true,
+    "sources": {
+      "wrapper": "degraded",
+      "audit": "degraded",
+      "proxy": "unsupported"
+    },
+    "gaps": [
+      {
+        "classes": [
+          "exec"
+        ],
+        "source": "wrapper",
+        "start_ns": "3143726758",
+        "end_ns": "3150061464",
+        "reason": "trace_transport_loss",
+        "lost_count": null
+      },
+      {
+        "classes": [
+          "fs.write"
+        ],
+        "source": "wrapper",
+        "start_ns": "3143726758",
+        "end_ns": "3150061695",
+        "reason": "trace_transport_loss",
+        "lost_count": null
+      },
+      {
+        "classes": [
+          "fs.deny"
+        ],
+        "source": "wrapper",
+        "start_ns": "3143726758",
+        "end_ns": "3150061845",
+        "reason": "trace_transport_loss",
+        "lost_count": null
+      },
+      {
+        "classes": [
+          "net"
+        ],
+        "source": "wrapper",
+        "start_ns": "3143726758",
+        "end_ns": "3150062005",
+        "reason": "trace_transport_loss",
+        "lost_count": null
+      }
+    ]
+  },
+  "coverage": {
+    "exec": {
+      "status": "degraded",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": null,
+      "gaps": [
+        {
+          "classes": [
+            "exec"
+          ],
+          "source": "wrapper",
+          "start_ns": "3143726758",
+          "end_ns": "3150061464",
+          "reason": "trace_transport_loss",
+          "lost_count": null
+        }
+      ]
+    },
+    "fs.write": {
+      "status": "degraded",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": null,
+      "gaps": [
+        {
+          "classes": [
+            "fs.write"
+          ],
+          "source": "wrapper",
+          "start_ns": "3143726758",
+          "end_ns": "3150061695",
+          "reason": "trace_transport_loss",
+          "lost_count": null
+        }
+      ]
+    },
+    "fs.deny": {
+      "status": "degraded",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": null,
+      "gaps": [
+        {
+          "classes": [
+            "fs.deny"
+          ],
+          "source": "wrapper",
+          "start_ns": "3143726758",
+          "end_ns": "3150061845",
+          "reason": "trace_transport_loss",
+          "lost_count": null
+        }
+      ]
+    },
+    "net": {
+      "status": "degraded",
+      "sources": [
+        "audit"
+      ],
+      "observed_count": null,
+      "gaps": [
+        {
+          "classes": [
+            "net"
+          ],
+          "source": "wrapper",
+          "start_ns": "3143726758",
+          "end_ns": "3150062005",
+          "reason": "trace_transport_loss",
+          "lost_count": null
+        }
+      ]
+    },
+    "limits": {
+      "status": "active",
+      "sources": [
+        "wrapper"
+      ],
+      "observed_count": 0,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": {
+    "pid": 1724479,
+    "identity": {
+      "kind": "linux_boot_start",
+      "value": {
+        "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+        "pid": 1724479,
+        "start_time_ticks": 134993214
+      }
+    }
+  },
+  "lifetime": {
+    "boundary": "pid_namespace",
+    "native": {
+      "os": "linux",
+      "details": {
+        "backend_exec_by": "descriptor",
+        "bwrap_pid": 1724476,
+        "cgroup_namespace": 4026532377,
+        "command_rules": {
+          "deny": 0,
+          "forbid": 0
+        },
+        "execution_cgroup": {
+          "charged_helpers": [
+            {
+              "pid": 1724476,
+              "role": "bubblewrap"
+            },
+            {
+              "pid": 1724478,
+              "role": "namespace_init"
+            }
+          ],
+          "device": 29,
+          "inode": 9506202,
+          "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_86f787d0-0a03-4c71-bb4c-44ba838586db.leaf",
+          "scope": "target_descendants_and_listed_helpers"
+        },
+        "filtered_readonly_opens": 0,
+        "launcher_pid": 1724479,
+        "mnt_namespace": 4026532370,
+        "namespace_init_pid": 1724478,
+        "narrowing_filter_digest": "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181",
+        "narrowing_filter_digest_installed": "sha256:9000a6939204c3b552547e900e1496f691a6f87523e3ccae69371b749ab0da12",
+        "net_namespace": 4026532380,
+        "observer_plan": {
+          "backend": "ptrace",
+          "event_bytes_max": 65536,
+          "in_flight_max": 16384,
+          "kernel_ring_bytes": null,
+          "path_snapshot_max": 4096,
+          "queue_bytes_max": 4194304,
+          "queue_events_max": 16384,
+          "queue_lifecycle_reserve_bytes": 65536,
+          "queue_result_bytes_max": 4128768,
+          "test_seams": {}
+        },
+        "path_claims_unverified": 0,
+        "pid_namespace": 4026532376,
+        "readonly_open_fast_path": true,
+        "requested_by_other_filters": 0,
+        "resolv_sanitization": "nameservers_only",
+        "seccomp_filters": {
+          "expected": 2,
+          "observed": 2
+        },
+        "supervisor_scope": {
+          "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-ledger-owner-071ff038f04a4d9994365521db92f8e1.service",
+          "reason": null,
+          "reason_code": null,
+          "state": "already_delegated",
+          "unit": null
+        },
+        "user_namespace": 4026532462,
+        "watcher_pid": 1724477
+      }
+    },
+    "tree_empty": true,
+    "verified_at": "2026-10-07T18:30:32Z",
+    "verification_scope": "attempt_tree",
+    "integrity": "verified"
+  },
+  "outcome": {
+    "kind": "signaled",
+    "code": null,
+    "signal": 15,
+    "cause": "operator_signal",
+    "error": null
+  },
+  "state_cleanup": "complete",
+  "cleanup_error": null,
+  "created_at": "2026-10-07T18:30:29Z",
+  "updated_at": "2026-10-07T18:30:32Z",
+  "errors": [
+    {
+      "code": "evidence_lost",
+      "stage": "running",
+      "message": "trace fd write failed: Broken pipe (os error 32)",
+      "remediation_category": "inspect_state"
+    }
+  ],
+  "credentials": []
+}

@@ -1,0 +1,68 @@
+{
+  "attempt_id": "att_b560307b-e11a-4301-85dd-88b31832d766",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "state": "not_captured"
+    },
+    "stdout": {
+      "state": "not_captured"
+    }
+  },
+  "child_protection": "enforced",
+  "coverage": {
+    "status": "unobserved"
+  },
+  "evidence_health": "ok",
+  "job_id": "job_1dc64b9d44ed9f4b6cf2f7bca17f4cd48de57a7ca449e4840140e511a6142179",
+  "ledger_settlement": "pending",
+  "ledger_state": "admitted",
+  "outcome": null,
+  "owner": {
+    "birth": "boot:47a3956e-f44b-4139-a8fc-45418c38243f:start:134994177",
+    "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+    "pid": 1725550,
+    "uid": 1000
+  },
+  "reachability": "reachable",
+  "request_digest": "sha256:45c64c83200fef2aca05670887b772ad2d16916585076f30449cdd6658571c5c",
+  "resolved": {
+    "argv_digest": "sha256:b38d775b5d82a7429ad9f29826bf731d79b88796deb8d4195908baa1d251c860",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout"
+      ]
+    },
+    "evidence": "strict",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:5c14b6c399ea5d5a4e5114358840d1db69741a471c3de30c72641d330206e935",
+    "launch": "fleet-fixture",
+    "owner_lifetime": "systemd_user_service",
+    "policy_digest": "sha256:97686fb3c73976ca42ba36187741c5f65c12538b4bd87a2eafd29033b4da9d30",
+    "profile": "tool",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "run_id": "run_eaf19b5918d34134aab1dc203190677a",
+  "schema": "ouro.fleet.attempt/1",
+  "settlement": "pending",
+  "stale": false,
+  "state": "running",
+  "state_cleanup": "pending",
+  "worker": "vps",
+  "workspace": "/home/ubuntu/ouro-fleet-lab-20261007/state/scratch/job_1dc64b9d44ed9f4b6cf2f7bca17f4cd48de57a7ca449e4840140e511a6142179"
+}

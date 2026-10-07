@@ -1,0 +1,6 @@
+[path] = System.argv()
+config = OuroFleet.Store.read!(OuroFleet.Boot.private!(path))
+OuroFleet.Boot.start(config)
+System.put_env("OURO_FLEET_CONFIG", path)
+{:ok, _} = Application.ensure_all_started(:ouro_fleet)
+Process.sleep(:infinity)

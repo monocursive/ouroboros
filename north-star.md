@@ -1,6 +1,8 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 21.** Written 2026-09-21, revised 2026-10-03. Revision 21
+Status: **specification, revision 22.** Written 2026-09-21, revised 2026-10-07. Revision 22
+records ledger contract closeout and the first two-node fleet execution slice.
+Fleet membership provisioning and managed submission remain open. Revision 21
 adds NVIDIA's OpenShell to the §0 competitor list; no mechanism or milestone changes.
 Revision 20 records tested detached Linux batch ownership; the rest of milestone 2 and
 managed submission remain open. Revision 19
@@ -683,10 +685,11 @@ refusal, and violation halves of `sandbox.ex`, and `core.md` §7.
 
 ## 5. `ouro-ledger`
 
-Implementation status 2026-10-06: the [local ledger implementation](docs/specs/ledger-v1.md)
+Implementation status 2026-10-07: the [local ledger implementation](docs/specs/ledger-v1.md)
 provides a durable single writer, preparation and replay identities, gated Linux
 launch ownership, source ingestion, settlement, bounded opt-in output capture,
-inspection, verification and orphan reconciliation. Its schema is not frozen.
+inspection, verification and orphan reconciliation. Its schemas and golden fixtures are
+[frozen together](docs/specs/ledger-v1/milestone-2-contracts.json).
 Bounded single-run queries preserve source records and their evidence labels;
 plain NDJSON export preserves exact canonical bytes. Rotation, recoverable pruning,
 operator holds and persistent history/capture retention policies are implemented.
@@ -699,9 +702,11 @@ they do not establish object or content equivalence. Portable bundles, explicit
 node signing and pinned offline verification are implemented. Best-effort
 writer-outage recovery retains bounded pending evidence and explicit degraded
 coverage. The [durability acceptance map](docs/specs/ledger-v1/durability-acceptance.md)
-tracks the remaining checks. Historical custody and managed authorization
-remain open; the complete
-milestone-2 contract below is not yet implemented.
+tracks the completed checks, including transcript display, explicit argv capture,
+foreground control and structured redaction. The
+[milestone-2 acceptance map](docs/specs/ledger-v1/milestone-2-acceptance.md) records
+closeout. Historical custody at the later legacy cut and managed authorization
+remain open.
 
 The ledger joins authorisation and attributed observation into one ordered record,
 keeps that record outside a contained child's write authority, and separates
@@ -1162,6 +1167,15 @@ wait and cancellation. [Lifecycle evidence](docs/specs/ledger-v1/evidence/2026-1
 includes killing the SSH client, reconnecting to the same owner and observing
 exactly one execution. This is local operator authority; managed ingress and
 the remaining milestone-2 contracts are still open.
+
+Status 2026-10-07: the [ledger closeout](docs/specs/ledger-v1/milestone-2-acceptance.md)
+freezes the completed record contracts and golden fixtures. The Pi's exact-kernel
+[Unix socket diagnostics module](docs/specs/jail-v1/evidence/2026-10-07-pi-proxy/README.md)
+enables its live proxy path without claiming memory-controller or Landlock support.
+The [fleet execution slice](docs/specs/fleet-v1/README.md) adds a Rust CLI and
+Elixir coordination around the independent owner. Its two-node fault evidence
+is separate from full milestone-3 closure: membership provisioning, final record
+freeze and the real-agent legacy-cut gate remain open.
 
 | Milestone | Deliverable | Exit |
 |---|---|---|

@@ -1,0 +1,14 @@
+{
+  "executables": {
+    "erl": null,
+    "erlc": null,
+    "escript": null,
+    "elixir": null,
+    "iex": null,
+    "mix": null
+  },
+  "runtime_directories": {
+    "/usr/lib/erlang": false,
+    "/usr/lib/elixir": false
+  }
+}

@@ -3,7 +3,7 @@
 # member: J0 has not selected eBPF, and a BPF target never builds on macOS.
 [workspace]
 resolver = "3"
-members = ["crates/ouro-jail", "crates/ouro-records", "crates/ouro-ledger", "crates/ouro-fixture", "crates/xtask"]
+members = ["crates/ouro", "crates/ouro-jail", "crates/ouro-records", "crates/ouro-ledger", "crates/ouro-fixture", "crates/xtask"]
 
 [workspace.package]
 version = "0.1.0"

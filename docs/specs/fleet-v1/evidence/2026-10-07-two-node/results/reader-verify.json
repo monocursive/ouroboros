@@ -1,0 +1,60 @@
+{
+  "exit_code": 0,
+  "result": [
+    {
+      "child_protection": "enforced",
+      "coverage": {
+        "exec": {
+          "gaps": [],
+          "observed_count": 386,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.deny": {
+          "gaps": [],
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "fs.write": {
+          "gaps": [],
+          "observed_count": 5,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "limits": {
+          "gaps": [],
+          "observed_count": 0,
+          "sources": [
+            "wrapper"
+          ],
+          "status": "active"
+        },
+        "net": {
+          "gaps": [],
+          "observed_count": 0,
+          "sources": [
+            "audit"
+          ],
+          "status": "active"
+        },
+        "proxy.net": {
+          "gaps": [],
+          "observed_count": null,
+          "sources": [],
+          "status": "unsupported"
+        }
+      },
+      "events": 401,
+      "local_consistency": true,
+      "problems": [],
+      "run_id": "run_317200410d0b423c9aeb0690451af4b9"
+    }
+  ]
+}

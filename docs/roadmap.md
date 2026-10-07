@@ -20,9 +20,11 @@ and SOCKS5 TCP proxying, optional HTTP(S) credential vaulting, event journals,
 
 Native Raspberry Pi validation covers the ARM64 syscall filters and observer.
 Host capabilities still decide which profiles can run: the tested Pi kernel
-disables memory cgroups and omits Landlock and Unix socket diagnostics.
-`tool` and `none` pass native launch tests; required memory ceilings,
-requested Landlock domains and `agent` refuse before the command starts.
+disables memory cgroups and omits Landlock. An exact-kernel
+[Unix socket diagnostics module](specs/jail-v1/evidence/2026-10-07-pi-proxy/README.md)
+now enables the live proxy path on the Pi, including credential-free production
+proxy-redaction checks. Required memory ceilings and requested Landlock domains
+still refuse before the command starts. This module needs rebuilding for a new kernel.
 The [October 6 Pi catch-up](specs/ledger-v1/evidence/2026-10-06-pi-catch-up/README.md)
 also validates the current retention, query, discovery, comparison and signed
 bundle features natively, including the installed CLI commands.
@@ -100,9 +102,9 @@ security settings and passes the failure tests. Inspection commands remain
 useful in the meantime. A future Mac client that submits work to Linux is a
 separate feature from running a sandbox locally on the Mac.
 
-## In progress: keep useful records across runs
+## Available in source: durable records across runs
 
-The first local `ouro-ledger` slice now reserves attempts, durably admits them
+The local `ouro-ledger` now reserves attempts, durably admits them
 before execution, ingests the jail's source events and records settlement.
 It includes inspection, local consistency verification, orphan reconciliation,
 bounded opt-in output capture, paginated evidence queries for one run, and
@@ -126,13 +128,15 @@ verification are also implemented. Best-effort writer-outage recovery retains
 bounded pending evidence for already admitted runs, with explicit degraded
 coverage and conservative missing-exit handling. The scripted durability audit
 now includes vendor-state cleanup after unknown outcomes. Transcript display,
-opt-in argv capture, foreground JSON control and structured redaction still
-remain in the milestone-2 contract; historical custody at the legacy cut and
-managed project authorization remain separate requirements.
+opt-in argv capture, foreground JSON control and structured redaction are also
+implemented and validated on Pi/VPS. The
+[milestone-2 closeout](specs/ledger-v1/milestone-2-acceptance.md) freezes the
+ledger schemas and fixtures. Historical custody at the legacy cut and managed
+project authorization remain separate requirements.
 A plain local export does not establish external custody.
 The [durability acceptance map](specs/ledger-v1/durability-acceptance.md) tracks
 lifecycle and pending-journal crash coverage, the completed acceptance cross-check
-and those remaining CLI/privacy contracts.
+and the completed CLI/privacy contracts.
 
 The storage/recovery slice adds durable segment and replay anchors, a rebuildable
 SQLite run index and reader cursors that survive writer restart. Canonical
@@ -152,6 +156,17 @@ Independent operator intents now have replay-safe effect decisions and protect
 pending effects from retention. Live tail follows bounded canonical fragments
 across rotation and writer restart without changing launch-owner authority.
 
+## In progress: place trusted-operator batch jobs
+
+The Rust `ouro fleet` front door and separate Elixir coordinator now connect
+provisioned Linux workers, preserve request identities through retries, and route
+execution to the independent Rust launch owner. The
+[two-node validation](specs/fleet-v1/evidence/2026-10-07-two-node/README.md)
+uses the VPS and Raspberry Pi. This source slice requires explicit private TLS
+configuration; membership provisioning and packaged installation remain work.
+Connected peers have operator authority over each other. It is not a managed
+team service or project authorization boundary.
+
 ## Later: submit work to a team worker
 
 A managed worker would let a developer submit a task to a company-controlled
@@ -163,9 +178,9 @@ The [pilot preparation record](benchmarks/managed/pilot-plan-2026-09-30.md)
 names the repository, team, model-service and deployment decisions still needed,
 and the implementation gates that follow the ledger prerequisites.
 
-After the single-worker workflow is proved, multiple workers could share
-and report work across a fleet. Both stages are planned. The standalone jail
-does not currently provide a team service or a fleet scheduler.
+After the single-worker workflow is proved, the managed service can use fleet
+placement across multiple workers. Both managed stages remain planned; the
+trusted-operator fleet slice does not supply their authorization or artifact flow.
 
 ## Help us make the next run better
 

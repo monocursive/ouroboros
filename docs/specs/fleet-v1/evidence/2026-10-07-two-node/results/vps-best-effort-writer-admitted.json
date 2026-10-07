@@ -1,0 +1,68 @@
+{
+  "attempt_id": "att_b46a0786-56f1-4bb0-b8bc-b311d05c60e0",
+  "capture": {
+    "argv": {
+      "state": "not_captured"
+    },
+    "stderr": {
+      "state": "not_captured"
+    },
+    "stdout": {
+      "state": "not_captured"
+    }
+  },
+  "child_protection": "enforced",
+  "coverage": {
+    "status": "unobserved"
+  },
+  "evidence_health": "ok",
+  "job_id": "job_edc66f9e526606e9aa3ff2c0cd00443d808d8e0c2866ff76d1f89e80f9b3ee9e",
+  "ledger_settlement": "pending",
+  "ledger_state": "admitted",
+  "outcome": null,
+  "owner": {
+    "birth": "boot:47a3956e-f44b-4139-a8fc-45418c38243f:start:134995287",
+    "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+    "pid": 1726723,
+    "uid": 1000
+  },
+  "reachability": "reachable",
+  "request_digest": "sha256:8ae6b2de6bd684565bf592029cee88d0d9ea2c47041e3bb328100a94d27643a4",
+  "resolved": {
+    "argv_digest": "sha256:b38d775b5d82a7429ad9f29826bf731d79b88796deb8d4195908baa1d251c860",
+    "capture": {
+      "limit_bytes": 64,
+      "streams": [
+        "stdout"
+      ]
+    },
+    "evidence": "best-effort",
+    "io": {
+      "mode": "batch",
+      "pty": false
+    },
+    "jail_image_digest": "sha256:5c14b6c399ea5d5a4e5114358840d1db69741a471c3de30c72641d330206e935",
+    "launch": "fleet-fixture",
+    "owner_lifetime": "systemd_user_service",
+    "policy_digest": "sha256:e58b29955531f86bba89dbf58577b530db7714e769af08d5f3f2ff4fbd836303",
+    "profile": "tool",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "schema": "ouro.ledger.request/1"
+  },
+  "run_id": "run_95e7d0f0eb794a8d9a82a6201f2ab542",
+  "schema": "ouro.fleet.attempt/1",
+  "settlement": "pending",
+  "stale": false,
+  "state": "running",
+  "state_cleanup": "pending",
+  "worker": "vps",
+  "workspace": "/home/ubuntu/ouro-fleet-lab-20261007/state/scratch/job_edc66f9e526606e9aa3ff2c0cd00443d808d8e0c2866ff76d1f89e80f9b3ee9e"
+}

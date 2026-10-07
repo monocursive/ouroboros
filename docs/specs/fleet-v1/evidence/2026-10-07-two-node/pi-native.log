@@ -1,0 +1,7 @@
+pi-tool PASS exited
+pi-none PASS exited
+pi-lost-reply PASS exited
+pi-owner-death PASS outcome_unknown
+pi-strict-writer PASS outcome_unknown
+pi-best-effort-writer PASS exited
+TWO-NODE ACCEPTANCE PASS 12 scenarios
