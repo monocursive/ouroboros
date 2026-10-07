@@ -654,8 +654,17 @@ fn run_linux(
     if let Some(notify) = notify.as_mut() {
         notify(&client.show(&run.run_id)?);
     }
-    let result = run_owned(options, &image, &expected_image, &run, &claim, &mut client);
-    if result.is_err() && !evidence::completion_pending(options, &run) {
+    let mut local_exit_saved = false;
+    let result = run_owned(
+        options,
+        &image,
+        &expected_image,
+        &run,
+        &claim,
+        &mut client,
+        &mut local_exit_saved,
+    );
+    if result.is_err() && !local_exit_saved {
         // Covers setup, finalization and lost mutation replies while this
         // library caller remains alive. Existing terminal evidence is preserved.
         record_unknown(
@@ -728,6 +737,7 @@ fn run_owned(
     run: &RunRecord,
     claim: &ClaimedOwner,
     client: &mut Client,
+    local_exit_saved: &mut bool,
 ) -> Result<RunResult> {
     let mut evidence = evidence::Evidence::new(options, run, claim)?;
     let run_dir = options.data.join("ledger").join(&run.run_id);
@@ -1085,7 +1095,9 @@ fn run_owned(
     } else {
         "outcome_unknown"
     };
-    evidence.finish(client, kind, json!({"receipt":receipt,"receipt_digest":digest,"outcome":typed.outcome,"coverage":typed.coverage,"capture":capture}), final_control)?;
+    let completion = evidence.finish(client, kind, json!({"receipt":receipt,"receipt_digest":digest,"outcome":typed.outcome,"coverage":typed.coverage,"capture":capture}), final_control);
+    *local_exit_saved = evidence.local_exit_saved;
+    completion?;
     let record = client.show(&run.run_id)?;
     let exit_code = exit.map_or(1, |s| {
         s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))

@@ -23,6 +23,9 @@ const STATE: &str = "owner-pending.json";
 const NEXT: &str = "owner-pending.next";
 const LOCK: &str = "owner-pending.lock";
 
+#[cfg(test)]
+mod crash_tests;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Completion {
@@ -109,13 +112,15 @@ impl Journal {
     }
     #[cfg(any(target_os = "linux", test))]
     pub fn create(&self, run: &RunRecord, owner: &Peer) -> Result<()> {
+        #[cfg(test)]
+        let _scope = crate::faults::scope("pending.create");
         // Creation must never overwrite pending evidence from an earlier owner.
         let _initial = Self::file(
             &self.dir,
             STATE,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
-        self.save(&State {
+        self.replace(&State {
             schema: "ouro.ledger.pending/1".into(),
             run_id: run.run_id.clone(),
             attempt_id: run.attempt_id.clone(),
@@ -131,12 +136,15 @@ impl Journal {
         })
     }
     pub fn read(&self, run: &RunRecord) -> Result<State> {
-        let file = Self::file(&self.dir, STATE, libc::O_RDONLY)?;
+        #[cfg(test)]
+        let _scope = crate::faults::scope("pending.read");
+        let mut file = Self::file(&self.dir, STATE, libc::O_RDONLY)?;
         if file.metadata()?.len() > JOURNAL_BYTES as u64 {
             return Err(invalid("size limit exceeded"));
         }
         let mut bytes = Vec::new();
-        file.take(JOURNAL_BYTES as u64 + 1)
+        (&mut file)
+            .take(JOURNAL_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() > JOURNAL_BYTES {
             return Err(invalid("size limit exceeded"));
@@ -159,9 +167,31 @@ impl Journal {
             return Err(invalid("checksum or durable owner/run binding mismatch"));
         }
         s.validate()?;
+        // A complete replacement can survive an interrupted save without its
+        // acknowledgement. Validate it, then establish durability before any
+        // caller imports, clears or acknowledges that pending evidence.
+        #[cfg(test)]
+        crate::faults::hit("read.before_file_sync")?;
+        file.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("read.before_directory_sync")?;
+        self.dir.sync_all()?;
         Ok(s)
     }
     pub fn save(&self, state: &State) -> Result<()> {
+        #[cfg(test)]
+        let _scope = crate::faults::scope(if state.completion.is_some() {
+            "pending.completion"
+        } else if !state.active {
+            "pending.clear"
+        } else if state.pending().is_empty() {
+            "pending.outage"
+        } else {
+            "pending.source"
+        });
+        self.replace(state)
+    }
+    fn replace(&self, state: &State) -> Result<()> {
         state.validate()?;
         let bytes =
             serde_json::to_vec(&serde_json::json!({"digest":digest(state)?,"state":state}))?;
@@ -169,14 +199,31 @@ impl Journal {
             return Err(invalid("size limit exceeded"));
         }
         // A stale replacement from an interrupted write has no authority.
+        #[cfg(test)]
+        crate::faults::hit("snapshot.before_temp_unlink")?;
         self.unlink(NEXT)?;
+        #[cfg(test)]
+        crate::faults::hit("snapshot.before_open")?;
         let mut next = Self::file(
             &self.dir,
             NEXT,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
+        #[cfg(test)]
+        {
+            crate::faults::hit("snapshot.before_write")?;
+            if crate::faults::active("snapshot.partial_write") {
+                next.write_all(&bytes[..bytes.len() / 2])?;
+                next.sync_all()?;
+                crate::faults::hit("snapshot.partial_write")?;
+            }
+        }
         next.write_all(&bytes)?;
+        #[cfg(test)]
+        crate::faults::hit("snapshot.before_file_sync")?;
         next.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("snapshot.before_rename")?;
         let from = CString::new(NEXT).unwrap();
         let to = CString::new(STATE).unwrap();
         if unsafe {
@@ -190,7 +237,11 @@ impl Journal {
         {
             return Err(std::io::Error::last_os_error().into());
         }
+        #[cfg(test)]
+        crate::faults::hit("snapshot.before_directory_sync")?;
         self.dir.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("snapshot.after_directory_sync")?;
         Ok(())
     }
     fn unlink(&self, name: &str) -> Result<()> {
@@ -204,10 +255,21 @@ impl Journal {
         Ok(())
     }
     pub fn remove(self) -> Result<()> {
+        #[cfg(test)]
+        let _scope = crate::faults::scope("pending.remove");
+        #[cfg(test)]
+        crate::faults::hit("cleanup.before_temp_unlink")?;
         self.unlink(NEXT)?;
+        #[cfg(test)]
+        crate::faults::hit("cleanup.before_state_unlink")?;
         self.unlink(STATE)?;
-        self.unlink(LOCK)?;
+        // Keep the mutex inode for the lifetime of the run directory. Unlinking
+        // a held flock lets another opener lock a different inode concurrently.
+        #[cfg(test)]
+        crate::faults::hit("cleanup.before_directory_sync")?;
         self.dir.sync_all()?;
+        #[cfg(test)]
+        crate::faults::hit("cleanup.after_directory_sync")?;
         Ok(())
     }
 }
@@ -335,7 +397,7 @@ mod tests {
     };
     const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    fn fixture(evidence: &str, admit: bool) -> (tempfile::TempDir, Store, RunRecord) {
+    pub(super) fn fixture(evidence: &str, admit: bool) -> (tempfile::TempDir, Store, RunRecord) {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         let owner = Peer {
@@ -372,7 +434,7 @@ mod tests {
             .unwrap();
         (temp, store, run)
     }
-    fn event(run: &RunRecord, seq: u64) -> Value {
+    pub(super) fn event(run: &RunRecord, seq: u64) -> Value {
         serde_json::to_value(records::Event::lifecycle_note(
             &run.attempt_id,
             seq,

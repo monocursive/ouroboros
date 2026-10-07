@@ -130,7 +130,9 @@ only an incomplete transport exchange enables buffering after admission.
 
 The owner atomically replaces `owner-pending.json` inside the run directory,
 with file and directory synchronization and a nonblocking exclusive lock shared
-with reconciliation. It retains a prefix of at most 32 events and 256 KiB.
+with reconciliation. Cleanup retains the same lock inode until the run directory
+is removed, so another opener cannot acquire a different mutex while cleanup
+still holds the first. It retains a prefix of at most 32 events and 256 KiB.
 Overflow retains only the latest event from each of the three sources, plus the
 first transport-loss note if necessary. Source sequences expose dropped
 intervals on import. Each retained event and local exit record is at most 1 MiB;
@@ -159,6 +161,18 @@ unknown; the writer never restarts an attempt. Journal persistence failure
 stops the owned tree and supplies no settlement acknowledgement. Successfully
 reconciled terminal journals are removed; invalid journals remain for inspection
 and conservatively block retention deletion.
+
+Reading a valid journal also synchronizes its pinned file and run directory
+before recovery imports or clears any pending evidence. Failure of either
+barrier refuses recovery without acknowledging or deleting that snapshot.
+A complete unacknowledged replacement may be recovered after these barriers;
+`owner-pending.next` is never promoted, even when it contains a complete record.
+The live owner remembers local completion only after its save returns success.
+It does not infer that success from a file left by a failed replacement. If the
+writer remains available, an owner save error records an unknown outcome unless
+canonical settlement was already durable. If the writer is unavailable, later
+recovery independently validates and synchronizes the surviving journal before
+deciding whether it contains sufficient evidence for settlement.
 
 After verified jail settlement, the owner appends the matching terminal receipt
 and the observed outcome. A run admitted by the ledger can also settle a proved

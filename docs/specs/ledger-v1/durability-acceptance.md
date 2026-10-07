@@ -30,10 +30,16 @@ switch or fault IPC request. Native cases use the production ledger launch
 owner and jail, then restart the production writer before replay. The test
 worker is a subprocess mode of the crash test; no test is marked ignored.
 
-Remaining acceptance work includes an equivalent interruption matrix for the
-best-effort pending journal and local-exit replacement itself, and a final
-cross-check of the full §5.4 acceptance list before declaring that gate complete.
-Existing write-limit/replacement-error checks cover specific local-exit failures,
-not every synchronization and rename interruption. Physical power loss,
+The [pending-journal matrices](../../../crates/ouro-ledger/src/pending/crash_tests.rs)
+cover initialization, outage marking, source buffering, local exit, reconciliation
+clear and cleanup: 44 injected I/O failures and 44 actual SIGKILLs. Recovery
+sync failures cannot import or acknowledge the journal. Cleanup keeps a stable
+mutex inode. The [native owner matrix](../../../crates/ouro-ledger/src/pending/crash_tests/launch.rs)
+injects save and cleanup faults into the real owner against the production
+writer and jail, checking admission, tree termination and replay.
+
+Remaining acceptance work is a final cross-check of the full §5.4 acceptance
+list before declaring that gate complete, plus historical custody at the cut.
+Physical power loss,
 independent custody, managed authorization and real-agent/provider acceptance
 are outside the evidence described here.

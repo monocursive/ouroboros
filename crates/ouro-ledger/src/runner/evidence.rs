@@ -9,6 +9,7 @@ pub(super) struct Evidence {
     pub claim: ClaimedOwner,
     offline: bool,
     initialized: bool,
+    pub local_exit_saved: bool,
     retry_at: Instant,
 }
 impl Evidence {
@@ -25,6 +26,7 @@ impl Evidence {
             claim: claim.clone(),
             offline: false,
             initialized: false,
+            local_exit_saved: false,
             retry_at: Instant::now(),
         })
     }
@@ -108,6 +110,7 @@ impl Evidence {
             });
             // No success acknowledgement can precede this local exit fence.
             journal.save(&state)?;
+            self.local_exit_saved = true;
         }
         if !self.offline {
             match client.append_owner(
@@ -135,30 +138,4 @@ impl Evidence {
             "local exit recorded; canonical reconciliation is pending writer availability",
         ))
     }
-}
-
-pub(super) fn completion_pending(options: &RunOptions, run: &RunRecord) -> bool {
-    if !options.best_effort {
-        return false;
-    }
-    if std::fs::symlink_metadata(
-        options
-            .data
-            .join("ledger")
-            .join(&run.run_id)
-            .join("owner-pending.json"),
-    )
-    .is_err()
-    {
-        return false;
-    }
-    let Ok(owner) = crate::daemon::peer_identity(unsafe { libc::geteuid() }, std::process::id())
-    else {
-        return false;
-    };
-    let mut run = run.clone();
-    run.owner = Some(owner);
-    Journal::open(&options.data.join("ledger").join(&run.run_id))
-        .and_then(|journal| journal.read(&run))
-        .is_ok_and(|state| state.completion.is_some())
 }
