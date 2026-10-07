@@ -1068,7 +1068,10 @@ matrices cover preparation, owner claim, admission, source append and settlement
 at persistence boundaries. A poisoned preparation retry refuses acknowledgement
 until recovery, just like an ambiguous append. The
 [October 6 lifecycle crash record](ledger-v1/evidence/2026-10-06-lifecycle-crashes/README.md)
-binds the tested revision, full-suite logs and native crash-case checks.
+binds the tested revision, full-suite logs and native crash-case checks. The
+[October 7 pending-journal record](ledger-v1/evidence/2026-10-07-pending-journal/README.md)
+adds owner save/cleanup faults, recovery barriers and a negative control for
+ambiguous local completion, with host coverage recorded explicitly.
 
 Linux execution tests must run the real jail through its closed gate, prove no
 duplicate launch on replay/lost reply, exercise daemon/owner death and record

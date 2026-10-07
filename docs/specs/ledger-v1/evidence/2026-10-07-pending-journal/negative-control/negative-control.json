@@ -1,0 +1,8 @@
+{
+  "expected_failure": true,
+  "restored_behavior": "completion inferred by rereading the pending file",
+  "case": "error/pending.completion/snapshot.before_directory_sync",
+  "observed": "settled",
+  "required": "outcome_unknown",
+  "cargo_exit": 101
+}

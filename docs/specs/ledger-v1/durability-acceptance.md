@@ -36,7 +36,9 @@ clear and cleanup: 44 injected I/O failures and 44 actual SIGKILLs. Recovery
 sync failures cannot import or acknowledge the journal. Cleanup keeps a stable
 mutex inode. The [native owner matrix](../../../crates/ouro-ledger/src/pending/crash_tests/launch.rs)
 injects save and cleanup faults into the real owner against the production
-writer and jail, checking admission, tree termination and replay.
+writer and jail, checking admission, tree termination and replay. The
+[pending-journal evidence](evidence/2026-10-07-pending-journal/README.md)
+records the tested revision and platform coverage.
 
 Remaining acceptance work is a final cross-check of the full §5.4 acceptance
 list before declaring that gate complete, plus historical custody at the cut.
