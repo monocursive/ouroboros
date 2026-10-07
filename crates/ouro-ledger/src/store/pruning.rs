@@ -109,7 +109,7 @@ pub(super) fn file_hash(file: &mut File, bytes: u64) -> Result<String> {
 /// Open relative to a pinned parent, never through a caller-supplied path.
 pub(super) fn member(root: &Path, name: &str) -> Result<(File, CString, Option<File>)> {
     let (parent, leaf) = if let Some(leaf) = name.strip_prefix("artifacts/") {
-        if !["stdout.bin", "stderr.bin"].contains(&leaf) {
+        if !["stdout.bin", "stderr.bin", "argv.bin"].contains(&leaf) {
             return Err(LedgerError("unsafe GC capture path".into()));
         }
         (root.join("artifacts"), leaf)
@@ -323,7 +323,7 @@ impl Retained {
             || self.replay.is_empty()
             || self.replay.len() > MAX_REPLAYS
             || self.files.len() < self.manifest.segments.len()
-            || self.files.len() > self.manifest.segments.len() + 2
+            || self.files.len() > self.manifest.segments.len() + 3
         {
             return Err(LedgerError("invalid retained GC authority".into()));
         }
@@ -352,8 +352,12 @@ impl Retained {
                         "GC segment inventory differs from chain anchors".into(),
                     ));
                 }
-            } else if !["artifacts/stdout.bin", "artifacts/stderr.bin"]
-                .contains(&file.path.as_str())
+            } else if ![
+                "artifacts/stdout.bin",
+                "artifacts/stderr.bin",
+                "artifacts/argv.bin",
+            ]
+            .contains(&file.path.as_str())
                 || file.bytes > 16 * 1024 * 1024
             {
                 return Err(LedgerError("invalid GC capture inventory".into()));

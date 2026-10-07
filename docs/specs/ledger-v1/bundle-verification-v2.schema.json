@@ -68,12 +68,13 @@
     },
     "captures": {
       "type": "array",
-      "maxItems": 2,
+      "maxItems": 3,
       "uniqueItems": true,
       "items": {
         "enum": [
           "stdout",
-          "stderr"
+          "stderr",
+          "argv"
         ]
       }
     },

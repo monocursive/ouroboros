@@ -775,7 +775,7 @@ starts its owner with `--io batch`. The resolved mode and descriptors' intended
 roles are recorded in `run.json`; raw output is never mixed into a JSON control
 response. Foreground JSON control uses `--control-fd` if child output is present.
 
-Implemented bundle slice: `bundle RUN --output DIR [--capture stdout|stderr]`
+Implemented bundle slice: `bundle RUN --output DIR [--capture stdout|stderr|argv]`
 exports a bounded snapshot; `--signing-key` adds an explicit Ed25519 signature.
 `bundle-keygen --output DIR` provisions a new key without replacing any existing
 identity. `verify-bundle DIR --trusted-key FILE` requires that exact signer.

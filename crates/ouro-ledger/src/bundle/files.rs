@@ -139,7 +139,7 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
             continue;
         }
         result.insert(leaf.to_owned());
-        if result.len() > 6 {
+        if result.len() > 7 {
             return Err(LedgerError("unexpected bundle members".into()));
         }
     }
@@ -239,6 +239,7 @@ impl Drop for Staging {
             "receipts.json",
             "stdout.bin",
             "stderr.bin",
+            "argv.bin",
             "signature.json",
             "private-key.pk8",
             "public-key.json",

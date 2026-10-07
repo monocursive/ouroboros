@@ -25,6 +25,9 @@ fn peer() -> Peer {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_captures(&["stdout"])
+    }
+    fn with_captures(names: &[&str]) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("data");
         let mut store = Store::open(&data).unwrap();
@@ -33,21 +36,35 @@ impl Fixture {
         ))
         .unwrap();
         payload["profile"] = json!("none");
-        payload["capture"]["streams"] = json!(["stdout"]);
+        payload["capture"]["streams"] = json!(names);
         let run = store.prepare("bundle-test", &payload, &peer()).unwrap();
         store.claim_owner(&run.run_id, &peer()).unwrap();
-        store.append_owner(&run.run_id, "terminal", "denied", None,
-            &json!({"outcome":{"kind":"refused"}, "capture":{"stdout":{"state":"captured","stored_bytes":7,"path":"artifacts/stdout.bin"},"stderr":{"state":"not_captured"}},
-            "coverage":{"status":"degraded","gaps":[{"reason":"fixture gap"}]}}),
-            &peer(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         let artifacts = data.join("ledger").join(&run.run_id).join("artifacts");
         private_directory(&artifacts).unwrap();
-        fs::write(artifacts.join("stdout.bin"), b"capture").unwrap();
-        fs::set_permissions(
-            artifacts.join("stdout.bin"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        let mut capture = json!({"stdout":{"state":"not_captured"},"stderr":{"state":"not_captured"},"argv":{"state":"not_captured"}});
+        for name in names {
+            let bytes: &[u8] = if *name == "argv" {
+                b"/bin/true\0\0private-arg\xff\0"
+            } else {
+                b"capture"
+            };
+            capture[*name] = json!({"state":"captured","stored_bytes":bytes.len(),"path":format!("artifacts/{name}.bin")});
+            let path = artifacts.join(format!("{name}.bin"));
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        store
+            .append_owner(
+                &run.run_id,
+                "terminal",
+                "denied",
+                None,
+                &json!({"outcome":{"kind":"refused"}, "capture":capture,
+            "coverage":{"status":"degraded","gaps":[{"reason":"fixture gap"}]}}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
         Self {
             temp,
             data,
@@ -448,4 +465,43 @@ fn valid_pinned_signature_never_overrides_canonical_semantic_checks() {
     assert!(signing::verify(signature, &bytes, Some(&signer.public())).is_ok());
     let error = verify_with_key(&path, Some(&keys.join("public-key.json"))).unwrap_err();
     assert!(error.to_string().contains("canonical replay"));
+}
+
+#[test]
+fn argv_is_exported_only_by_selection_and_all_three_signed_members_verify_offline() {
+    let mut f = Fixture::with_captures(&["stdout", "stderr", "argv"]);
+    let ordinary = f.bundle(&[]);
+    assert!(!ordinary.join("argv.bin").exists());
+    let events = fs::read_to_string(ordinary.join("events.ndjson")).unwrap();
+    assert!(!events.contains("private-arg"));
+    let selected = f.bundle(&["argv"]);
+    assert_eq!(verify(&selected).unwrap()["captures"], json!(["argv"]));
+    assert_eq!(
+        fs::read(selected.join("argv.bin")).unwrap(),
+        b"/bin/true\0\0private-arg\xff\0"
+    );
+    assert!(!selected.join("stdout.bin").exists());
+    let keys = f.temp.path().join("keys");
+    keygen(&keys).unwrap();
+    let path = f.temp.path().join("all-signed");
+    let signer = signing::Signer::load(&keys.join("private-key.pk8")).unwrap();
+    let report = assemble(
+        &f.data,
+        &f.run.run_id,
+        &path,
+        &["stdout".into(), "stderr".into(), "argv".into()],
+        Some(&signer),
+        |q| f.store.read(q),
+    )
+    .unwrap();
+    assert_eq!(report["captures"].as_array().unwrap().len(), 3);
+    drop(f.store);
+    fs::remove_dir_all(&f.data).unwrap();
+    fs::remove_file(keys.join("private-key.pk8")).unwrap();
+    assert_eq!(
+        verify_with_key(&path, Some(&keys.join("public-key.json"))).unwrap(),
+        report
+    );
+    fs::write(path.join("argv.bin"), b"tampered").unwrap();
+    assert!(verify_with_key(&path, Some(&keys.join("public-key.json"))).is_err());
 }

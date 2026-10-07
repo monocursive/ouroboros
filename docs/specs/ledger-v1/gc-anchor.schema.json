@@ -162,7 +162,7 @@
         "files": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 4098,
+          "maxItems": 4099,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -176,7 +176,7 @@
             "properties": {
               "path": {
                 "type": "string",
-                "pattern": "^(events-[0-9]{4}\\.ndjson|artifacts/(stdout|stderr)\\.bin)$"
+                "pattern": "^(events-[0-9]{4}\\.ndjson|artifacts/(stdout|stderr|argv)\\.bin)$"
               },
               "bytes": {
                 "type": "integer",

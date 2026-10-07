@@ -98,7 +98,7 @@
         "files": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 2,
+          "maxItems": 3,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -113,7 +113,8 @@
               "path": {
                 "enum": [
                   "artifacts/stdout.bin",
-                  "artifacts/stderr.bin"
+                  "artifacts/stderr.bin",
+                  "artifacts/argv.bin"
                 ]
               },
               "bytes": {

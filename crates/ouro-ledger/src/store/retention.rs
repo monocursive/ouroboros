@@ -193,7 +193,7 @@ impl Store {
             }
             if stream.run.capture_history.is_some() {
                 capture_reasons.push("captures_pruned");
-            } else if !["stdout", "stderr"].iter().any(|name| {
+            } else if !["stdout", "stderr", "argv"].iter().any(|name| {
                 matches!(
                     stream.run.capture[name]["state"].as_str(),
                     Some("captured" | "incomplete")

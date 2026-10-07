@@ -418,9 +418,27 @@ incomplete capture. Final forwarding has a two-second drain deadline so it
 cannot block the owner's evidence and lifetime loop.
 Default metadata uses argv digests and existing jail-redacted observation fields.
 The ledger does not archive vendor state. Whole-run GC removes inventoried
-stdout/stderr captures with canonical history. Capture-only expiry retains
+stdout/stderr/argv captures with canonical history. Capture-only expiry retains
 canonical history and records a deletion anchor. Structured minimization
 options remain future work.
+
+`run --capture argv` stores a private `artifacts/argv.bin` containing each
+requested argument's native bytes followed by NUL, including the executable.
+Empty arguments and non-UTF-8 bytes are preserved. The same per-artifact cap
+applies (default 1 MiB, maximum 16 MiB); zero is valid, and a truncated prefix
+can end inside an argument. Metadata records `encoding: nul_delimited`,
+`argument_count`, the limit, observed/stored byte counts and truncation.
+
+The owner writes and synchronizes argv after Jail preparation and before the
+admission record and execution gate. Admission binds the capture metadata;
+a write/sync failure leaves the gate closed and follows owner failure handling.
+A complete admission capture survives owner death, while the run outcome can
+remain unknown. This artifact records requested arguments, not proof of exec.
+Live display withholds bytes until the run is terminal. Raw arguments never
+enter the request, canonical events, ordinary show, query or canonical export.
+Bundle export requires its own explicit `--capture argv` selection. Both
+capture-only and whole-run retention include this artifact. The byte content
+has the same local-artifact integrity limits as output captures.
 
 Selected foreground streams are forwarded through separate queues of at most
 128 chunks of 8192 bytes each (1 MiB queued per stream). Queue overflow or a lost
@@ -432,7 +450,8 @@ run outcome when the writer is reachable. Batch output uses independent sinks.
 ordinary `show` response remains metadata only. With the flag, the CLI returns
 an [`ouro.ledger.show/1`](ledger-v1/show.schema.json) envelope containing the
 unchanged `run` projection and a `transcript`. Both pretty and `--json` output
-read at most 65,536 source bytes from each terminal stdout/stderr artifact.
+read at most 65,536 source bytes from each stdout/stderr/argv artifact on a
+terminal run.
 `text` uses reversible ASCII byte escapes (`\n`, `\r`, `\t`, `\\`, `\"`,
 `\'` and `\xNN`); non-ASCII bytes are escaped too. This prevents child output
 from executing terminal controls or inserting misleading display formatting.
@@ -843,7 +862,7 @@ to resolve an uncertain result. A page is not an atomic transaction across runs.
 
 For each eligible run the writer replays and verifies all canonical segments,
 compares their chain, state and replay identities against accepted writer state,
-and inventories exact segment bytes and selected stdout/stderr captures. It then
+and inventories exact segment bytes and selected stdout/stderr/argv captures. It then
 publishes a canonical, checksummed [GC anchor](ledger-v1/gc-anchor.schema.json)
 as `gc.json`: synchronize the temporary file, rename it, then synchronize the run
 directory **before any unlink**. This retained authority holds the original run
@@ -859,7 +878,7 @@ unlinked files, identity, size and contents before unlinking through a pinned
 parent directory. Symlinks, hard links, changed bytes or unexpected segments
 refuse. There is no recursive deletion; run directories, `segments.json`, replay
 anchors, projections, reader checkpoints and other files remain. Inventory is
-bounded to 4,096 segments of at most 1 GiB each, two captures of at most 16 MiB
+bounded to 4,096 segments of at most 1 GiB each, three captures of at most 16 MiB
 each, 65,536 replay-map entries and 16 MiB of retained metadata. Oversized runs
 are retained with an error. These bounds do not change normal segment rotation.
 
@@ -881,14 +900,14 @@ event bytes. The original `none` label remains `unprotected`.
 
 ### 8.1 Capture-only expiry
 
-Before history is eligible, GC can remove the selected stdout/stderr captures
+Before history is eligible, GC can remove the selected stdout/stderr/argv captures
 while preserving canonical events, manifests, replay identities and all query
 and export bytes. The same known-terminal-outcome, hold, reader-pin, clock and
 layout checks apply. Empty selected captures are still inventoried and removed;
-unselected streams are not candidates. Both captured streams share one policy.
+unselected streams are not candidates. All selected artifacts share one policy.
 Age uses the latest canonical writer activity, just like history retention.
 
-The writer verifies canonical history and inventories at most two regular,
+The writer verifies canonical history and inventories at most three regular,
 owned, unlinked capture files of at most 16 MiB each. It synchronizes the
 checksummed [capture inventory](ledger-v1/capture-gc-anchor.schema.json) as
 `captures-gc.json` before unlinking anything. That inventory binds the terminal
@@ -921,17 +940,17 @@ though canonical export contains no capture bytes.
 ## 8.4. Unsigned portable evidence bundles
 
 ```sh
-ouro-ledger bundle RUN --output /absolute/new-bundle [--capture stdout] [--capture stderr] --json
+ouro-ledger bundle RUN --output /absolute/new-bundle [--capture stdout] [--capture stderr] [--capture argv] --json
 ouro-ledger verify-bundle /absolute/new-bundle --json
 ```
 
 `bundle` connects to an existing writer and exports one pinned snapshot. The
 new private directory contains exact canonical records concatenated into
 `events.ndjson`, a canonical `receipts.json` array extracted from embedded
-admission/final records, and `bundle.json`. Optional `stdout.bin` and
-`stderr.bin` are included only when explicitly selected. No vendor state,
-SQLite index, credentials, raw argv or environment is discovered or copied.
-Selected output and explicit record bodies can contain secrets.
+admission/final records, and `bundle.json`. Optional `stdout.bin`, `stderr.bin`
+and `argv.bin` are included only when explicitly selected. No vendor state, SQLite index or environment is discovered
+or copied. Raw argv stays out of default bundles; selected argv/output artifacts
+and explicit record bodies can contain secrets.
 
 The [manifest](ledger-v1/bundle.schema.json) inventories each member's length and
 SHA-256. Its `run` is replayed from the exported records and describes that
@@ -1117,7 +1136,7 @@ The [October 7 transcript record](ledger-v1/evidence/2026-10-07-transcript/READM
 documents bounded opt-in display and native Pi/VPS validation. Milestone 2 still
 requires the CLI/privacy contracts identified by the
 [acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts):
-argv capture, foreground `--control-fd`
+foreground `--control-fd`
 and structured `--redact`. Historical custody remains an obligation at the
 later legacy-store removal cut; this tooling checkout does not perform it. Managed
 single-worker submission additionally needs its own principal, authorization,

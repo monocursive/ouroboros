@@ -28,10 +28,9 @@ impl Store {
     }
 
     fn transcript_stream(&self, run: &RunRecord, name: &str) -> Value {
-        let selected = name != "argv"
-            && run.payload["capture"]["streams"]
-                .as_array()
-                .is_some_and(|s| s.contains(&json!(name)));
+        let selected = run.payload["capture"]["streams"]
+            .as_array()
+            .is_some_and(|s| s.contains(&json!(name)));
         let recorded = &run.capture[name];
         let mut result = json!({
             "state":"not_captured", "displayed_bytes":0, "display_truncated":false,

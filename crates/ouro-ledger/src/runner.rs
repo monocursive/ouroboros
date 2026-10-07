@@ -1,13 +1,15 @@
 //! The launch owner: durably admit before opening the jail's existing gate.
 
+mod argv_capture;
 #[cfg(target_os = "linux")]
 mod evidence;
 use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 #[cfg(target_os = "linux")]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -41,8 +43,8 @@ const FRAME_MAX: usize = 1_048_576;
 #[cfg(target_os = "linux")]
 const CAPTURE_MAX: u64 = 16 * 1_048_576;
 
-/// The operator's literal execution request. Raw argv is never persisted;
-/// detached submission transfers it to the owner over a private socket.
+/// The operator's literal execution request. Raw argv is persisted only with
+/// explicit capture; detached submission uses a private socket either way.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunOptions {
@@ -468,7 +470,6 @@ fn output_pipe() -> Result<(File, File)> {
     Ok((parent, child))
 }
 
-#[cfg(target_os = "linux")]
 fn write_capture(writer: &mut impl Write, mut bytes: &[u8], stored: &mut u64) -> Result<()> {
     while !bytes.is_empty() {
         match writer.write(bytes) {
@@ -601,9 +602,9 @@ fn run_linux(
     if options
         .captures
         .iter()
-        .any(|s| s != "stdout" && s != "stderr")
+        .any(|s| !["stdout", "stderr", "argv"].contains(&s.as_str()))
     {
-        return Err(error("this slice captures stdout/stderr only"));
+        return Err(error("capture accepts stdout, stderr and argv only"));
     }
     let image = pinned_image(&options.jail)?;
     let expected_image = image_digest(&image)?;
@@ -860,6 +861,7 @@ fn run_owned(
     let mut control = Frames::new(control_parent)?;
     let mut gate = Some(&mut gate_parent);
     let mut admitted = false;
+    let mut argv_capture = json!({"state":"not_captured"});
     let mut terminal: Option<ControlMessage> = None;
     let mut terminal_seen = None;
     let mut control_seq = 0_u64;
@@ -920,12 +922,31 @@ fn run_owned(
                                 "executing jail image differs from the prepared image digest",
                             ));
                         }
+                        // Capture the exact requested argv only after preparation,
+                        // and durably bind its metadata before releasing exec.
+                        // Any partial write/sync failure takes the normal failure
+                        // path with incomplete metadata and an unopened gate.
+                        let mut admission =
+                            json!({"receipt":receipt,"receipt_digest":message.receipt_digest});
+                        if options.captures.iter().any(|s| s == "argv") {
+                            argv_capture::save(
+                                &run_dir,
+                                &options.argv,
+                                options.capture_limit,
+                                &mut argv_capture,
+                            )?;
+                            admission["capture"] = json!({
+                                "stdout":{"state":"not_captured"},
+                                "stderr":{"state":"not_captured"},
+                                "argv":argv_capture,
+                            });
+                        }
                         client.append_owner(
                             &run.run_id,
                             "admission",
                             "admitted",
                             None,
-                            &json!({"receipt":receipt,"receipt_digest":message.receipt_digest}),
+                            &admission,
                             &claim.owner_token,
                         )?;
                         evidence.admitted()?;
@@ -1001,6 +1022,7 @@ fn run_owned(
         terminate(&mut child.0);
     }
     let mut capture = serde_json::Map::new();
+    capture.insert("argv".into(), argv_capture);
     let complete = failure.is_none();
     for item in &mut captures {
         match item.finish(complete) {

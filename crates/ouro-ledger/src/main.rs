@@ -76,7 +76,7 @@ enum Action {
     /// Inspect a run's outcome, coverage and protection independently.
     Show {
         run_id: String,
-        /// Display up to 64 KiB per recorded terminal stream; may reveal secrets.
+        /// Display up to 64 KiB per recorded artifact on a terminal run; may reveal secrets.
         #[arg(long)]
         with_transcript: bool,
         #[arg(long)]
@@ -107,8 +107,8 @@ enum Action {
         /// New directory; existing destinations are never overwritten.
         #[arg(long)]
         output: PathBuf,
-        /// Include a terminal capture, which may contain secrets.
-        #[arg(long, value_parser = ["stdout", "stderr"])]
+        /// Include a selected output or argv artifact, which may contain secrets.
+        #[arg(long, value_parser = ["stdout", "stderr", "argv"])]
         capture: Vec<String>,
         /// Private Ed25519 PKCS#8 file from bundle-keygen; no automatic identity.
         #[arg(long)]
@@ -423,7 +423,8 @@ struct RunArgs {
     /// Start an independent user service and return its durable run identity.
     #[arg(long)]
     detach: bool,
-    #[arg(long,value_parser=["stdout","stderr"])]
+    /// Store a bounded output or NUL-delimited argv prefix; may contain secrets.
+    #[arg(long,value_parser=["stdout","stderr","argv"])]
     capture: Vec<String>,
     #[arg(long, default_value_t = 1_048_576)]
     capture_limit: u64,

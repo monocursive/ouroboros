@@ -10,13 +10,14 @@ fn stream(store: &Store, run: &RunRecord) -> Value {
 fn transcript_is_opt_in_bounded_and_lossless_for_hostile_bytes() {
     let mut bytes = vec![0u8; DISPLAY_BYTES as usize + 1];
     bytes[..12].copy_from_slice(b"hello\x1b\n\r\xff\"\\\0");
-    let (_temp, store, run) = gc_fixture_captures(&[("stdout", &bytes), ("stderr", &bytes)]);
+    let (_temp, store, run) =
+        gc_fixture_captures(&[("stdout", &bytes), ("stderr", &bytes), ("argv", &bytes)]);
     let plain = serde_json::to_value(store.show(&run.run_id).unwrap()).unwrap();
     assert!(plain.get("transcript").is_none());
     let shown = store.show_with_transcript(&run.run_id).unwrap();
     let transcript = &shown["transcript"];
     assert_eq!(shown["run"], plain);
-    for name in ["stdout", "stderr"] {
+    for name in ["stdout", "stderr", "argv"] {
         let s = &transcript["streams"][name];
         assert_eq!(s["state"], "captured");
         assert_eq!(s["displayed_bytes"], DISPLAY_BYTES);
@@ -39,7 +40,6 @@ fn transcript_is_opt_in_bounded_and_lossless_for_hostile_bytes() {
             .len()
             < MAX_FRAME_BYTES
     );
-    assert_eq!(transcript["streams"]["argv"]["state"], "not_captured");
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn transcript_keeps_capture_loss_separate_from_display_limits() {
 
 #[test]
 fn transcript_never_opens_live_unfinalized_or_unselected_artifacts() {
-    for state in ["prepared", "owned", "running", "outcome_unknown"] {
+    for state in ["prepared", "owned", "admitted", "outcome_unknown"] {
         let (_temp, mut store, run) = gc_fixture();
         let r = &mut store.streams.get_mut(&run.run_id).unwrap().run;
         r.state = state.into();
@@ -172,4 +172,69 @@ fn transcript_reports_empty_captures_and_retention_without_changing_history() {
         .unwrap();
     assert_eq!(stream(&store, &run)["state"], "pruned");
     assert!(stream(&store, &run).get("text").is_none());
+}
+
+#[test]
+fn argv_only_and_all_captures_follow_both_retention_paths() {
+    use ouro_records::retention::RetentionPolicy;
+    for captures in [
+        vec![("argv", b"/bin/true\0".as_slice())],
+        vec![
+            ("stdout", b"out".as_slice()),
+            ("stderr", b"err".as_slice()),
+            ("argv", b"/bin/true\0".as_slice()),
+        ],
+    ] {
+        for capture_first in [false, true] {
+            let (_temp, mut store, run) = gc_fixture_captures(&captures);
+            let root = store.root.join(&run.run_id);
+            let history = fs::read(root.join("events-0001.ndjson")).unwrap();
+            if capture_first {
+                let result = store
+                    .gc_policy_at(
+                        RetentionPolicy {
+                            retain_days: 90,
+                            capture_retain_days: 1,
+                        },
+                        None,
+                        100,
+                        &peer(),
+                        gc_future(),
+                    )
+                    .unwrap();
+                assert_eq!(result.captures_pruned.len(), 1);
+                assert_eq!(fs::read(root.join("events-0001.ndjson")).unwrap(), history);
+                for (name, _) in &captures {
+                    assert!(!root.join(format!("artifacts/{name}.bin")).exists());
+                    assert_eq!(
+                        store.show_with_transcript(&run.run_id).unwrap()["transcript"]["streams"]
+                            [name]["state"],
+                        "pruned"
+                    );
+                }
+            }
+            let result = store
+                .gc_policy_at(
+                    RetentionPolicy {
+                        retain_days: 1,
+                        capture_retain_days: 1,
+                    },
+                    None,
+                    100,
+                    &peer(),
+                    gc_future(),
+                )
+                .unwrap();
+            assert_eq!(result.pruned.len(), 1);
+            for (name, _) in &captures {
+                assert!(!root.join(format!("artifacts/{name}.bin")).exists());
+            }
+            drop(store);
+            let store = Store::open(&_temp.path().join("data")).unwrap();
+            assert_eq!(
+                store.show_with_transcript(&run.run_id).unwrap()["transcript"]["streams"]["argv"]["state"],
+                "pruned"
+            );
+        }
+    }
 }

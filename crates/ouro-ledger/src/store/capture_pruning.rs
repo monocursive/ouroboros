@@ -47,11 +47,11 @@ impl Retained {
     fn capture(&self, complete: bool) -> Value {
         let mut value = self.capture.clone();
         for f in &self.files {
-            let name = if f.path == "artifacts/stdout.bin" {
-                "stdout"
-            } else {
-                "stderr"
-            };
+            let name = f
+                .path
+                .strip_prefix("artifacts/")
+                .and_then(|p| p.strip_suffix(".bin"))
+                .expect("validated capture path");
             value[name]["state"] = json!(if complete { "pruned" } else { "pruning" });
             if complete {
                 value[name]["stored_bytes"] = json!(0);
@@ -126,7 +126,7 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
             .is_some_and(pruning::digest_valid)
         || !(1..=36_500).contains(&r.retain_days)
         || r.files.is_empty()
-        || r.files.len() > 2
+        || r.files.len() > 3
         || ![&r.last_activity_at, &r.cutoff, &r.collected_at]
             .into_iter()
             .all(|s| crate::reader::utc_second(s))
@@ -139,6 +139,7 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
         let name = match f.path.as_str() {
             "artifacts/stdout.bin" => "stdout",
             "artifacts/stderr.bin" => "stderr",
+            "artifacts/argv.bin" => "argv",
             _ => return Err(LedgerError("unsafe capture GC inventory".into())),
         };
         if f.bytes > 16 * 1024 * 1024
@@ -155,7 +156,7 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
             ));
         }
     }
-    for name in ["stdout", "stderr"] {
+    for name in ["stdout", "stderr", "argv"] {
         if matches!(
             r.capture[name]["state"].as_str(),
             Some("captured" | "incomplete")
@@ -385,7 +386,7 @@ impl Store {
 pub(super) fn inventory(root: &Path, run: &RunRecord) -> Result<Vec<RemovedFile>> {
     directory(&root.join("artifacts"))?;
     let mut files = Vec::new();
-    for name in ["stdout", "stderr"] {
+    for name in ["stdout", "stderr", "argv"] {
         let path = format!("artifacts/{name}.bin");
         let (_, _, file) = member(root, &path)?;
         let expected = run.capture[name]["stored_bytes"].as_u64().unwrap_or(0);

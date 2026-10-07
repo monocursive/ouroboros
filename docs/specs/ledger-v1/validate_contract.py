@@ -263,6 +263,15 @@ def pruning_fixtures(validators, run, records):
     capture_envelope = {"digest": digest(captured), "retained": captured}
     validators["capture-gc-anchor"].validate(capture_envelope)
     validators["capture-gc-complete"].validate({"schema": "ouro.ledger.capture-gc-complete/1", "anchor_digest": digest(captured)})
+    all_captures = copy.deepcopy(capture_envelope)
+    all_captures["retained"]["files"] = [
+        {**captured["files"][0], "path": f"artifacts/{name}.bin"}
+        for name in ("stdout", "stderr", "argv")
+    ]
+    validators["capture-gc-anchor"].validate(all_captures)
+    all_history = copy.deepcopy(envelope)
+    all_history["retained"]["files"] += all_captures["retained"]["files"]
+    validators["gc-anchor"].validate(all_history)
     for path in ["events-0001.ndjson", "../escape", "artifacts/vendor-state"]:
         altered = copy.deepcopy(capture_envelope)
         altered["retained"]["files"][0]["path"] = path
@@ -320,7 +329,7 @@ def bundle_fixtures(validators):
         altered = copy.deepcopy(manifest)
         altered[key] = value
         expect_invalid(validators["bundle"], altered, "unsupported authenticity claim")
-    for name in ["../events.ndjson", "vendor-state", "argv.bin"]:
+    for name in ["../events.ndjson", "vendor-state", "environment.bin"]:
         altered = copy.deepcopy(manifest)
         altered["files"][0]["name"] = name
         expect_invalid(validators["bundle"], altered, "unsafe or unsupported member")
@@ -389,6 +398,7 @@ def transcript_fixtures(validators):
             "state": state, "displayed_bytes": 4, "display_truncated": False,
             "stored_bytes": 4, "text": r"hi\n\xff",
         }
+        report["transcript"]["streams"]["argv"] = copy.deepcopy(report["transcript"]["streams"]["stdout"])
         validators["show"].validate(report)
     for key, value in (("text", "\x1b[31m"), ("displayed_bytes", 65537), ("state", "pruned")):
         altered = copy.deepcopy(report)
@@ -410,6 +420,21 @@ def main():
     bundle_fixtures(validators)
     signed_bundle_fixtures(validators)
     transcript_fixtures(validators)
+    for suffix in ("", "-v2"):
+        manifest = read(f"bundle{suffix}.json")
+        manifest["files"] = [f for f in manifest["files"] if f["name"] in ("events.ndjson", "receipts.json")]
+        for name in ("stdout", "stderr", "argv"):
+            manifest["files"].append({"name": f"{name}.bin", "bytes": 0, "digest": "sha256:" + hashlib.sha256(b"").hexdigest()})
+        validators[f"bundle{suffix}"].validate(manifest)
+        oversized = copy.deepcopy(manifest)
+        oversized["files"][-1]["bytes"] = 16777217
+        expect_invalid(validators[f"bundle{suffix}"], oversized, "unbounded argv capture")
+        duplicate = copy.deepcopy(manifest)
+        duplicate["files"][-2] = duplicate["files"][-1]
+        expect_invalid(validators[f"bundle{suffix}"], duplicate, "duplicate argv capture")
+        report = read(f"bundle-verification{suffix}.json")
+        report["captures"] = ["stdout", "stderr", "argv"]
+        validators[f"bundle-verification{suffix}"].validate(report)
     query = read("query-page.json")
     comparison = read("diff-page.json")
     validators["query"].validate(query)
@@ -600,6 +625,10 @@ def main():
         target[path[-1]] = value
         expect_invalid(validators["record"], altered, label)
 
+    for names in (["argv"], ["stdout", "stderr", "argv"]):
+        selected = copy.deepcopy(request)
+        selected["capture"]["streams"] = names
+        validators["request"].validate(selected)
     altered = copy.deepcopy(request)
     altered["raw_argv"] = ["secret"]
     expect_invalid(validators["request"], altered, "raw argv in prepare")

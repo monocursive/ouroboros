@@ -179,7 +179,7 @@ impl Read for CheckedReader {
 }
 
 fn capture_bytes(run: &RunRecord, name: &str) -> Result<u64> {
-    if !["stdout", "stderr"].contains(&name)
+    if !["stdout", "stderr", "argv"].contains(&name)
         || !["settled", "denied", "outcome_unknown"].contains(&run.state.as_str())
         || !run.payload["capture"]["streams"]
             .as_array()
@@ -253,9 +253,11 @@ fn assemble(
     let start = Instant::now();
     let selected: BTreeSet<_> = captures.iter().map(String::as_str).collect();
     if selected.len() != captures.len()
-        || selected.iter().any(|s| !["stdout", "stderr"].contains(s))
+        || selected
+            .iter()
+            .any(|s| !["stdout", "stderr", "argv"].contains(s))
     {
-        return Err(error("select stdout and/or stderr once each"));
+        return Err(error("select stdout, stderr and/or argv once each"));
     }
     let stage = files::Staging::new(output)?;
     let mut events = files::member(&stage.dir, "events.ndjson", true)?;
@@ -420,7 +422,7 @@ fn verify_directory(
     if !(signed
         || (manifest.schema == "ouro.ledger.bundle/1" && manifest.authenticity == "unsigned"))
         || manifest.capture_digest_basis != "bundle_time"
-        || !(2..=4).contains(&manifest.files.len())
+        || !(2..=5).contains(&manifest.files.len())
     {
         return Err(error("unsupported bundle manifest"));
     }
@@ -450,7 +452,7 @@ fn verify_directory(
         let max = match member.name.as_str() {
             "events.ndjson" => MAX_STREAM_BYTES,
             "receipts.json" => MAX_JSON_BYTES,
-            "stdout.bin" | "stderr.bin" => {
+            "stdout.bin" | "stderr.bin" | "argv.bin" => {
                 let stream = member.name.trim_end_matches(".bin");
                 if capture_bytes(&manifest.run, stream)? != member.bytes {
                     return Err(error("bundle capture differs from canonical size"));

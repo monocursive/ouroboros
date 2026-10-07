@@ -28,7 +28,7 @@
     "files": {
       "type": "array",
       "minItems": 2,
-      "maxItems": 4,
+      "maxItems": 5,
       "items": {
         "type": "object",
         "properties": {
@@ -37,7 +37,8 @@
               "events.ndjson",
               "receipts.json",
               "stdout.bin",
-              "stderr.bin"
+              "stderr.bin",
+              "argv.bin"
             ]
           },
           "bytes": {
@@ -79,7 +80,8 @@
                 "name": {
                   "enum": [
                     "stdout.bin",
-                    "stderr.bin"
+                    "stderr.bin",
+                    "argv.bin"
                   ]
                 }
               }
@@ -133,6 +135,17 @@
             "properties": {
               "name": {
                 "const": "stderr.bin"
+              }
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "argv.bin"
               }
             }
           },

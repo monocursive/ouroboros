@@ -382,14 +382,14 @@ fn validate_payload(payload: &Value) -> Result<()> {
         || payload["capture"]["limit_bytes"]
             .as_u64()
             .is_none_or(|limit| limit > 16 * 1_048_576)
-        || streams.len() > 2
+        || streams.len() > 3
         || streams.iter().any(|stream| {
-            ![Some("stdout"), Some("stderr")].contains(&stream.as_str())
+            ![Some("stdout"), Some("stderr"), Some("argv")].contains(&stream.as_str())
                 || !unique.insert(stream.as_str().unwrap_or(""))
         })
     {
         return Err(LedgerError(
-            "capture only accepts unique stdout/stderr selections and at most 16 MiB per stream"
+            "capture only accepts unique stdout/stderr/argv selections and at most 16 MiB per stream"
                 .into(),
         ));
     }

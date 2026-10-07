@@ -23,7 +23,7 @@
           "properties": {
             "stdout": {"$ref": "#/$defs/stream"},
             "stderr": {"$ref": "#/$defs/stream"},
-            "argv": {"$ref": "#/$defs/stream", "properties": {"state": {"const": "not_captured"}}}
+            "argv": {"$ref": "#/$defs/stream"}
           }
         }
       }

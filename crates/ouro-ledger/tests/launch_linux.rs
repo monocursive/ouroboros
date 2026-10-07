@@ -23,6 +23,8 @@ use ouro_ledger::{
 use ouro_records::records;
 use serde_json::Value;
 
+#[path = "launch_linux/argv_capture.rs"]
+mod argv_capture;
 #[path = "launch_linux/transcript.rs"]
 mod transcript;
 #[path = "launch_linux/vendor_state.rs"]
@@ -124,6 +126,10 @@ fn real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_re
         command.args([
             "--capture",
             "stdout",
+            "--capture",
+            "stderr",
+            "--capture",
+            "argv",
             "--",
             "/bin/sh",
             "-c",
@@ -141,7 +147,7 @@ fn real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_re
             &fixture.data,
             &run.run_id,
             &path,
-            &["stdout".into()],
+            &["stdout".into(), "stderr".into(), "argv".into()],
             &keys.join("private-key.pk8"),
         )
         .unwrap();
@@ -150,6 +156,7 @@ fn real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_re
         assert_eq!(report["child_protection"], run.child_protection);
         assert_eq!(report["coverage"], run.coverage);
         assert_eq!(report["external_custody"], false);
+        assert_eq!(report["captures"].as_array().unwrap().len(), 3);
         fixture.writer.kill();
         fs::remove_dir_all(&fixture.data).unwrap();
         fs::remove_file(keys.join("private-key.pk8")).unwrap();
