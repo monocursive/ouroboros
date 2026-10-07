@@ -23,6 +23,9 @@ use ouro_ledger::{
 use ouro_records::records;
 use serde_json::Value;
 
+#[path = "launch_linux/vendor_state.rs"]
+mod vendor_state;
+
 const COMMAND_LIMIT: Duration = Duration::from_secs(20);
 
 #[test]
