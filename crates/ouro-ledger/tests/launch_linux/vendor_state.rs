@@ -82,14 +82,12 @@ fn vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death() {
             fixture.assert_unknown(&run.run_id)
         };
         assert_eq!(final_run.child_protection, "enforced");
-        let canonical = fs::read(
-            fixture
-                .data
-                .join("ledger")
-                .join(&run.run_id)
-                .join("events-0001.ndjson"),
-        )
-        .unwrap();
+        let canonical_path = fixture
+            .data
+            .join("ledger")
+            .join(&run.run_id)
+            .join("events-0001.ndjson");
+        let canonical = fs::read(&canonical_path).unwrap();
         assert!(
             !canonical
                 .windows(b"private-vendor-content".len())
@@ -108,7 +106,30 @@ fn vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death() {
             b"x"
         );
         assert!(!vendor.try_exists().unwrap());
-        assert!(fixture.client().verify(Some(&run.run_id)).unwrap()[0].local_consistency);
+        let verification = fixture.client().verify(Some(&run.run_id)).unwrap();
+        let report = &verification[0];
+        assert_eq!(report.child_protection, "enforced");
+        if !report.local_consistency {
+            // An actual writer SIGKILL can interrupt a canonical frame. That
+            // must stay poisoned, including after otherwise successful vendor
+            // cleanup. No other verification failure is expected here.
+            assert_eq!(ending, "writer-death", "{report:?}");
+            assert_eq!(
+                report.problems,
+                vec!["oversized or interrupted canonical frame; bytes retained".to_owned()]
+            );
+            let tail = canonical.rsplit(|byte| *byte == b'\n').next().unwrap();
+            assert!(!tail.is_empty(), "interrupted frame must lack its newline");
+            assert!(tail.len() <= ouro_ledger::protocol::MAX_FRAME_BYTES);
+            assert_eq!(replay.state, "outcome_unknown");
+            assert_eq!(replay.coverage["status"], "degraded");
+            eprintln!("vendor-state/writer-death: interrupted frame retained and reported");
+        }
+        assert_eq!(
+            fs::read(&canonical_path).unwrap(),
+            canonical,
+            "verification and replay must preserve every canonical byte"
+        );
         eprintln!("vendor-state/{ending}: populated, tree empty, removed, replay unchanged");
     }
 }
