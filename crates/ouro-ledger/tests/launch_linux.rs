@@ -849,6 +849,7 @@ fn writer_death_stops_the_owner_and_recovery_remains_unknown() {
     );
 }
 
+#[track_caller]
 fn wait_pending(fixture: &Fixture, run: &RunRecord, predicate: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + COMMAND_LIMIT;
     let path = fixture
@@ -863,10 +864,28 @@ fn wait_pending(fixture: &Fixture, run: &RunRecord, predicate: impl Fn(&Value) -
         {
             return value;
         }
-        assert!(
-            Instant::now() < deadline,
-            "pending journal did not reach expected state"
-        );
+        if Instant::now() >= deadline {
+            let read = |name: &str| -> Value {
+                fs::read(path.with_file_name(name))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or(Value::Null)
+            };
+            let pending = read("owner-pending.json");
+            let projection = read("run.json");
+            let verification =
+                Client::connect(&fixture.data).and_then(|mut c| c.verify(Some(&run.run_id)));
+            panic!(
+                "pending journal timeout: profile={} active={} overflow={} completion={} events={} projection={} verification={verification:?} caller={}",
+                run.payload["profile"],
+                pending["state"]["active"],
+                pending["state"]["overflow"],
+                pending["state"]["completion"]["kind"],
+                pending["state"]["events"].as_array().map_or(0, Vec::len),
+                projection["state"],
+                std::panic::Location::caller()
+            );
+        }
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -897,6 +916,56 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
             "admitted child must continue during writer outage"
         );
         fixture.writer = Fixture::start_writer(&fixture.data);
+        let verification = fixture.client().verify(Some(&run.run_id)).unwrap();
+        assert_eq!(verification.len(), 1);
+        if !verification[0].local_consistency {
+            // SIGKILL can split a canonical frame as well as disconnect the
+            // writer. Best-effort transport cannot repair or bless that
+            // history: require conservative refusal instead of waiting for
+            // a journal clear that must never occur.
+            assert_eq!(
+                verification[0].problems,
+                vec!["oversized or interrupted canonical frame; bytes retained".to_owned()]
+            );
+            let path = fixture
+                .data
+                .join("ledger")
+                .join(&run.run_id)
+                .join("events-0001.ndjson");
+            let canonical = fs::read(&path).unwrap();
+            let tail = canonical.rsplit(|b| *b == b'\n').next().unwrap();
+            assert!(!tail.is_empty());
+            assert!(tail.len() <= ouro_ledger::protocol::MAX_FRAME_BYTES);
+            assert!(!owner.finish().status.success());
+            fixture.assert_tree_stopped(&run);
+            let unknown = fixture.assert_unknown(&run.run_id);
+            assert_eq!(unknown.coverage["status"], "degraded");
+            assert_eq!(
+                unknown.child_protection,
+                if profile == "tool" {
+                    "enforced"
+                } else {
+                    "unprotected"
+                }
+            );
+            assert!(!Process::spawn(&mut command, true).finish().status.success());
+            let replay = fixture.assert_unknown(&run.run_id);
+            assert_eq!(replay.attempt_id, run.attempt_id);
+            assert_eq!(replay.chain, unknown.chain);
+            assert_eq!(
+                fs::read(fixture.workspace.join("executions")).unwrap(),
+                b"x"
+            );
+            assert_eq!(
+                fixture.client().verify(Some(&run.run_id)).unwrap()[0].problems,
+                verification[0].problems
+            );
+            assert_eq!(fs::read(path).unwrap(), canonical);
+            println!(
+                "pending-restart/{profile}: interrupted frame retained, unknown, tree empty, no reexecution"
+            );
+            continue;
+        }
         wait_pending(&fixture, &run, |s| s["active"] == false);
         fs::write(fixture.workspace.join("release"), b"").unwrap();
         let output = owner.finish();
