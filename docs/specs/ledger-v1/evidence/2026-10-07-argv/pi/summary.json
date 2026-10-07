@@ -1,0 +1,20 @@
+{
+  "tests_passed": 203,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "journal_io_failure_cases": 44,
+  "journal_sigkill_cases": 44,
+  "native_pending_owner_cases": 72,
+  "existing_lifecycle_cases": 66,
+  "argv_launch_tests": 2,
+  "argv_portable_tests": 5,
+  "all_capture_signed_launch_tests": 1,
+  "vendor_cleanup_scenarios": 3,
+  "source_checks": "passed before and after",
+  "production_test_controls": "absent",
+  "binaries_sha256": {
+    "ouro-jail": "861a8c559cd00b07fceca27e90e9defd9ab317215b4f1092da52dea43bbe9a0f",
+    "ouro-fixture": "d892cb6d0d3a67c81d8a423af00a75c52555e5b1388e7d6d1d4be0c894a2c102",
+    "ouro-ledger": "6246e032f783fa0d91553065add652db889e52e5db8545e10267ff6a6c71959b"
+  }
+}

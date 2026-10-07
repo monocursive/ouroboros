@@ -434,8 +434,9 @@ admission record and execution gate. Admission binds the capture metadata;
 a write/sync failure leaves the gate closed and follows owner failure handling.
 A complete admission capture survives owner death, while the run outcome can
 remain unknown. This artifact records requested arguments, not proof of exec.
-Live display withholds bytes until the run is terminal. Raw arguments never
-enter the request, canonical events, ordinary show, query or canonical export.
+Live display withholds bytes until the run is terminal. The owner does not put
+raw argv into the request or canonical events; ordinary show, query and
+canonical export do not read the artifact.
 Bundle export requires its own explicit `--capture argv` selection. Both
 capture-only and whole-run retention include this artifact. The byte content
 has the same local-artifact integrity limits as output captures.
@@ -1133,7 +1134,9 @@ The [contract validator](ledger-v1/validate_contract.py) checks versioned schema
 and fixtures only; it makes no runtime or custody claim.
 
 The [October 7 transcript record](ledger-v1/evidence/2026-10-07-transcript/README.md)
-documents bounded opt-in display and native Pi/VPS validation. Milestone 2 still
+documents bounded opt-in display and native Pi/VPS validation. The
+[argv capture record](ledger-v1/evidence/2026-10-07-argv/README.md) covers bounded
+raw arguments, retention and explicit bundle selection. Milestone 2 still
 requires the CLI/privacy contracts identified by the
 [acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts):
 foreground `--control-fd`

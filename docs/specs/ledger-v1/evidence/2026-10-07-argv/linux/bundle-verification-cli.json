@@ -1,0 +1,75 @@
+{
+  "authenticity": "signed",
+  "capture_digest_basis": "bundle_time",
+  "captures": [
+    "argv",
+    "stderr",
+    "stdout"
+  ],
+  "child_protection": "enforced",
+  "coverage": {
+    "exec": {
+      "gaps": [],
+      "observed_count": 2,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.deny": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "fs.write": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "limits": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "wrapper"
+      ],
+      "status": "active"
+    },
+    "net": {
+      "gaps": [],
+      "observed_count": 0,
+      "sources": [
+        "audit"
+      ],
+      "status": "active"
+    },
+    "proxy.net": {
+      "gaps": [],
+      "observed_count": null,
+      "sources": [],
+      "status": "unsupported"
+    }
+  },
+  "external_custody": false,
+  "local_consistency": true,
+  "manifest_digest": "sha256:dbf832efb08acdf864822ab0a1f13d4f8acd0d07f252d49fa4d6266b57cbc5ad",
+  "run_id": "run_734de26b16bf4749a6fe919d66d89ebb",
+  "schema": "ouro.ledger.bundle-verification/2",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "sha256:d3ef17609d41503fe9afb4319e82c7b413f55b5bf08a37d3329ddb09fe049305",
+    "public_key": "50717adcd51536753755b3dc8c17b364e081cf1073df5e06f683ad611223c2ad",
+    "trust": "pinned",
+    "valid": true
+  },
+  "snapshot": {
+    "head_digest": "sha256:c5d87d360014d815a2611e282af26dd064de32163725f2af5a36652d672707e2",
+    "head_seq": 11
+  },
+  "state": "settled"
+}
