@@ -910,7 +910,7 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
         let mut fixture = Fixture::new(&jail);
         let mut command = fixture.command_with_profile("pending-live", true, profile);
         command.args(["--evidence", "best-effort", "--redact", "paths", "--redact", "destinations", "--capture", "stdout", "--", "/bin/sh", "-c",
-            "printf x >> executions; touch started; while test ! -f flood; do sleep 0.05; done; i=0; while test $i -lt 160; do echo x > item; i=$((i+1)); done; touch flooded; while test ! -f release; do sleep 0.05; done; printf recovered"]);
+            "root=$(pwd -P); printf x >> executions; touch started; while test ! -f flood; do sleep 0.05; done; i=0; while test $i -lt 160; do echo x > \"$root/item\"; i=$((i+1)); done; touch flooded; while test ! -f release; do sleep 0.05; done; printf recovered"]);
         let mut owner = Process::spawn(&mut command, true);
         let run = fixture.wait_started(&mut owner);
         fixture.writer.kill();

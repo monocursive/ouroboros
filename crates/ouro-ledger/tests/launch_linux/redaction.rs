@@ -32,7 +32,7 @@ fn real_redaction_preserves_capture_bytes_and_replay_and_verifies_offline() {
         let mut command = fixture.command_with_profile("redaction", true, profile);
         command.args(["--redact", "paths", "--redact", "destinations",
             "--capture", "stdout", "--capture", "argv", "--", "/bin/sh", "-c",
-            "printf x >> executions; printf sensitive-capture > private-file-name; mv private-file-name private-renamed-name; printf sensitive-capture"]);
+            "root=$(pwd -P); printf x >> executions; printf sensitive-capture > \"$root/private-file-name\"; mv \"$root/private-file-name\" \"$root/private-renamed-name\"; printf sensitive-capture"]);
         let (output, run) = fixture.run(&mut command);
         assert!(
             output.status.success(),
@@ -125,7 +125,7 @@ fn real_redaction_preserves_capture_bytes_and_replay_and_verifies_offline() {
 fn real_proxy_redaction_removes_destination_without_changing_denial_or_counters() {
     let Some(jail) = live_jail() else { return };
     let fixture = Fixture::new(&jail);
-    let mut command = fixture.command_with_profile("redaction-proxy", true, "tool");
+    let mut command = fixture.command_with_profile("redaction-proxy", true, "agent");
     command.args(["--redact", "destinations", "--", "/bin/sh", "-c",
         "curl --silent --max-time 3 --noproxy '' --proxy \"$HTTP_PROXY\" --proxytunnel https://redaction-private.invalid/ >/dev/null; test $? -ne 0"]);
     let (output, run) = fixture.run(&mut command);

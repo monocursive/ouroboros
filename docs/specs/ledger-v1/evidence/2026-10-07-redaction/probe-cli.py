@@ -28,10 +28,10 @@ with tempfile.TemporaryDirectory(prefix="ouro-redaction-proof-") as tmp:
             assert writer.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
         command = base + ["run", "--jail-bin", str(image), "--workspace", str(workspace),
-            "--request-id", "redaction-cli-proof", "--jail", "tool", "--limit", "wall=10s",
+            "--request-id", "redaction-cli-proof", "--jail", "agent", "--limit", "wall=10s",
             "--io", "batch", "--json", "--redact", "paths", "--redact", "destinations",
             "--capture", "stdout", "--capture", "argv", "--", "/bin/sh", "-c",
-            'printf x >> executions; printf capture-private > path-private; mv path-private renamed-private; '
+            'root=$(pwd -P); printf x >> executions; printf capture-private > "$root/path-private"; mv "$root/path-private" "$root/renamed-private"; '
             'curl --silent --max-time 3 --noproxy "" --proxy "$HTTP_PROXY" --proxytunnel https://host-private.invalid/ >/dev/null; '
             'test $? -ne 0 || exit 99; printf capture-private']
         first = subprocess.run(command, env=env, capture_output=True, timeout=30)
