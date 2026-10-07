@@ -1184,8 +1184,38 @@ fn best_effort_local_exit_file_limit_never_fabricates_settlement() {
     let run = fixture.wait_started(&mut owner);
     fixture.writer.kill();
     wait_pending(&fixture, &run, |s| s["active"] == true);
-    // Only the unreaped launch owner gets this actual kernel write limit. Its
-    // child can finish normally, but the larger local exit snapshot cannot fit.
+    // Pause the owner while its already-admitted child finishes. Otherwise an
+    // in-flight source snapshot can hit the limit and stop the child before
+    // this test reaches the intended post-exit evidence failure.
+    let pid = owner.child.id() as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+    let deadline = Instant::now() + COMMAND_LIMIT;
+    loop {
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        if status.lines().any(|line| line.starts_with("State:\tT")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "owner did not stop");
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(fixture.workspace.join("release"), b"").unwrap();
+    loop {
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(fixture.receipt_path(&run)).unwrap()).unwrap();
+        if receipt["phase"] == "settled" {
+            assert_eq!(receipt["outcome"]["code"], 0);
+            assert_eq!(receipt["lifetime"]["tree_empty"], true);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child did not settle while owner stopped"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fixture.workspace.join("finished").exists());
+    // Only the unreaped owner gets the real kernel write limit. Its child has
+    // already exited normally, but the larger local exit snapshot cannot fit.
     let limit = libc::rlimit {
         rlim_cur: 4096,
         rlim_max: 4096,
@@ -1201,12 +1231,15 @@ fn best_effort_local_exit_file_limit_never_fabricates_settlement() {
         },
         0
     );
-    fs::write(fixture.workspace.join("release"), b"").unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
     let output = owner.finish();
     assert!(!output.status.success());
     assert!(fixture.workspace.join("finished").exists());
     fixture.writer = Fixture::start_writer(&fixture.data);
     fixture.assert_unknown(&run.run_id);
+    println!(
+        "pending-file-limit: child exited before owner write limit, settlement remains unknown"
+    );
 }
 
 #[test]

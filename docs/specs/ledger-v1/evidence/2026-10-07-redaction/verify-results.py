@@ -57,6 +57,7 @@ for profile in ("tool", "none"):
         assert log.count(f"control/{profile}/{fault}: bounded delivery failure, settled outcome, same-request replay, one execution") == 1
 assert log.count("control/modes: foreground without --json and batch both use only the separate result fd") == 1
 for marker in (
+    "pending-file-limit: child exited before owner write limit, settlement remains unknown",
     "redaction/outage: bounded journal prefix and overflow tails minimized before storage",
     *[f"redaction/{p}: canonical metadata minimized, explicit captures unchanged, restart replay once, offline bundle verified" for p in ("tool", "none")],
 ):
