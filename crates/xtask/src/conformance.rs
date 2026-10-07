@@ -167,11 +167,19 @@ pub fn run_path_for_humans(run_dir: &str) -> String {
 #[must_use]
 pub fn build_command(jobs: u32, revision: &str) -> String {
     format!(
-        "env {} {REMOTE_CARGO} build --release --workspace -j{jobs} && \
+        "{} && env {} {REMOTE_CARGO} build --release --workspace -j{jobs} && \
          env {} {REMOTE_CARGO} test --release --workspace --no-run -j{jobs}",
+        build_space_command(),
         build_env(revision),
         build_env(revision)
     )
+}
+
+/// Refuse a fresh release build before a full filesystem turns linker mmap
+/// writes into SIGBUS. This is a minimum headroom check, not a reservation;
+/// another writer can still exhaust the host while the build runs.
+fn build_space_command() -> &'static str {
+    r#"df -Pk . && df -Pk . | awk "NR == 2 { if (\$4 ~ /^[0-9]+$/ && \$4 >= 4194304) ok=1 } END { if (!ok) { print \"conformance: release build requires at least 4 GiB available; preserve evidence and remove only verified inactive build caches\"; exit 125 } }""#
 }
 
 /// The build-provenance claims every cargo step that builds or tests the
@@ -1412,6 +1420,7 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
         );
         if let Some(log) = &build.log {
             print!("{log}");
+            write_evidence(opts, "build.log", log, &mut outcomes);
         }
         match build.code {
             Some(code) => {
@@ -1921,10 +1930,11 @@ mod tests {
         assert_eq!(
             b,
             format!(
-                "env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
+                "{} && env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
                  $HOME/.cargo/bin/cargo build --release --workspace -j2 && \
                  env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
-                 $HOME/.cargo/bin/cargo test --release --workspace --no-run -j2"
+                 $HOME/.cargo/bin/cargo test --release --workspace --no-run -j2",
+                build_space_command()
             )
         );
         let started = detached_start("d", "build", &b);
@@ -1932,6 +1942,36 @@ mod tests {
             started.starts_with("cd $HOME/ouro-ci/runs/d && mkdir build.started &&"),
             "{started}"
         );
+    }
+
+    #[test]
+    fn build_space_refuses_full_unreadable_and_small_filesystems_before_build() {
+        for (available, allowed) in [
+            ("0", false),
+            ("4194303", false),
+            ("4194304", true),
+            ("unknown", false),
+        ] {
+            let script = format!(
+                "df() {{ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/test 9000000 1 {available} 1%% /\\n'; }}; {} && printf build-started",
+                build_space_command()
+            );
+            let output = Command::new("sh").args(["-c", &script]).output().unwrap();
+            assert_eq!(output.status.success(), allowed, "{available}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(stdout.contains("build-started"), allowed);
+            if !allowed {
+                assert!(stdout.contains("requires at least 4 GiB"));
+            }
+        }
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                &format!("df() {{ return 1; }}; {}", build_space_command()),
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
     }
 
     #[test]

@@ -1,0 +1,165 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling version_check v0.9.5
+   Compiling libc v0.2.189
+   Compiling syn v3.0.6
+   Compiling cfg-if v1.0.5
+   Compiling generic-array v0.14.7
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling serde_derive v1.0.229
+   Compiling memchr v2.8.3
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.14
+   Compiling cc v1.5.1
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.151
+   Compiling typenum v1.20.1
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling heck v0.5.0
+   Compiling itoa v1.0.18
+   Compiling hashbrown v0.17.1
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling ring v0.17.14
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling digest v0.10.7
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.1
+   Compiling cpufeatures v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling sha2 v0.10.9
+   Compiling clap_builder v4.6.7
+   Compiling num-integer v0.1.47
+   Compiling clap_derive v4.6.7
+   Compiling getrandom v0.2.17
+   Compiling untrusted v0.9.0
+   Compiling clap v4.6.7
+   Compiling getrandom v0.3.4
+   Compiling zeroize v1.9.0
+   Compiling getrandom v0.4.3
+   Compiling zerocopy v0.8.57
+   Compiling rustls-pki-types v1.15.1
+   Compiling num-bigint v0.4.8
+   Compiling indexmap v2.14.2
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling ahash v0.8.12
+   Compiling toml_write v0.1.2
+   Compiling ref-cast v1.0.27
+   Compiling parking_lot_core v0.9.12
+   Compiling regex-syntax v0.8.11
+   Compiling winnow v0.7.15
+   Compiling smallvec v1.16.1
+   Compiling toml_edit v0.22.27
+   Compiling num-rational v0.4.2
+   Compiling num-iter v0.1.46
+   Compiling num-complex v0.4.6
+   Compiling aho-corasick v1.1.5
+   Compiling ref-cast-impl v1.0.27
+   Compiling scopeguard v1.2.0
+   Compiling base64 v0.22.1
+   Compiling time-core v0.1.9
+   Compiling vcpkg v0.2.15
+   Compiling num-conv v0.2.2
+   Compiling pkg-config v0.3.34
+   Compiling deranged v0.5.8
+   Compiling powerfmt v0.2.0
+   Compiling time v0.3.55
+   Compiling libsqlite3-sys v0.38.2
+   Compiling regex-automata v0.4.18
+   Compiling ouro-records v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/ouro-records)
+   Compiling lock_api v0.4.14
+   Compiling num v0.4.3
+   Compiling uuid v1.26.1
+   Compiling toml v0.8.23
+   Compiling syn v2.0.119
+   Compiling rustls v0.23.45
+   Compiling base64 v0.23.1
+   Compiling borrow-or-share v0.2.4
+   Compiling unicode-general-category v1.1.0
+   Compiling bit-vec v0.8.0
+   Compiling bit-set v0.8.0
+   Compiling fluent-uri v0.4.1
+   Compiling pem v4.0.0
+   Compiling strum_macros v0.28.0
+   Compiling parking_lot v0.12.5
+   Compiling fraction v0.17.0
+   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/ouro-jail)
+   Compiling yasna v0.6.0
+   Compiling rustls-webpki v0.103.15
+   Compiling micromap v0.3.0
+   Compiling num-cmp v0.1.0
+   Compiling percent-encoding v2.3.2
+   Compiling vsimd v0.8.0
+   Compiling outref v0.5.2
+   Compiling subtle v2.6.1
+   Compiling bytecount v0.6.9
+   Compiling jsonschema-value v0.57.0
+   Compiling uuid-simd v0.8.0
+   Compiling referencing v0.57.0
+   Compiling rcgen v0.14.10
+   Compiling strum v0.28.0
+   Compiling fancy-regex v0.19.2
+   Compiling regex v1.13.1
+   Compiling jsonschema-regex v0.57.0
+   Compiling webpki-roots v1.0.9
+   Compiling hashlink v0.12.2
+   Compiling email_address v0.2.9
+   Compiling bitflags v2.13.2
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling data-encoding v2.11.1
+   Compiling fallible-iterator v0.3.0
+   Compiling jsonschema v0.57.0
+   Compiling rusqlite v0.40.2
+   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/ouro-fixture)
+   Compiling ouro-ledger v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/ouro-ledger)
+   Compiling xtask v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/xtask)
+    Finished `release` profile [optimized] target(s) in 4m 03s
+   Compiling bitflags v2.13.2
+   Compiling rustix v1.1.5
+   Compiling linux-raw-sys v0.12.1
+   Compiling fastrand v2.5.0
+   Compiling rusqlite v0.40.2
+   Compiling tempfile v3.27.0
+   Compiling ouro-ledger v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/ouro-ledger)
+   Compiling ouro-jail v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/ouro-jail)
+   Compiling ouro-fixture v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/ouro-fixture)
+   Compiling xtask v0.1.0 (/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/crates/xtask)
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/deps/rustcmDd2PZ/symbols.o" "<17 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/deps/{libjsonschema-70a224f189b8d4bd,libregex-9d7e04bce172201d,libjsonschema_regex-d4176908b7b402bf,libfancy_regex-3d41e68d47cfe84f,libbit_set-db298fc4d625bf02,libbit_vec-cb76cf221c5a9461,libregex_automata-52f296b75729d308,libaho_corasick-277f4dacfd284bc1,libregex_syntax-17e3c7a6f97156b0,libuuid_simd-588620be50cb4699,liboutref-afab134536d65aa4,libvsimd-0a918562379ff9bd,libunicode_general_category-aa8754a1905a6f20,libemail_address-9331b45e4242e0e5,libdata_encoding-d16231f5073b664a,libstrum-2859e7d395ad495d,libreferencing-946deadb0800433b,libmicromap-fb2c7755cc93adbc,libpercent_encoding-3279a37cc5d62c73,libparking_lot-a4bebdd731e3429a,libparking_lot_core-2cf5df679bcf7725,libsmallvec-44bc340e66c37c4f,liblock_api-dbff0a63415ad025,libscopeguard-fc5e75d9193ea349,libfluent_uri-a147af88cd459b64,libborrow_or_share-4db627b522532ef0,libref_cast-5001cf16fde0f06e,libjsonschema_value-a79f4539c0808e2d,libbytecount-02ea35d09d019dd8,libfraction-878faead91b6d90f,libnum-90793daa08877bb8,libnum_iter-f4e75b810f4640ea,libnum_rational-9ec402bfb31c1c94,libnum_complex-74b7efd8fbbe0377,libnum_bigint-4b099dd45e16cd98,libnum_integer-998980a5d35077b1,libnum_traits-90dbc9eef1d9b11e,libnum_cmp-08f252d7c8576d18,libahash-bdaa1a47d5fc140b,libgetrandom-85111b19882ca4a1,libzerocopy-fa272574cc0488ff}.rlib" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libtest-*,libgetopts-*,librustc_std_workspace_std-*}.rlib" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/deps/{libouro_fixture-4f16595cbcb72c29,libtempfile-ad328555c3c8eb0e,libfastrand-f7ef496091d2d74e,libonce_cell-5e0cf96ce3281499,librustix-642c08e27fda41e8,libbitflags-435140e96680ba31,liblinux_raw_sys-3f74a0a0ff56bd99,libouro_jail-d0633a7cb813236e,libwebpki_roots-9ae1484efef210c8,librcgen-55161b09d7f5da44,libyasna-33308a1f475bcaa6,libtime-4dbe767b04ac4a6c,libpowerfmt-df1368cb08b7e5a0,libnum_conv-4d4a33606985e3bb,libderanged-14bbd5ac6c3e3d4a,libtime_core-aea8bd356668e5d5,libpem-f79eed707985daed,libbase64-4879bdb93c9a56c4,librustls-060958b8918364de,libsubtle-d2b64395c76666cb,libwebpki-37997435bd470197,libring-c24d14c6ab7daf6d,libgetrandom-666ef2ad3d228478,libuntrusted-6046503770adb7b5,librustls_pki_types-a9c4cf58fe1775a8,libtoml-8bb8b55d352fcec4,libtoml_edit-12e263554ecc9d31,libserde_spanned-962b229020fe6f84,libindexmap-51c0b0450d22bd0c,libhashbrown-5652b262c2dfbab3,libequivalent-5e451087648a3feb,libfoldhash-da3805bb81549e60,liballocator_api2-b57e365424b8bdc0,libwinnow-d20b928197e4251c,libtoml_write-cb0cd6b18498cae5,libtoml_datetime-75e3b7cd3d46ef47,libuuid-b184ba45be29fa10,libgetrandom-314ad791831bf5d1,libzeroize-0ae2e9de1fce3072,liblibc-65e1a9c648e56d89,libclap-de95583382c29138,libclap_builder-3de6ab782a2e2dde,libstrsim-647b593e5d0f0f88,libanstream-320f4a4e67f6e6f7,libanstyle_query-d441b6de73ddf424,libis_terminal_polyfill-8077134449adb30e,libcolorchoice-4cac3b24ccc6075c,libanstyle_parse-4bfcb1d11c2a00b4,libutf8parse-71f38f403679c145,libclap_lex-4e99b1d28479ff7f,libanstyle-64f95aeda085024e,libouro_records-0bf7d2277488a969,libserde_json-2eb5b78fe1abe357,libmemchr-f65cc7170efc91f7,libzmij-fb8a68db9eaf9dcb,libitoa-3f1e1c9af425c136,libserde-cf0ff2ee566be960,libserde_core-a063b13d9cb9a5b1,libbase64-9e740c72a4866227,libsha2-16b8f2c03bdf5faa,libcpufeatures-ec93dba7e5c1c6ba,libcfg_if-7b8f778351493918,libdigest-8a78a49424c4028b,libblock_buffer-6976b28ac79a0317,libcrypto_common-12678a331dcf55e0,libgeneric_array-e21b49ab91fddcba,libtypenum-a8ec867d80e1943c}.rlib" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libstd-*,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-L" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/deps/rustcmDd2PZ/raw-dylibs" "-B<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-fuse-ld=lld" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/build/ring-3891526c29501daf/out" "-L" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib" "-o" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/deps/j5_audit_gaps_linux-bf07fb1dd5cf0afd" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-Wl,-O1" "-Wl,--strip-debug" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and instructions to reproduce the bug.
+          Stack dump without symbol names (ensure you have llvm-symbolizer in your PATH or set the environment var `LLVM_SYMBOLIZER_PATH` to point to it):
+          0  libLLVM.so.22.1-rust-1.98.1-stable 0x00007f1c64342337 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) + 39
+          1  libLLVM.so.22.1-rust-1.98.1-stable 0x00007f1c64342c2d
+          2  libc.so.6                          0x00007f1c5e045cb0
+          3  libc.so.6                          0x00007f1c5e197b19
+          4  rust-lld                           0x00005c13e7b99324
+          5  rust-lld                           0x00005c13e7c18efb
+          6  libLLVM.so.22.1-rust-1.98.1-stable 0x00007f1c642ea7b2
+          7  libLLVM.so.22.1-rust-1.98.1-stable 0x00007f1c642e9f6a
+          8  libLLVM.so.22.1-rust-1.98.1-stable 0x00007f1c6424f5b0
+          9  libc.so.6                          0x00007f1c5e0a3dfa
+          10 libc.so.6                          0x00007f1c5e1375cc
+          collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped
+          compilation terminated.
+          
+
+error: could not compile `ouro-jail` (test "j5_audit_gaps_linux") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/deps/rustcL5fuFK/symbols.o" "<17 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "/home/ouro-ci/ouro-ci/runs/20261007T160849Z-d6b09db26b5a/target/release/deps/{libjsonschema-70a224f189b8d4bd,libregex-9d7e04bce172201d,libjsonschema_regex-d4176908b7b402bf,libfancy_regex-3d41e68d47cfe84f,libbit_set-db298fc4d625bf02,libbit_vec-cb76cf221c5a9461,libregex_automata-52f296b75729d308,libaho_corasick-277f4dacfd284bc1,libregex_syntax-17e3c7a6f97156b0,libuuid_simd-588620be50cb4699,liboutref-afab134536d65aa4,libvsimd-0a918562379ff9bd,libunicode_general_category-aa8754a1905a6f20,libemail_address-9331b45e4242e0e5,libdata_encoding-d16231f5073b664a,libstrum-2859e7d395ad495d,libreferencing-946deadb0800433b,libmicromap-fb2c7755cc93adbc,libpercent_encoding-3279a37cc5d62c73,libparking_lot-a4bebdd731e3429a,libparking_lot_core-2cf5df679bcf7725,libsmallerror: could not compile `ouro-jail` (test "portable_gc") due to 1 previous error

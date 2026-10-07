@@ -1,0 +1,14 @@
+conformance FAIL 20261007T174926Z-d6b09db26b5a
+- the remote conformance suite exited 101
+- 1 test binary reported FAILED
+- I01: `erl` is on the suite's PATH at /usr/bin/erl
+- I01: `erlc` is on the suite's PATH at /usr/bin/erlc
+- I01: `escript` is on the suite's PATH at /usr/bin/escript
+- I01: `elixir` is on the suite's PATH at /usr/bin/elixir
+- I01: `iex` is on the suite's PATH at /usr/bin/iex
+- I01: `mix` is on the suite's PATH at /usr/bin/mix
+- I01: a BEAM installation directory exists: /usr/lib/erlang
+- I01: a BEAM installation directory exists: /usr/lib/elixir
+- I01: the BEAM package `erlang-base` is installed
+- I01: the BEAM package `elixir` is installed
+- gate I01 fails: I01.1: check `i01_absent` failed | I01.3: check `suite_clean` failed

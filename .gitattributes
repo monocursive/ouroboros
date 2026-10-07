@@ -5,3 +5,6 @@ docs/benchmarks/sandboxes/results/**/*.txt -whitespace
 docs/specs/jail-v1/evidence/**/*.log -whitespace
 docs/specs/jail-v1/evidence/**/*.txt -whitespace
 docs/specs/ledger-v1/evidence/**/*.log -whitespace
+docs/specs/ledger-v1/evidence/**/*.txt -whitespace
+docs/specs/fleet-v1/evidence/**/*.log -whitespace
+docs/specs/fleet-v1/evidence/**/*.txt -whitespace
