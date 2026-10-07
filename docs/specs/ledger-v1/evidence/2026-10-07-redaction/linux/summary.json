@@ -1,0 +1,22 @@
+{
+  "proxy_status": "proxy_redaction_verified",
+  "tests_passed": 220,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "journal_io_failure_cases": 44,
+  "journal_sigkill_cases": 44,
+  "native_pending_owner_cases": 72,
+  "existing_lifecycle_cases": 66,
+  "redaction_launch_tests": 2,
+  "redaction_portable_tests": 5,
+  "control_launch_tests": 3,
+  "control_portable_tests": 7,
+  "vendor_cleanup_scenarios": 3,
+  "source_checks": "passed before and after",
+  "production_test_controls": "absent",
+  "binaries_sha256": {
+    "ouro-jail": "8b3950ea58e0288549497170ee2f57d056c985a5472beb9781f8cdf14480f7cf",
+    "ouro-fixture": "6f8b364aae99ac3136f793de01fd5dd121482c2e39861265093f69b9e5a57092",
+    "ouro-ledger": "fc0151d16cddd332a959bad8e22e8ccaef50f0b52d748890a49a671eae50558b"
+  }
+}

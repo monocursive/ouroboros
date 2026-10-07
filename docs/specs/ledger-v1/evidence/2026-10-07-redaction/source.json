@@ -1,0 +1,6 @@
+{
+  "revision": "15b77b4fb4f449a2010c4b3f6bb1b8ca6600cc82",
+  "source_kind": "Git archive runtime, test, contract and validation helper inputs; native fixtures and post-exit failure synchronization corrected",
+  "source_files": 437,
+  "archive_sha256": "5d5ca276b759e118584cf9a7a4f993364170c43e1eb062da0aa2df7842ffe404"
+}

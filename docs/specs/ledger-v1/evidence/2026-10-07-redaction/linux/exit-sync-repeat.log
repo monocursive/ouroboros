@@ -1,0 +1,160 @@
+Post-exit write-limit case 1
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.66s
+
+Post-exit write-limit case 2
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.64s
+
+Post-exit write-limit case 3
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.66s
+
+Post-exit write-limit case 4
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.64s
+
+Post-exit write-limit case 5
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.61s
+
+Post-exit write-limit case 6
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.63s
+
+Post-exit write-limit case 7
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.66s
+
+Post-exit write-limit case 8
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.63s
+
+Post-exit write-limit case 9
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.65s
+
+Post-exit write-limit case 10
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.59s
+
+Post-exit write-limit case 11
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.61s
+
+Post-exit write-limit case 12
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.62s
+
+Post-exit write-limit case 13
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.69s
+
+Post-exit write-limit case 14
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.71s
+
+Post-exit write-limit case 15
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.67s
+
+Post-exit write-limit case 16
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.64s
+
+Post-exit write-limit case 17
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.67s
+
+Post-exit write-limit case 18
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.66s
+
+Post-exit write-limit case 19
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.65s
+
+Post-exit write-limit case 20
+
+running 1 test
+test best_effort_local_exit_file_limit_never_fabricates_settlement ... pending-file-limit: child exited before owner write limit, settlement remains unknown
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 1.68s
+

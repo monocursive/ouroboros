@@ -1,0 +1,16 @@
+{
+  "tests_passed": 180,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "scope": "portable macOS; Linux launch modules are compiled out",
+  "implementation": "e3de84a94665a3cce2a22f6cfa1136210b0081a2",
+  "native_fixture_correction": "15b77b4fb4f449a2010c4b3f6bb1b8ca6600cc82",
+  "checks": [
+    "fmt",
+    "clippy",
+    "contracts",
+    "links",
+    "i02",
+    "freeze"
+  ]
+}

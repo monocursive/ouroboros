@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/ouro-vendor-89e61694/docs/specs/ledger-v1/evidence/2026-10-07-redaction/probe-cli.py", line 47, in <module>
+    assert any(e.get("redaction", {}).get("fields") == ["path", "path2"] for e in events)
+           ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

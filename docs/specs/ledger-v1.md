@@ -484,7 +484,8 @@ same request id refuses. The policy is passed to detached owners too.
 Each changed source event gains a ledger-owned top-level `redaction` containing
 `schema: ouro.ledger.redaction/1` and the sorted names of changed fields. This
 marker states that the envelope was transformed; it does not claim the retained
-bytes are the original Jail event. No digest of the removed values is retained.
+bytes are the original Jail event. The transformation retains no digest of
+removed field values.
 Other source facts, outcomes, decisions, counters, sequence and receipt
 correlation are unchanged. Target comparisons count these identities as
 unavailable, making the affected class incomparable; event counts remain usable
@@ -1223,6 +1224,9 @@ documents bounded opt-in display and native Pi/VPS validation. The
 raw arguments, retention and explicit bundle selection. Structured `--redact`
 implements the final CLI/privacy slice listed in the
 [acceptance audit](ledger-v1/durability-acceptance.md#remaining-milestone-2-contracts).
+The [redaction evidence](ledger-v1/evidence/2026-10-07-redaction/README.md)
+records native path, capture, replay and outage checks, plus live proxy redaction
+on VPS and the Pi kernel's explicit proxy-capability refusal.
 Historical custody remains an obligation at the
 later legacy-store removal cut; this tooling checkout does not perform it. Managed
 single-worker submission additionally needs its own principal, authorization,
