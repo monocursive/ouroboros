@@ -15,6 +15,8 @@ MANIFEST = "milestone-2-contracts.json"
 
 
 def contracts(root):
+    if (root / "fixtures").is_symlink():
+        raise ValueError("contract fixture directory must not be a symlink")
     paths = sorted([*root.glob("*.schema.json"), *root.glob("fixtures/*")])
     result = {}
     for path in paths:
@@ -27,7 +29,10 @@ def contracts(root):
 
 
 def check(root=ROOT):
-    expected = json.loads((root / MANIFEST).read_text())
+    manifest = root / MANIFEST
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError("contract freeze manifest must be a regular file")
+    expected = json.loads(manifest.read_text())
     actual = contracts(root)
     if expected != actual:
         before, after = expected.get("sha256", {}), actual["sha256"]

@@ -1164,7 +1164,7 @@ mod tests {
         let count = |key: &str| value.get(key).and_then(toml::Value::as_array).map(Vec::len);
         assert_eq!(count("launch_profile"), Some(14), "{text}");
         assert_eq!(count("baseline"), Some(4), "{text}");
-        assert_eq!(count("manifest"), Some(6), "{text}");
+        assert_eq!(count("manifest"), Some(7), "{text}");
         assert_eq!(count("backend_plan"), Some(3), "{text}");
         for profile in value["launch_profile"].as_array().unwrap() {
             let environment = profile["environment"].as_str().expect("an environment");

@@ -34,14 +34,39 @@ final reference conformance; Pi runtime packages are independent of that lane.
 The local macOS ledger suite passes 180 tests with no failures or ignored tests;
 its [log](local-ledger-test.log) is portable/refusal evidence, not native launch
 proof. The build-headroom regression and conformance-driver tests pass 69 tests
-in [this log](ci/preflight-tests.log). Contract freeze and fixture validation pass.
+in [this log](ci/preflight-tests.log). The full local xtask suite passes 201 tests in [this log](ci/xtask-full.log).
+The first hosted run exposed an outdated six-manifest test assertion after the
+new `ouro` crate raised the frozen inventory to seven; that assertion is corrected.
+Contract freeze and fixture validation pass, including symlinked fixture-directory
+and manifest refusals with otherwise identical bytes.
 The final native Raspberry Pi suite passes **221 tests**, with no failures,
 ignored tests or capability skips: [log](pi/ledger.log), [summary](pi/summary.json).
 This includes the real proxy path with Unix diagnostics and the fleet reservation
 bridge. The [source and binary hashes](../../../fleet-v1/evidence/2026-10-07-two-node/pi-source-binaries.json)
 bind the production sources; only fleet formatter compatibility and documentation
-changed after those execution tests. Final CI evidence is recorded below when
-the reference run completes.
+changed after those execution tests.
+
+## Reference build and integrated CI
+
+The clean reference build at `f933105ebfcbdfee0133986e21cfe7423e7aeb75`
+completed the native suites. Its [full log](ci/reference-candidate/test.log)
+contains exactly one failed test: the outdated six-manifest assertion described
+above. The [workflow summary](ci/reference-candidate/summary.txt) therefore remains
+**failed**, including I01's aggregate `suite_clean` clause. The independent
+[BEAM-absence probe](ci/reference-candidate/i01.txt) passes; the earlier package
+contamination is resolved. No failed result was relabelled as a pass.
+
+The [doctor record](ci/reference-candidate/doctor.json) verifies the clean build,
+required host capabilities and executable hashes. The refreshed Jail freeze pins
+that build and passes `cargo +1.98.1 run -p xtask -- freeze --check`; subsequent
+changes affect only test expectations, document validation and this report, not
+Jail build inputs or frozen policy values.
+
+Final integrated acceptance is the `conformance`, `rust`, `contracts`, and `fleet`
+CI checks on the commit introducing this freeze update and corrected assertion.
+The conformance workflow retains its complete final logs, doctor record and binary
+hashes as an artifact. A candidate's successful doctor alone is not a passing
+conformance verdict.
 
 The [Pi proxy follow-up](../../../jail-v1/evidence/2026-10-07-pi-proxy/README.md)
 records the exact-kernel module, all 220 ledger tests at the pre-bridge source,
