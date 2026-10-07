@@ -296,6 +296,9 @@ such stores.
 
 ### 3.2 Foreground control output
 
+[Native validation evidence](ledger-v1/evidence/2026-10-07-control-fd/README.md)
+records the descriptor and disconnect checks on the Pi and VPS.
+
 `run --control-fd N` sends one compact, newline-terminated `ouro.ledger.run/1`
 record to the supplied descriptor when the CLI has a run result. It implies
 JSON for that descriptor; adding `--json` is allowed. The frame matches batch
@@ -321,8 +324,8 @@ without reexecution. Batch mode also accepts this separate result channel;
 dependency. Foreground `--json` without `--control-fd` continues to refuse.
 
 Control results are bounded to 1 MiB including their terminating newline.
-Delivery has a two-second deadline and retries nonblocking backpressure. A
-stalled regular-file write cannot hold the CLI beyond that delivery wait.
+The CLI waits at most two seconds for its delivery worker, which retries
+nonblocking backpressure and keeps blocking writes outside the launch path.
 If the consumer disconnects or the deadline expires, the CLI exits 1 with a
 result-delivery diagnostic naming the run and request. The durable child
 outcome is unchanged. A destination can contain a partial frame; discard it and

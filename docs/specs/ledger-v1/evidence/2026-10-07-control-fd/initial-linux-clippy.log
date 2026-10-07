@@ -1,0 +1,12 @@
+    Checking ouro-ledger v0.1.0 (/home/ubuntu/ouro-vendor-89e61694/crates/ouro-ledger)
+error: unused import: `FromRawFd`
+ --> crates/ouro-ledger/tests/launch_linux/control_output.rs:6:23
+  |
+6 |         fd::{AsRawFd, FromRawFd as _, RawFd},
+  |                       ^^^^^^^^^
+  |
+  = note: `-D unused-imports` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `ouro-ledger` (test "launch_linux") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

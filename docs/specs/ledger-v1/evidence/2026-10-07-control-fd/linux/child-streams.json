@@ -1,0 +1,10 @@
+{
+  "exit_code": 7,
+  "control_fds": [
+    200,
+    201
+  ],
+  "stdout_hex": "737464696e2d6c696e65746573741bff",
+  "stderr_hex": "65727200",
+  "result_frame_bytes": 12128
+}

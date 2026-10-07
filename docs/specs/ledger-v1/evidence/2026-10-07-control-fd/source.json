@@ -1,0 +1,6 @@
+{
+  "revision": "8a88137569631087caa45b71f96645b64d2fe5fa",
+  "source_kind": "Git archive runtime, test and contract inputs; test-only import correction over ae8ec49c",
+  "source_files": 430,
+  "archive_sha256": "41881284f93b91dcc5ec14973f7baa1802ac4c97cf7cb82527984b49eafc1230"
+}
