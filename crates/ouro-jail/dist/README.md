@@ -104,3 +104,7 @@ python3 -m unittest discover -s crates/ouro-jail/dist -p test_release.py
 These tests include real ephemeral signatures, wrong-key rejection, archive and
 binary tampering, architecture/build mismatch, missing/duplicate targets and
 archive reproducibility. They do not establish public release availability.
+
+The Pi host used for ARM64 validation lacks memory cgroups. Its default `build`
+profile requires a memory ceiling and refuses before execution; `tool` and
+`agent` validation must not be presented as support for that profile.

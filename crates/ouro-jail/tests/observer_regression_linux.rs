@@ -59,6 +59,7 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
 }
 
 use ouro_fixture::harness;
+#[cfg(target_arch = "x86_64")]
 use ouro_jail::platform::linux::seccomp;
 use ouro_jail::platform::linux::tracer::{
     ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary, clock,
@@ -362,6 +363,7 @@ static int mode_outside(int argc, char **argv) {
     r = syscall(SYS_truncate, tr, 0L);
     report("truncate", r, tr, "");
 
+#ifdef __x86_64__
     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
     if (low == MAP_FAILED) {
@@ -378,6 +380,7 @@ static int mode_outside(int argc, char **argv) {
 
     r = syscall(0x40000000L | 257L, AT_FDCWD, x32, O_WRONLY | O_CREAT, 0600);
     report("x32_openat", r, x32, "");
+#endif
     return 0;
 }
 
@@ -427,7 +430,7 @@ static int mode_bigpaths(int argc, char **argv) {
     memset(b, 'b', len); b[len] = 0;
     memcpy(a, argv[3], strlen(argv[3]));
     memcpy(b, argv[3], strlen(argv[3]));
-    for (i = 0; i < n; i++) syscall(SYS_rename, a, b);
+    for (i = 0; i < n; i++) native_rename(a, b);
     report("bigpaths", n, "", "");
     return 0;
 }
@@ -532,9 +535,9 @@ static int mode_twopath(int argc, char **argv) {
     m = mmap(NULL, 2 * ps, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (m == MAP_FAILED) return 3;
     mprotect(m + ps, ps, PROT_NONE);
-    r = syscall(SYS_rename, good, m + ps);
+    r = native_rename(good, m + ps);
     report("rename_second_faults", r, good, "");
-    r = syscall(SYS_rename, m + ps, good);
+    r = native_rename(m + ps, good);
     report("rename_first_faults", r, "", good);
     return 0;
 }
@@ -575,6 +578,7 @@ static int mode_exec_over_inflight(int argc, char **argv) {
     for (;;) pause();
 }
 
+#ifdef __x86_64__
 static int mode_abi(int argc, char **argv) {
     char i386[512], native[512], mk[512];
     char *low;
@@ -602,6 +606,7 @@ static int mode_abi(int argc, char **argv) {
     report("mknodat", r, mk, "");
     return 0;
 }
+#endif
 
 static int mode_rdonly(int argc, char **argv) {
     long n, i, ok = 0;
@@ -649,7 +654,7 @@ static int mode_symlink(int argc, char **argv) {
     long r;
     if (argc < 3) return 2;
     snprintf(link, sizeof link, "%s/the-link", argv[2]);
-    r = syscall(SYS_symlink, "THE-TARGET", link);
+    r = native_symlink("THE-TARGET", link);
     report("symlink", r, "THE-TARGET", link);
     return 0;
 }
@@ -667,6 +672,7 @@ static int mode_unreadable(int argc, char **argv) {
     return 0;
 }
 
+#ifdef __x86_64__
 static int mode_i386_pipe(void) {
     int fds[2] = {-1, -1};
     long res;
@@ -676,6 +682,7 @@ static int mode_i386_pipe(void) {
     if (fds[1] >= 0) close(fds[1]);
     return 0;
 }
+#endif
 
 static long g_n;
 static char *g_worker_path;
@@ -727,12 +734,16 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "twopath")) return mode_twopath(argc, argv);
     if (!strcmp(argv[1], "threads-exec")) return mode_threads_exec(argc, argv);
     if (!strcmp(argv[1], "exec-over-inflight")) return mode_exec_over_inflight(argc, argv);
+#ifdef __x86_64__
     if (!strcmp(argv[1], "abi")) return mode_abi(argc, argv);
+#endif
     if (!strcmp(argv[1], "rdonly")) return mode_rdonly(argc, argv);
     if (!strcmp(argv[1], "worker-fork")) return mode_worker_fork(argc, argv);
     if (!strcmp(argv[1], "symlink")) return mode_symlink(argc, argv);
     if (!strcmp(argv[1], "unreadable")) return mode_unreadable(argc, argv);
+#ifdef __x86_64__
     if (!strcmp(argv[1], "i386-pipe")) return mode_i386_pipe();
+#endif
     if (!strcmp(argv[1], "two-threads")) return mode_two_threads(argc, argv);
     return 2;
 }
@@ -781,7 +792,11 @@ fn build() -> Result<&'static (PathBuf, PathBuf), String> {
             let dir = std::env::temp_dir().join(format!("ouro-j1-regress-{}", std::process::id()));
             std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
             let source = dir.join("regress.c");
-            std::fs::write(&source, HELPER_C).map_err(|e| format!("write regress.c: {e}"))?;
+            std::fs::write(
+                &source,
+                format!("{}\n{HELPER_C}", include_str!("fixtures/native_fs.h")),
+            )
+            .map_err(|e| format!("write regress.c: {e}"))?;
             let helper = dir.join("regress");
             // `-B` beside the compiler, so building the fixture does not
             // depend on `PATH`: `gcc` looks up `as` and `ld` there, and every
@@ -1466,7 +1481,8 @@ fn r7_a_lying_sockaddr_length_retains_only_the_family_it_names() {
 }
 
 /// R8: `mknodat` and `truncate` are inside the closed set as of jail-v1 §11.2,
-/// and are now named. A call from an ABI the set does not name still is not.
+/// and are now named. On x86_64, the fixture additionally exercises i386 and
+/// x32 calls to verify that foreign ABI operations are never named as native.
 #[test]
 fn r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi() {
     let _serial = serial();
@@ -1494,14 +1510,17 @@ fn r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi() {
     );
     assert_eq!(observed.of_op(ClosedOp::Mknod).len(), 1);
     assert_eq!(observed.of_op(ClosedOp::Truncate).len(), 1);
-    assert!(
-        !paths.iter().any(|p| p.ends_with("by-int80")),
-        "an i386 open is outside the native ABI and must not be named: {paths:?}"
-    );
-    assert!(
-        !paths.iter().any(|p| p.ends_with("by-x32")),
-        "an x32 openat carries a number from another table: {paths:?}"
-    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert!(
+            !paths.iter().any(|p| p.ends_with("by-int80")),
+            "an i386 open is outside the native ABI and must not be named: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("by-x32")),
+            "an x32 openat carries a number from another table: {paths:?}"
+        );
+    }
 }
 
 /// R9: `open_how` structures of every awkward size. Every result the observer
@@ -1801,7 +1820,11 @@ fn r17_a_foreign_filter_is_named_not_guessed() {
             code: 0x15,
             jt: 0,
             jf: 2,
-            k: 0xc000_003e,
+            k: if cfg!(target_arch = "aarch64") {
+                0xc000_00b7
+            } else {
+                0xc000_003e
+            },
         },
         libc::sock_filter {
             code: 0x20,
@@ -1813,7 +1836,7 @@ fn r17_a_foreign_filter_is_named_not_guessed() {
             code: 0x15,
             jt: 1,
             jf: 0,
-            k: 3,
+            k: u32::try_from(libc::SYS_close).unwrap(),
         },
         libc::sock_filter {
             code: 0x06,
@@ -1952,6 +1975,7 @@ fn r20_a_non_leader_exec_accounts_for_every_thread() {
 /// the observer cannot name, and the calls the observer does name still work
 /// and are still reported.
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn r21_the_tool_baseline_denies_the_abi_the_observer_cannot_name() {
     let _serial = serial();
     let Some(work) = setup("r21") else { return };
@@ -2245,6 +2269,7 @@ fn r26_a_tracee_cannot_manufacture_the_observers_loss() {
 /// `unexpected_trace_stop`: the narrowing filter itself now stops on every
 /// foreign call, so the stop is expected and the gap says what it is.
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table() {
     let _serial = serial();
     let Some(work) = setup("r27") else { return };

@@ -106,7 +106,7 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
                 + ['operator_review_of_host_support_and_validation_required'],
             'artifacts': records,
             'support': {'x86_64': 'Ubuntu 26.04 reference host; other hosts require their own doctor result',
-                        'aarch64': 'Debian 13 Raspberry Pi with matching Unix diagnostics support; memory cgroups and Landlock unavailable'},
+                        'aarch64': 'Debian 13 Raspberry Pi with matching Unix diagnostics support; memory cgroups and Landlock unavailable; the default build profile refuses'},
             'native_records_are_attestations': 'Review the native builder and validation evidence before signing.'}
     (out / 'release-plan.json').write_text(json.dumps(plan, indent=2) + '\n')
     shutil.copyfile(Path(__file__).with_name('install.sh'), out / 'install.sh')
@@ -114,7 +114,7 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
         '# Ouro Jail ' + version + ' — release candidate\n\n'
         'Prepared for monocursive/ouroboros. Not published.\n\n'
         'Linux x86_64 and ARM64 packages; host enforcement depends on `ouro-jail doctor`.\n'
-        'Ubuntu 24 stock execution remains refused. Pi memory ceilings and Landlock remain unavailable.\n'
+        'Ubuntu 24 stock execution remains refused. Pi memory ceilings and Landlock remain unavailable; the default build profile refuses.\n'
         'Real-agent reliability remains experimental: attach the completed compatibility record before changing that claim.\n'
         'Verify SHA256SUMS with a public key obtained through an independent trusted channel.\n')
     return plan

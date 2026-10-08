@@ -158,21 +158,21 @@ static int mode_closed_set(int argc, char **argv) {
     report("open_write", r, a, ""); if (r >= 0) close((int) r);
     r = syscall(SYS_openat, AT_FDCWD, miss, O_WRONLY | O_CREAT, 0600);
     report("open_enoent", r, miss, "");
-    r = syscall(SYS_mkdir, d, 0700);
+    r = native_mkdir(d, 0700);
     report("mkdir", r, d, "");
-    r = syscall(SYS_mkdir, d, 0700);
+    r = native_mkdir(d, 0700);
     report("mkdir_eexist", r, d, "");
-    r = syscall(SYS_rename, a, b);
+    r = native_rename(a, b);
     report("rename", r, a, b);
-    r = syscall(SYS_link, b, c);
+    r = native_link(b, c);
     report("link", r, b, c);
-    r = syscall(SYS_symlink, "a-target", s);
+    r = native_symlink("a-target", s);
     report("symlink", r, s, "a-target");
-    r = syscall(SYS_unlink, c);
+    r = native_unlink(c);
     report("unlink", r, c, "");
-    r = syscall(SYS_unlink, c);
+    r = native_unlink(c);
     report("unlink_enoent", r, c, "");
-    r = syscall(SYS_rmdir, d);
+    r = native_rmdir(d);
     report("rmdir", r, d, "");
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
     memset(&sa, 0, sizeof sa);
@@ -184,7 +184,7 @@ static int mode_closed_set(int argc, char **argv) {
     r = syscall(SYS_openat, AT_FDCWD, argv[3], O_WRONLY, 0);
     report("open_eacces", r, argv[3], "");
 
-    r = syscall(SYS_creat, a2, 0600);
+    r = native_creat(a2, 0600);
     report("creat", r, a2, ""); if (r >= 0) close((int) r);
     r = syscall(SYS_renameat2, AT_FDCWD, a2, AT_FDCWD, b2, 0);
     report("renameat2", r, a2, b2);
@@ -194,7 +194,7 @@ static int mode_closed_set(int argc, char **argv) {
     report("mkdirat", r, d2, "");
     r = syscall(SYS_unlinkat, AT_FDCWD, d2, AT_REMOVEDIR);
     report("unlinkat_removedir", r, d2, "");
-    r = syscall(SYS_open, a3, O_WRONLY | O_CREAT, 0600);
+    r = native_open(a3, O_WRONLY | O_CREAT, 0600);
     report("open", r, a3, ""); if (r >= 0) close((int) r);
     r = syscall(SYS_linkat, AT_FDCWD, a3, AT_FDCWD, c3, 0);
     report("linkat", r, a3, c3);
@@ -210,7 +210,7 @@ static int mode_closed_set(int argc, char **argv) {
        mknod spellings. A FIFO needs no privilege. */
     r = syscall(SYS_truncate, a3, 0L);
     report("truncate", r, a3, "");
-    r = syscall(SYS_mknod, n1, S_IFIFO | 0600, 0);
+    r = native_mknod(n1, S_IFIFO | 0600, 0);
     report("mknod", r, n1, "");
     r = syscall(SYS_mknodat, AT_FDCWD, n2, S_IFIFO | 0600, 0);
     report("mknodat", r, n2, "");
@@ -359,7 +359,7 @@ static int mode_storm(int argc, char **argv) {
     report("storm", n, argv[3], "");
     if (await_release()) return 4;
     snprintf(dir, sizeof dir, "%s.d", argv[3]);
-    report("after", syscall(SYS_mkdir, dir, 0700), dir, "");
+    report("after", native_mkdir(dir, 0700), dir, "");
     return 0;
 }
 
@@ -374,8 +374,8 @@ static int mode_fileops(int argc, char **argv) {
     for (i = 0; i < n; i++) {
         long fd = syscall(SYS_openat, AT_FDCWD, a, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) close((int) fd);
-        syscall(SYS_rename, a, b);
-        syscall(SYS_unlink, b);
+        native_rename(a, b);
+        native_unlink(b);
     }
     report("fileops", n, argv[3], "");
     return 0;
@@ -387,7 +387,7 @@ static int mode_denied(int argc, char **argv) {
     if (argc < 3) return 2;
     r = syscall(SYS_openat, AT_FDCWD, argv[2], O_WRONLY | O_CREAT, 0600);
     report("open_erofs", r, argv[2], "");
-    r = syscall(SYS_mkdir, argv[2], 0700);
+    r = native_mkdir(argv[2], 0700);
     report("mkdir_erofs", r, argv[2], "");
     return 0;
 }
@@ -435,13 +435,13 @@ static int mode_shell_ops(int argc, char **argv) {
     snprintf(d, sizeof d, "%s/d", argv[2]);
     r = syscall(SYS_openat, AT_FDCWD, a, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     report("open_create", r, a, ""); if (r >= 0) close((int) r);
-    r = syscall(SYS_rename, a, b);
+    r = native_rename(a, b);
     report("rename", r, a, b);
-    r = syscall(SYS_unlink, b);
+    r = native_unlink(b);
     report("unlink", r, b, "");
-    r = syscall(SYS_mkdir, d, 0700);
+    r = native_mkdir(d, 0700);
     report("mkdir", r, d, "");
-    r = syscall(SYS_rmdir, d);
+    r = native_rmdir(d);
     report("rmdir", r, d, "");
     report("nspid", (long) getpid(), "", "");
     return 0;
@@ -517,7 +517,11 @@ fn build() -> Result<&'static (PathBuf, PathBuf), String> {
             let dir = std::env::temp_dir().join(format!("ouro-j1-observer-{}", std::process::id()));
             std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
             let source = dir.join("helper.c");
-            std::fs::write(&source, HELPER_C).map_err(|e| format!("write helper.c: {e}"))?;
+            std::fs::write(
+                &source,
+                format!("{}\n{HELPER_C}", include_str!("fixtures/native_fs.h")),
+            )
+            .map_err(|e| format!("write helper.c: {e}"))?;
             let helper = dir.join("helper");
             // `-B` beside the compiler, so building the fixture does not
             // depend on `PATH`: `gcc` looks up `as` and `ld` there, and every
@@ -874,6 +878,25 @@ fn find_launcher(root: libc::pid_t, argv0: &[u8], budget: Duration) -> Option<li
     None
 }
 
+/// Independently name the syscall emitted by the native C fixture macros.
+fn native_expectation(syscall: &str, op: ClosedOp) -> (&str, ClosedOp) {
+    if cfg!(target_arch = "aarch64") {
+        match syscall {
+            "mkdir" => ("mkdirat", op),
+            "rename" => ("renameat", op),
+            "link" => ("linkat", op),
+            "symlink" => ("symlinkat", op),
+            "unlink" => ("unlinkat", op),
+            "rmdir" => ("unlinkat", ClosedOp::Unlink),
+            "creat" | "open" => ("openat", op),
+            "mknod" => ("mknodat", op),
+            _ => (syscall, op),
+        }
+    } else {
+        (syscall, op)
+    }
+}
+
 // ------------------------------------------------------------------ tests
 
 /// O01: every closed-set result the observer reports is the result the
@@ -937,12 +960,29 @@ fn o01_every_closed_set_result_matches_the_fixture() {
         ("renameat", Some(("renameat", ClosedOp::Rename))),
         ("connect_ok", Some(("connect", ClosedOp::Connect))),
     ];
-    // Every row of the closed set is compared here, one-to-one.
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|(label, expectation)| {
+            (
+                *label,
+                expectation.map(|(syscall, op)| native_expectation(syscall, op)),
+            )
+        })
+        .collect();
+    // Every native row is compared, including the legacy x86_64 spellings.
     let rows: std::collections::BTreeSet<&str> = expected
         .iter()
         .filter_map(|(_, e)| e.map(|(syscall, _)| syscall))
         .collect();
-    assert_eq!(rows.len(), 22, "{rows:?}");
+    assert_eq!(
+        rows.len(),
+        if cfg!(target_arch = "aarch64") {
+            13
+        } else {
+            22
+        },
+        "{rows:?}"
+    );
     let labels: Vec<&str> = reports.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(
         labels,
@@ -1199,8 +1239,9 @@ fn o01_through_bubblewrap_carries_host_pids_for_namespace_processes() {
         else {
             unreachable!()
         };
-        assert_eq!(*syscall, *want_syscall, "{label}");
-        assert_eq!(*op, *want_op, "{label}");
+        let (want_syscall, want_op) = native_expectation(want_syscall, *want_op);
+        assert_eq!(*syscall, want_syscall, "{label}");
+        assert_eq!(*op, want_op, "{label}");
         assert_eq!(*ret, report.ret(), "{label}");
         assert_eq!(*pid, inner, "{label}: events carry the host pid");
         let (a, b) = paths(event);
