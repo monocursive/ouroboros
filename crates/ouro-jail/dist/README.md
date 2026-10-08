@@ -46,3 +46,61 @@ Run the installer regression with an ephemeral test key:
 ```sh
 python3 crates/ouro-jail/dist/test_install.py target/release/ouro-jail
 ```
+
+## Prepare the Linux release candidate
+
+The selected destination is `monocursive/ouroboros`, initially Linux x86_64 and
+ARM64. Preparation produces local files and never creates a GitHub release.
+A Homebrew tap and native macOS execution are outside this first distribution.
+
+Build the same clean commit on each native host with the pinned Rust toolchain.
+Set `OURO_BUILD_REVISION` to that commit and `OURO_BUILD_DIRTY=false` only after
+checking the checkout. Run the applicable native validation before staging.
+The `stage` command executes the supplied binary's `version --json`, checks its
+ELF architecture and requires the named clean, optimized build-input digest:
+
+```sh
+python3 crates/ouro-jail/dist/prepare_release.py stage \
+  --binary target/release/ouro-jail --target x86_64-unknown-linux-gnu \
+  --revision "$TESTED_REVISION" --inputs "$TESTED_INPUTS" --out /private/stage-x86
+# On the Pi, use --target aarch64-unknown-linux-gnu and a separate output directory.
+```
+
+Copy the two staged directories to the release operator's machine. Archive
+bytes are deterministic across source-file timestamps and locations. Assembly
+requires exactly one artifact per architecture and verifies archive contents,
+native build records, source inputs and binary hashes before preparing a draft:
+
+```sh
+python3 crates/ouro-jail/dist/prepare_release.py assemble \
+  --stage /private/stage-x86 --stage /private/stage-arm \
+  --revision "$TESTED_REVISION" --inputs "$TESTED_INPUTS" \
+  --version 0.1.0-rc.1 --out /private/release-candidate
+```
+
+`0.1.0-rc.1` is an example candidate version, not a published tag. The resulting
+`release-plan.json` records the repository, proposed tag, commit, hashes and
+remaining publication blockers. `RELEASE_NOTES.md` preserves the current host
+and agent-compatibility limits. Native artifact records are builder attestations;
+review the trusted build environment and its conformance evidence before signing.
+
+For signed assembly, use a fresh output directory and add `--signing-key` with
+the operator's private key path and `--public-key` with the independently trusted
+public key. Assembly verifies its own signature before reporting success. It
+never generates, uploads or stores a private key. The production key, custody,
+backup and trusted public-key distribution must be chosen by the operator.
+
+Before publication, review the exact candidate, its validation record and host
+support notes. Then create a draft release in the selected repository using the
+plan's exact commit and proposed tag, upload the two archives and signed manifest,
+and verify installation from those draft assets. Public publication is a separate
+operator action. GitHub's [release procedure](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+describes the distinction between saving a draft and publishing it.
+
+```sh
+python3 -m unittest discover -s crates/ouro-jail/dist -p test_release.py
+```
+
+These tests include real ephemeral signatures, wrong-key rejection, archive and
+binary tampering, architecture/build mismatch, missing/duplicate targets and
+archive reproducibility. They do not establish public release availability.

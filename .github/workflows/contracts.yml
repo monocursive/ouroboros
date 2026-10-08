@@ -23,3 +23,9 @@ jobs:
       - run: uv run docs/specs/validate_links.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_performance.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_agent_matrix.py
+      - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_observer_pair.py
+      - name: Signed package preparation regressions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+          python3 -m unittest discover -s crates/ouro-jail/dist -p test_release.py
