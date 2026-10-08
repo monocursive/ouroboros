@@ -44,6 +44,36 @@ def sha256(path):
         return hashlib.file_digest(file, 'sha256').hexdigest()
 
 
+def stop_group(child):
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        return child.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return child.wait(timeout=15)
+
+
+def wait_trial(child, stderr_path, outer_seconds):
+    """Stop the experiment on a provider refusal instead of amplifying its retries."""
+    deadline = time.monotonic() + outer_seconds
+    while child.poll() is None:
+        with stderr_path.open('rb') as stream:
+            stream.seek(max(0, stderr_path.stat().st_size - 65536))
+            limited = b'Rate limit exceeded' in stream.read(65536)
+        if limited:
+            return stop_group(child), ['stopped after explicit provider rate limit']
+        if time.monotonic() >= deadline:
+            return stop_group(child), ['outer deadline exceeded']
+        time.sleep(.1)
+    return child.returncode, []
+
+
 def receipt_problems(receipt, observe):
     problems = []
     for key, expected in [('phase', 'settled'), ('containment', 'enforced'),
@@ -94,6 +124,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--agent', type=Path, required=True)
+    parser.add_argument('--model', default=MODEL, help='Explicit provider/model; defaults to the credential-free fixture.')
     parser.add_argument('--tool-dir', type=Path, help='Read-only directory containing a provisioned rg binary.')
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--inputs', required=True, help='Expected Jail build-input SHA256.')
@@ -131,7 +162,7 @@ def main():
     result = {'schema': 'ouro.jail.agent-matrix/1', 'build': build,
               'harness_sha256': sha256(Path(__file__)),
               'binary_sha256': sha256(binary), 'agent_sha256': sha256(agent),
-              'vendor_version': vendor, 'model': MODEL, 'credential': 'none',
+              'vendor_version': vendor, 'model': args.model, 'credential': 'none',
               'ripgrep': {'path': rg, 'sha256': sha256(Path(rg))} if rg else None,
               'host': list(os.uname()), 'seed': args.seed, 'rounds': args.rounds,
               'arms': args.arms, 'tasks': args.tasks, 'pure': args.pure,
@@ -166,7 +197,7 @@ def main():
             if task == 'repair':
                 (work / 'numbers_task.py').write_text('def sum_even(numbers):\n    return sum(numbers)\n')
                 (work / 'test_numbers.py').write_text(TEST_SOURCE)
-            command = [str(agent), 'run', '--model', MODEL, PROMPTS[task]]
+            command = [str(agent), 'run', '--model', args.model, PROMPTS[task]]
             if args.diagnostic_logs:
                 command[2:2] = ['--print-logs', '--log-level', 'DEBUG', '--format', 'json']
             if args.pure:
@@ -189,16 +220,8 @@ def main():
                                          stdout=stdout, stderr=stderr, start_new_session=True)
                 result['active_trial'] = {'name': name, 'root': str(root), 'pid': child.pid}
                 save()
-                try:
-                    row['exit'] = child.wait(timeout=args.wall_seconds + 20)
-                except subprocess.TimeoutExpired:
-                    row['problems'].append('outer deadline exceeded')
-                    os.killpg(child.pid, signal.SIGTERM)
-                    try:
-                        row['exit'] = child.wait(timeout=15)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(child.pid, signal.SIGKILL)
-                        row['exit'] = child.wait(timeout=15)
+                row['exit'], wait_problems = wait_trial(child, destination / 'stderr.txt', args.wall_seconds + 20)
+                row['problems'] += wait_problems
             row['seconds'] = time.monotonic() - started
             row['provider_rate_limited'] = 'Rate limit exceeded' in (destination / 'stderr.txt').read_text(errors='replace')
             if row['exit'] != 0:

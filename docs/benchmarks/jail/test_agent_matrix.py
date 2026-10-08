@@ -1,14 +1,34 @@
 import copy
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
+import time
 import unittest
 
-from agent_matrix import receipt_problems, summarize
+from agent_matrix import receipt_problems, summarize, wait_trial
 from verify_agent_matrix import verify_inventory, verify_trial_files
 from onboarding_guest import verify_build
 
 
 class AgentEvidenceTests(unittest.TestCase):
+    def test_provider_refusal_stops_a_real_process_without_waiting_for_retries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'stderr.txt'
+            with path.open('wb') as stderr:
+                child = subprocess.Popen([sys.executable, '-c',
+                    'import sys,time; print("Rate limit exceeded", file=sys.stderr, flush=True); time.sleep(60)'],
+                    stderr=stderr, start_new_session=True)
+                started = time.monotonic()
+                try:
+                    code, problems = wait_trial(child, path, 10)
+                    self.assertNotEqual(code, 0)
+                    self.assertEqual(problems, ['stopped after explicit provider rate limit'])
+                    self.assertLess(time.monotonic() - started, 5)
+                    self.assertIsNotNone(child.poll())
+                finally:
+                    if child.poll() is None: child.kill(); child.wait()
+
     def test_missing_trace_judge_or_fixture_cannot_pass_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
