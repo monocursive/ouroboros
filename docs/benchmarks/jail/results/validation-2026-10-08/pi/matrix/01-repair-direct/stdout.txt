@@ -1,0 +1,1 @@
+`sum_even` now filters to even integers only (numbers_task.py:2); all 3 tests pass.

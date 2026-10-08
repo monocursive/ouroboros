@@ -51,6 +51,11 @@ OpenCode run in 67.32 seconds. The record names the exact build and host and
 preserves the unsuccessful Ubuntu 22 and stock Ubuntu 24 attempts. This local
 package test does not establish public release availability or wider support.
 
+The [October 8 refresh](benchmarks/jail/validation-2026-10-08.md) repeats this
+with the current frozen Jail inputs. Provisioning ripgrep also makes the real
+OpenCode glob/read/write workflow pass in 82.85 seconds. Stock Ubuntu 24 still
+refuses contained execution; signed-package checks pass on both releases.
+
 Before public distribution, we also need to choose the release repository,
 Homebrew tap, and production signing identity. Until those are configured,
 the guide uses a source build and makes the host requirements explicit.
@@ -77,6 +82,12 @@ quotas with 41 live checks. Explicit swap and bounded tmpfs ceilings also have
 live checks. The [October 2 baseline](specs/jail-v1/evidence/2026-10-02-final/README.md)
 records a passing conformance run and current tested freeze. Project quotas and
 automatic volume provisioning remain pending.
+
+The same October 8 record passes K17 with 540 measured samples and no exclusions:
+worst added startup is 131.3 ms p95; observation-off file-work overhead is
+34.9%–37.9%. Real-agent matrices retain deadline failures and provider rate
+limits, so their successful cases are not general compatibility claims. The
+new runner checks dependencies first and stops on a provider rate limit.
 
 The release checks also include the full test suite, Linux conformance,
 security review, and unresolved findings. Documentation and a successful

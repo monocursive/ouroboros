@@ -1,0 +1,1 @@
+All 3 tests pass. `numbers_task.py:2` now filters with `isinstance(n, int) and n % 2 == 0`, so negative evens (`-4`, `-2`) and `0` are included, odds and non-integers excluded; `test_numbers.py` unchanged.

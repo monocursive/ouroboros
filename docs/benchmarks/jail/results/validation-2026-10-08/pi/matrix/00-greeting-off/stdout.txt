@@ -1,0 +1,1 @@
+Created `greeting.txt` with exactly `hello` + newline (verified: 6 bytes, `h e l l o \n`).

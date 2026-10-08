@@ -21,10 +21,14 @@ Supported for execution: Linux on x86_64 or aarch64, on a host that runs its own
 delegate a cgroup v2 subtree is not). The reference host is Ubuntu 26.04.1 on
 kernel 7.0; native ARM64 checks also run on a Raspberry Pi 4 with Debian 13.
 Capabilities are host-specific: the tested Pi's kernel disables memory cgroups
-and omits Landlock and AF_UNIX socket diagnostics. Required memory ceilings,
-requested Landlock domains and the `agent` profile refuse there before exec;
-`tool` and `none` remain eligible. Run `doctor --profile <profile>` for the policy you
-intend to use. macOS builds support inspection (`version`, `explain`, `doctor`)
+and omits Landlock. The exact-kernel [Unix diagnostics module](evidence/2026-10-07-pi-proxy/README.md)
+now enables the proxy, and `doctor --launch opencode` reports ready on that
+provisioned host. Required memory ceilings and requested Landlock domains still
+refuse before exec. A kernel upgrade needs matching Unix diagnostics support;
+this module does not establish support for arbitrary Pi kernels. Run
+`doctor --profile <profile>` or `doctor --launch <agent>` for the policy you
+intend to use. Readiness is separate from [agent compatibility](agent-compatibility.md).
+macOS builds support inspection (`version`, `explain`, `doctor`)
 and refuse execution with exit 125. Linux builds for other architectures refuse
 with 125 (`unsupported_architecture`).
 

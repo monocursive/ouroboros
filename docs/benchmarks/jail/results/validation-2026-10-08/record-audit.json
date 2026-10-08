@@ -1,0 +1,15 @@
+{
+  "schema": "ouro.jail.validation-record-audit/1",
+  "valid": true,
+  "checks": [
+    "frozen receipt and event schemas",
+    "receipt and event semantics",
+    "trace attempt attribution",
+    "enforced attempt cleanup and tree integrity"
+  ],
+  "receipts": 81,
+  "traces": 61,
+  "events": 179627,
+  "enforced_receipts": 80,
+  "refused_receipts": 1
+}

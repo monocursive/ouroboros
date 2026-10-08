@@ -1,0 +1,10 @@
+[0m
+> build · big-pickle
+[0m
+[0m← [0mWrite greeting.txt
+Wrote file successfully.
+[0m
+[0m$ [0mod -c greeting.txt
+0000000   h   e   l   l   o  \n
+0000006
+[0m

@@ -1,0 +1,14 @@
+[0m
+> build · big-pickle
+[0m
+[0m← [0mWrite greeting.txt
+Wrote file successfully.
+[0m
+[0m$ [0mxxd greeting.txt
+(no output)
+[0m
+[0m$ [0mod -c greeting.txt; ls -la greeting.txt
+0000000   h   e   l   l   o  \n
+0000006
+-rw------- 1 monocursive monocursive 6 Oct  8 08:31 greeting.txt
+[0m

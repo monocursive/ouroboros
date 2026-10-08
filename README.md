@@ -192,21 +192,25 @@ macOS supports local store inspection. The jail still works independently.
 See the [ledger specification and commands](docs/specs/ledger-v1.md). The full
 ledger now includes bounded cross-run discovery and comparisons, signed portable
 bundles, and best-effort writer-outage recovery for already admitted runs. The
-full durability gate, historical-custody migration and managed project
-authorization remain open. Local consistency is reported separately from coverage and
+[milestone-2 acceptance record](docs/specs/ledger-v1/milestone-2-acceptance.md)
+closes its scripted durability gate. Historical-custody migration and managed
+project authorization remain open. Local consistency is reported separately from coverage and
 protection from the child.
+
+The [October 8 Jail validation](docs/benchmarks/jail/validation-2026-10-08.md)
+refreshes performance and signed onboarding against the current frozen runtime
+inputs. It also records mixed real-agent results and the corrected ripgrep
+prerequisite; repeated compatibility remains unqualified where trials failed
+or stopped early.
 
 ## Planned work
 
-- **Next:** complete the ledger acceptance and remaining verbs, signed public
-  distribution, more agent/version compatibility records, and benchmarks
-  refreshed against a committed build. [Clean-VM onboarding](docs/benchmarks/jail/onboarding-2026-09-30.md)
-  completed in 67.32 seconds on the documented Ubuntu 26.04.1 combination.
+- **Next:** signed public distribution and broader agent/version compatibility
+  records. Current-input clean-VM onboarding and benchmark results are linked above.
 - **Research:** native macOS execution, including process-tree cleanup when the
   supervising helper dies. Apple entitlement approval is also pending; approval
   alone does not resolve the cleanup blocker.
-- **Later:** signed ledger export bundles, and company-managed Linux
-  workers, starting with one worker before a fleet.
+- **Later:** company-managed Linux workers, starting with one worker before a fleet.
 
 These are planned features with no release dates. See the [roadmap](docs/roadmap.md),
 [north star](north-star.md), and [managed-teams specification](docs/specs/managed-teams-v1.md).

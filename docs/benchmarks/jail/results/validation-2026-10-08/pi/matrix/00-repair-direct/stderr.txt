@@ -1,0 +1,28 @@
+[0m
+> build · big-pickle
+[0m
+[0m✱ [0mGlob "**/*.py"[90m 2 matches[0m
+[0m→ [0mRead numbers_task.py
+[0m→ [0mRead test_numbers.py
+[0m
+[0m← [0mEdit numbers_task.py
+Index: /home/monocursive/.ouro-agent-matrix-mjwt9ba8/work/numbers_task.py
+===================================================================
+--- /home/monocursive/.ouro-agent-matrix-mjwt9ba8/work/numbers_task.py
++++ /home/monocursive/.ouro-agent-matrix-mjwt9ba8/work/numbers_task.py
+@@ -1,2 +1,2 @@
+ def sum_even(numbers):
+-    return sum(numbers)
++    return sum(n for n in numbers if isinstance(n, int) and not isinstance(n, bool) and n % 2 == 0)
+
+[0m
+[0m$ [0mpython3 -m unittest -v
+test_empty (test_numbers.NumbersTest.test_empty) ... ok
+test_mixed (test_numbers.NumbersTest.test_mixed) ... ok
+test_negative (test_numbers.NumbersTest.test_negative) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+OK
+[0m

@@ -1,0 +1,77 @@
+{
+  "argv": [
+    "/home/ubuntu/ouro-jail-validation-20261008/bin/ouro-jail",
+    "run",
+    "--profile",
+    "tool",
+    "--observe",
+    "on",
+    "--workspace",
+    "/home/ubuntu/ouro-jail-validation-20261008/perf/plain/ws",
+    "--",
+    "/home/ubuntu/ouro-jail-validation-20261008/perf/plain/ws/ouro-fixture",
+    "fileops",
+    "5000",
+    "/home/ubuntu/ouro-jail-validation-20261008/perf/plain/ws/fileops"
+  ],
+  "attempts": [
+    {
+      "dir": "/home/ubuntu/ouro-jail-validation-20261008/perf/plain/state/fileops/tool-on/data-0/attempts/att_614c76ee-879c-4f3c-a430-91ae3675ee57",
+      "id": "att_614c76ee-879c-4f3c-a430-91ae3675ee57",
+      "receipt": true,
+      "trace": {
+        "by_operation": {
+          "fs.create": 5000,
+          "fs.rename": 5000,
+          "fs.unlink": 5000,
+          "jail.receipt": 3,
+          "note": 2,
+          "proc.exec": 1,
+          "proc.exit": 1
+        },
+        "by_source": {
+          "audit": 15002,
+          "wrapper": 5
+        },
+        "bytes": 8163789,
+        "frames": 15007,
+        "guard": null,
+        "notes": {
+          "lifecycle": 2
+        },
+        "state": "complete"
+      }
+    }
+  ],
+  "cgroup": "/user.slice/user-1000.slice/session-18560.scope",
+  "exec_errno": null,
+  "exec_ns": 1396983856826198,
+  "pid": 1985155,
+  "rusage": {
+    "maxrss_kib": 8544,
+    "stime_us": 592520,
+    "utime_us": 250258
+  },
+  "sampling": {
+    "hwm_kib": 8756,
+    "interval_ms": 5,
+    "leaf_note": null,
+    "leaf_path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_614c76ee-879c-4f3c-a430-91ae3675ee57.leaf",
+    "leaf_peak_bytes": 2027520,
+    "leaf_samples": 204,
+    "samples": 226
+  },
+  "schema": "ouro.fixture.perf-launch/1",
+  "status": {
+    "code": 0,
+    "exited": true,
+    "raw": 0,
+    "signal": null
+  },
+  "t0_ns": 1396983856352151,
+  "t1_ns": 1396985018882628,
+  "timed_out": false,
+  "timens": "time:[4026531834]",
+  "wait_errno": null,
+  "waited_via": "pidfd"
+}

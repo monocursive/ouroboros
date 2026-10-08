@@ -1,0 +1,1 @@
+I'll create `greeting.txt` with exactly "hello" followed by a newline.

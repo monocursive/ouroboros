@@ -1,0 +1,1 @@
+Created `greeting.txt` containing `hello\n` (6 bytes, verified via hex dump).

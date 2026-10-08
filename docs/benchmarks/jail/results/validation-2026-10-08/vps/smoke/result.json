@@ -1,0 +1,93 @@
+{
+  "schema": "ouro.jail.agent-matrix/1",
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": false,
+      "inputs": "sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32",
+      "opt_level": "3",
+      "revision": "f933105ebfcbdfee0133986e21cfe7423e7aeb75",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "x86_64",
+      "kernel": "Linux 7.0.0-31-generic",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "binary_sha256": "73f3de8cdb17eb6b74996f6d7f4d8c43c893a423a6547cd3708abfd8b94b8395",
+  "agent_sha256": "513f500a1a5ea1dc7d865547ac87b32a8936334e8d5abd5b3ff585c45a170080",
+  "vendor_version": "1.18.32",
+  "model": "opencode/big-pickle",
+  "credential": "none",
+  "host": [
+    "Linux",
+    "vps-450b3fe8",
+    "7.0.0-31-generic",
+    "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "x86_64"
+  ],
+  "seed": 20261008,
+  "rounds": 1,
+  "wall_seconds": 120,
+  "rows": [
+    {
+      "name": "00-greeting-on",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "on",
+      "load_before": [
+        0.134765625,
+        0.13427734375,
+        0.095703125
+      ],
+      "passed": false,
+      "problems": [
+        "CLI did not exit zero",
+        "target did not exit zero"
+      ],
+      "exit": 143,
+      "seconds": 120.45975571102463,
+      "trace_sha256": "4719011882a9c4e79093e5b6f44150036d27a7ffb10bca723d971c87bff94842",
+      "attempt_id": "att_be4e747e-cec3-4154-972a-5416d6b8bdad",
+      "outcome": {
+        "kind": "signaled",
+        "code": null,
+        "signal": 15,
+        "cause": "wall_expiry",
+        "error": null
+      }
+    }
+  ],
+  "status": "failed",
+  "timing_limit": "Includes remote model latency and fresh vendor state per attempt.",
+  "summary": {
+    "greeting/on": {
+      "attempts": 1,
+      "passed": 0,
+      "failed": 1,
+      "median_seconds": null,
+      "p95_seconds": null,
+      "timing_population": "successful attempts only; failures retained separately"
+    }
+  }
+}

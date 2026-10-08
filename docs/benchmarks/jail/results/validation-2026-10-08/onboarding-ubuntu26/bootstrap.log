@@ -1,0 +1,174 @@
+Cloud-init v. 26.1-0ubuntu3~26.04.1 running 'init-local' at Thu, 08 Oct 2026 07:12:51 +0000. Up 37.53 seconds.
+Cloud-init v. 26.1-0ubuntu3~26.04.1 running 'init' at Thu, 08 Oct 2026 07:12:56 +0000. Up 42.00 seconds.
+ci-info: ++++++++++++++++++++++++++++++++++++++Net device info++++++++++++++++++++++++++++++++++++++
+ci-info: +--------+------+----------------------------+---------------+--------+-------------------+
+ci-info: | Device |  Up  |          Address           |      Mask     | Scope  |     Hw-Address    |
+ci-info: +--------+------+----------------------------+---------------+--------+-------------------+
+ci-info: |  ens3  | True |         10.0.2.15          | 255.255.255.0 | global | 52:54:00:12:34:56 |
+ci-info: |  ens3  | True | fe80::5054:ff:fe12:3456/64 |       .       |  link  | 52:54:00:12:34:56 |
+ci-info: |   lo   | True |         127.0.0.1          |   255.0.0.0   |  host  |         .         |
+ci-info: |   lo   | True |          ::1/128           |       .       |  host  |         .         |
+ci-info: +--------+------+----------------------------+---------------+--------+-------------------+
+ci-info: ++++++++++++++++++++++++++++Route IPv4 info+++++++++++++++++++++++++++++
+ci-info: +-------+-------------+----------+-----------------+-----------+-------+
+ci-info: | Route | Destination | Gateway  |     Genmask     | Interface | Flags |
+ci-info: +-------+-------------+----------+-----------------+-----------+-------+
+ci-info: |   0   |   0.0.0.0   | 10.0.2.2 |     0.0.0.0     |    ens3   |   UG  |
+ci-info: |   1   |   10.0.2.0  | 0.0.0.0  |  255.255.255.0  |    ens3   |   U   |
+ci-info: |   2   |   10.0.2.2  | 0.0.0.0  | 255.255.255.255 |    ens3   |   UH  |
+ci-info: |   3   |   10.0.2.3  | 0.0.0.0  | 255.255.255.255 |    ens3   |   UH  |
+ci-info: +-------+-------------+----------+-----------------+-----------+-------+
+ci-info: +++++++++++++++++++Route IPv6 info+++++++++++++++++++
+ci-info: +-------+-------------+---------+-----------+-------+
+ci-info: | Route | Destination | Gateway | Interface | Flags |
+ci-info: +-------+-------------+---------+-----------+-------+
+ci-info: |   0   |  fe80::/64  |    ::   |    ens3   |   U   |
+ci-info: |   2   |    local    |    ::   |    ens3   |   U   |
+ci-info: |   3   |  multicast  |    ::   |    ens3   |   U   |
+ci-info: +-------+-------------+---------+-----------+-------+
+Cloud-init v. 26.1-0ubuntu3~26.04.1 running 'modules:config' at Thu, 08 Oct 2026 07:13:03 +0000. Up 48.79 seconds.
+Cloud-init v. 26.1-0ubuntu3~26.04.1 running 'modules:final' at Thu, 08 Oct 2026 07:13:15 +0000. Up 61.08 seconds.
+Hit:1 http://archive.ubuntu.com/ubuntu resolute InRelease
+Get:2 http://security.ubuntu.com/ubuntu resolute-security InRelease [137 kB]
+Get:3 http://archive.ubuntu.com/ubuntu resolute-updates InRelease [137 kB]
+Get:4 http://archive.ubuntu.com/ubuntu resolute-backports InRelease [137 kB]
+Get:5 http://security.ubuntu.com/ubuntu resolute-security/main amd64 Packages [598 kB]
+Get:6 http://archive.ubuntu.com/ubuntu resolute/universe amd64 Packages [16.0 MB]
+Get:7 http://security.ubuntu.com/ubuntu resolute-security/main Translation-en [138 kB]
+Get:8 http://security.ubuntu.com/ubuntu resolute-security/main amd64 Components [46.7 kB]
+Get:9 http://security.ubuntu.com/ubuntu resolute-security/universe amd64 Packages [200 kB]
+Get:10 http://security.ubuntu.com/ubuntu resolute-security/universe Translation-en [64.9 kB]
+Get:11 http://security.ubuntu.com/ubuntu resolute-security/universe amd64 Components [55.6 kB]
+Get:12 http://security.ubuntu.com/ubuntu resolute-security/universe amd64 c-n-f Metadata [3552 B]
+Get:13 http://security.ubuntu.com/ubuntu resolute-security/restricted amd64 Packages [474 kB]
+Get:14 http://security.ubuntu.com/ubuntu resolute-security/restricted Translation-en [96.3 kB]
+Get:15 http://security.ubuntu.com/ubuntu resolute-security/multiverse amd64 Packages [10.8 kB]
+Get:16 http://security.ubuntu.com/ubuntu resolute-security/multiverse Translation-en [2844 B]
+Get:17 http://security.ubuntu.com/ubuntu resolute-security/multiverse amd64 Components [212 B]
+Get:18 http://security.ubuntu.com/ubuntu resolute-security/multiverse amd64 c-n-f Metadata [120 B]
+Get:19 http://archive.ubuntu.com/ubuntu resolute/universe Translation-en [6329 kB]
+Get:20 http://archive.ubuntu.com/ubuntu resolute/universe amd64 Components [4556 kB]
+Get:21 http://archive.ubuntu.com/ubuntu resolute/universe amd64 c-n-f Metadata [313 kB]
+Get:22 http://archive.ubuntu.com/ubuntu resolute/multiverse amd64 Packages [290 kB]
+Get:23 http://archive.ubuntu.com/ubuntu resolute/multiverse Translation-en [127 kB]
+Get:24 http://archive.ubuntu.com/ubuntu resolute/multiverse amd64 Components [50.0 kB]
+Get:25 http://archive.ubuntu.com/ubuntu resolute/multiverse amd64 c-n-f Metadata [8276 B]
+Get:26 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 Packages [734 kB]
+Get:27 http://archive.ubuntu.com/ubuntu resolute-updates/main Translation-en [172 kB]
+Get:28 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 Components [110 kB]
+Get:29 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 Packages [323 kB]
+Get:30 http://archive.ubuntu.com/ubuntu resolute-updates/universe Translation-en [105 kB]
+Get:31 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 Components [201 kB]
+Get:32 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 c-n-f Metadata [4704 B]
+Get:33 http://archive.ubuntu.com/ubuntu resolute-updates/restricted amd64 Packages [508 kB]
+Get:34 http://archive.ubuntu.com/ubuntu resolute-updates/restricted Translation-en [101 kB]
+Get:35 http://archive.ubuntu.com/ubuntu resolute-updates/multiverse amd64 Packages [21.0 kB]
+Get:36 http://archive.ubuntu.com/ubuntu resolute-updates/multiverse Translation-en [4168 B]
+Get:37 http://archive.ubuntu.com/ubuntu resolute-updates/multiverse amd64 Components [216 B]
+Get:38 http://archive.ubuntu.com/ubuntu resolute-updates/multiverse amd64 c-n-f Metadata [256 B]
+Get:39 http://archive.ubuntu.com/ubuntu resolute-backports/main amd64 Components [212 B]
+Get:40 http://archive.ubuntu.com/ubuntu resolute-backports/main amd64 c-n-f Metadata [112 B]
+Get:41 http://archive.ubuntu.com/ubuntu resolute-backports/universe amd64 Packages [3136 B]
+Get:42 http://archive.ubuntu.com/ubuntu resolute-backports/universe Translation-en [7988 B]
+Get:43 http://archive.ubuntu.com/ubuntu resolute-backports/universe amd64 Components [1060 B]
+Get:44 http://archive.ubuntu.com/ubuntu resolute-backports/universe amd64 c-n-f Metadata [116 B]
+Get:45 http://archive.ubuntu.com/ubuntu resolute-backports/restricted amd64 Components [216 B]
+Get:46 http://archive.ubuntu.com/ubuntu resolute-backports/restricted amd64 c-n-f Metadata [120 B]
+Get:47 http://archive.ubuntu.com/ubuntu resolute-backports/multiverse amd64 Components [216 B]
+Get:48 http://archive.ubuntu.com/ubuntu resolute-backports/multiverse amd64 c-n-f Metadata [120 B]
+Fetched 32.0 MB in 13s (2517 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+git is already the newest version (1:2.53.0-1ubuntu1).
+git set to manually installed.
+perl is already the newest version (5.40.1-7ubuntu0.3).
+perl set to manually installed.
+curl is already the newest version (8.18.0-1ubuntu2.7).
+curl set to manually installed.
+python3 is already the newest version (3.14.3-0ubuntu2).
+python3 set to manually installed.
+ca-certificates is already the newest version (20260601~26.04.1).
+ca-certificates set to manually installed.
+Solving dependencies...
+The following NEW packages will be installed:
+  bubblewrap minisign
+0 upgraded, 2 newly installed, 0 to remove and 23 not upgraded.
+Need to get 68.9 kB of archives.
+After this operation, 188 kB of additional disk space will be used.
+Get:1 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 bubblewrap amd64 0.11.1-1ubuntu0.3 [51.0 kB]
+Get:2 http://archive.ubuntu.com/ubuntu resolute/universe amd64 minisign amd64 0.12-1build1 [17.9 kB]
+Fetched 68.9 kB in 0s (353 kB/s)
+Selecting previously unselected package bubblewrap.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 91484 files and directories currently installed.)
+Preparing to unpack .../bubblewrap_0.11.1-1ubuntu0.3_amd64.deb ...
+Unpacking bubblewrap (0.11.1-1ubuntu0.3) ...
+Selecting previously unselected package minisign.
+Preparing to unpack .../minisign_0.12-1build1_amd64.deb ...
+Unpacking minisign (0.12-1build1) ...
+Setting up bubblewrap (0.11.1-1ubuntu0.3) ...
+Setting up minisign (0.12-1build1) ...
+Processing triggers for man-db (2.13.1-1build1) ...
+
+Running kernel seems to be up-to-date.
+
+No services need to be restarted.
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+Cloud-init v. 26.1-0ubuntu3~26.04.1 finished at Thu, 08 Oct 2026 07:14:31 +0000. Datasource DataSourceNoCloud [seed=/dev/sr0].  Up 137.43 seconds
+Generating public/private rsa key pair.
+Your identification has been saved in /etc/ssh/ssh_host_rsa_key
+Your public key has been saved in /etc/ssh/ssh_host_rsa_key.pub
+The key fingerprint is:
+SHA256:twajWG8/3JP4dWslD4ZlxBr47uNDVapuK0aPYXJyY58 root@ouro-k27-fresh
+The key's randomart image is:
++---[RSA 3072]----+
+|           . .   |
+|          . . o .|
+|           . + o |
+|            o =  |
+|      . S .. *   |
+|     o oo+O.= + .|
+|    . . oXo% +.+o|
+|       . oB E. oo|
+|         ..*+=.. |
++----[SHA256]-----+
+Generating public/private ecdsa key pair.
+Your identification has been saved in /etc/ssh/ssh_host_ecdsa_key
+Your public key has been saved in /etc/ssh/ssh_host_ecdsa_key.pub
+The key fingerprint is:
+SHA256:KIsRWYK8xuDYZ0XIbrGyradQfkMX4WLTc5D1xabftsE root@ouro-k27-fresh
+The key's randomart image is:
++---[ECDSA 256]---+
+|.....o+o.  ..    |
+|o. ++ooo . .o    |
+|=.+.++= . .o     |
+|.=oo*o =  .      |
+|. oBo o S  . o   |
+| o.+.+      . E  |
+|. o.+        . o |
+| .....        .  |
+|  .o             |
++----[SHA256]-----+
+Generating public/private ed25519 key pair.
+Your identification has been saved in /etc/ssh/ssh_host_ed25519_key
+Your public key has been saved in /etc/ssh/ssh_host_ed25519_key.pub
+The key fingerprint is:
+SHA256:vvDtCuzLIW+VrAgBUChGnEumKOJ4YyRlyOKYxe88+vo root@ouro-k27-fresh
+The key's randomart image is:
++--[ED25519 256]--+
+|**o              |
+|*B=              |
+|@*..             |
+|Ooo .            |
+|=o +   .S.       |
+|..= +. .+        |
+| o +.o=o.        |
+|  . .=o= o       |
+|  .+E.=.+oo      |
++----[SHA256]-----+

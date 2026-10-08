@@ -1,0 +1,1 @@
+All 3 tests pass. `sum_even` now filters with `n % 2 == 0`, which correctly includes negative evens (`-4 % 2 == 0` in Python) and zero.

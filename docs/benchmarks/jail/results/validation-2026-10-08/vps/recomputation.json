@@ -1,0 +1,20 @@
+{
+  "independently_recomputed": true,
+  "equal_except": [
+    "provenance"
+  ],
+  "checked_fields": [
+    "cells",
+    "comparisons",
+    "cpu_pressure",
+    "cpu_stall_ms",
+    "gate",
+    "host",
+    "integrity",
+    "load1",
+    "parameters",
+    "revalidated",
+    "schema",
+    "warmup_launches"
+  ]
+}

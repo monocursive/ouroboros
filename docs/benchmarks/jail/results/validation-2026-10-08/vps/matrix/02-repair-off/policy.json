@@ -1,0 +1,244 @@
+{
+  "policy_digest": "sha256:318198891eb72d3a451201290203637d35f4e3aef38e037794edc692d61de506",
+  "provenance": [
+    {
+      "detail": null,
+      "key": "profile",
+      "origin": "builtin-profile:agent"
+    },
+    {
+      "detail": null,
+      "key": "launch.network.allow",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "launch.network.allow",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "launch.network.allow",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "filesystem.read_only",
+      "origin": "cli"
+    },
+    {
+      "detail": "120s",
+      "key": "limits.wall",
+      "origin": "cli"
+    },
+    {
+      "detail": null,
+      "key": "observation.mode",
+      "origin": "cli"
+    },
+    {
+      "detail": "bundled",
+      "key": "launch.resolution",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.HOME",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.XDG_CACHE_HOME",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.XDG_CONFIG_HOME",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.XDG_DATA_HOME",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.XDG_STATE_HOME",
+      "origin": "launch-profile:opencode"
+    },
+    {
+      "detail": "opencode",
+      "key": "launch",
+      "origin": "launch-profile:opencode"
+    }
+  ],
+  "schema": "ouro.jail.policy-file/1",
+  "snapshot": {
+    "environment": {
+      "bindings": [
+        {
+          "name": "HOME",
+          "value": {
+            "path": "",
+            "root": "vendor_state"
+          }
+        },
+        {
+          "name": "PATH",
+          "value": "/usr/local/bin:/usr/bin:/bin"
+        },
+        {
+          "name": "TMPDIR",
+          "value": {
+            "path": "",
+            "root": "scratch"
+          }
+        },
+        {
+          "name": "XDG_CACHE_HOME",
+          "value": {
+            "path": "cache",
+            "root": "vendor_state"
+          }
+        },
+        {
+          "name": "XDG_CONFIG_HOME",
+          "value": {
+            "path": "config",
+            "root": "vendor_state"
+          }
+        },
+        {
+          "name": "XDG_DATA_HOME",
+          "value": {
+            "path": "data",
+            "root": "vendor_state"
+          }
+        },
+        {
+          "name": "XDG_STATE_HOME",
+          "value": {
+            "path": "state",
+            "root": "vendor_state"
+          }
+        }
+      ],
+      "inherit_host": false
+    },
+    "filesystem": {
+      "deny_read": [],
+      "protected_coverage": "none",
+      "protected_segments": [],
+      "read_only": [
+        {
+          "path": "/bin",
+          "root": "host"
+        },
+        {
+          "path": "/etc/group",
+          "root": "host"
+        },
+        {
+          "path": "/etc/hosts",
+          "root": "host"
+        },
+        {
+          "path": "/etc/localtime",
+          "root": "host"
+        },
+        {
+          "path": "/etc/passwd",
+          "root": "host"
+        },
+        {
+          "path": "/etc/resolv.conf",
+          "root": "host"
+        },
+        {
+          "path": "/etc/ssl",
+          "root": "host"
+        },
+        {
+          "path": "/home/ubuntu/.opencode/bin",
+          "root": "host"
+        },
+        {
+          "path": "/lib",
+          "root": "host"
+        },
+        {
+          "path": "/lib64",
+          "root": "host"
+        },
+        {
+          "path": "/usr",
+          "root": "host"
+        }
+      ],
+      "read_write": [
+        {
+          "path": "",
+          "root": "scratch"
+        },
+        {
+          "path": "",
+          "root": "vendor_state"
+        },
+        {
+          "path": "",
+          "root": "workspace"
+        }
+      ]
+    },
+    "launch": {
+      "credentials": [],
+      "home_is_state": true,
+      "state_subdirs": [
+        "cache/opencode",
+        "config/opencode",
+        "data/opencode",
+        "state/opencode"
+      ],
+      "state_var": null
+    },
+    "limits": {
+      "cpu": null,
+      "mem": null,
+      "pids": {
+        "required": false,
+        "value": "512"
+      },
+      "wall": {
+        "required": true,
+        "value": "120000"
+      }
+    },
+    "network": {
+      "allow": [
+        "models.opencode.ai:443",
+        "opencode.ai:443",
+        "registry.npmjs.org:443"
+      ],
+      "mode": "proxy",
+      "ruleset": "ouro.jail.network/1",
+      "translation_prefixes": []
+    },
+    "observation": {
+      "evidence": "strict",
+      "mode": "off"
+    },
+    "platform": "linux",
+    "profile": "agent",
+    "profile_version": 1,
+    "roots": {
+      "scratch": {
+        "kind": "managed"
+      },
+      "vendor_state": {
+        "kind": "managed"
+      },
+      "workspace": "/home/ubuntu/.ouro-agent-matrix-2363mlpd/work"
+    },
+    "schema": "ouro.jail.policy-snapshot/1"
+  }
+}

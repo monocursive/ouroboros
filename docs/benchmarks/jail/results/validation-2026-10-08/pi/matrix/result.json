@@ -1,0 +1,515 @@
+{
+  "schema": "ouro.jail.agent-matrix/1",
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": null,
+      "inputs": "sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32",
+      "opt_level": "3",
+      "revision": null,
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "aarch64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "aarch64",
+      "kernel": "Linux 6.18.50+rpt-rpi-v8",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "binary_sha256": "10b53fa587fe7fb0f6a69d6d5050513c987fb811d1521a99666b4414c137fab9",
+  "agent_sha256": "7c6e67883fcb230b7d4cb1bfea821756ed8b320c1fb44e9c36c8e7fc8725826b",
+  "vendor_version": "1.18.32",
+  "model": "opencode/big-pickle",
+  "credential": "none",
+  "host": [
+    "Linux",
+    "raspberrypi",
+    "6.18.50+rpt-rpi-v8",
+    "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "aarch64"
+  ],
+  "seed": 20261008,
+  "rounds": 5,
+  "wall_seconds": 120,
+  "rows": [
+    {
+      "name": "00-greeting-off",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "off",
+      "load_before": [
+        0.33837890625,
+        0.21630859375,
+        0.083984375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 88.38832081200962,
+      "trace_sha256": "9d89c26f03233044390ab80d268f43c1fae3dcb8c03968d58ff13cf4c892660f",
+      "attempt_id": "att_55df97b6-03bd-46af-bb66-40967dd295d1",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "00-repair-on",
+      "iteration": 0,
+      "task": "repair",
+      "arm": "on",
+      "load_before": [
+        0.6591796875,
+        0.41845703125,
+        0.1748046875
+      ],
+      "passed": false,
+      "problems": [
+        "CLI did not exit zero",
+        "target did not exit zero"
+      ],
+      "exit": 143,
+      "seconds": 121.04493449300935,
+      "trace_sha256": "e206bcac8d79feb1d4c8c27084a6515f85efe4720cadf3aa5c498338db0f7bfa",
+      "attempt_id": "att_0ae7704c-1dc4-43e6-97e6-7ebbe0805f48",
+      "outcome": {
+        "kind": "signaled",
+        "code": null,
+        "signal": 15,
+        "cause": "wall_expiry",
+        "error": null
+      }
+    },
+    {
+      "name": "00-repair-off",
+      "iteration": 0,
+      "task": "repair",
+      "arm": "off",
+      "load_before": [
+        0.7578125,
+        0.626953125,
+        0.287109375
+      ],
+      "passed": false,
+      "problems": [
+        "CLI did not exit zero",
+        "target did not exit zero"
+      ],
+      "exit": 1,
+      "seconds": 120.98043119699287,
+      "trace_sha256": "fa28ab232fae099047da7ca2cbcc3d41ab3b2c11c6dfd3181ba1bae9beb67877",
+      "attempt_id": "att_3bda36bb-9d04-42a6-bcc0-37dd6c893312",
+      "outcome": {
+        "kind": "unknown",
+        "code": null,
+        "signal": null,
+        "cause": "wall_expiry",
+        "error": null
+      }
+    },
+    {
+      "name": "00-repair-direct",
+      "iteration": 0,
+      "task": "repair",
+      "arm": "direct",
+      "load_before": [
+        0.7392578125,
+        0.69384765625,
+        0.359375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 88.46451010799501
+    },
+    {
+      "name": "00-greeting-direct",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "direct",
+      "load_before": [
+        0.82080078125,
+        0.7626953125,
+        0.416015625
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 88.61290253800689
+    },
+    {
+      "name": "00-greeting-on",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "on",
+      "load_before": [
+        1.125,
+        0.89599609375,
+        0.4970703125
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 26.572425646998454,
+      "trace_sha256": "8f2399d296803272e969ba884ca882c85ebd8679e526af31c8f0e3189cfe0eb2",
+      "attempt_id": "att_23aa521f-befe-44d9-9d97-5c9fa4277bf0",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "01-repair-on",
+      "iteration": 1,
+      "task": "repair",
+      "arm": "on",
+      "load_before": [
+        1.2353515625,
+        0.94091796875,
+        0.525390625
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 108.56401177198859,
+      "trace_sha256": "e72be305d9ff8699e86159d73df74653117816b0401c72f9b0b47dff7a8294a4",
+      "attempt_id": "att_1f7a5a1e-1225-4d94-8552-d50235966c5a",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "01-repair-off",
+      "iteration": 1,
+      "task": "repair",
+      "arm": "off",
+      "load_before": [
+        1.21484375,
+        1.08349609375,
+        0.6298828125
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 49.21411907499714,
+      "trace_sha256": "714d9f8d2c0ecee8841de50b4cd1fb062a63b17226b4c870f35ed4edfd39b0e9",
+      "attempt_id": "att_7f86ae6c-bf41-4112-a4cd-c9968895b1a5",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "01-repair-direct",
+      "iteration": 1,
+      "task": "repair",
+      "arm": "direct",
+      "load_before": [
+        1.44677734375,
+        1.18701171875,
+        0.69287109375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 100.94871817699459
+    },
+    {
+      "name": "01-greeting-off",
+      "iteration": 1,
+      "task": "greeting",
+      "arm": "off",
+      "load_before": [
+        0.8056640625,
+        1.0849609375,
+        0.71630859375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 67.8927342829993,
+      "trace_sha256": "524dad4e28260e0b55eba4b06b87a94af6b80c66b0d8f349b9c499db69d3e4da",
+      "attempt_id": "att_a826a93e-bc15-4040-b59b-9f2ce22e66a2",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "01-greeting-direct",
+      "iteration": 1,
+      "task": "greeting",
+      "arm": "direct",
+      "load_before": [
+        0.90283203125,
+        1.0888671875,
+        0.74560546875
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 71.48082576799789
+    },
+    {
+      "name": "01-greeting-on",
+      "iteration": 1,
+      "task": "greeting",
+      "arm": "on",
+      "load_before": [
+        0.9296875,
+        1.08740234375,
+        0.7763671875
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 26.474725752006634,
+      "trace_sha256": "a8cdab9b4621905de47c94a2df8cb5c31958b7f3fc3be9ecf951549937aa1b2f",
+      "attempt_id": "att_019f1871-089d-41b9-82d3-c4c0b08ddd79",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "02-greeting-on",
+      "iteration": 2,
+      "task": "greeting",
+      "arm": "on",
+      "load_before": [
+        1.25537109375,
+        1.15869140625,
+        0.810546875
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 33.99995401701017,
+      "trace_sha256": "5f7707b432e6dc66389d1127c740d735db2b0c5bc93e50aec91a5d5953c7a7f6",
+      "attempt_id": "att_0dcd7520-c02c-4067-aaa8-a9c9accc4e53",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "02-greeting-off",
+      "iteration": 2,
+      "task": "greeting",
+      "arm": "off",
+      "load_before": [
+        2.2275390625,
+        1.4111328125,
+        0.9091796875
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 37.27609004599799,
+      "trace_sha256": "f687275a634819f1970cad9921cc9aeb15428dcd04010353a5e9052c602cacce",
+      "attempt_id": "att_062d2e3c-eae1-46a6-a1c9-517104ca0921",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "02-repair-off",
+      "iteration": 2,
+      "task": "repair",
+      "arm": "off",
+      "load_before": [
+        1.7890625,
+        1.3955078125,
+        0.92333984375
+      ],
+      "passed": false,
+      "problems": [
+        "CLI did not exit zero",
+        "target did not exit zero"
+      ],
+      "exit": 1,
+      "seconds": 120.98246738500893,
+      "trace_sha256": "8c3d65e3d7fe19cea55b12e6237dedfca90faaff7386ab43975e3f20da139572",
+      "attempt_id": "att_14050229-9f03-4af8-ade4-2feadb9d3737",
+      "outcome": {
+        "kind": "unknown",
+        "code": null,
+        "signal": null,
+        "cause": "wall_expiry",
+        "error": null
+      }
+    },
+    {
+      "name": "02-repair-on",
+      "iteration": 2,
+      "task": "repair",
+      "arm": "on",
+      "load_before": [
+        0.7900390625,
+        1.17431640625,
+        0.90478515625
+      ],
+      "passed": false,
+      "problems": [
+        "CLI did not exit zero",
+        "target did not exit zero"
+      ],
+      "exit": 143,
+      "seconds": 121.02417777299706,
+      "trace_sha256": "bc19f0c4af3b80a3959cc872b3bde61f7c8c229806c0fcf67f4e481e0d8408b0",
+      "attempt_id": "att_292f7200-e366-4e45-b426-dd80cf9fa8f1",
+      "outcome": {
+        "kind": "signaled",
+        "code": null,
+        "signal": 15,
+        "cause": "wall_expiry",
+        "error": null
+      }
+    },
+    {
+      "name": "02-greeting-direct",
+      "iteration": 2,
+      "task": "greeting",
+      "arm": "direct",
+      "load_before": [
+        0.59716796875,
+        1.02734375,
+        0.88818359375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 39.433399132001796
+    },
+    {
+      "name": "02-repair-direct",
+      "iteration": 2,
+      "task": "repair",
+      "arm": "direct",
+      "load_before": [
+        1.16943359375,
+        1.1181640625,
+        0.9267578125
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 43.76688744699641
+    },
+    {
+      "name": "03-greeting-direct",
+      "iteration": 3,
+      "task": "greeting",
+      "arm": "direct",
+      "load_before": [
+        1.654296875,
+        1.25634765625,
+        0.98486328125
+      ],
+      "passed": false,
+      "problems": [
+        "outer deadline exceeded",
+        "CLI did not exit zero"
+      ],
+      "exit": -15,
+      "seconds": 140.21584394699312,
+      "retained_root": "/home/monocursive/.ouro-agent-matrix-ijtl2i6_"
+    }
+  ],
+  "status": "failed",
+  "timing_limit": "Includes remote model latency and fresh vendor state per attempt.",
+  "summary": {
+    "greeting/direct": {
+      "attempts": 4,
+      "passed": 3,
+      "failed": 1,
+      "median_seconds": 71.48082576799789,
+      "p95_seconds": 88.61290253800689,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "greeting/off": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "median_seconds": 67.8927342829993,
+      "p95_seconds": 88.38832081200962,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "greeting/on": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "median_seconds": 26.572425646998454,
+      "p95_seconds": 33.99995401701017,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "repair/direct": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "median_seconds": 88.46451010799501,
+      "p95_seconds": 100.94871817699459,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "repair/off": {
+      "attempts": 3,
+      "passed": 1,
+      "failed": 2,
+      "median_seconds": 49.21411907499714,
+      "p95_seconds": 49.21411907499714,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "repair/on": {
+      "attempts": 3,
+      "passed": 1,
+      "failed": 2,
+      "median_seconds": 108.56401177198859,
+      "p95_seconds": 108.56401177198859,
+      "timing_population": "successful attempts only; failures retained separately"
+    }
+  }
+}

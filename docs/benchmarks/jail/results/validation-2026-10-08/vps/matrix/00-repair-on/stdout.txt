@@ -1,0 +1,1 @@
+All 3 tests pass. `sum_even` now filters to even integers only (`numbers_task.py:2`), so negative evens like `-4` and `-2` are included while odd values are skipped.

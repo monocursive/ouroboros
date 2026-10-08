@@ -1,0 +1,1 @@
+All 3 tests pass. `sum_even` now filters to `int` values divisible by 2 (negative evens included), so non-integers are excluded and `-4 + -2 + 0 + 2 = -4`.

@@ -1,0 +1,13 @@
+#cloud-config
+users:
+  - name: ubuntu
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhk6ODWJH6i/xcjrmPYTZyVfd+qSeKllbipDiEFIV2b monocursive@monocursives-macbook-pro.home
+ssh_pwauth: false
+package_update: true
+packages: [bubblewrap, minisign, curl, ca-certificates, perl, git, python3]
+runcmd:
+  - [touch, /home/ubuntu/cloud-ready]

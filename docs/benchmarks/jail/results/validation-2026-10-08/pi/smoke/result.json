@@ -1,0 +1,90 @@
+{
+  "schema": "ouro.jail.agent-matrix/1",
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": null,
+      "inputs": "sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32",
+      "opt_level": "3",
+      "revision": null,
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "aarch64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "aarch64",
+      "kernel": "Linux 6.18.50+rpt-rpi-v8",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "binary_sha256": "10b53fa587fe7fb0f6a69d6d5050513c987fb811d1521a99666b4414c137fab9",
+  "agent_sha256": "7c6e67883fcb230b7d4cb1bfea821756ed8b320c1fb44e9c36c8e7fc8725826b",
+  "vendor_version": "1.18.32",
+  "model": "opencode/big-pickle",
+  "credential": "none",
+  "host": [
+    "Linux",
+    "raspberrypi",
+    "6.18.50+rpt-rpi-v8",
+    "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "aarch64"
+  ],
+  "seed": 20261008,
+  "rounds": 1,
+  "wall_seconds": 120,
+  "rows": [
+    {
+      "name": "00-greeting-on",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "on",
+      "load_before": [
+        0.0859375,
+        0.03125,
+        0.00537109375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 43.4862256339984,
+      "trace_sha256": "97a20f5808da0035caad8f8b869a0b6c93966abcbb0ca33ed901340f01937855",
+      "attempt_id": "att_354ec28a-4c22-438e-a6df-a932b4bfbd7b",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    }
+  ],
+  "status": "passed",
+  "timing_limit": "Includes remote model latency and fresh vendor state per attempt.",
+  "summary": {
+    "greeting/on": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "median_seconds": 43.4862256339984,
+      "p95_seconds": 43.4862256339984,
+      "timing_population": "successful attempts only; failures retained separately"
+    }
+  }
+}

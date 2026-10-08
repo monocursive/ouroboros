@@ -1,0 +1,8 @@
+test_empty (test_numbers.NumbersTest.test_empty) ... ok
+test_mixed (test_numbers.NumbersTest.test_mixed) ... ok
+test_negative (test_numbers.NumbersTest.test_negative) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+OK

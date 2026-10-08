@@ -1,0 +1,12 @@
+[0m
+> build · big-pickle
+[0m
+[0m✱ [0mGlob "**/task.txt"[90m 1 match[0m
+[0m→ [0mRead task.txt
+[0m
+[0m← [0mWrite greeting.txt
+Wrote file successfully.
+[0m
+[0m$ [0mcmp task.txt greeting.txt && echo "identical"
+identical
+[0m

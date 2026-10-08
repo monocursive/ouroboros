@@ -1,0 +1,1 @@
+All 3 tests pass. `sum_even` now filters to integers divisible by 2 (Python's `%` handles negatives correctly), so non-integers and odd values are excluded.

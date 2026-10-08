@@ -1,0 +1,3 @@
+`numbers_task.py:2` now filters to even integers (`isinstance(n, int) and n % 2 == 0`), so negatives like -4/-2 are included and odd values are skipped.
+
+All 3 tests pass (`python3 -m unittest -v` → OK). `test_numbers.py` was not modified.

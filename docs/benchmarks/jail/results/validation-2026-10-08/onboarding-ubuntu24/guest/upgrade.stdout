@@ -1,0 +1,19 @@
+ouro-jail 0.1.0
+platform linux x86_64 (Linux 6.8.0-142-generic)
+closed set linux-closed-v1
+schema receipt ouro.jail.receipt/1
+schema event ouro.event/1
+schema policy ouro.jail.policy/1
+schema policy_snapshot ouro.jail.policy-snapshot/1
+schema policy_file ouro.jail.policy-file/1
+schema gate ouro.jail.gate/1
+schema control ouro.jail.control/1
+schema network ouro.jail.network/1
+schema learned_policy ouro.jail.learned-policy/1
+schema doctor ouro.jail.doctor/1
+schemas frozen (milestone 1)
+build rustc 1.98.1 (48a229cea 2026-09-01)
+build target x86_64-unknown-linux-gnu opt-level 3 debug-assertions false
+build revision f933105ebfcbdfee0133986e21cfe7423e7aeb75 dirty false
+build inputs sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32
+Installed in /home/ubuntu/.local/bin. Add that directory to PATH if needed.

@@ -49,6 +49,27 @@ unavailable. Other Linux architectures are not yet supported for execution.
 Public jail packages and a Homebrew tap are still being prepared. Older
 Ouroboros releases belong to the archived agent runtime.
 
+## Verify a supplied package
+
+Public release coordinates are not configured yet. If an operator supplies a
+Jail artifact directory and a trusted minisign public key through independent
+channels, the checked-in installer verifies the signed checksum manifest before
+installing the binary. This path needs `minisign` and the host prerequisites above,
+but no Rust compiler:
+
+```sh
+sh crates/ouro-jail/dist/install.sh --from-dir /path/to/artifacts \
+  --public-key "$OURO_JAIL_TRUSTED_PUBLIC_KEY"
+ouro-jail version --json
+ouro-jail doctor --profile tool --json
+```
+
+Use `--upgrade` explicitly to replace an existing installation. A failed
+signature or archive checksum leaves the installed binary unchanged. A valid
+signature proves the artifact's signer; `doctor` still decides whether this
+host can enforce the requested policy. The [fresh-VM validation](benchmarks/jail/results/validation-2026-10-08/onboarding-ubuntu26/guest/result.json)
+uses an ephemeral test key and is not a public release or production signing claim.
+
 ## Run your first command
 
 Let's write a file in a fresh directory. This example needs no network or
@@ -160,10 +181,12 @@ All remain experimental until a compatibility record covers the specific
 agent version and jail build.
 
 Here's an OpenCode example. It assumes OpenCode is already installed at
-`$HOME/.opencode/bin` and you're still in the disposable directory above:
+`$HOME/.opencode/bin`, your distribution's `ripgrep` package supplies `rg` on
+`PATH`, and you're still in the disposable directory above:
 
 ```sh
 git init
+rg --version
 ouro-jail doctor --launch opencode
 ouro-jail explain --launch opencode --workspace "$PWD" \
   --ro "$HOME/.opencode/bin" --json
@@ -179,6 +202,16 @@ that needs authentication also needs explicit credential configuration in
 your launch profile; normal login state is not exposed automatically. See the
 [launch profile reference](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/operating.md#launch-profiles-and-credentials)
 for the configuration format.
+
+OpenCode 1.18.32 uses `rg` for file search. Without it, OpenCode attempts a
+GitHub download that the starter profile refuses. Provision the tool before
+launch instead of widening the network policy. For a private tool installation,
+grant its directory with `--ro` and set the child's path explicitly, for example
+`-- /usr/bin/env PATH=/private/tools:/usr/local/bin:/usr/bin:/bin /path/to/opencode run …`.
+Contained profiles replace the host's `PATH`, so changing it only outside the
+jail does not expose a private tool directory to the agent.
+`doctor --launch` checks Jail capabilities and profile inputs; it does not
+verify every vendor tool dependency or provider availability.
 
 OpenCode has recorded live runs. The
 [compatibility table](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/agent-compatibility.md)

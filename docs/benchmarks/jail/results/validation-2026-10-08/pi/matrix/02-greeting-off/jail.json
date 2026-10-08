@@ -1,0 +1,394 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_062d2e3c-eae1-46a6-a1c9-517104ca0921",
+  "revision": 4,
+  "phase": "settled",
+  "platform": {
+    "os": "linux",
+    "arch": "aarch64",
+    "kernel": "Linux 6.18.50+rpt-rpi-v8"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": "bubblewrap",
+    "backend_version": "bubblewrap 0.12.0"
+  },
+  "policy": {
+    "name": "agent",
+    "digest": "sha256:66c639aeb40fa52b1856af3e50cde5a39f6c316ecccd0581762eb83c31c36627",
+    "observe": "off",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_proxy",
+      "limit:wall"
+    ],
+    "grants": [
+      {
+        "kind": "allow_host",
+        "value": "opencode.ai:443",
+        "by": "operator"
+      },
+      {
+        "kind": "allow_host",
+        "value": "models.opencode.ai:443",
+        "by": "operator"
+      },
+      {
+        "kind": "allow_host",
+        "value": "registry.npmjs.org:443",
+        "by": "operator"
+      },
+      {
+        "kind": "read_only",
+        "value": "/home/monocursive/ouro-jail-validation-20261008/agent",
+        "by": "operator"
+      }
+    ]
+  },
+  "containment": "enforced",
+  "child_protection": "enforced",
+  "exec_observed": true,
+  "argv_digest": "sha256:098747541fc0917387bd19fdc7878df33fe90236162f8c0690c8226ec3ec5888",
+  "applied": {
+    "filesystem": {
+      "mechanism": "bubblewrap-binds",
+      "protected_coverage": "none",
+      "mounts": [
+        {
+          "path": "/",
+          "mode": "ro"
+        },
+        {
+          "path": "/usr",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/ssl",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/resolv.conf",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/passwd",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/group",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/hosts",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/localtime",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/ld.so.cache",
+          "mode": "ro"
+        },
+        {
+          "path": "/proc",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/null",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/zero",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/full",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/random",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/urandom",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/tty",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/pts",
+          "mode": "rw"
+        },
+        {
+          "path": "/tmp",
+          "mode": "rw"
+        },
+        {
+          "path": "/home/monocursive/.ouro-agent-matrix-o_wvfbb0/work",
+          "mode": "rw"
+        },
+        {
+          "path": "/home/monocursive/ouro-jail-validation-20261008/agent",
+          "mode": "ro"
+        },
+        {
+          "path": "/run/ouro/state",
+          "mode": "rw"
+        },
+        {
+          "path": "/run/ouro/proxy",
+          "mode": "ro"
+        },
+        {
+          "path": "/run/ouro/jail",
+          "mode": "ro"
+        }
+      ]
+    },
+    "network": {
+      "mode": "proxy",
+      "mechanism": "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
+      "allowed_hosts": [
+        "opencode.ai:443",
+        "models.opencode.ai:443",
+        "registry.npmjs.org:443"
+      ]
+    },
+    "syscalls": {
+      "mechanism": "seccomp-bpf+seccomp-user-notification",
+      "digest": "sha256:52a13e8ce62d615ad756e950382944442e000fb1609afd99de44c446d027de62"
+    },
+    "limits": [
+      {
+        "key": "wall",
+        "requested": "120000",
+        "required": true,
+        "applied": true,
+        "mechanism": "boottime-deadline",
+        "scope": "tree",
+        "hit": false
+      },
+      {
+        "key": "pids",
+        "requested": "512",
+        "required": false,
+        "applied": true,
+        "mechanism": "pids.max",
+        "scope": "tree",
+        "hit": false
+      }
+    ],
+    "environment_names": [
+      "ALL_PROXY",
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "PATH",
+      "PWD",
+      "TMPDIR",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "active"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "active",
+      "sources": [
+        "wrapper"
+      ],
+      "observed_count": 0,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "active",
+      "sources": [
+        "proxy"
+      ],
+      "observed_count": 29,
+      "gaps": []
+    }
+  },
+  "process": {
+    "pid": 140949,
+    "identity": {
+      "kind": "linux_boot_start",
+      "value": {
+        "boot_id": "9c1b4d50-1376-4da9-83da-1d58a793b465",
+        "pid": 140949,
+        "start_time_ticks": 7588268
+      }
+    }
+  },
+  "lifetime": {
+    "boundary": "pid_namespace",
+    "native": {
+      "os": "linux",
+      "details": {
+        "agent": {
+          "allowed_setup_operations": [
+            "prctl(PR_SET_NO_NEW_PRIVS)",
+            "seccomp",
+            "landlock_create_ruleset",
+            "landlock_add_rule",
+            "landlock_restrict_self",
+            "mount",
+            "umount2",
+            "pivot_root",
+            "chroot",
+            "unshare",
+            "clone_namespace_flags"
+          ],
+          "baseline_filter_digest": "sha256:52a13e8ce62d615ad756e950382944442e000fb1609afd99de44c446d027de62",
+          "filter_variant": "namespace_inner",
+          "first_flight_bytes_max": 8192,
+          "first_flight_timeout_ms": 5000,
+          "mediation_filter_digest": "sha256:33063c21492671bcf0a73a39a2a51af680cb9482443fb5ab8be82ba019aa4136",
+          "mediation_record_queue": 4096,
+          "nested_user_namespace": "available",
+          "nested_user_namespace_evidence": "a nested bubblewrap ran a command; bare unshare(CLONE_NEWUSER) inside: ok",
+          "origin_verification": "http_host_and_tls_sni",
+          "proxy_socket": "/run/ouro/proxy/proxy.sock",
+          "socks5_listen": "127.0.0.1:3129",
+          "tls_application_authority_verified": false,
+          "udp_egress": false,
+          "unix_peer_mediation": "seccomp_user_notification"
+        },
+        "backend_exec_by": "descriptor",
+        "bwrap_pid": 140945,
+        "cgroup_namespace": 4026532743,
+        "command_rules": {
+          "deny": 0,
+          "forbid": 0
+        },
+        "execution_cgroup": {
+          "charged_helpers": [
+            {
+              "pid": 140945,
+              "role": "bubblewrap"
+            },
+            {
+              "pid": 140948,
+              "role": "namespace_init"
+            },
+            {
+              "pid": 140951,
+              "role": "bridge"
+            }
+          ],
+          "device": 25,
+          "inode": 97275,
+          "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_062d2e3c-eae1-46a6-a1c9-517104ca0921.leaf",
+          "scope": "target_descendants_and_listed_helpers"
+        },
+        "filtered_readonly_opens": null,
+        "helpers": [
+          {
+            "charged_to_attempt": true,
+            "kind": "bridge",
+            "listen": "127.0.0.1:3128",
+            "mediated_connects": 29,
+            "pid": 140951,
+            "rejected_at_capacity": 0,
+            "seccomp_filters": 2
+          }
+        ],
+        "launcher_pid": 140949,
+        "mnt_namespace": 4026532563,
+        "namespace_init_pid": 140948,
+        "narrowing_filter_digest": null,
+        "narrowing_filter_digest_installed": null,
+        "net_namespace": 4026532745,
+        "observer_plan": null,
+        "path_claims_unverified": null,
+        "pid_namespace": 4026532740,
+        "readonly_open_fast_path": false,
+        "requested_by_other_filters": null,
+        "resolv_sanitization": "nameservers_only",
+        "seccomp_filters": {
+          "expected": 2,
+          "observed": 2
+        },
+        "supervisor_scope": {
+          "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-140913-7dc5853144cd4e5e.scope",
+          "reason": null,
+          "reason_code": null,
+          "state": "entered",
+          "unit": "ouro-jail-140913-7dc5853144cd4e5e.scope"
+        },
+        "user_namespace": 4026532567,
+        "watcher_pid": 140946
+      }
+    },
+    "tree_empty": true,
+    "verified_at": "2026-10-08T07:31:33Z",
+    "verification_scope": "attempt_tree",
+    "integrity": "verified"
+  },
+  "outcome": {
+    "kind": "exited",
+    "code": 0,
+    "signal": null,
+    "cause": null,
+    "error": null
+  },
+  "state_cleanup": "complete",
+  "cleanup_error": null,
+  "created_at": "2026-10-08T07:30:56Z",
+  "updated_at": "2026-10-08T07:31:33Z",
+  "errors": [],
+  "credentials": []
+}

@@ -1,0 +1,10 @@
+Creating hybrid image...
+
+Formatting '/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/ouro-k27-vm-dx2vxfva/guest.qcow2', fmt=qcow2 size=12884901888 backing_file=/Users/monocursive/code/ouroboros/evidence/jail-validation-20261008/ubuntu24.img backing_fmt=qcow2 cluster_size=65536 lazy_refcounts=off refcount_bits=16
+The secret key was saved as /var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/ouro-k27-vm-dx2vxfva/test-signing.key - Keep it secret!
+The public key was saved as /var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/ouro-k27-vm-dx2vxfva/test-signing.pub - That one can be public.
+
+Files signed using this key pair can be verified with the following command:
+
+minisign -Vm <file> -P RWTJrC3YlyWKoGHzgKTRxxxvcE1Obk+6Tf7McTDeWi0WXs0GpTtEfSd/
+

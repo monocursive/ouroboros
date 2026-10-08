@@ -1,0 +1,110 @@
+{
+  "schema": "ouro.jail.opencode-tools/1",
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": null,
+      "inputs": "sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32",
+      "opt_level": "3",
+      "revision": null,
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "aarch64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "aarch64",
+      "kernel": "Linux 6.18.50+rpt-rpi-v8",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "vendor_version": "1.18.32",
+  "ripgrep_version": "ripgrep 14.1.1\n\nfeatures:+pcre2\nsimd(compile):+NEON\nsimd(runtime):+NEON\n\nPCRE2 10.43 is available (JIT is available)",
+  "harness_sha256": "c1bae221e1ab3cb12ee2ac84b411680218d6f9529d734ce5e15c8dfb76994759",
+  "provider_requests": 0,
+  "credential": "none",
+  "rows": [
+    {
+      "case": "missing",
+      "rg_supplied": false,
+      "exit": 1,
+      "passed": true,
+      "denied_destinations": [
+        "github.com:443"
+      ],
+      "tree_empty": true,
+      "coverage_healthy": true
+    },
+    {
+      "case": "0-files",
+      "rg_supplied": true,
+      "exit": 0,
+      "passed": true,
+      "denied_destinations": [],
+      "tree_empty": true,
+      "coverage_healthy": true
+    },
+    {
+      "case": "0-search",
+      "rg_supplied": true,
+      "exit": 0,
+      "passed": true,
+      "denied_destinations": [],
+      "tree_empty": true,
+      "coverage_healthy": true
+    },
+    {
+      "case": "1-files",
+      "rg_supplied": true,
+      "exit": 0,
+      "passed": true,
+      "denied_destinations": [],
+      "tree_empty": true,
+      "coverage_healthy": true
+    },
+    {
+      "case": "1-search",
+      "rg_supplied": true,
+      "exit": 0,
+      "passed": true,
+      "denied_destinations": [],
+      "tree_empty": true,
+      "coverage_healthy": true
+    },
+    {
+      "case": "2-files",
+      "rg_supplied": true,
+      "exit": 0,
+      "passed": true,
+      "denied_destinations": [],
+      "tree_empty": true,
+      "coverage_healthy": true
+    },
+    {
+      "case": "2-search",
+      "rg_supplied": true,
+      "exit": 0,
+      "passed": true,
+      "denied_destinations": [],
+      "tree_empty": true,
+      "coverage_healthy": true
+    }
+  ],
+  "status": "passed"
+}

@@ -1,0 +1,40 @@
+[0m
+> build · big-pickle
+[0m
+[0m✗ [0mGlob "**/numbers_task.py" failed
+[91m[1mError: [0mripgrep execution failed
+[0m✗ [0mGlob "**/test_numbers.py" failed
+[91m[1mError: [0mripgrep execution failed
+[0m
+[0m$ [0mls -la
+total 16
+drwx------ 3 monocursive monocursive 4096 Oct  8 08:31 .
+drwx------ 3 monocursive monocursive   60 Oct  8 08:31 ..
+drwx------ 7 monocursive monocursive 4096 Oct  8 08:31 .git
+-rw------- 1 monocursive monocursive   47 Oct  8 08:31 numbers_task.py
+-rw------- 1 monocursive monocursive  294 Oct  8 08:31 test_numbers.py
+[0m
+[0m→ [0mRead numbers_task.py
+[0m→ [0mRead test_numbers.py
+[0m
+[0m← [0mEdit numbers_task.py
+Index: /home/monocursive/.ouro-agent-matrix-dtvlud3e/work/numbers_task.py
+===================================================================
+--- /home/monocursive/.ouro-agent-matrix-dtvlud3e/work/numbers_task.py
++++ /home/monocursive/.ouro-agent-matrix-dtvlud3e/work/numbers_task.py
+@@ -1,2 +1,2 @@
+ def sum_even(numbers):
+-    return sum(numbers)
++    return sum(n for n in numbers if isinstance(n, int) and n % 2 == 0)
+
+[0m
+[0m$ [0mpython3 -m unittest -v
+test_empty (test_numbers.NumbersTest.test_empty) ... ok
+test_mixed (test_numbers.NumbersTest.test_mixed) ... ok
+test_negative (test_numbers.NumbersTest.test_negative) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+OK
+[0m

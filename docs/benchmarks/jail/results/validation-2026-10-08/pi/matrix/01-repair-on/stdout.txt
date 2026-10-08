@@ -1,0 +1,1 @@
+Fixed `numbers_task.py:2` to filter for even integers (`isinstance(x, int)` and `x % 2 == 0`), which handles negatives correctly (negative even % 2 == 0). All 3 tests pass; `test_numbers.py` unchanged.

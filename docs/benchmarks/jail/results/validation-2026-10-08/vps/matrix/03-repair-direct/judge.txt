@@ -1,0 +1,26 @@
+test_empty (test_numbers.NumbersTest.test_empty) ... ok
+test_mixed (test_numbers.NumbersTest.test_mixed) ... FAIL
+test_negative (test_numbers.NumbersTest.test_negative) ... FAIL
+
+======================================================================
+FAIL: test_mixed (test_numbers.NumbersTest.test_mixed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/.ouro-agent-matrix-ejog3fi3/work/test_numbers.py", line 4, in test_mixed
+    def test_mixed(self): self.assertEqual(sum_even([1,2,3,4]), 6)
+                          ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 10 != 6
+
+======================================================================
+FAIL: test_negative (test_numbers.NumbersTest.test_negative)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/.ouro-agent-matrix-ejog3fi3/work/test_numbers.py", line 5, in test_negative
+    def test_negative(self): self.assertEqual(sum_even([-4,-3,-2,-1,0,2]), -4)
+                             ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: -8 != -4
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+FAILED (failures=2)

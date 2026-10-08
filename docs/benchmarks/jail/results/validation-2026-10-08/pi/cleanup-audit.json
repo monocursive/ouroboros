@@ -1,0 +1,11 @@
+{
+  "schema": "ouro.jail.validation-cleanup/1",
+  "roots": [
+    {
+      "root": "/home/monocursive/.ouro-agent-matrix-ijtl2i6_",
+      "live_file_references": [],
+      "action": "retained_for_diagnosis"
+    }
+  ],
+  "scope": "same-uid cwd, executable and open-file references; not proof of all descendants"
+}

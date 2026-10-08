@@ -9,13 +9,17 @@ credential, or a vendor-state archive.
 
 Current embedded starter profiles: `opencode`, `claude`, `codex`, `cursor`,
 `aider`, `goose`, `gemini`, `amp`, `cline`, `copilot`, `kilo`, `auggie`,
-`droid`, and `pi`. Every current-build combination is **experimental,
-unrecorded** until a row below names that exact build and vendor version.
+`droid`, and `pi`. Combinations remain **experimental** beyond the exact evidence recorded below.
+The October 8 current-input matrix has mixed results and incomplete repetitions;
+its successful cases do not establish general reliability.
 `doctor --launch` proves resolution and host capabilities, not vendor
 compatibility. The historical rows below retain their original scope.
 
 | Agent | Vendor version | Ouroboros revision | Platform | Backend | Jail mode | Credential | Result |
 |---|---|---|---|---|---|---|---|
+| OpenCode | 1.18.32 | clean `f933105e`; inputs `0abe3b09146a…`, unchanged at `d0bc346d` | Fresh Ubuntu 26.04 VM, x86_64 | bubblewrap 0.11.1, ptrace | `agent`, observation on, strict evidence | none (`opencode/big-pickle`) | Signed install, real glob/read/write workflow and clean settlement passed in 82.85 s; exact fixture scope only ([October 8 evidence](../../benchmarks/jail/validation-2026-10-08.md)) |
+| OpenCode | 1.18.32 | clean `f933105e`; current inputs `0abe3b09146a…` | Reference VPS, Ubuntu 26.04.1, Linux 7.0.0-31, x86_64 | bubblewrap 0.11.1, ptrace | `agent` on/off plus direct controls | none (`opencode/big-pickle`) | Mixed, incomplete matrix: deadlines and provider rate limits; missing ripgrep reproduced and supplied-tool regression fixed. Remains experimental ([record](../../benchmarks/jail/validation-2026-10-08.md)) |
+| OpenCode | 1.18.32 | archive build, null git metadata; current inputs `0abe3b09146a…` | Raspberry Pi, Debian 13, Linux 6.18.50+rpt-rpi-v8, aarch64 | bubblewrap 0.12.0, ptrace; provisioned Unix diagnostics | `agent` on/off plus direct controls | none (`opencode/big-pickle`) | Real tasks passed, but repeated matrix hit deadlines and remained incomplete; supplied-tool regression passes. Memory cgroups/Landlock still unavailable ([record](../../benchmarks/jail/validation-2026-10-08.md)) |
 | OpenCode | 1.18.32 | `41d8c230716877b5da6e6db3220017b7eb685344`, clean; inputs `f5486df58917…` | Fresh Ubuntu 26.04.1 VM, Linux 7.0.0-34, x86_64 QEMU TCG | bubblewrap 0.11.1, ptrace | `agent`, observation on, strict evidence; embedded profile | none (`opencode/big-pickle`) | Passed A01 execution and signed non-TTY onboarding in 67.32 seconds ([fresh VM evidence](../../benchmarks/jail/onboarding-2026-09-30.md)); other distributions retain explicit refusals |
 | OpenCode | 1.18.32 | `2c8f28dc` + dirty implementation; inputs `fa366f0c8236…` | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64 | bubblewrap 0.11.1, ptrace | `agent`, observation on, strict evidence | none (`opencode/big-pickle`) | Passed execution, learning and proposal validation ([current evidence](#opencode-current-implementation-2026-09-28)) |
 | OpenCode | 1.18.32 | `027de7d2` (the milestone revision; the bundled profile at that revision) | Ubuntu 26.04.1, Linux 7.0.0-31, x86_64, stock host | bubblewrap 0.11.1, ptrace observer; the frozen filters | `agent`, observation on, strict evidence | none (OpenCode Zen free model `big-pickle`) | Passed: wrote the requested workspace file; receipt settled, exit 0, every coverage class active ([milestone run](#opencode-agent-no-credential-at-the-milestone-revision)) |
