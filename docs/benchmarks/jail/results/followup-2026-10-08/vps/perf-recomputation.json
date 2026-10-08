@@ -1,0 +1,17 @@
+{
+  "all_measurement_fields_equal": true,
+  "only_provenance_differs": true,
+  "local_recomputation": {
+    "raw_bytes": 1424901,
+    "raw_file": "launches.ndjson",
+    "raw_records": 630,
+    "raw_sha256": "452a1d6a0331fc376ff0fca03d44b4ac97b82f0c77d7a8ded573227d73ee93d8",
+    "revalidated": false,
+    "summarized_at": "2026-10-08T10:38:41Z",
+    "summarizer": {
+      "record_schema": "xtask.perf.launch/2",
+      "source_revision": "d9d27227bea7182e962b0e9a5e41d49bd9dd2452",
+      "xtask_version": "0.1.0"
+    }
+  }
+}

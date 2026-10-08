@@ -1,0 +1,3 @@
+    Checking xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Checking ouro-jail v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-jail)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.05s

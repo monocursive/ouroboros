@@ -1,0 +1,18 @@
+[
+  {
+    "entry": {
+      "path": "numbers_task.py",
+      "type": "file"
+    },
+    "line": 1,
+    "offset": 0,
+    "text": "# ouro_probe_marker\n",
+    "submatches": [
+      {
+        "text": "ouro_probe_marker",
+        "start": 2,
+        "end": 19
+      }
+    ]
+  }
+]

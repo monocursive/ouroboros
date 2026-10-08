@@ -1,0 +1,46 @@
+timestamp=2026-10-08T09:28:14.092Z level=INFO run=e494011c message="creating instance" directory=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work
+timestamp=2026-10-08T09:28:14.100Z level=INFO run=e494011c message=fromDirectory directory=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work
+timestamp=2026-10-08T09:28:14.348Z level=INFO run=e494011c message=bootstrapping directory=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work
+timestamp=2026-10-08T09:28:14.471Z level=INFO run=e494011c message=loading path=/run/ouro/state/config/opencode/config.json
+timestamp=2026-10-08T09:28:14.491Z level=INFO run=e494011c message=loading path=/run/ouro/state/config/opencode/opencode.json
+timestamp=2026-10-08T09:28:14.507Z level=INFO run=e494011c message=loading path=/run/ouro/state/config/opencode/opencode.jsonc
+timestamp=2026-10-08T09:28:15.705Z level=INFO run=e494011c message="all LSPs are disabled"
+timestamp=2026-10-08T09:28:15.713Z level=INFO run=e494011c message="all formatters are disabled"
+timestamp=2026-10-08T09:28:15.713Z level=INFO run=e494011c message=init
+timestamp=2026-10-08T09:28:16.679Z level=INFO run=e494011c message=created id=ses_ee52871d9ffe3Ad7uU1fiLehJZ slug=jolly-squid version=1.18.32 projectID=global directory=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work path="" workspaceID=undefined parentID=undefined title="New session - 2026-10-08T09:28:16.679Z" agent=undefined model=undefined metadata=undefined permission="[{\"permission\":\"question\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_enter\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_exit\",\"pattern\":\"*\",\"action\":\"deny\"}]" cost=0 tokens.input=0 tokens.output=0 tokens.reasoning=0 tokens.cache.read=0 tokens.cache.write=0 time.created=1791451696679 time.updated=1791451696679
+timestamp=2026-10-08T09:28:16.745Z level=INFO run=e494011c message="event connected"
+timestamp=2026-10-08T09:28:19.643Z level=INFO run=e494011c message=loop session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ step=0
+timestamp=2026-10-08T09:28:19.806Z level=INFO run=e494011c message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ small=true agent=title mode=primary
+timestamp=2026-10-08T09:28:19.914Z level=INFO run=e494011c message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:28:20.555Z level=INFO run=e494011c message=initialized
+timestamp=2026-10-08T09:28:20.693Z level=INFO run=e494011c message=tracking hash=4b825dc642cb6eb9a060e54bf8d69288fbee4904 cwd=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work git=/run/ouro/state/data/opencode/snapshot/global/fe326577f6db2685b775921177eebaefe0f2f967
+timestamp=2026-10-08T09:28:20.726Z level=INFO run=e494011c message="shell tool using shell" shell=/usr/bin/bash
+timestamp=2026-10-08T09:28:20.778Z level=INFO run=e494011c message=init count=1
+timestamp=2026-10-08T09:28:21.333Z level=INFO run=e494011c message="watcher backend" directory=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work platform=linux backend=inotify
+timestamp=2026-10-08T09:28:21.341Z level=INFO run=e494011c message="project copy refresh started" projectID=global
+timestamp=2026-10-08T09:28:21.349Z level=INFO run=e494011c message="project copy refresh done" projectID=global updated=[] removed=[]
+timestamp=2026-10-08T09:28:24.306Z level=INFO run=e494011c message="booting location services" directory=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work workspaceID=undefined
+timestamp=2026-10-08T09:28:24.416Z level=INFO run=e494011c message=process session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ messageID=msg_11ad799ce001Eq1mG3O4NLsqmm
+timestamp=2026-10-08T09:28:24.426Z level=INFO run=e494011c message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ small=false agent=build mode=primary
+timestamp=2026-10-08T09:28:24.436Z level=INFO run=e494011c message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:28:29.240Z level=INFO run=e494011c message=evaluated permission=edit pattern=greeting.txt action.permission=* action.action=allow action.pattern=*
+timestamp=2026-10-08T09:28:29.309Z level=INFO run=e494011c message=formatting file=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work/greeting.txt
+timestamp=2026-10-08T09:28:29.313Z level=INFO run=e494011c message="touching file" file=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work/greeting.txt
+timestamp=2026-10-08T09:28:29.996Z level=INFO run=e494011c message=tracking hash=57e9529754dc514a3ec10db2ff882018fbe1fcbf cwd=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work git=/run/ouro/state/data/opencode/snapshot/global/fe326577f6db2685b775921177eebaefe0f2f967
+timestamp=2026-10-08T09:28:30.448Z level=INFO run=e494011c message=loop session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ step=1
+timestamp=2026-10-08T09:28:30.680Z level=INFO run=e494011c message=tracking hash=57e9529754dc514a3ec10db2ff882018fbe1fcbf cwd=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work git=/run/ouro/state/data/opencode/snapshot/global/fe326577f6db2685b775921177eebaefe0f2f967
+timestamp=2026-10-08T09:28:30.834Z level=INFO run=e494011c message=process session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ messageID=msg_11ad7c3f90011fGpHL0rWwKtOR
+timestamp=2026-10-08T09:28:30.838Z level=INFO run=e494011c message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ small=false agent=build mode=primary
+timestamp=2026-10-08T09:28:30.845Z level=INFO run=e494011c message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:28:36.378Z level=INFO run=e494011c message=evaluated permission=bash pattern="wc -c greeting.txt" action.permission=* action.action=allow action.pattern=*
+timestamp=2026-10-08T09:28:36.385Z level=INFO run=e494011c message=evaluated permission=bash pattern="od -c greeting.txt" action.permission=* action.action=allow action.pattern=*
+timestamp=2026-10-08T09:28:37.328Z level=INFO run=e494011c message=tracking hash=57e9529754dc514a3ec10db2ff882018fbe1fcbf cwd=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work git=/run/ouro/state/data/opencode/snapshot/global/fe326577f6db2685b775921177eebaefe0f2f967
+timestamp=2026-10-08T09:28:37.646Z level=INFO run=e494011c message=loop session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ step=2
+timestamp=2026-10-08T09:28:37.897Z level=INFO run=e494011c message=tracking hash=57e9529754dc514a3ec10db2ff882018fbe1fcbf cwd=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work git=/run/ouro/state/data/opencode/snapshot/global/fe326577f6db2685b775921177eebaefe0f2f967
+timestamp=2026-10-08T09:28:37.946Z level=INFO run=e494011c message=process session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ messageID=msg_11ad7e016001q5oV2cVy8F5H2c
+timestamp=2026-10-08T09:28:37.950Z level=INFO run=e494011c message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ small=false agent=build mode=primary
+timestamp=2026-10-08T09:28:37.960Z level=INFO run=e494011c message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:28:41.720Z level=INFO run=e494011c message=tracking hash=57e9529754dc514a3ec10db2ff882018fbe1fcbf cwd=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work git=/run/ouro/state/data/opencode/snapshot/global/fe326577f6db2685b775921177eebaefe0f2f967
+timestamp=2026-10-08T09:28:41.935Z level=INFO run=e494011c message=loop session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ step=3
+timestamp=2026-10-08T09:28:41.945Z level=INFO run=e494011c message="exiting loop" session.id=ses_ee52871d9ffe3Ad7uU1fiLehJZ
+timestamp=2026-10-08T09:28:42.303Z level=INFO run=e494011c message="disposing instance" directory=/home/monocursive/.ouro-agent-matrix-a9cj2zsk/work

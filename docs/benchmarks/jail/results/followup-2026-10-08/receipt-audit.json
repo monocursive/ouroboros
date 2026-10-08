@@ -1,0 +1,10 @@
+{
+  "receipts": 674,
+  "schema_and_semantics_valid": true,
+  "verified_empty_trees": 674,
+  "containment_counts": {
+    "none": 1,
+    "enforced": 673
+  },
+  "cleanup_complete_or_explicitly_not_needed": 674
+}

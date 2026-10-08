@@ -1,0 +1,77 @@
+   Compiling xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.61s
+     Running unittests src/main.rs (target/debug/deps/xtask-d1a5d4e084a997d9)
+
+running 69 tests
+test conformance::tests::a_clean_run_passes_and_the_remote_directory_is_removed ... ok
+test conformance::tests::a_clean_smoke_leg_has_no_problems ... ok
+test conformance::tests::a_detached_command_with_a_single_quote_is_refused - should panic ... ok
+test conformance::tests::a_detached_start_is_idempotent_and_holds_no_session_descriptor ... ok
+test conformance::tests::a_doctor_that_failed_or_produced_no_json_fails_the_run ... ok
+test conformance::tests::a_failed_or_absent_contract_validation_fails_the_run ... ok
+test conformance::tests::a_failed_or_absent_smoke_leg_fails_the_run ... ok
+test conformance::tests::a_failing_suite_exit_code_fails_the_run ... ok
+test conformance::tests::a_failure_in_any_test_binary_counts_not_only_the_last ... ok
+test conformance::tests::a_log_from_another_revision_or_without_conformance_mode_fails_the_run ... ok
+test conformance::tests::a_lost_build_fails_the_run_and_stops_there ... ok
+test conformance::tests::a_lost_suite_fails_the_run_and_says_why_even_with_a_clean_partial_log ... ok
+test conformance::tests::a_manifest_mismatch_fails_the_run_in_both_directions ... ok
+test conformance::tests::a_manifest_that_did_not_load_fails_the_run ... ok
+test conformance::tests::a_mapped_test_missing_from_the_log_fails_the_run_by_gate_and_clause ... ok
+test conformance::tests::a_missing_host_manifest_or_evidence_write_fails_the_run ... ok
+test conformance::tests::a_revision_that_is_not_a_commit_is_refused - should panic ... ok
+test conformance::tests::a_signal_killed_step_is_a_failure_and_says_so ... ok
+test conformance::tests::a_skipped_live_test_fails_the_run ... ok
+test conformance::tests::a_smoke_session_already_inside_the_user_manager_proves_nothing ... ok
+test conformance::tests::a_source_path_that_already_ends_in_a_slash_is_not_doubled ... ok
+test conformance::tests::a_step_that_ends_is_done_with_its_own_status ... ok
+test conformance::tests::a_step_that_never_ends_times_out ... ok
+test conformance::tests::a_stop_names_this_run_only ... ok
+test conformance::tests::a_suite_command_with_a_double_quote_is_refused - should panic ... ok
+test conformance::tests::a_suite_log_without_the_scrubbed_path_fails_i01 ... ok
+test conformance::tests::absent_vanished_and_unreadable_end_the_wait_at_once ... ok
+test conformance::tests::an_acceptance_map_that_did_not_load_fails_the_run ... ok
+test conformance::tests::an_empty_or_unreadable_test_log_fails_the_run ... ok
+test conformance::tests::an_i01_finding_or_a_missing_probe_fails_the_run ... ok
+test conformance::tests::build_space_refuses_full_unreadable_and_small_filesystems_before_build ... ok
+test conformance::tests::consecutive_failed_checks_lose_contact_and_say_why ... ok
+test conformance::tests::doctors_build_provenance_must_name_the_tested_clean_optimised_build ... ok
+test conformance::tests::dropped_checks_are_retried_and_contact_survives_them ... ok
+test conformance::tests::each_earlier_step_fails_the_run_and_stops_the_later_ones ... ok
+test conformance::tests::every_driver_check_is_derived_from_its_own_step ... ok
+test conformance::tests::every_ending_but_done_is_a_problem ... ok
+test conformance::tests::every_way_a_smoke_step_can_fail_is_named ... ok
+test conformance::tests::executable_measurement_covers_each_execution_binary_and_checks_afterwards ... ok
+test conformance::tests::i01_a_clean_probe_has_no_problems ... ok
+test conformance::tests::i01_a_silent_partial_or_foreign_probe_is_a_problem_not_a_pass ... ok
+test conformance::tests::i01_anything_found_is_a_problem_that_names_it ... ok
+test conformance::tests::i01_the_probe_also_looks_where_cargo_install_puts_binaries ... ok
+test conformance::tests::i01_the_probe_uses_the_suite_path_and_names_every_candidate ... ok
+test conformance::tests::i01_the_suite_runs_with_only_the_system_directories_on_its_path_and_says_so ... ok
+test conformance::tests::keep_remote_is_honoured_on_a_clean_run_and_never_invents_a_directory ... ok
+test conformance::tests::known_hosts_is_added_only_when_given ... ok
+test conformance::tests::no_local_path_reaches_a_failure_message ... ok
+test conformance::tests::only_a_well_formed_stamp_older_than_the_cutoff_is_pruned ... ok
+test conformance::tests::rsync_excludes_target_and_git_and_ends_the_source_with_a_slash ... ok
+test conformance::tests::rsync_transport_quotes_whitespace_and_both_quote_kinds ... ok
+test conformance::tests::run_directory_names_sort_and_stay_shell_safe ... ok
+test conformance::tests::shell_safety_rejects_what_would_need_quoting ... ok
+test conformance::tests::ssh_options_are_batch_and_strict_and_never_learn_a_host_key ... ok
+test conformance::tests::status_checks_parse_strictly ... ok
+test conformance::tests::the_build_and_test_steps_carry_identical_provenance_claims ... ok
+test conformance::tests::the_contract_validator_is_run_with_uv_from_the_worktree ... ok
+test conformance::tests::the_doctor_command_keeps_its_own_exit_status ... ok
+test conformance::tests::the_i02_scan_gates_the_run ... ok
+test conformance::tests::the_printed_run_path_is_pasteable_and_the_shell_one_expands ... ok
+test conformance::tests::the_remote_commands_use_the_account_cargo_and_two_jobs ... ok
+test conformance::tests::the_remote_scan_uses_the_precompiled_driver_without_rebuilding ... ok
+test conformance::tests::the_rsync_excludes_are_anchored_and_cover_the_local_evidence ... ok
+test conformance::tests::the_smoke_leg_runs_in_the_plain_session_and_never_in_a_driver_scope ... ok
+test conformance::tests::the_ssh_argv_ends_with_the_destination_then_the_command ... ok
+test conformance::tests::the_suite_does_not_stop_at_the_first_failing_binary ... ok
+test conformance::tests::the_test_command_forbids_skips_and_names_both_binaries ... ok
+test conformance::tests::the_verdict_the_driver_writes_is_the_one_it_decides_on ... ok
+test conformance::tests::transfer_inventory_keeps_sources_and_excludes_ignored_caches_and_secrets ... ok
+
+test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out; finished in 0.11s
+

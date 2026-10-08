@@ -1,0 +1,21 @@
+{
+  "schema": "ouro.jail.agent-diagnostics/1",
+  "matrix_status": "blocked",
+  "rows": [
+    {
+      "name": "00-greeting-off",
+      "passed": false,
+      "seconds": 72.87242871080525,
+      "main_stream_requests": 6,
+      "rate_limit_log_entries": 8,
+      "output_event_types": [
+        "error"
+      ],
+      "model_stream_to_first_output_seconds": 69.2810001373291,
+      "last_output_to_disposal_seconds": 0.020999908447265625,
+      "logged_startup_to_first_stream_seconds": 2.059999942779541,
+      "provider_refusal_through_disposal_seconds": 69.30200004577637
+    }
+  ],
+  "interpretation": "Timestamp intervals include agent/provider/tool work. They do not isolate causal sandbox overhead or prove the cause of earlier unlogged stalls."
+}

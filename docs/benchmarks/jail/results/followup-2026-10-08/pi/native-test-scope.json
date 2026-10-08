@@ -1,0 +1,17 @@
+{
+  "binary": "staged clean ARM64 release executable",
+  "binary_sha256": "a82fec348fa9474affb9e503fe785686497e04bc9b43260a74c5ec996438f5aa",
+  "runtime_inputs": "sha256:c708778d02dc8448268e0fada49487247574d5d50498a4c9142ef1a0d185afea",
+  "full_reference_conformance": false,
+  "memory_cgroup_cases_retained_as_refusals": [
+    "l01_operator_int_term_and_hup_each_end_a_contained_tree",
+    "l02_killing_the_backend_of_agent_or_build_ends_the_tree_within_a_bound",
+    "l02_killing_the_supervisor_of_agent_or_build_ends_the_tree_within_a_bound",
+    "l02_killing_the_watcher_of_agent_or_build_ends_the_tree_within_a_bound"
+  ],
+  "x86_compat_instruction_cases_not_built_on_arm64": [
+    "r21_the_tool_baseline_denies_the_abi_the_observer_cannot_name",
+    "r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table"
+  ],
+  "lifetime_agent_legs": "the initial full attempt reports successful tool/agent signal and agent helper-kill legs before build refuses for missing limit:mem"
+}

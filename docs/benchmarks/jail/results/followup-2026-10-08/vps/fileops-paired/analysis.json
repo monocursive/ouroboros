@@ -1,0 +1,48 @@
+{
+  "pairs": 60,
+  "measured_launches": 120,
+  "warmup_launches": 10,
+  "exclusions": 0,
+  "max_load1": 1.63818359375,
+  "bootstrap": {
+    "seed": 20261008,
+    "resamples": 10000,
+    "unit": "paired round",
+    "interval": "percentile"
+  },
+  "work_ns": {
+    "before": {
+      "median_ms": 942.6367325,
+      "p95_ms": 1059.093382
+    },
+    "after": {
+      "median_ms": 948.958675,
+      "p95_ms": 1046.399701
+    },
+    "paired_ratio": {
+      "median": 1.0038634155747737,
+      "bootstrap_95pct": [
+        0.9889322769224544,
+        1.0073174344703724
+      ]
+    }
+  },
+  "wall_ns": {
+    "before": {
+      "median_ms": 1058.7681795,
+      "p95_ms": 1170.774143
+    },
+    "after": {
+      "median_ms": 1060.063776,
+      "p95_ms": 1153.842173
+    },
+    "paired_ratio": {
+      "median": 0.9955510732114687,
+      "bootstrap_95pct": [
+        0.9892993956699643,
+        1.011899839581514
+      ]
+    }
+  },
+  "work_improvement_demonstrated": false
+}

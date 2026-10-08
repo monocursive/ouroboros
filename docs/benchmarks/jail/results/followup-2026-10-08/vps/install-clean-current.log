@@ -1,0 +1,1 @@
+PASS: non-TTY install, explicit upgrade, corrupt archive rejection, signature rejection, installed binary preserved

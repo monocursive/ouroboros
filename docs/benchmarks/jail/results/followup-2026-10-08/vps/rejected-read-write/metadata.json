@@ -1,0 +1,49 @@
+{
+  "before_sha256": "73f3de8cdb17eb6b74996f6d7f4d8c43c893a423a6547cd3708abfd8b94b8395",
+  "after_sha256": "607a59552b399a4fecddeee008d5f08fd401cc9bbe87005ae4d58e014d258845",
+  "harness_sha256": "8197ee48f5fcf963aec5c5f00756a941a56cadf1fb00c1ebe06aeafdeaeae975",
+  "workload_sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+  "host": [
+    "Linux",
+    "vps-450b3fe8",
+    "7.0.0-31-generic",
+    "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "x86_64"
+  ],
+  "samples": 60,
+  "seed": 20261001,
+  "after_version": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": true,
+      "inputs": "sha256:29629c79cd3d906bacfc2549cc17526453bf5ddf3ed7a1d30a61be6293447b85",
+      "opt_level": "3",
+      "revision": "e6795c7ceaef5175af9b612ca95ec1293a1421b8",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "x86_64",
+      "kernel": "Linux 7.0.0-31-generic",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  }
+}

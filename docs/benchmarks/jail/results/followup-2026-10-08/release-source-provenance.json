@@ -1,0 +1,12 @@
+{
+  "revision": "d9d27227bea7182e962b0e9a5e41d49bd9dd2452",
+  "git_archive_sha256": "5e5db8a7f016bc7953c7f27850cbaf9418543447443e55608cc2ae28962efee3",
+  "inputs": "sha256:c708778d02dc8448268e0fada49487247574d5d50498a4c9142ef1a0d185afea",
+  "reference_conformance_revision": "d972bb0dfbd52255d8577caac620e56a485f250a",
+  "same_runtime_inputs": true,
+  "changes_since_reference": [
+    "portable ARM64 test fixtures",
+    "Pi build-profile support notes",
+    "refreshed runtime freeze"
+  ]
+}

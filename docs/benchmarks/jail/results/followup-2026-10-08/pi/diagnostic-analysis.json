@@ -1,0 +1,103 @@
+{
+  "schema": "ouro.jail.agent-diagnostics/1",
+  "matrix_status": "passed",
+  "rows": [
+    {
+      "name": "00-greeting-off",
+      "passed": true,
+      "seconds": 22.812529534989153,
+      "main_stream_requests": 2,
+      "rate_limit_log_entries": 0,
+      "output_event_types": [
+        "step_finish",
+        "step_start",
+        "text",
+        "tool_use"
+      ],
+      "model_stream_to_first_output_seconds": 1.7569999694824219,
+      "last_output_to_disposal_seconds": 0.2739999294281006,
+      "logged_startup_to_first_stream_seconds": 10.220999956130981
+    },
+    {
+      "name": "00-repair-on",
+      "passed": true,
+      "seconds": 88.25399990999722,
+      "main_stream_requests": 5,
+      "rate_limit_log_entries": 0,
+      "output_event_types": [
+        "step_finish",
+        "step_start",
+        "text",
+        "tool_use"
+      ],
+      "model_stream_to_first_output_seconds": 8.551000118255615,
+      "last_output_to_disposal_seconds": 0.2669999599456787,
+      "logged_startup_to_first_stream_seconds": 10.681999921798706
+    },
+    {
+      "name": "00-repair-off",
+      "passed": true,
+      "seconds": 71.31403394699737,
+      "main_stream_requests": 5,
+      "rate_limit_log_entries": 0,
+      "output_event_types": [
+        "step_finish",
+        "step_start",
+        "text",
+        "tool_use"
+      ],
+      "model_stream_to_first_output_seconds": 13.25,
+      "last_output_to_disposal_seconds": 0.16900014877319336,
+      "logged_startup_to_first_stream_seconds": 10.386000156402588
+    },
+    {
+      "name": "00-repair-direct",
+      "passed": true,
+      "seconds": 72.93030842600274,
+      "main_stream_requests": 5,
+      "rate_limit_log_entries": 0,
+      "output_event_types": [
+        "step_finish",
+        "step_start",
+        "text",
+        "tool_use"
+      ],
+      "model_stream_to_first_output_seconds": 8.252000093460083,
+      "last_output_to_disposal_seconds": 0.3489999771118164,
+      "logged_startup_to_first_stream_seconds": 10.625999927520752
+    },
+    {
+      "name": "00-greeting-direct",
+      "passed": true,
+      "seconds": 24.027590236000833,
+      "main_stream_requests": 2,
+      "rate_limit_log_entries": 0,
+      "output_event_types": [
+        "step_finish",
+        "step_start",
+        "text",
+        "tool_use"
+      ],
+      "model_stream_to_first_output_seconds": 1.878999948501587,
+      "last_output_to_disposal_seconds": 0.3559999465942383,
+      "logged_startup_to_first_stream_seconds": 10.00600004196167
+    },
+    {
+      "name": "00-greeting-on",
+      "passed": true,
+      "seconds": 33.80678463001095,
+      "main_stream_requests": 3,
+      "rate_limit_log_entries": 0,
+      "output_event_types": [
+        "step_finish",
+        "step_start",
+        "text",
+        "tool_use"
+      ],
+      "model_stream_to_first_output_seconds": 3.8889999389648438,
+      "last_output_to_disposal_seconds": 0.497999906539917,
+      "logged_startup_to_first_stream_seconds": 10.33400011062622
+    }
+  ],
+  "interpretation": "Timestamp intervals include agent/provider/tool work. They do not isolate causal sandbox overhead or prove the cause of earlier unlogged stalls."
+}

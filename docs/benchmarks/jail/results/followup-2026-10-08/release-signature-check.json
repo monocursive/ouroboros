@@ -1,0 +1,6 @@
+{
+  "actual_native_archives_signed_and_verified": true,
+  "identical_manifest_to_unsigned_candidate": true,
+  "production_identity": false,
+  "test_key_removed": true
+}

@@ -1,0 +1,113 @@
+{
+  "schema": "ouro.jail.agent-matrix/1",
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": false,
+      "inputs": "sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32",
+      "opt_level": "3",
+      "revision": "f933105ebfcbdfee0133986e21cfe7423e7aeb75",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "x86_64",
+      "kernel": "Linux 7.0.0-31-generic",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "harness_sha256": "98e74f1fd2894c5ad1326af5a16790a861a9c1d7c95e4cf61970e352e43dcc1e",
+  "binary_sha256": "73f3de8cdb17eb6b74996f6d7f4d8c43c893a423a6547cd3708abfd8b94b8395",
+  "agent_sha256": "513f500a1a5ea1dc7d865547ac87b32a8936334e8d5abd5b3ff585c45a170080",
+  "vendor_version": "1.18.32",
+  "model": "opencode/big-pickle",
+  "credential": "none",
+  "ripgrep": {
+    "path": "/home/ubuntu/ouro-jail-validation-20261008/ripgrep/extracted/usr/bin/rg",
+    "sha256": "5659967081c0bc37cc062837541b7a65abb646575cb0d921fe32c9552215c58d"
+  },
+  "host": [
+    "Linux",
+    "vps-450b3fe8",
+    "7.0.0-31-generic",
+    "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "x86_64"
+  ],
+  "seed": 20261008,
+  "rounds": 1,
+  "arms": [
+    "direct",
+    "off",
+    "on"
+  ],
+  "tasks": [
+    "greeting",
+    "repair"
+  ],
+  "pure": false,
+  "diagnostic_logs": true,
+  "cooldown_seconds": 30,
+  "wall_seconds": 120,
+  "rows": [
+    {
+      "name": "00-greeting-off",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "off",
+      "load_before": [
+        0.244140625,
+        0.1435546875,
+        0.10107421875
+      ],
+      "passed": false,
+      "problems": [
+        "CLI did not exit zero",
+        "incorrect greeting",
+        "target did not exit zero"
+      ],
+      "exit": 1,
+      "seconds": 72.87242871080525,
+      "provider_rate_limited": true,
+      "trace_sha256": "4a2d95315395b821dfad5ccf3485edeee502e2dabc6ab256cf52b9dab118222c",
+      "attempt_id": "att_c3ffb625-7615-4aa4-b4c3-be3d0081d479",
+      "outcome": {
+        "kind": "exited",
+        "code": 1,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    }
+  ],
+  "status": "blocked",
+  "timing_limit": "Includes remote model latency and fresh vendor state per attempt.",
+  "summary": {
+    "greeting/off": {
+      "attempts": 1,
+      "passed": 0,
+      "failed": 1,
+      "median_seconds": null,
+      "p95_seconds": null,
+      "timing_population": "successful attempts only; failures retained separately"
+    }
+  },
+  "blocked_reason": "provider_rate_limit; remaining trials were not attempted"
+}

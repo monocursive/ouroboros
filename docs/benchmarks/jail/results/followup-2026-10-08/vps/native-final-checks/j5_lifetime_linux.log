@@ -1,0 +1,26 @@
+
+running 21 tests
+test c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resumes_it ... ok
+test l01_a_fork_burst_is_fully_reaped ... ok
+test l01_a_fork_storm_stopped_mid_flight_ends_at_verified_tree_death ... ok
+test l01_a_sigterm_ignoring_descendant_is_dead_before_settlement_is_announced ... ok
+test l01_a_sigterm_ignoring_descendant_of_a_contained_run_dies_when_the_operator_signals ... ok
+test l01_operator_int_term_and_hup_each_end_a_contained_tree ... ok
+test l01_operator_int_term_and_hup_each_end_a_none_tree_at_verified_death ... ok
+test l01_wall_expiry_ends_a_contained_tree_with_a_sigterm_ignoring_descendant ... ok
+test l02_killing_the_backend_of_a_real_run_ends_the_tree_and_the_receipt_says_how ... ok
+test l02_killing_the_backend_of_agent_or_build_ends_the_tree_within_a_bound ... ok
+test l02_killing_the_supervisor_of_agent_or_build_ends_the_tree_within_a_bound ... ok
+test l02_killing_the_watcher_of_agent_or_build_ends_the_tree_within_a_bound ... ok
+test l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues ... ok
+test l03_a_preferred_pids_ceiling_without_a_leaf_is_recorded_absent_and_the_run_proceeds ... ok
+test l03_a_required_limit_whose_leaf_cannot_be_created_refuses_before_exec ... ok
+test l04_the_execution_wall_follows_the_boot_clock_across_a_suspend_sized_jump ... ok
+test l04_the_execution_wall_ignores_wall_clock_steps ... ok
+test l04_the_gate_wait_follows_the_boot_clock ... ok
+test l04_the_preparation_budget_follows_the_boot_clock ... ok
+test l04_the_stop_grace_follows_the_boot_clock ... ok
+test x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 72.34s
+

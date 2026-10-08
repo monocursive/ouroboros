@@ -1,0 +1,46 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/ouro-jail-validation-20261008/source-clean/crates/ouro-jail)
+    Finished `release` profile [optimized] target(s) in 14.06s
+     Running tests/observer_regression_linux.rs (/home/monocursive/ouro-jail-validation-20261008/source-next/target/release/deps/observer_regression_linux-52a21a241e5eb578)
+
+running 29 tests
+test exitkill_child_supervisor ... ignored
+test j4_n8_execveat_failure_and_success_are_distinct_events ... ok
+test j4_n8_vfork_and_posix_spawn_children_keep_their_attribution ... ok
+test r10_the_queue_bound_is_the_four_mib_of_the_spec ... ok
+test r11_a_late_untraced_child_exit_is_still_reported ... ok
+test r12_finish_returns_even_when_a_tracee_will_not_die ... ok
+test r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount ... ok
+test r17_a_foreign_filter_is_named_not_guessed ... ok
+test r18_einprogress_is_the_raw_return ... ok
+test r19_two_paths_are_independent_evidence ... ok
+test r1_a_restarted_syscall_produces_exactly_one_result ... ok
+test r20_a_non_leader_exec_accounts_for_every_thread ... ok
+test r22_a_read_only_open_costs_one_stop_and_no_event ... ok
+test r23_fork_names_the_thread_group_and_the_thread_that_forked ... ok
+test r24_a_queue_gap_names_what_it_lost_and_never_swallows_the_exit ... ok
+test r25_symlink_reports_the_link_it_creates_as_its_primary_path ... ok
+test r26_a_tracee_cannot_manufacture_the_observers_loss ... ok
+test r28_concurrent_threads_pair_their_own_entries_and_exits ... ok
+test r29_a_dead_supervisor_kills_its_traced_tree ... 
+running 1 test
+ok
+test r2_a_group_stop_during_a_covered_call_is_survived ... ok
+test r30_repeated_attach_and_finish_leaks_nothing ... ok
+test r31_an_entry_destroyed_by_an_exec_names_its_operation ... ok
+test r3_attaching_to_an_already_stopped_tracee_works ... ok
+test r4_an_exit_while_a_call_is_in_flight_is_a_gap_not_a_result ... ok
+test r5_a_fork_burst_keeps_attribution ... ok
+test r6_hostile_path_pointers_never_produce_a_confident_path ... ok
+test r7_a_lying_sockaddr_length_retains_only_the_family_it_names ... ok
+test r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi ... ok
+test r9_open_how_sizes_are_decoded_or_declared_unavailable ... ok
+
+test result: ok. 28 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 18.10s
+
+missing PASS
+0-files PASS
+0-search PASS
+1-files PASS
+1-search PASS
+2-files PASS
+2-search PASS

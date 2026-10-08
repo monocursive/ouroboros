@@ -1,0 +1,65 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cpu-clock'
+# Event count (approx.): 2699398776
+#
+# Overhead  Command          Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                          
+# ........  ...............  ....................  ................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+     6.61%  ouro-fixture     [kernel.kallsyms]     [k] _raw_spin_unlock_irqrestore
+            |
+            ---_raw_spin_unlock_irqrestore
+               |          
+                --6.46%--do_notify_parent_cldstop
+                          ptrace_stop
+                          ptrace_do_notify
+                          ptrace_notify
+                          |          
+                          |--3.49%--do_syscall_64
+                          |          entry_SYSCALL_64_after_hwframe
+                          |          syscall
+                          |          0
+                          |          
+                           --2.97%--__seccomp_filter
+                                     __secure_computing
+                                     do_syscall_64
+                                     entry_SYSCALL_64_after_hwframe
+                                     syscall
+                                     0
+
+     6.01%  ouro-jail-trace  [kernel.kallsyms]     [k] _raw_spin_unlock_irq
+            |
+            ---_raw_spin_unlock_irq
+               |          
+                --5.72%--ptrace_request
+                          arch_ptrace
+                          __x64_sys_ptrace
+                          x64_sys_call
+                          do_syscall_64
+                          entry_SYSCALL_64_after_hwframe
+                          ptrace
+                          <ouro_jail::platform::linux::tracer::session::Session>::restart
+
+     5.27%  ouro-jail-trace  [kernel.kallsyms]     [k] _raw_spin_unlock_irqrestore
+            |
+            ---_raw_spin_unlock_irqrestore
+               |          
+                --4.01%--try_to_wake_up
+                          wake_up_q
+                          futex_wake
+                          do_futex
+                          __x64_sys_futex
+                          x64_sys_call
+                          do_syscall_64
+                          entry_SYSCALL_64_after_hwframe
+                          syscall
+                          <std::sync::mpmc::waker::SyncWaker>::notify
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

@@ -1,0 +1,9 @@
+....Signature and comment signature verified
+Trusted comment: timestamp:1791455244	file:SHA256SUMS	hashed
+Signature key id in /var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/tmpmwa73s4w/refused/SHA256SUMS.minisig is 7E83E5482EFF3053
+but the key id in the public key is 3A229FAE3FE56F3C
+...
+----------------------------------------------------------------------
+Ran 7 tests in 0.078s
+
+OK

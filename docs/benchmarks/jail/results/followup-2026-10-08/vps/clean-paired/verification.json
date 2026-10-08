@@ -1,0 +1,15 @@
+{
+  "verified": true,
+  "checks": [
+    "complete paired inventory",
+    "all retained trace digests",
+    "attempt attribution",
+    "exact create/rename/unlink count",
+    "verified cleanup",
+    "identical recomputed summary"
+  ],
+  "traces": 130,
+  "events": 1950910,
+  "receipts": 130,
+  "fs_write_events": 1950000
+}

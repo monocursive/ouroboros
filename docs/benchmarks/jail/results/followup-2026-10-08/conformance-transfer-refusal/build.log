@@ -1,0 +1,3 @@
+Filesystem     1024-blocks     Used Available Capacity Mounted on
+/dev/sda1         80161396 78930388   1214624      99% /
+conformance: release build requires at least 4 GiB available; preserve evidence and remove only verified inactive build caches

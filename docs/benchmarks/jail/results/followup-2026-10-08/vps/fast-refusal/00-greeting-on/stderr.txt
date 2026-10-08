@@ -1,0 +1,26 @@
+timestamp=2026-10-08T09:46:31.614Z level=INFO run=33cd5c85 message="creating instance" directory=/home/ubuntu/.ouro-agent-matrix-g4tlra19/work
+timestamp=2026-10-08T09:46:31.617Z level=INFO run=33cd5c85 message=fromDirectory directory=/home/ubuntu/.ouro-agent-matrix-g4tlra19/work
+timestamp=2026-10-08T09:46:31.690Z level=INFO run=33cd5c85 message=bootstrapping directory=/home/ubuntu/.ouro-agent-matrix-g4tlra19/work
+timestamp=2026-10-08T09:46:31.703Z level=INFO run=33cd5c85 message=loading path=/run/ouro/state/config/opencode/config.json
+timestamp=2026-10-08T09:46:31.704Z level=INFO run=33cd5c85 message=loading path=/run/ouro/state/config/opencode/opencode.json
+timestamp=2026-10-08T09:46:31.704Z level=INFO run=33cd5c85 message=loading path=/run/ouro/state/config/opencode/opencode.jsonc
+timestamp=2026-10-08T09:46:31.964Z level=INFO run=33cd5c85 message="all LSPs are disabled"
+timestamp=2026-10-08T09:46:31.966Z level=INFO run=33cd5c85 message="all formatters are disabled"
+timestamp=2026-10-08T09:46:31.966Z level=INFO run=33cd5c85 message=init
+timestamp=2026-10-08T09:46:32.181Z level=INFO run=33cd5c85 message=created id=ses_ee517ba8affeVSSuxQhxXbuDSs slug=quick-engine version=1.18.32 projectID=global directory=/home/ubuntu/.ouro-agent-matrix-g4tlra19/work path="" workspaceID=undefined parentID=undefined title="New session - 2026-10-08T09:46:32.181Z" agent=undefined model=undefined metadata=undefined permission="[{\"permission\":\"question\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_enter\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_exit\",\"pattern\":\"*\",\"action\":\"deny\"}]" cost=0 tokens.input=0 tokens.output=0 tokens.reasoning=0 tokens.cache.read=0 tokens.cache.write=0 time.created=1791452792181 time.updated=1791452792181
+timestamp=2026-10-08T09:46:32.201Z level=INFO run=33cd5c85 message="event connected"
+timestamp=2026-10-08T09:46:32.938Z level=INFO run=33cd5c85 message=loop session.id=ses_ee517ba8affeVSSuxQhxXbuDSs step=0
+timestamp=2026-10-08T09:46:32.964Z level=INFO run=33cd5c85 message=stream providerID=opencode modelID=big-pickle session.id=ses_ee517ba8affeVSSuxQhxXbuDSs small=true agent=title mode=primary
+timestamp=2026-10-08T09:46:32.982Z level=INFO run=33cd5c85 message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:46:33.090Z level=INFO run=33cd5c85 message=initialized
+timestamp=2026-10-08T09:46:33.114Z level=INFO run=33cd5c85 message=tracking hash=4b825dc642cb6eb9a060e54bf8d69288fbee4904 cwd=/home/ubuntu/.ouro-agent-matrix-g4tlra19/work git=/run/ouro/state/data/opencode/snapshot/global/c03f874912aa98987dc04133370d903a10e6392b
+timestamp=2026-10-08T09:46:33.124Z level=INFO run=33cd5c85 message="shell tool using shell" shell=/usr/bin/bash
+timestamp=2026-10-08T09:46:33.134Z level=INFO run=33cd5c85 message=init count=1
+timestamp=2026-10-08T09:46:33.271Z level=INFO run=33cd5c85 message="watcher backend" directory=/home/ubuntu/.ouro-agent-matrix-g4tlra19/work platform=linux backend=inotify
+timestamp=2026-10-08T09:46:33.272Z level=INFO run=33cd5c85 message="project copy refresh started" projectID=global
+timestamp=2026-10-08T09:46:33.274Z level=INFO run=33cd5c85 message="project copy refresh done" projectID=global updated=[] removed=[]
+timestamp=2026-10-08T09:46:33.873Z level=INFO run=33cd5c85 message="booting location services" directory=/home/ubuntu/.ouro-agent-matrix-g4tlra19/work workspaceID=undefined
+timestamp=2026-10-08T09:46:33.877Z level=INFO run=33cd5c85 message=process session.id=ses_ee517ba8affeVSSuxQhxXbuDSs messageID=msg_11ae8486f001cRfw7o1egBXmPe
+timestamp=2026-10-08T09:46:33.878Z level=INFO run=33cd5c85 message=stream providerID=opencode modelID=big-pickle session.id=ses_ee517ba8affeVSSuxQhxXbuDSs small=false agent=build mode=primary
+timestamp=2026-10-08T09:46:33.889Z level=INFO run=33cd5c85 message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:46:34.122Z level=ERROR run=33cd5c85 message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee517ba8affeVSSuxQhxXbuDSs small=false agent=build mode=primary error.error="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later."

@@ -1,0 +1,6 @@
+    Checking ouro-records v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-records)
+    Checking ouro-fixture v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-fixture)
+   Compiling ouro-jail v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-jail)
+    Checking ouro-ledger v0.1.0 (/Users/monocursive/code/ouroboros/crates/ouro-ledger)
+    Checking xtask v0.1.0 (/Users/monocursive/code/ouroboros/crates/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.87s

@@ -1,0 +1,45 @@
+timestamp=2026-10-08T09:20:05.658Z level=INFO run=0e85089e message="creating instance" directory=/home/ubuntu/.ouro-agent-matrix-_77krd05/work
+timestamp=2026-10-08T09:20:05.660Z level=INFO run=0e85089e message=fromDirectory directory=/home/ubuntu/.ouro-agent-matrix-_77krd05/work
+timestamp=2026-10-08T09:20:05.728Z level=INFO run=0e85089e message=bootstrapping directory=/home/ubuntu/.ouro-agent-matrix-_77krd05/work
+timestamp=2026-10-08T09:20:05.739Z level=INFO run=0e85089e message=loading path=/run/ouro/state/config/opencode/config.json
+timestamp=2026-10-08T09:20:05.740Z level=INFO run=0e85089e message=loading path=/run/ouro/state/config/opencode/opencode.json
+timestamp=2026-10-08T09:20:05.741Z level=INFO run=0e85089e message=loading path=/run/ouro/state/config/opencode/opencode.jsonc
+timestamp=2026-10-08T09:20:05.850Z level=INFO run=0e85089e message="all LSPs are disabled"
+timestamp=2026-10-08T09:20:05.852Z level=INFO run=0e85089e message="all formatters are disabled"
+timestamp=2026-10-08T09:20:05.852Z level=INFO run=0e85089e message=init
+timestamp=2026-10-08T09:20:06.209Z level=INFO run=0e85089e message=created id=ses_ee52fedbeffev0sQy5qYe8kQO0 slug=clever-knight version=1.18.32 projectID=global directory=/home/ubuntu/.ouro-agent-matrix-_77krd05/work path="" workspaceID=undefined parentID=undefined title="New session - 2026-10-08T09:20:06.209Z" agent=undefined model=undefined metadata=undefined permission="[{\"permission\":\"question\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_enter\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_exit\",\"pattern\":\"*\",\"action\":\"deny\"}]" cost=0 tokens.input=0 tokens.output=0 tokens.reasoning=0 tokens.cache.read=0 tokens.cache.write=0 time.created=1791451206209 time.updated=1791451206209
+timestamp=2026-10-08T09:20:06.224Z level=INFO run=0e85089e message="event connected"
+timestamp=2026-10-08T09:20:06.887Z level=INFO run=0e85089e message=loop session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 step=0
+timestamp=2026-10-08T09:20:06.914Z level=INFO run=0e85089e message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=true agent=title mode=primary
+timestamp=2026-10-08T09:20:06.931Z level=INFO run=0e85089e message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:20:06.994Z level=INFO run=0e85089e message=initialized
+timestamp=2026-10-08T09:20:07.042Z level=INFO run=0e85089e message=tracking hash=4b825dc642cb6eb9a060e54bf8d69288fbee4904 cwd=/home/ubuntu/.ouro-agent-matrix-_77krd05/work git=/run/ouro/state/data/opencode/snapshot/global/815c412607509b96a382fcab6dbe7d68103cdfba
+timestamp=2026-10-08T09:20:07.051Z level=INFO run=0e85089e message="shell tool using shell" shell=/usr/bin/bash
+timestamp=2026-10-08T09:20:07.061Z level=INFO run=0e85089e message=init count=1
+timestamp=2026-10-08T09:20:07.170Z level=INFO run=0e85089e message="watcher backend" directory=/home/ubuntu/.ouro-agent-matrix-_77krd05/work platform=linux backend=inotify
+timestamp=2026-10-08T09:20:07.172Z level=INFO run=0e85089e message="project copy refresh started" projectID=global
+timestamp=2026-10-08T09:20:07.174Z level=INFO run=0e85089e message="project copy refresh done" projectID=global updated=[] removed=[]
+timestamp=2026-10-08T09:20:07.704Z level=INFO run=0e85089e message="booting location services" directory=/home/ubuntu/.ouro-agent-matrix-_77krd05/work workspaceID=undefined
+timestamp=2026-10-08T09:20:07.717Z level=INFO run=0e85089e message=process session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 messageID=msg_11ad014eb001DSe8rc0P7YcMHs
+timestamp=2026-10-08T09:20:07.718Z level=INFO run=0e85089e message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary
+timestamp=2026-10-08T09:20:07.721Z level=INFO run=0e85089e message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:20:08.111Z level=ERROR run=0e85089e message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary error.error="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later."
+timestamp=2026-10-08T09:20:10.358Z level=INFO run=0e85089e message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary
+timestamp=2026-10-08T09:20:10.367Z level=INFO run=0e85089e message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:20:10.619Z level=ERROR run=0e85089e message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary error.error="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later."
+timestamp=2026-10-08T09:20:14.271Z level=ERROR run=0e85089e message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=true agent=title mode=primary error.error="AI_RetryError: Failed after 3 attempts. Last error: Error from provider (Console): Rate limit exceeded. Please try again later."
+timestamp=2026-10-08T09:20:15.291Z level=INFO run=0e85089e message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary
+timestamp=2026-10-08T09:20:15.294Z level=INFO run=0e85089e message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:20:15.558Z level=ERROR run=0e85089e message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary error.error="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later."
+timestamp=2026-10-08T09:20:24.779Z level=INFO run=0e85089e message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary
+timestamp=2026-10-08T09:20:24.783Z level=INFO run=0e85089e message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:20:25.021Z level=ERROR run=0e85089e message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary error.error="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later."
+timestamp=2026-10-08T09:20:41.467Z level=INFO run=0e85089e message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary
+timestamp=2026-10-08T09:20:41.470Z level=INFO run=0e85089e message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:20:41.794Z level=ERROR run=0e85089e message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary error.error="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later."
+timestamp=2026-10-08T09:21:06.134Z level=INFO run=0e85089e message=cleanup prune=7.days
+timestamp=2026-10-08T09:21:16.688Z level=INFO run=0e85089e message=stream providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary
+timestamp=2026-10-08T09:21:16.690Z level=INFO run=0e85089e message="llm runtime selected" llm.runtime=ai-sdk llm.provider=opencode llm.model=big-pickle
+timestamp=2026-10-08T09:21:16.994Z level=ERROR run=0e85089e message="stream error" providerID=opencode modelID=big-pickle session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 small=false agent=build mode=primary error.error="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later."
+timestamp=2026-10-08T09:21:16.996Z level=ERROR run=0e85089e message=process session.id=ses_ee52fedbeffev0sQy5qYe8kQO0 messageID=msg_11ad014eb001DSe8rc0P7YcMHs error="Error from provider (Console): Rate limit exceeded. Please try again later." stack="AI_APICallError: Error from provider (Console): Rate limit exceeded. Please try again later.\n    at <anonymous> (/$bunfs/root/chunk-cxy6gyp0.js:6:14272)\n    at async <anonymous> (/$bunfs/root/chunk-cxy6gyp0.js:6:12790)\n    at processTicksAndRejections (native:7:39)"
+timestamp=2026-10-08T09:21:17.020Z level=INFO run=0e85089e message="disposing instance" directory=/home/ubuntu/.ouro-agent-matrix-_77krd05/work

@@ -1,0 +1,16 @@
+
+running 11 tests
+test j4_r03_a_local_write_failure_is_loss_and_never_tears_the_trace ... ok
+test j4_r03_a_slow_consumer_within_the_deadline_loses_nothing ... ok
+test j4_r03_a_trace_fd_is_not_duplicated_locally ... ok
+test j4_r03_disconnect_best_effort_continues ... ok
+test j4_r03_disconnect_strict_stops ... ok
+test j4_r03_local_cap_best_effort_keeps_a_prefix_and_reserve_notes ... ok
+test j4_r03_local_cap_strict_stops ... ok
+test j4_r03_saturation_best_effort_continues ... ok
+test j4_r03_saturation_strict_stops ... ok
+test j4_r03_the_wall_is_enforced_while_the_trace_is_saturated ... ok
+test j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.53s
+

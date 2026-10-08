@@ -1,0 +1,2 @@
+{"op":"perf-start","args":{"mode":"fileops","monotonic_ns":1404815530282331,"pid":2,"timens":"time:[4026531834]"},"ret":0,"errno":null}
+{"op":"fileops","args":{"children_maxrss_kib":0,"created":5000,"dir":".","end_ns":1404816435778401,"first_error":null,"maxrss_kib":3920,"ok":true,"open_via":"openat","rename_via":"rename","renamed":5000,"rounds":5000,"start_ns":1404815530282331,"unlink_via":"unlink","unlinked":5000},"ret":5000,"errno":null}

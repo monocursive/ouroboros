@@ -1,0 +1,257 @@
+{
+  "schema": "ouro.jail.agent-matrix/1",
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": null,
+      "inputs": "sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32",
+      "opt_level": "3",
+      "revision": null,
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "aarch64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "aarch64",
+      "kernel": "Linux 6.18.50+rpt-rpi-v8",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "harness_sha256": "98e74f1fd2894c5ad1326af5a16790a861a9c1d7c95e4cf61970e352e43dcc1e",
+  "binary_sha256": "10b53fa587fe7fb0f6a69d6d5050513c987fb811d1521a99666b4414c137fab9",
+  "agent_sha256": "7c6e67883fcb230b7d4cb1bfea821756ed8b320c1fb44e9c36c8e7fc8725826b",
+  "vendor_version": "1.18.32",
+  "model": "opencode/big-pickle",
+  "credential": "none",
+  "ripgrep": {
+    "path": "/home/monocursive/ouro-jail-validation-20261008/ripgrep/extracted/usr/bin/rg",
+    "sha256": "2fa4043ffd29a34759d9a9b77bed8ac84e6eb80efad83c77c4a3f9b82f302e8f"
+  },
+  "host": [
+    "Linux",
+    "raspberrypi",
+    "6.18.50+rpt-rpi-v8",
+    "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "aarch64"
+  ],
+  "seed": 20261008,
+  "rounds": 1,
+  "arms": [
+    "direct",
+    "off",
+    "on"
+  ],
+  "tasks": [
+    "greeting",
+    "repair"
+  ],
+  "pure": false,
+  "diagnostic_logs": true,
+  "cooldown_seconds": 30,
+  "wall_seconds": 120,
+  "rows": [
+    {
+      "name": "00-greeting-off",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "off",
+      "load_before": [
+        0.080078125,
+        0.0166015625,
+        0.00537109375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 22.812529534989153,
+      "provider_rate_limited": false,
+      "trace_sha256": "213b3c7c654fde5f137df9fd8d85e7c175407fe82ce71d0bd981695a886a3757",
+      "attempt_id": "att_f2e1a8d9-b167-4fe6-88a8-e1c8739f7351",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "00-repair-on",
+      "iteration": 0,
+      "task": "repair",
+      "arm": "on",
+      "load_before": [
+        0.3408203125,
+        0.11572265625,
+        0.0400390625
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 88.25399990999722,
+      "provider_rate_limited": false,
+      "trace_sha256": "bdaeced764eca5ae669294bb77e37c5027ef057d806a16981e67c3920e08ed9d",
+      "attempt_id": "att_62d0bb48-5e4d-4df2-8559-117885838d06",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "00-repair-off",
+      "iteration": 0,
+      "task": "repair",
+      "arm": "off",
+      "load_before": [
+        0.6064453125,
+        0.4150390625,
+        0.17041015625
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 71.31403394699737,
+      "provider_rate_limited": false,
+      "trace_sha256": "88d051805b491df477a7cf1f75dd873753865e8aa4d0baeb0ab7cf0b7713d776",
+      "attempt_id": "att_3cbc5baf-4336-4105-a275-f0e86dc11fd3",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    },
+    {
+      "name": "00-repair-direct",
+      "iteration": 0,
+      "task": "repair",
+      "arm": "direct",
+      "load_before": [
+        0.67333984375,
+        0.548828125,
+        0.2490234375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 72.93030842600274,
+      "provider_rate_limited": false,
+      "cleanup_scope": "process_group_only_not_attempt_tree"
+    },
+    {
+      "name": "00-greeting-direct",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "direct",
+      "load_before": [
+        0.7119140625,
+        0.662109375,
+        0.32568359375
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 24.027590236000833,
+      "provider_rate_limited": false,
+      "cleanup_scope": "process_group_only_not_attempt_tree"
+    },
+    {
+      "name": "00-greeting-on",
+      "iteration": 0,
+      "task": "greeting",
+      "arm": "on",
+      "load_before": [
+        0.572265625,
+        0.65234375,
+        0.34423828125
+      ],
+      "passed": true,
+      "problems": [],
+      "exit": 0,
+      "seconds": 33.80678463001095,
+      "provider_rate_limited": false,
+      "trace_sha256": "9eb897c4e67675a7b2a670e88b3e6a9a8ac22e0929fea14e1f5e4db4f8dfa995",
+      "attempt_id": "att_33924a92-5884-40fc-83b2-27d70c035e08",
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      }
+    }
+  ],
+  "status": "passed",
+  "timing_limit": "Includes remote model latency and fresh vendor state per attempt.",
+  "summary": {
+    "greeting/direct": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "median_seconds": 24.027590236000833,
+      "p95_seconds": 24.027590236000833,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "greeting/off": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "median_seconds": 22.812529534989153,
+      "p95_seconds": 22.812529534989153,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "greeting/on": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "median_seconds": 33.80678463001095,
+      "p95_seconds": 33.80678463001095,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "repair/direct": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "median_seconds": 72.93030842600274,
+      "p95_seconds": 72.93030842600274,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "repair/off": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "median_seconds": 71.31403394699737,
+      "p95_seconds": 71.31403394699737,
+      "timing_population": "successful attempts only; failures retained separately"
+    },
+    "repair/on": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "median_seconds": 88.25399990999722,
+      "p95_seconds": 88.25399990999722,
+      "timing_population": "successful attempts only; failures retained separately"
+    }
+  }
+}

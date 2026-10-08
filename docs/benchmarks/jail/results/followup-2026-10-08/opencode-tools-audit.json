@@ -1,0 +1,112 @@
+{
+  "verified": true,
+  "trials": 21,
+  "events": 1390,
+  "rows": [
+    {
+      "trial": "pi/tools-clean/missing",
+      "events": 72,
+      "uncompressed_trace_sha256": "0139369bb807371cc82f6305ac2f4497dc788163809e298aba8952fddf9bd617"
+    },
+    {
+      "trial": "pi/tools-clean/0-files",
+      "events": 65,
+      "uncompressed_trace_sha256": "7a8b01805a227e986852468ab5921e25da5dc8648cfd4213c445172b47d7a67c"
+    },
+    {
+      "trial": "pi/tools-clean/0-search",
+      "events": 65,
+      "uncompressed_trace_sha256": "4843469676d0f6c489664f615f2974cadc4fd30ad5fc5aadea4b8d2f8ef273d2"
+    },
+    {
+      "trial": "pi/tools-clean/1-files",
+      "events": 65,
+      "uncompressed_trace_sha256": "30c013ba2da191a321509df9455eafdc21f88273536d15078ca7e0b139a1a8df"
+    },
+    {
+      "trial": "pi/tools-clean/1-search",
+      "events": 65,
+      "uncompressed_trace_sha256": "f48f0f3b06fab673d63b1bfd90c4035fbfc88aa5859c0df6210247aab1a3742c"
+    },
+    {
+      "trial": "pi/tools-clean/2-files",
+      "events": 65,
+      "uncompressed_trace_sha256": "1d8043730da750c93c7f58feffc62f991ddf125b1312c33f5f90ea874cad69c7"
+    },
+    {
+      "trial": "pi/tools-clean/2-search",
+      "events": 65,
+      "uncompressed_trace_sha256": "44fa0cc2f74432ffe529224dea3cc9e6813536bc878c52824b40791279c3223d"
+    },
+    {
+      "trial": "pi/tools-final/missing",
+      "events": 64,
+      "uncompressed_trace_sha256": "0115ca2d184b97cc4b7673fad97c76d2907f619c6d9b3b38f8fe98b2454aad9f"
+    },
+    {
+      "trial": "pi/tools-final/0-files",
+      "events": 65,
+      "uncompressed_trace_sha256": "56dc8664cfa4aa9e7b76e62cc148e03c8eebec1d3d4bfabbec2e284482107461"
+    },
+    {
+      "trial": "pi/tools-final/0-search",
+      "events": 65,
+      "uncompressed_trace_sha256": "3a11aad1d536df9d4b0d617c8f27d66e78c29a692a1e363f03a7343c6e7d6678"
+    },
+    {
+      "trial": "pi/tools-final/1-files",
+      "events": 65,
+      "uncompressed_trace_sha256": "a950d19b5bc7a361cb2bd74cc31153aa257cd696447223f42ac426c3827fb853"
+    },
+    {
+      "trial": "pi/tools-final/1-search",
+      "events": 65,
+      "uncompressed_trace_sha256": "5fc933a5d0a1ce599927144f8dc3319a40e533fb4ae0844c0022c01f9796045c"
+    },
+    {
+      "trial": "pi/tools-final/2-files",
+      "events": 65,
+      "uncompressed_trace_sha256": "eed6c4e7014f67d1b351190ada3295e417ebe21dfc457e4a6c0e03016f5f85c1"
+    },
+    {
+      "trial": "pi/tools-final/2-search",
+      "events": 65,
+      "uncompressed_trace_sha256": "f909903bd72fa4c1b50c1dd86cd86a57ccf20ac9eb3ac7ef22cd6e4722f36dd1"
+    },
+    {
+      "trial": "vps/tools-final/missing",
+      "events": 72,
+      "uncompressed_trace_sha256": "df475b523d5bb4d1cece89ffe8f01cb30787991314be80f33283ffd4fa1b7686"
+    },
+    {
+      "trial": "vps/tools-final/0-files",
+      "events": 73,
+      "uncompressed_trace_sha256": "4807677954988478c55551f6e8109a57749c16925bb44c4906a510a9d8be2f42"
+    },
+    {
+      "trial": "vps/tools-final/0-search",
+      "events": 61,
+      "uncompressed_trace_sha256": "2b5ac2ac40bb6d1dcec7a89edad31082689f285458b591a700a6682720579aa9"
+    },
+    {
+      "trial": "vps/tools-final/1-files",
+      "events": 60,
+      "uncompressed_trace_sha256": "c10b4ee174c771614c297182ff235c5a598b13be652db555399b5bf29b54510d"
+    },
+    {
+      "trial": "vps/tools-final/1-search",
+      "events": 73,
+      "uncompressed_trace_sha256": "75ff38b8b0ed054191af6282107f208f434a99685ef44b9344b42c7f489aa737"
+    },
+    {
+      "trial": "vps/tools-final/2-files",
+      "events": 74,
+      "uncompressed_trace_sha256": "c58cae250d49583a84b004e30191c39fae47e551f304f86e4bce229d32cb087a"
+    },
+    {
+      "trial": "vps/tools-final/2-search",
+      "events": 61,
+      "uncompressed_trace_sha256": "9fed5160f67ffe7710378baf4ec780014811ee72faeccf334c8651be4245609f"
+    }
+  ]
+}

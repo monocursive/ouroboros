@@ -1,0 +1,5554 @@
+{
+  "schema": "ouro.jail.observer-pair/1",
+  "seed": 20261008,
+  "samples": 60,
+  "warmups": 5,
+  "rounds": 5000,
+  "host": [
+    "Linux",
+    "vps-450b3fe8",
+    "7.0.0-31-generic",
+    "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "x86_64"
+  ],
+  "harness_sha256": "fd140ebeb80d27c9583ed42fb9709f6f01e453b157d9b5bcf256a573d91124be",
+  "fixture_sha256": "10d161af824e84513ea9455c581af2328af23f8e2fbd2d3c4eb3928ef65ae0bf",
+  "binary_sha256": {
+    "before": "73f3de8cdb17eb6b74996f6d7f4d8c43c893a423a6547cd3708abfd8b94b8395",
+    "after": "607a59552b399a4fecddeee008d5f08fd401cc9bbe87005ae4d58e014d258845"
+  },
+  "build": {
+    "before": {
+      "build": {
+        "debug_assertions": false,
+        "dirty": false,
+        "inputs": "sha256:0abe3b09146a35ad31793908f78cec33ea3400d9e2400c29c6e7510e77276f32",
+        "opt_level": "3",
+        "revision": "f933105ebfcbdfee0133986e21cfe7423e7aeb75",
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      "component": "ouro-jail",
+      "frozen": true,
+      "observation": {
+        "closed_set": "linux-closed-v1"
+      },
+      "platform": {
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic",
+        "os": "linux"
+      },
+      "schemas": {
+        "control": "ouro.jail.control/1",
+        "doctor": "ouro.jail.doctor/1",
+        "event": "ouro.event/1",
+        "gate": "ouro.jail.gate/1",
+        "learned_policy": "ouro.jail.learned-policy/1",
+        "network": "ouro.jail.network/1",
+        "policy": "ouro.jail.policy/1",
+        "policy_file": "ouro.jail.policy-file/1",
+        "policy_snapshot": "ouro.jail.policy-snapshot/1",
+        "receipt": "ouro.jail.receipt/1"
+      },
+      "version": "0.1.0"
+    },
+    "after": {
+      "build": {
+        "debug_assertions": false,
+        "dirty": true,
+        "inputs": "sha256:29629c79cd3d906bacfc2549cc17526453bf5ddf3ed7a1d30a61be6293447b85",
+        "opt_level": "3",
+        "revision": "e6795c7ceaef5175af9b612ca95ec1293a1421b8",
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      "component": "ouro-jail",
+      "frozen": true,
+      "observation": {
+        "closed_set": "linux-closed-v1"
+      },
+      "platform": {
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic",
+        "os": "linux"
+      },
+      "schemas": {
+        "control": "ouro.jail.control/1",
+        "doctor": "ouro.jail.doctor/1",
+        "event": "ouro.event/1",
+        "gate": "ouro.jail.gate/1",
+        "learned_policy": "ouro.jail.learned-policy/1",
+        "network": "ouro.jail.network/1",
+        "policy": "ouro.jail.policy/1",
+        "policy_file": "ouro.jail.policy-file/1",
+        "policy_snapshot": "ouro.jail.policy-snapshot/1",
+        "receipt": "ouro.jail.receipt/1"
+      },
+      "version": "0.1.0"
+    }
+  },
+  "acceptance": "paired work-time ratio bootstrap 95% upper bound below 1; no receipt or workload failures",
+  "status": "completed",
+  "rows": [
+    {
+      "name": "000-before",
+      "iteration": -5,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1042783366,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404086746544127,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404087673559864,
+          "first_error": null,
+          "maxrss_kib": 4100,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404086746544127,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.4521484375,
+      "receipt_healthy": true,
+      "trace_sha256": "22be8b96568f4bb47a60ab0ae274e507101c4a8a33475fda0c4d59fd78b77779"
+    },
+    {
+      "name": "000-after",
+      "iteration": -5,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1058341772,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404087904221135,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404088844923035,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404087904221135,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.4521484375,
+      "receipt_healthy": true,
+      "trace_sha256": "bf686d93b1f5fc18c41e51531f91a7a36acbd2f143bc9ed57b8ace5ff0a4a6c9"
+    },
+    {
+      "name": "001-after",
+      "iteration": -4,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1049029121,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404089059352211,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404090001727912,
+          "first_error": null,
+          "maxrss_kib": 3980,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404089059352211,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.4521484375,
+      "receipt_healthy": true,
+      "trace_sha256": "f488cc14db8473dc545195350ca16abc3f85d95f8a89b0b5a8c7e04311831c61"
+    },
+    {
+      "name": "001-before",
+      "iteration": -4,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1050472389,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404090223065091,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404091156294131,
+          "first_error": null,
+          "maxrss_kib": 4044,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404090223065091,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.49609375,
+      "receipt_healthy": true,
+      "trace_sha256": "c7c561ee27dc9ae6222085ee2bb0d7caa8065a6dc04982595d3fe3268162d783"
+    },
+    {
+      "name": "002-before",
+      "iteration": -3,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1053510616,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404091395067349,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404092336966063,
+          "first_error": null,
+          "maxrss_kib": 4044,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404091395067349,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.49609375,
+      "receipt_healthy": true,
+      "trace_sha256": "0623a35783aa6077d1825bde1c928b2179fa270bd53b4f43c1afb30d5c701314"
+    },
+    {
+      "name": "002-after",
+      "iteration": -3,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1044718280,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404092553496466,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404093477894940,
+          "first_error": null,
+          "maxrss_kib": 3896,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404092553496466,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.49609375,
+      "receipt_healthy": true,
+      "trace_sha256": "12df2ab1214d849b3e9fb7ac93c872c99b37b8a051f90e55d1c0a4f70c0d04e8"
+    },
+    {
+      "name": "003-after",
+      "iteration": -2,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1019027614,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404093705233962,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404094613705528,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404093705233962,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.49609375,
+      "receipt_healthy": true,
+      "trace_sha256": "c7abb73bcccefa611c03c50bee5c504a0ea76c50710d58aafe1509f7363e70c4"
+    },
+    {
+      "name": "003-before",
+      "iteration": -2,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1049629458,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404094829072626,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404095757094175,
+          "first_error": null,
+          "maxrss_kib": 3964,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404094829072626,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.53662109375,
+      "receipt_healthy": true,
+      "trace_sha256": "2a09939583a53808f4025416a490ba05ad0cdf07b84e8efba98655f9543785fd"
+    },
+    {
+      "name": "004-after",
+      "iteration": -1,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1056952576,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404095990266496,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404096924025972,
+          "first_error": null,
+          "maxrss_kib": 3940,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404095990266496,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.53662109375,
+      "receipt_healthy": true,
+      "trace_sha256": "1dad2b2a55c6dd5dbcfaf4ed9615730680e727bc8ee0b92c908eddc28f593cc1"
+    },
+    {
+      "name": "004-before",
+      "iteration": -1,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1085554367,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404097164834844,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404098127912900,
+          "first_error": null,
+          "maxrss_kib": 4076,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404097164834844,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.53662109375,
+      "receipt_healthy": true,
+      "trace_sha256": "b493550d7054cbc134800fff7d5b15aa6b049ee4c766b637ca883a36e1755f8b"
+    },
+    {
+      "name": "005-before",
+      "iteration": 0,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1060416057,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404098358612782,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404099301042792,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404098358612782,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.53662109375,
+      "receipt_healthy": true,
+      "trace_sha256": "0ef90cb45fcc3bd01d698bed57ad06ff555875ad6bd47d66abfd39c606bd1f60"
+    },
+    {
+      "name": "005-after",
+      "iteration": 0,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1081035513,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404099513639058,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404100490336017,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404099513639058,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.53662109375,
+      "receipt_healthy": true,
+      "trace_sha256": "f216c4a59647f417e60dcad896af273fa8919faf6421e400f6506feb5950f52f"
+    },
+    {
+      "name": "006-after",
+      "iteration": 1,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1026360291,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404100702944572,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404101622219227,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404100702944572,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.57373046875,
+      "receipt_healthy": true,
+      "trace_sha256": "2983525aea89871550614221f5e99d99484e4dd11bd237e4798e6be3ca039da2"
+    },
+    {
+      "name": "006-before",
+      "iteration": 1,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1021824206,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404101840144786,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404102752207643,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404101840144786,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.57373046875,
+      "receipt_healthy": true,
+      "trace_sha256": "2332021885b6f5a58e7e755208edf0afd17541bbb899d473c2144a5446fbb7dd"
+    },
+    {
+      "name": "007-after",
+      "iteration": 2,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1109901107,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404102976271596,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404103957872493,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404102976271596,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.57373046875,
+      "receipt_healthy": true,
+      "trace_sha256": "3e75738effb0c741de4cc2e475bfdfd74ddb5e73ed1215a55cd946a5216b8f32"
+    },
+    {
+      "name": "007-before",
+      "iteration": 2,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1171149068,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404104174462576,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404105233555958,
+          "first_error": null,
+          "maxrss_kib": 3968,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404104174462576,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.57373046875,
+      "receipt_healthy": true,
+      "trace_sha256": "66d121fbac50411a278b3f152b566e809d85f8d910df0eb7cc31852b2ab9e242"
+    },
+    {
+      "name": "008-before",
+      "iteration": 3,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1163504867,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404105472183884,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404106514148052,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404105472183884,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.60791015625,
+      "receipt_healthy": true,
+      "trace_sha256": "4dd79e20ec6ec29d29a867a6cfbdaa177b1928371c1bcf4d3895ef990eeb0b00"
+    },
+    {
+      "name": "008-after",
+      "iteration": 3,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1153842173,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404106745572182,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404107785993181,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404106745572182,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.60791015625,
+      "receipt_healthy": true,
+      "trace_sha256": "d64322ae0f5a69912888f9faefc26032c9943e4a9e3dd7bce55169354e7a4cf9"
+    },
+    {
+      "name": "009-after",
+      "iteration": 4,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1167805739,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404108006058675,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404109064178986,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404108006058675,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.60791015625,
+      "receipt_healthy": true,
+      "trace_sha256": "f443bdc99b673ae7a545fa0b21d0f426bea354ecf23757ef1fafc3df7f7b9afb"
+    },
+    {
+      "name": "009-before",
+      "iteration": 4,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1033728028,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404109281516988,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404110207232589,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404109281516988,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.60791015625,
+      "receipt_healthy": true,
+      "trace_sha256": "c661f5fb1914ca333c4afe14ec9e9d958e184cfe513dfa231857d79b24079f42"
+    },
+    {
+      "name": "010-before",
+      "iteration": 5,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1021447364,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404110419860525,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404111325966811,
+          "first_error": null,
+          "maxrss_kib": 4020,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404110419860525,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.6396484375,
+      "receipt_healthy": true,
+      "trace_sha256": "b6f1ecc26cb3bf4217f5ae1fc3b8b2f4465fe70a24d16e5e92e7a4a0d1b51b08"
+    },
+    {
+      "name": "010-after",
+      "iteration": 5,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1020637663,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404111553525725,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404112465426691,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404111553525725,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.6396484375,
+      "receipt_healthy": true,
+      "trace_sha256": "e068dd81980621e2b2d9fe9a4e5b14d88d3058e21e017336e1716569f7f68fa3"
+    },
+    {
+      "name": "011-after",
+      "iteration": 6,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1021876257,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404112699466243,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404113585702342,
+          "first_error": null,
+          "maxrss_kib": 3896,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404112699466243,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.6396484375,
+      "receipt_healthy": true,
+      "trace_sha256": "76f52d7b22a9ac0e628122c1aeb8069cc902f5197ace667656ec463391ab2623"
+    },
+    {
+      "name": "011-before",
+      "iteration": 6,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1032820859,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404113814164947,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404114734515055,
+          "first_error": null,
+          "maxrss_kib": 4056,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404113814164947,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.6396484375,
+      "receipt_healthy": true,
+      "trace_sha256": "85624dcdb44d7c1a27ba103873fb421ff49bd3d60be6efb30bd26d037a51479d"
+    },
+    {
+      "name": "012-before",
+      "iteration": 7,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1090054080,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404114959625889,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404115925673871,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404114959625889,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.7490234375,
+      "receipt_healthy": true,
+      "trace_sha256": "912efe1e88061c95406611d5e2983d7201552c34b16919f08d4cad8fe8587c8a"
+    },
+    {
+      "name": "012-after",
+      "iteration": 7,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1146354522,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404116175562832,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404117190282373,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404116175562832,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.7490234375,
+      "receipt_healthy": true,
+      "trace_sha256": "2a5281714bc115ac9708f6f1db3039abf433120a8caec57c70aaf5e436ba08f8"
+    },
+    {
+      "name": "013-after",
+      "iteration": 8,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1085728509,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404117425213276,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404118390770023,
+          "first_error": null,
+          "maxrss_kib": 4024,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404117425213276,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.7490234375,
+      "receipt_healthy": true,
+      "trace_sha256": "2b1a3f3540f3408d4374f6eefecf258c393b2e70122cf03d4e8cac5f4214726f"
+    },
+    {
+      "name": "013-before",
+      "iteration": 8,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1043233333,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404118624947315,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404119543927085,
+          "first_error": null,
+          "maxrss_kib": 4100,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404118624947315,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.7490234375,
+      "receipt_healthy": true,
+      "trace_sha256": "63b026ef1346324d4475f7f0eb6e100ddba2f47bfab86b1cad117e096b6a7bea"
+    },
+    {
+      "name": "014-before",
+      "iteration": 9,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1073047389,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404119777049126,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404120730344736,
+          "first_error": null,
+          "maxrss_kib": 4040,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404119777049126,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.76953125,
+      "receipt_healthy": true,
+      "trace_sha256": "3d8e18c45051a752b5c3c41fb590d3f52a792510ca0f0a86f5cb8965323ff158"
+    },
+    {
+      "name": "014-after",
+      "iteration": 9,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1039723871,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404120956579284,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404121883220156,
+          "first_error": null,
+          "maxrss_kib": 3936,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404120956579284,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.76953125,
+      "receipt_healthy": true,
+      "trace_sha256": "7253cb0021a1deceb2ed0fa98f4b747e163056eaab2722de5ced6b55f8a1d33e"
+    },
+    {
+      "name": "015-before",
+      "iteration": 10,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1000020177,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404122099954891,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404122984366299,
+          "first_error": null,
+          "maxrss_kib": 4084,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404122099954891,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.76953125,
+      "receipt_healthy": true,
+      "trace_sha256": "f9f6965700ebb7606f088f520d4d73306474b4f27e6eeb697e78aac7a9270364"
+    },
+    {
+      "name": "015-after",
+      "iteration": 10,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1055964164,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404123220096261,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404124161541948,
+          "first_error": null,
+          "maxrss_kib": 3884,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404123220096261,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.76953125,
+      "receipt_healthy": true,
+      "trace_sha256": "bb194d4686c17ce1ca367d8705e09622b4f577beaa63c3283ec36d6f6471b21a"
+    },
+    {
+      "name": "016-after",
+      "iteration": 11,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1075473017,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404124387535475,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404125346512091,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404124387535475,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.76953125,
+      "receipt_healthy": true,
+      "trace_sha256": "5e6197d6f53929014c40f532acdda862ecf591156c6dd9f877973504efb42866"
+    },
+    {
+      "name": "016-before",
+      "iteration": 11,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1108214218,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404125574978876,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404126555284389,
+          "first_error": null,
+          "maxrss_kib": 4040,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404125574978876,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9482421875,
+      "receipt_healthy": true,
+      "trace_sha256": "cfc3bf0095945b0a7a4d46d2ea99dce25e5c68586a11e82a951016795347ce69"
+    },
+    {
+      "name": "017-after",
+      "iteration": 12,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1081545228,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404126780181441,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404127756115841,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404126780181441,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9482421875,
+      "receipt_healthy": true,
+      "trace_sha256": "d4732cecaf31624c2578616bf9f2cef558968b351846db8ef03176a14ec04fe7"
+    },
+    {
+      "name": "017-before",
+      "iteration": 12,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1082768714,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404127977023125,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404128949513014,
+          "first_error": null,
+          "maxrss_kib": 4108,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404127977023125,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9482421875,
+      "receipt_healthy": true,
+      "trace_sha256": "82fb1e4b2165c43240919b584f2bd032cbb42d688cb3222ede60a76ec7e54764"
+    },
+    {
+      "name": "018-before",
+      "iteration": 13,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1094729877,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404129176395080,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404130155283775,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404129176395080,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9482421875,
+      "receipt_healthy": true,
+      "trace_sha256": "3308a62942e73933c22d5ddc7fb22e85f7ace4113ae2881fd12c97f949c32a23"
+    },
+    {
+      "name": "018-after",
+      "iteration": 13,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1086076543,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404130381992489,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404131350047115,
+          "first_error": null,
+          "maxrss_kib": 3940,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404130381992489,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95263671875,
+      "receipt_healthy": true,
+      "trace_sha256": "0a081dd0633709c390673e56b8f89f3af81fef2cfe34903069dab6964afa0d59"
+    },
+    {
+      "name": "019-before",
+      "iteration": 14,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1076803984,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404131569062656,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404132533776943,
+          "first_error": null,
+          "maxrss_kib": 4036,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404131569062656,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95263671875,
+      "receipt_healthy": true,
+      "trace_sha256": "9447d3d372312b9ec83c93ac5b6a6dc0775fe8fd2320a107c7148acc294c9df7"
+    },
+    {
+      "name": "019-after",
+      "iteration": 14,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1103487950,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404132760809831,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404133751322195,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404132760809831,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95263671875,
+      "receipt_healthy": true,
+      "trace_sha256": "ae7d1e134b3afe1a83852bec4376cff71a1b153b2a343d54beb73e2eb90a5314"
+    },
+    {
+      "name": "020-after",
+      "iteration": 15,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1091304726,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404133981640941,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404134949849468,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404133981640941,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95263671875,
+      "receipt_healthy": true,
+      "trace_sha256": "bd5c2fcfd8ceb333f4e73efef8e9c9da2dc9a6a123528bf7f4bb486227978bbb"
+    },
+    {
+      "name": "020-before",
+      "iteration": 15,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1078471093,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404135179822842,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404136142068948,
+          "first_error": null,
+          "maxrss_kib": 4084,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404135179822842,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95654296875,
+      "receipt_healthy": true,
+      "trace_sha256": "6d6fc27d9dd8f0d1d2e110a44583d225c599bc3186c2b4b6e38d980a9e72d9e6"
+    },
+    {
+      "name": "021-after",
+      "iteration": 16,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1079203192,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404136359846506,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404137331234531,
+          "first_error": null,
+          "maxrss_kib": 3892,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404136359846506,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95654296875,
+      "receipt_healthy": true,
+      "trace_sha256": "7561909152f8ee132087f110df5e40004ced6b03342d7a4cdf2e204f3e36faa5"
+    },
+    {
+      "name": "021-before",
+      "iteration": 16,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1094783247,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404137552775003,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404138536260974,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404137552775003,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95654296875,
+      "receipt_healthy": true,
+      "trace_sha256": "18ff82fe6bd755687623256615194cffee1730b286abf7acc2e10f02c90ec946"
+    },
+    {
+      "name": "022-after",
+      "iteration": 17,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1178746268,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404138767604742,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404139827806478,
+          "first_error": null,
+          "maxrss_kib": 3940,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404138767604742,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.95654296875,
+      "receipt_healthy": true,
+      "trace_sha256": "0ced6e6fdb2de22ee0c935a72e5f88dbd083fb0c65587eaedc55761a80249d87"
+    },
+    {
+      "name": "022-before",
+      "iteration": 17,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1060366056,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404140057624159,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404141004123368,
+          "first_error": null,
+          "maxrss_kib": 4092,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404140057624159,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.96044921875,
+      "receipt_healthy": true,
+      "trace_sha256": "3a3fd3101aabdc9cd737bc0ab029b2d7400fe4fec335cfa4133c82300ef3ed7a"
+    },
+    {
+      "name": "023-before",
+      "iteration": 18,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1113216297,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404141237835835,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404142228154106,
+          "first_error": null,
+          "maxrss_kib": 4056,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404141237835835,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.96044921875,
+      "receipt_healthy": true,
+      "trace_sha256": "9c080dd2b0c9b289d3fe68006474473d6e1f8bc764e21d4a7be0ee066d6bb034"
+    },
+    {
+      "name": "023-after",
+      "iteration": 18,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1102226466,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404142463997059,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404143445992631,
+          "first_error": null,
+          "maxrss_kib": 3996,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404142463997059,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.96044921875,
+      "receipt_healthy": true,
+      "trace_sha256": "a33ec2f1f4f68a20dd7fa909f3c04ad0e743ae68f1a3fa0908f69ab1689ebc6b"
+    },
+    {
+      "name": "024-before",
+      "iteration": 19,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1191862366,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404143670840513,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404144747111598,
+          "first_error": null,
+          "maxrss_kib": 4056,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404143670840513,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.96044921875,
+      "receipt_healthy": true,
+      "trace_sha256": "5a97e4ca1a48f9a878a8ee09901822343003d04ee3e6f0a0759973ac403b67d4"
+    },
+    {
+      "name": "024-after",
+      "iteration": 19,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1059659618,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404144980815026,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404145908618422,
+          "first_error": null,
+          "maxrss_kib": 4112,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404144980815026,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9638671875,
+      "receipt_healthy": true,
+      "trace_sha256": "b7f2354908ad81e6484d7d1b5098cd7c98ecf7e30e7c67f04c03bad36e015223"
+    },
+    {
+      "name": "025-before",
+      "iteration": 20,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1070254385,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404146152608412,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404147105702779,
+          "first_error": null,
+          "maxrss_kib": 4044,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404146152608412,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9638671875,
+      "receipt_healthy": true,
+      "trace_sha256": "a5e8ba0dfaf2d1649b8a18fe0d222c6911d259cff50d330b95875a31ea44369f"
+    },
+    {
+      "name": "025-after",
+      "iteration": 20,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1042526893,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404147335509011,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404148261852918,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404147335509011,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9638671875,
+      "receipt_healthy": true,
+      "trace_sha256": "9240bf489d31f651a2f96c43cc325fed01c53dafbbcb263ebb0b16a7a449a2cd"
+    },
+    {
+      "name": "026-before",
+      "iteration": 21,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1007375695,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404148476794272,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404149381606173,
+          "first_error": null,
+          "maxrss_kib": 4060,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404148476794272,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9638671875,
+      "receipt_healthy": true,
+      "trace_sha256": "1cf0d87d55c0336be13a50bb5f74d103b8373208ea67beac18d743317a4727de"
+    },
+    {
+      "name": "026-after",
+      "iteration": 21,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1058590417,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404149586744571,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404150534085139,
+          "first_error": null,
+          "maxrss_kib": 3964,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404149586744571,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 0.9638671875,
+      "receipt_healthy": true,
+      "trace_sha256": "8b5bd643d7c3e9c80cb391745208be2a80f354e90a13e2dbd51dc863c317cca9"
+    },
+    {
+      "name": "027-before",
+      "iteration": 22,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1029511279,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404150776514590,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404151685914807,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404150776514590,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.046875,
+      "receipt_healthy": true,
+      "trace_sha256": "1f62dc02c1207fbd6d2fc137e302de82751b488bd0a1d545a2e0f61f2861b40a"
+    },
+    {
+      "name": "027-after",
+      "iteration": 22,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1106969192,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404151904300231,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404152891608332,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404151904300231,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.046875,
+      "receipt_healthy": true,
+      "trace_sha256": "8dbefcdeef7ca66dcabd82aebe34cf80d20e8a66e01433bff6ff6c848da218d9"
+    },
+    {
+      "name": "028-after",
+      "iteration": 23,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1045087615,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404153117970991,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404154056763866,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404153117970991,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.046875,
+      "receipt_healthy": true,
+      "trace_sha256": "774901be52bdd58a3a23f264a73221661eef29a9f5fc246ac2b2dacb037a036d"
+    },
+    {
+      "name": "028-before",
+      "iteration": 23,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1056391644,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404154280092068,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404155214168325,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404154280092068,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.046875,
+      "receipt_healthy": true,
+      "trace_sha256": "c8d73968856ed46bdcb5015ab01b43af39be23ff99e079ff205bb524e12b1dc2"
+    },
+    {
+      "name": "029-after",
+      "iteration": 24,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1032532662,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404155448620804,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404156366583964,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404155448620804,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.04296875,
+      "receipt_healthy": true,
+      "trace_sha256": "7cea547d836839bcda9660d0bce2efa7c08ed60ff52e63ef50a46096214ad944"
+    },
+    {
+      "name": "029-before",
+      "iteration": 24,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1053099893,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404156587212413,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404157529876846,
+          "first_error": null,
+          "maxrss_kib": 4060,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404156587212413,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.04296875,
+      "receipt_healthy": true,
+      "trace_sha256": "3b74e98c7d1c69152e9568958d40607cb21a4b29fcd84c91045c40c40469ca1d"
+    },
+    {
+      "name": "030-before",
+      "iteration": 25,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1039386756,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404157749656055,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404158677185541,
+          "first_error": null,
+          "maxrss_kib": 4036,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404157749656055,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.04296875,
+      "receipt_healthy": true,
+      "trace_sha256": "3a5176286a466167b2ad4334e786c0d3456348fd33caf27041af8edf1f9e9c4c"
+    },
+    {
+      "name": "030-after",
+      "iteration": 25,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1097124222,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404158892558286,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404159870989327,
+          "first_error": null,
+          "maxrss_kib": 3880,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404158892558286,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.04296875,
+      "receipt_healthy": true,
+      "trace_sha256": "e33922f3a49c58a1919af0be0bd3679afea8c664dfa6b34ad3df5d5119362fc6"
+    },
+    {
+      "name": "031-after",
+      "iteration": 26,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1037088438,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404160119996163,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404161030942657,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404160119996163,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.0390625,
+      "receipt_healthy": true,
+      "trace_sha256": "f6019ab7bccf00efa6eca077580bf0d4fbe45b1bbd7581cdc257748df21281dc"
+    },
+    {
+      "name": "031-before",
+      "iteration": 26,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1035949573,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404161253224096,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404162175921325,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404161253224096,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.0390625,
+      "receipt_healthy": true,
+      "trace_sha256": "b69423710238a6856bd433ce3653ad6ee7858c4285414218489dfa73551b26e3"
+    },
+    {
+      "name": "032-before",
+      "iteration": 27,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1106767431,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404162419060339,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404163404127472,
+          "first_error": null,
+          "maxrss_kib": 4092,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404162419060339,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.0390625,
+      "receipt_healthy": true,
+      "trace_sha256": "3e15ea7266023546ed61849c68aa737ba6c4e18ef63f540323824d529231029f"
+    },
+    {
+      "name": "032-after",
+      "iteration": 27,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1006219320,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404163620417309,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404164520657322,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404163620417309,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.0390625,
+      "receipt_healthy": true,
+      "trace_sha256": "5ce3d918c862f93f7b890217e9d441629bcc5d7c896013438fcc20f858027f4f"
+    },
+    {
+      "name": "033-after",
+      "iteration": 28,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1082521863,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404164734457477,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404165706703081,
+          "first_error": null,
+          "maxrss_kib": 3980,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404164734457477,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.0390625,
+      "receipt_healthy": true,
+      "trace_sha256": "ca45c6ac4d5eb0b2ce7054bc9ea38a6c4d76e2a5853bd9fda884c03f8eb59a88"
+    },
+    {
+      "name": "033-before",
+      "iteration": 28,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1086864506,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404165942408115,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404166908320071,
+          "first_error": null,
+          "maxrss_kib": 4080,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404165942408115,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.1162109375,
+      "receipt_healthy": true,
+      "trace_sha256": "3230df263fc81d491065d9eea0d9f36324c4e6957bf570211a36beee935c69b9"
+    },
+    {
+      "name": "034-before",
+      "iteration": 29,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1008103363,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404167125415157,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404168023453584,
+          "first_error": null,
+          "maxrss_kib": 4016,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404167125415157,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.1162109375,
+      "receipt_healthy": true,
+      "trace_sha256": "c83832df0da51666673859753f9800e25710b5653d4283e0f1b1c13c45cc399a"
+    },
+    {
+      "name": "034-after",
+      "iteration": 29,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 998389095,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404168247785728,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404169135348137,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404168247785728,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.1162109375,
+      "receipt_healthy": true,
+      "trace_sha256": "4fb66bf1deca4ea7c3a95b0dd1622d96d4a5535fec82904c60bcd6fac6e81f07"
+    },
+    {
+      "name": "035-after",
+      "iteration": 30,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1063000655,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404169357685057,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404170307391476,
+          "first_error": null,
+          "maxrss_kib": 3880,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404169357685057,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.1162109375,
+      "receipt_healthy": true,
+      "trace_sha256": "67a1f35f5083969a467c5a1e440dbfd876cb62af3d5e29c27fd06600cf0cc09e"
+    },
+    {
+      "name": "035-before",
+      "iteration": 30,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1034461715,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404170527364657,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404171450178885,
+          "first_error": null,
+          "maxrss_kib": 4128,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404170527364657,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.26708984375,
+      "receipt_healthy": true,
+      "trace_sha256": "c8d3650a0f9877178d36a41adb1c1f47596de73b1daf28f921b463642310a8d4"
+    },
+    {
+      "name": "036-before",
+      "iteration": 31,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1053342647,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404171679397860,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404172617977283,
+          "first_error": null,
+          "maxrss_kib": 4052,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404171679397860,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.26708984375,
+      "receipt_healthy": true,
+      "trace_sha256": "378601a57b2fbe7e9211a152c7aee43071900e81fb839d96847ee97aafc1cd26"
+    },
+    {
+      "name": "036-after",
+      "iteration": 31,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1056061450,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404172838356429,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404173782550730,
+          "first_error": null,
+          "maxrss_kib": 4044,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404172838356429,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.26708984375,
+      "receipt_healthy": true,
+      "trace_sha256": "a905a10870fb0a8f05a182b28b2c81a24fe21c0b82fd0479db2d012c12bfdfbb"
+    },
+    {
+      "name": "037-after",
+      "iteration": 32,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1071291767,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404174019793353,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404174970444653,
+          "first_error": null,
+          "maxrss_kib": 3996,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404174019793353,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.26708984375,
+      "receipt_healthy": true,
+      "trace_sha256": "18e7d836e1cc526c92fdc0cb4ed6648e6a8f371fa029017a55a1405c1a302233"
+    },
+    {
+      "name": "037-before",
+      "iteration": 32,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1049236777,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404175184605473,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404176128951846,
+          "first_error": null,
+          "maxrss_kib": 4108,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404175184605473,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.24560546875,
+      "receipt_healthy": true,
+      "trace_sha256": "fcb7b1eb0673279e62804c3590fdf84d8767a78dbcfb469b849eff9cecd934be"
+    },
+    {
+      "name": "038-before",
+      "iteration": 33,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1111195635,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404176348987178,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404177337895816,
+          "first_error": null,
+          "maxrss_kib": 4092,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404176348987178,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.24560546875,
+      "receipt_healthy": true,
+      "trace_sha256": "ce4cb659578bb8f78fee7cf2e3a2a992f5e1a2b62bffb84fe2e089ee5987b0c8"
+    },
+    {
+      "name": "038-after",
+      "iteration": 33,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1065217582,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404177574890525,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404178523101456,
+          "first_error": null,
+          "maxrss_kib": 3896,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404177574890525,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.24560546875,
+      "receipt_healthy": true,
+      "trace_sha256": "b43661f814c4397fbff0d47aa4400e21adbdc6423861e5211f5dd9822d4c4f48"
+    },
+    {
+      "name": "039-after",
+      "iteration": 34,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1093154293,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404178746967765,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404179726248636,
+          "first_error": null,
+          "maxrss_kib": 3892,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404178746967765,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.24560546875,
+      "receipt_healthy": true,
+      "trace_sha256": "74bf76b808bd4cabb5b5d9e2329785e1d4cf48e35b6ab46116f64dc5223784be"
+    },
+    {
+      "name": "039-before",
+      "iteration": 34,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1189654805,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404179949458116,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404181024537878,
+          "first_error": null,
+          "maxrss_kib": 4060,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404179949458116,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.30615234375,
+      "receipt_healthy": true,
+      "trace_sha256": "4784c86a048404658387cc631845c1c7503943bfbd5361b88c87a32b3decc419"
+    },
+    {
+      "name": "040-after",
+      "iteration": 35,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1132894310,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404181260522145,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404182268154563,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404181260522145,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.30615234375,
+      "receipt_healthy": true,
+      "trace_sha256": "59a338ef3314a390d7ad952c8494f67e7be31c2ba634d30a47f2ce3edebb9136"
+    },
+    {
+      "name": "040-before",
+      "iteration": 35,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1062293185,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404182499262810,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404183442715332,
+          "first_error": null,
+          "maxrss_kib": 4100,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404182499262810,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.30615234375,
+      "receipt_healthy": true,
+      "trace_sha256": "751d55724324e4b3061e8992b06191d8ee2903227348a7230c7135962e932921"
+    },
+    {
+      "name": "041-after",
+      "iteration": 36,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1044317537,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404183661531999,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404184597790093,
+          "first_error": null,
+          "maxrss_kib": 4020,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404183661531999,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.30615234375,
+      "receipt_healthy": true,
+      "trace_sha256": "ae10ff30f843ba13fbee768ec24289acf617c6afae18d5a577c2ef8b45996051"
+    },
+    {
+      "name": "041-before",
+      "iteration": 36,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1049462299,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404184805500935,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404185755180773,
+          "first_error": null,
+          "maxrss_kib": 4072,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404184805500935,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.28125,
+      "receipt_healthy": true,
+      "trace_sha256": "29d4956e318d44026e7e32a47056cbce8090fb5228fa78617e1056f3a596b643"
+    },
+    {
+      "name": "042-before",
+      "iteration": 37,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1077915637,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404185975204225,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404186928810870,
+          "first_error": null,
+          "maxrss_kib": 4088,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404185975204225,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.28125,
+      "receipt_healthy": true,
+      "trace_sha256": "b2646fdec590d28bbedf99ea18b3e8bbea6f53faa6a2b57b246a6c93754db5a2"
+    },
+    {
+      "name": "042-after",
+      "iteration": 37,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1028415132,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404187158811384,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404188065963752,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404187158811384,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.28125,
+      "receipt_healthy": true,
+      "trace_sha256": "e029aaf2947ebd0af32e75d7f5033b23db5cc027ecf86aa72ddc9436995c683f"
+    },
+    {
+      "name": "043-after",
+      "iteration": 38,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1002061059,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404188289885261,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404189176312797,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404188289885261,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.28125,
+      "receipt_healthy": true,
+      "trace_sha256": "c6393930536490fd5d013fb8d9a5ebb4d6e044625c1cb45f7b366703d2c4648b"
+    },
+    {
+      "name": "043-before",
+      "iteration": 38,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1055795887,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404189407490035,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404190349387418,
+          "first_error": null,
+          "maxrss_kib": 4076,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404189407490035,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.28125,
+      "receipt_healthy": true,
+      "trace_sha256": "58760d0de37a4a96717bb00899dcfac458089b1a47069826f668f1543ac7e505"
+    },
+    {
+      "name": "044-before",
+      "iteration": 39,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1097956122,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404190573979456,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404191549970536,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404190573979456,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.3388671875,
+      "receipt_healthy": true,
+      "trace_sha256": "d68b78d7fd17a8541a61082ce553778882cf137c7bc8620b6ec72f0095f6c0c0"
+    },
+    {
+      "name": "044-after",
+      "iteration": 39,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1152436398,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404191771791960,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404192818191661,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404191771791960,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.3388671875,
+      "receipt_healthy": true,
+      "trace_sha256": "c0af1249e1a519a37a2bd4b4708832a3d056c09e39c6ca18736d5d53bde71b3b"
+    },
+    {
+      "name": "045-after",
+      "iteration": 40,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1058802113,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404193034575248,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404193989145007,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404193034575248,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.3388671875,
+      "receipt_healthy": true,
+      "trace_sha256": "ee7f69322e7a3b8e41f0385c3fe525bdc868c7d2406e12c1356188d3643a3e86"
+    },
+    {
+      "name": "045-before",
+      "iteration": 40,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1070367075,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404194215487335,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404195172282281,
+          "first_error": null,
+          "maxrss_kib": 4044,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404194215487335,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.3388671875,
+      "receipt_healthy": true,
+      "trace_sha256": "366bc183dcb31b1cde0814b0b77a4e02ea06511cae668ba4905ce39ab08ffbf6"
+    },
+    {
+      "name": "046-after",
+      "iteration": 41,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1081605943,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404195392716597,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404196364265014,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404195392716597,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.39208984375,
+      "receipt_healthy": true,
+      "trace_sha256": "ca1bc3b0e27f6b5d0732eebcc5b700c666f2286cc7f895b85c392b7568322cf3"
+    },
+    {
+      "name": "046-before",
+      "iteration": 41,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1057170303,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404196590346769,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404197528319894,
+          "first_error": null,
+          "maxrss_kib": 4100,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404196590346769,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.39208984375,
+      "receipt_healthy": true,
+      "trace_sha256": "d57f6c06cb5e9a5b04984b17cda11ce4ed1e61289c4599e55c63562134f4dd14"
+    },
+    {
+      "name": "047-before",
+      "iteration": 42,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1036149205,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404197752189753,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404198678858550,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404197752189753,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.39208984375,
+      "receipt_healthy": true,
+      "trace_sha256": "0cbbbb661ff5716f61a3508d7a7600413082bfa1b08ed73a752a0f593f323995"
+    },
+    {
+      "name": "047-after",
+      "iteration": 42,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1020135692,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404198890624201,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404199807073053,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404198890624201,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.39208984375,
+      "receipt_healthy": true,
+      "trace_sha256": "881a62f3800a13244db27c063ff9f795d32992215af5d82a093f799a247f7336"
+    },
+    {
+      "name": "048-after",
+      "iteration": 43,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1115660489,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404200035651179,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404201030195405,
+          "first_error": null,
+          "maxrss_kib": 3980,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404200035651179,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.44091796875,
+      "receipt_healthy": true,
+      "trace_sha256": "59b35501588e60b02cd0987d10c2e2147d94675e546bbde3bb4dd19155509475"
+    },
+    {
+      "name": "048-before",
+      "iteration": 43,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1042844438,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404201255058697,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404202181194237,
+          "first_error": null,
+          "maxrss_kib": 4100,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404201255058697,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.44091796875,
+      "receipt_healthy": true,
+      "trace_sha256": "65d346702524484e3b8cf451d2ec3d0ed7e72b67b894485cc97a5022dda49d70"
+    },
+    {
+      "name": "049-after",
+      "iteration": 44,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1007414445,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404202396454881,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404203297133929,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404202396454881,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.44091796875,
+      "receipt_healthy": true,
+      "trace_sha256": "4a046030758525c56fc95c90b3c363c901ee807bf1a4ae9f0b45f80e7e3635e2"
+    },
+    {
+      "name": "049-before",
+      "iteration": 44,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1158892188,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404203539850429,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404204569098430,
+          "first_error": null,
+          "maxrss_kib": 4056,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404203539850429,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.44091796875,
+      "receipt_healthy": true,
+      "trace_sha256": "6fe221a493096f92d6bd665bc6b0da4d3826c314da0589fb0e92588591a0a452"
+    },
+    {
+      "name": "050-after",
+      "iteration": 45,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1045356629,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404204795885945,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404205726702253,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404204795885945,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.44091796875,
+      "receipt_healthy": true,
+      "trace_sha256": "cee2527c6649f1b8e55fdf2933168589d96b05e921b7a6dc2143e3fd4b03636a"
+    },
+    {
+      "name": "050-before",
+      "iteration": 45,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1084190474,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404205949623709,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404206920869492,
+          "first_error": null,
+          "maxrss_kib": 3980,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404205949623709,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48583984375,
+      "receipt_healthy": true,
+      "trace_sha256": "e3614b5cc195ab4f73eb78a5c142da88f82ab229b4dc802d8b404056244b1dd0"
+    },
+    {
+      "name": "051-after",
+      "iteration": 46,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1037660035,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404207129702017,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404208055604864,
+          "first_error": null,
+          "maxrss_kib": 3940,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404207129702017,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48583984375,
+      "receipt_healthy": true,
+      "trace_sha256": "0557f733c16686f7e8188d10f85eaf8c98e528303c29347381ecdc02e06cef6d"
+    },
+    {
+      "name": "051-before",
+      "iteration": 46,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1061110651,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404208308141244,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404209236171457,
+          "first_error": null,
+          "maxrss_kib": 4108,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404208308141244,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48583984375,
+      "receipt_healthy": true,
+      "trace_sha256": "c1c6917b5158a416fac3d9a5a9c4a479b86ab56c48275d273bfd134deae39dcf"
+    },
+    {
+      "name": "052-before",
+      "iteration": 47,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 980554357,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404209458849141,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404210325048718,
+          "first_error": null,
+          "maxrss_kib": 4100,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404209458849141,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48583984375,
+      "receipt_healthy": true,
+      "trace_sha256": "a5030d223aadac7a65a1d3cfba0f678c74155ac5695bc1a892839a9619a609e6"
+    },
+    {
+      "name": "052-after",
+      "iteration": 47,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1021097512,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404210552412500,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404211450325445,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404210552412500,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.52734375,
+      "receipt_healthy": true,
+      "trace_sha256": "d2142c28b2a99f2ebf64d790513f32fc8f5798160a3ccf51fe694d26277e5664"
+    },
+    {
+      "name": "053-after",
+      "iteration": 48,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1024782668,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404211690425682,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404212598311980,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404211690425682,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.52734375,
+      "receipt_healthy": true,
+      "trace_sha256": "418287ffeedb1c19bf18a4ebb2629316b980679ca0d4d62c583ad8e1fcab272f"
+    },
+    {
+      "name": "053-before",
+      "iteration": 48,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1030671990,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404212827367271,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404213738684171,
+          "first_error": null,
+          "maxrss_kib": 4080,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404212827367271,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.52734375,
+      "receipt_healthy": true,
+      "trace_sha256": "740701910b9ad62addab5047bf34551a87271edf1ac4cf72bb7bd9ae8c7b73dc"
+    },
+    {
+      "name": "054-after",
+      "iteration": 49,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1012367364,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404213953958484,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404214858166616,
+          "first_error": null,
+          "maxrss_kib": 3980,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404213953958484,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.52734375,
+      "receipt_healthy": true,
+      "trace_sha256": "52157b8f40905092638c35c98dda99150ac4963f766208da61ccbbdb03cf781f"
+    },
+    {
+      "name": "054-before",
+      "iteration": 49,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 999913183,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404215072408797,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404215967482397,
+          "first_error": null,
+          "maxrss_kib": 3980,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404215072408797,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48486328125,
+      "receipt_healthy": true,
+      "trace_sha256": "f71a4db44ce058bf5170b97f012465db98ca0134dd37fdeee7909e0e9934b332"
+    },
+    {
+      "name": "055-after",
+      "iteration": 50,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1047569045,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404216189151070,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404217113964363,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404216189151070,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48486328125,
+      "receipt_healthy": true,
+      "trace_sha256": "fbf48b711a11a6742dd9f2cd3beb749fafbba1d278fe98ee6243735cbacc088b"
+    },
+    {
+      "name": "055-before",
+      "iteration": 50,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1062387018,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404217352160037,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404218293517655,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404217352160037,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48486328125,
+      "receipt_healthy": true,
+      "trace_sha256": "405095afddd552909d212d3691de1f09c5716c97f2c8c5973a641853cc405f4f"
+    },
+    {
+      "name": "056-before",
+      "iteration": 51,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1056667058,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404218513742918,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404219460556921,
+          "first_error": null,
+          "maxrss_kib": 4052,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404218513742918,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48486328125,
+      "receipt_healthy": true,
+      "trace_sha256": "a691e72286a74f1756d95c138a37f3eed67881e75ef59b4cab94c83cc5664cf3"
+    },
+    {
+      "name": "056-after",
+      "iteration": 51,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1039130853,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404219677685108,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404220607719966,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404219677685108,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.48486328125,
+      "receipt_healthy": true,
+      "trace_sha256": "2c69f054c51734ceb26c7e6384357852117e9690610523dcee47356b4c9509e4"
+    },
+    {
+      "name": "057-after",
+      "iteration": 52,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1031189255,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404220838401808,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404221758222181,
+          "first_error": null,
+          "maxrss_kib": 3892,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404220838401808,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.6064453125,
+      "receipt_healthy": true,
+      "trace_sha256": "2ca368ad418c89eb202e1e6dc028133669dbd6677dae4a6f7dc2e656d7ffd7f6"
+    },
+    {
+      "name": "057-before",
+      "iteration": 52,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1004722903,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404221965565158,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404222869026711,
+          "first_error": null,
+          "maxrss_kib": 3880,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404221965565158,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.6064453125,
+      "receipt_healthy": true,
+      "trace_sha256": "925d992bbd7fdd6219e3eda081252bbad0a772e7fee0e641bf7afe55b6531e55"
+    },
+    {
+      "name": "058-after",
+      "iteration": 53,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1074435585,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404223087253900,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404224039162686,
+          "first_error": null,
+          "maxrss_kib": 3968,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404223087253900,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.6064453125,
+      "receipt_healthy": true,
+      "trace_sha256": "8667834c49d136937a259c2358203edc90bb57c7726fe1a04c13cc2645744a3a"
+    },
+    {
+      "name": "058-before",
+      "iteration": 53,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1044672861,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404224285623921,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404225203472830,
+          "first_error": null,
+          "maxrss_kib": 4008,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404224285623921,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.6064453125,
+      "receipt_healthy": true,
+      "trace_sha256": "2f2187f1977e421155add9c87a5bab84591bed2ca53301f595de8e96410bdf86"
+    },
+    {
+      "name": "059-before",
+      "iteration": 54,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1055861438,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404225440541480,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404226383150512,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404225440541480,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.63818359375,
+      "receipt_healthy": true,
+      "trace_sha256": "091f3fd09465d13e502c0884de5119a99a3e6cc4722cdac89405d921183b46c6"
+    },
+    {
+      "name": "059-after",
+      "iteration": 54,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1060467934,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404226608258626,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404227558369290,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404226608258626,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.63818359375,
+      "receipt_healthy": true,
+      "trace_sha256": "7f56a0a25ce1bad139c7c249708d40264d638b30af1b6f3ff511e1ee206ee818"
+    },
+    {
+      "name": "060-after",
+      "iteration": 55,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1043783269,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404227774714866,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404228710299502,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404227774714866,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.63818359375,
+      "receipt_healthy": true,
+      "trace_sha256": "c921918b8379083a55138213979d46ff352e35ac28ac8ee28d2ecb77d5d6739a"
+    },
+    {
+      "name": "060-before",
+      "iteration": 55,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1097122901,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404228935327945,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404229916234975,
+          "first_error": null,
+          "maxrss_kib": 4072,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404228935327945,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.63818359375,
+      "receipt_healthy": true,
+      "trace_sha256": "09c1e05f708158cdfc1fb6461d4fff903f2e9b507645825e2404d06d83eae599"
+    },
+    {
+      "name": "061-after",
+      "iteration": 56,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1052266113,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404230134129661,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404231078284482,
+          "first_error": null,
+          "maxrss_kib": 3984,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404230134129661,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.5869140625,
+      "receipt_healthy": true,
+      "trace_sha256": "5126e896a461fae866e22b8028620cee25236ee2b150ec68f8336669b9646f96"
+    },
+    {
+      "name": "061-before",
+      "iteration": 56,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1065208322,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404231302438344,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404232242658456,
+          "first_error": null,
+          "maxrss_kib": 4100,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404231302438344,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.5869140625,
+      "receipt_healthy": true,
+      "trace_sha256": "766a9bf53b22e853708f1b9c79481663055c9368881cf5dda53a273642fabacf"
+    },
+    {
+      "name": "062-before",
+      "iteration": 57,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1029859369,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404232481075293,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404233394949233,
+          "first_error": null,
+          "maxrss_kib": 4052,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404232481075293,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.5869140625,
+      "receipt_healthy": true,
+      "trace_sha256": "6bae28ffa1684dd7fb525e721c226a94e3292a28dfba7ef9bbe524d4c4bb0eee"
+    },
+    {
+      "name": "062-after",
+      "iteration": 57,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1176518874,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404233615575133,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404234680412491,
+          "first_error": null,
+          "maxrss_kib": 3980,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404233615575133,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.5869140625,
+      "receipt_healthy": true,
+      "trace_sha256": "cb737df877f23f9912342af2e34effeccba610ebab982ae79825ef963f00f629"
+    },
+    {
+      "name": "063-before",
+      "iteration": 58,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 1170774143,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404234906805150,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404235967611658,
+          "first_error": null,
+          "maxrss_kib": 4032,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404234906805150,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.53955078125,
+      "receipt_healthy": true,
+      "trace_sha256": "06c1736d0e7bf30bd8c6858b70405998183052c8c2deea9579e0afe63cf610e4"
+    },
+    {
+      "name": "063-after",
+      "iteration": 58,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1093692190,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404236199756478,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404237165631873,
+          "first_error": null,
+          "maxrss_kib": 3920,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404236199756478,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.53955078125,
+      "receipt_healthy": true,
+      "trace_sha256": "7ad7c06b9408a2d3c8c17a172836b5399a9d98000134105ed924cffdf9549045"
+    },
+    {
+      "name": "064-after",
+      "iteration": 59,
+      "arm": "after",
+      "exit": 0,
+      "wall_ns": 1071030584,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404237395854660,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404238352574685,
+          "first_error": null,
+          "maxrss_kib": 4048,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404237395854660,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.53955078125,
+      "receipt_healthy": true,
+      "trace_sha256": "4568b9a3ad35dfe55daadc80cd62c0bbec892d6e2fc4d9ed284e53aa776d3ae0"
+    },
+    {
+      "name": "064-before",
+      "iteration": 59,
+      "arm": "before",
+      "exit": 0,
+      "wall_ns": 997663224,
+      "fixture_start": {
+        "op": "perf-start",
+        "args": {
+          "mode": "fileops",
+          "monotonic_ns": 1404238577230072,
+          "pid": 2,
+          "timens": "time:[4026531834]"
+        },
+        "ret": 0,
+        "errno": null
+      },
+      "fixture_end": {
+        "op": "fileops",
+        "args": {
+          "children_maxrss_kib": 0,
+          "created": 5000,
+          "dir": ".",
+          "end_ns": 1404239449747458,
+          "first_error": null,
+          "maxrss_kib": 4084,
+          "ok": true,
+          "open_via": "openat",
+          "rename_via": "rename",
+          "renamed": 5000,
+          "rounds": 5000,
+          "start_ns": 1404238577230072,
+          "unlink_via": "unlink",
+          "unlinked": 5000
+        },
+        "ret": 5000,
+        "errno": null
+      },
+      "load1": 1.53955078125,
+      "receipt_healthy": true,
+      "trace_sha256": "4795ec3d007a7873185b32a6718117d71999c3f6053071a01ea74a16382bb38b"
+    }
+  ]
+}

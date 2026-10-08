@@ -1,0 +1,63 @@
+diff --git a/crates/ouro-jail/src/trace.rs b/crates/ouro-jail/src/trace.rs
+index ca2d6444..10d02b31 100644
+--- a/crates/ouro-jail/src/trace.rs
++++ b/crates/ouro-jail/src/trace.rs
+@@ -152,12 +152,18 @@ impl TraceWriter {
+         event: &crate::records::Event,
+         priority: Priority,
+     ) -> Result<(), JailError> {
+-        let mut event = event.clone();
+-        if event.source == crate::records::EventSource::Wrapper {
++        // Only wrapper events need their sequence rewritten. Observer and
++        // proxy events already own their sequence; serialize them in place.
++        let mut wrapper;
++        let event = if event.source == crate::records::EventSource::Wrapper {
+             self.wrapper_seq += 1;
+-            event.source_seq = self.wrapper_seq;
+-        }
+-        let frame = serde_json::to_vec(&event).map_err(|err| {
++            wrapper = event.clone();
++            wrapper.source_seq = self.wrapper_seq;
++            &wrapper
++        } else {
++            event
++        };
++        let frame = serde_json::to_vec(event).map_err(|err| {
+             let reason = format!("trace serialization failed: {err}");
+             self.local_loss.get_or_insert(Loss {
+                 reason: reason.clone(),
+diff --git a/crates/ouro-records/src/canonical.rs b/crates/ouro-records/src/canonical.rs
+index 2e523569..17e2596d 100644
+--- a/crates/ouro-records/src/canonical.rs
++++ b/crates/ouro-records/src/canonical.rs
+@@ -36,8 +36,10 @@ pub fn sha256_prefixed(bytes: &[u8]) -> String {
+     let digest = Sha256::digest(bytes);
+     let mut out = String::with_capacity(7 + digest.len() * 2);
+     out.push_str("sha256:");
++    const HEX: &[u8; 16] = b"0123456789abcdef";
+     for byte in digest {
+-        out.push_str(&format!("{byte:02x}"));
++        out.push(char::from(HEX[usize::from(byte >> 4)]));
++        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+     }
+     out
+ }
+@@ -91,6 +93,18 @@ pub fn argv_digest(argv: &[Vec<u8>]) -> String {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn prefixed_digest_preserves_sha256_known_answers() {
++        assert_eq!(
++            sha256_prefixed(b""),
++            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++        );
++        assert_eq!(
++            sha256_prefixed(b"abc"),
++            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
++        );
++    }
++
+     #[test]
+     fn sorts_object_keys_by_utf16_code_units() {
+         // U+FF3A (fullwidth Z) is one UTF-16 unit; U+1F600 is a surrogate pair

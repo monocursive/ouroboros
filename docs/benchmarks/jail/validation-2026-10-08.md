@@ -1,6 +1,10 @@
 # Current Jail validation — 2026-10-08
 
-The current frozen Linux Jail inputs pass the fixed-workload performance gate
+This earlier validation is superseded for the runtime freeze and performance by
+the [follow-up validation](followup-2026-10-08.md). Its agent failures and fresh-VM
+observations remain historical evidence.
+
+The then-frozen Linux Jail inputs pass the fixed-workload performance gate
 and fresh Ubuntu 26.04 signed onboarding. Real OpenCode trials produced both
 successful tasks and failures; **the repeated compatibility matrices did not
 complete and are not a blanket support claim**. Fleet and native macOS execution

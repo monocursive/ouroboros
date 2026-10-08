@@ -1,0 +1,9 @@
+{
+  "revision": "d972bb0dfbd52255d8577caac620e56a485f250a",
+  "git_archive_sha256": "e8f8dfa6d6ec382d8839874738f94c44e15e2bbae218a08f983f320b2bcf302a",
+  "inputs": "sha256:c708778d02dc8448268e0fada49487247574d5d50498a4c9142ef1a0d185afea",
+  "rust_toolchain": "1.98.1",
+  "archive_created_from_clean_git_commit": true,
+  "pi_source_directory": "/home/monocursive/ouro-jail-validation-20261008/source-clean",
+  "vps_reference_run": "20261008T100226Z-d972bb0dfbd5"
+}

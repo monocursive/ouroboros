@@ -1,0 +1,63 @@
+{
+  "version": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": false,
+      "inputs": "sha256:c708778d02dc8448268e0fada49487247574d5d50498a4c9142ef1a0d185afea",
+      "opt_level": "3",
+      "revision": "d9d27227bea7182e962b0e9a5e41d49bd9dd2452",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "aarch64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "aarch64",
+      "kernel": "Linux 6.18.50+rpt-rpi-v8",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "binary_sha256": "e1b8484a8be72ed042de3883027b778075db3837fe071a076dac59ba725381be",
+  "runtime_inputs_match_reference_conformance": true,
+  "excluded_memory_requirement_cases": [
+    "l01_operator_int_term_and_hup_each_end_a_contained_tree",
+    "l02_killing_the_backend_of_agent_or_build_ends_the_tree_within_a_bound",
+    "l02_killing_the_supervisor_of_agent_or_build_ends_the_tree_within_a_bound",
+    "l02_killing_the_watcher_of_agent_or_build_ends_the_tree_within_a_bound"
+  ],
+  "rows": [
+    {
+      "test": "j4_trace_linux",
+      "test_binary_sha256": "9237ae5449eacae6572a96383212e43dfba588b72b88d777e7f54827ac14307c",
+      "exit": 0,
+      "summaries": [
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.70s"
+      ]
+    },
+    {
+      "test": "j5_lifetime_linux",
+      "test_binary_sha256": "a14be473c9f3fb09a7cdee436920dc68330520fbdc56b33afdd9453aadb52a09",
+      "exit": 0,
+      "summaries": [
+        "test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 78.30s"
+      ]
+    }
+  ],
+  "passed": true
+}

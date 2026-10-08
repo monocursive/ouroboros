@@ -1,0 +1,217 @@
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling serde_json v1.0.151
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling zerocopy v0.8.57
+   Compiling num-traits v0.2.19
+   Compiling getrandom v0.3.4
+   Compiling hashbrown v0.17.1
+   Compiling ahash v0.8.12
+   Compiling parking_lot_core v0.9.12
+   Compiling regex-syntax v0.8.11
+   Compiling ref-cast v1.0.27
+   Compiling num-integer v0.1.47
+   Compiling num-complex v0.4.6
+   Compiling num-bigint v0.4.8
+   Compiling num-iter v0.1.46
+   Compiling indexmap v2.14.2
+   Compiling num-rational v0.4.2
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling aho-corasick v1.1.5
+   Compiling ref-cast-impl v1.0.27
+   Compiling smallvec v1.16.1
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling regex-automata v0.4.18
+   Compiling toml_edit v0.22.27
+   Compiling num v0.4.3
+   Compiling syn v2.0.119
+   Compiling bit-vec v0.8.0
+   Compiling borrow-or-share v0.2.4
+   Compiling unicode-general-category v1.1.0
+   Compiling rustix v1.1.5
+   Compiling ouro-records v0.1.0 (/home/monocursive/ouro-jail-validation-20261008/source-next/crates/ouro-records)
+   Compiling strum_macros v0.28.0
+   Compiling fluent-uri v0.4.1
+   Compiling bit-set v0.8.0
+   Compiling toml v0.8.23
+   Compiling fraction v0.17.0
+   Compiling parking_lot v0.12.5
+   Compiling vsimd v0.8.0
+   Compiling bitflags v2.13.2
+   Compiling bytecount v0.6.9
+   Compiling percent-encoding v2.3.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling micromap v0.3.0
+   Compiling num-cmp v0.1.0
+   Compiling outref v0.5.2
+   Compiling uuid-simd v0.8.0
+   Compiling referencing v0.57.0
+   Compiling jsonschema-value v0.57.0
+   Compiling ouro-jail v0.1.0 (/home/monocursive/ouro-jail-validation-20261008/source-next/crates/ouro-jail)
+   Compiling fancy-regex v0.19.2
+   Compiling strum v0.28.0
+   Compiling regex v1.13.1
+   Compiling email_address v0.2.9
+   Compiling jsonschema-regex v0.57.0
+   Compiling fastrand v2.5.0
+   Compiling data-encoding v2.11.1
+   Compiling tempfile v3.27.0
+   Compiling jsonschema v0.57.0
+   Compiling ouro-fixture v0.1.0 (/home/monocursive/ouro-jail-validation-20261008/source-next/crates/ouro-fixture)
+    Finished `release` profile [optimized] target(s) in 8m 52s
+     Running tests/j4_trace_linux.rs (target/release/deps/j4_trace_linux-63338d791966261f)
+
+running 11 tests
+test j4_r03_a_local_write_failure_is_loss_and_never_tears_the_trace ...    Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling utf8parse v0.2.2
+   Compiling libc v0.2.189
+   Compiling generic-array v0.14.7
+   Compiling serde_core v1.0.229
+   Compiling anstyle-parse v1.0.0
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling zmij v1.0.23
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling syn v3.0.6
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.1
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling heck v0.5.0
+   Compiling clap_builder v4.6.7
+   Compiling cpufeatures v0.2.17
+   Compiling digest v0.10.7
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling cfg-if v1.0.5
+   Compiling sha2 v0.10.9
+   Compiling clap_derive v4.6.7
+   Compiling serde_derive v1.0.229
+   Compiling clap v4.6.7
+   Compiling ouro-fixture v0.1.0 (/home/monocursive/ouro-jail-validation-20261008/source-next/crates/ouro-fixture)
+    Finished `release` profile [optimized] target(s) in 1m 46s
+FAILED
+test j4_r03_a_slow_consumer_within_the_deadline_loses_nothing ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+test j4_r03_a_trace_fd_is_not_duplicated_locally ...     Finished `release` profile [optimized] target(s) in 0.18s
+ok
+test j4_r03_disconnect_best_effort_continues ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+test j4_r03_disconnect_strict_stops ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+test j4_r03_local_cap_best_effort_keeps_a_prefix_and_reserve_notes ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+test j4_r03_local_cap_strict_stops ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+test j4_r03_saturation_best_effort_continues ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+test j4_r03_saturation_strict_stops ...     Finished `release` profile [optimized] target(s) in 0.21s
+FAILED
+test j4_r03_the_wall_is_enforced_while_the_trace_is_saturated ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+test j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full ...     Finished `release` profile [optimized] target(s) in 0.18s
+FAILED
+
+failures:
+
+---- j4_r03_a_local_write_failure_is_loss_and_never_tears_the_trace stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(1) after 251.66706ms; fd trace 0 bytes None; local traces [(65249, Complete, 100)]
+
+thread 'j4_r03_a_local_write_failure_is_loss_and_never_tears_the_trace' (147751) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- j4_r03_a_slow_consumer_within_the_deadline_loses_nothing stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(0) after 715.293116ms; fd trace 136027 bytes Some((Complete, 207)); local traces []
+
+thread 'j4_r03_a_slow_consumer_within_the_deadline_loses_nothing' (148456) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_disconnect_best_effort_continues stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+ouro-fixture harness: the trace is Incomplete at byte Some(4835); only the 9 frame(s) before that point are in `trace_events`
+j4-trace: exit Some(1) after 920.026795ms; fd trace 5000 bytes Some((Incomplete, 9)); local traces []
+
+thread 'j4_r03_disconnect_best_effort_continues' (148527) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_disconnect_strict_stops stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+ouro-fixture harness: the trace is Incomplete at byte Some(4835); only the 9 frame(s) before that point are in `trace_events`
+j4-trace: exit Some(1) after 185.761205ms; fd trace 5000 bytes Some((Incomplete, 9)); local traces []
+
+thread 'j4_r03_disconnect_strict_stops' (148562) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_local_cap_best_effort_keeps_a_prefix_and_reserve_notes stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(1) after 611.663917ms; fd trace 0 bytes None; local traces [(9079, Complete, 16)]
+
+thread 'j4_r03_local_cap_best_effort_keeps_a_prefix_and_reserve_notes' (148597) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_local_cap_strict_stops stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(1) after 170.497969ms; fd trace 0 bytes None; local traces [(9079, Complete, 16)]
+
+thread 'j4_r03_local_cap_strict_stops' (148631) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_saturation_best_effort_continues stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(1) after 2.921322575s; fd trace 63257 bytes Some((Complete, 97)); local traces []
+
+thread 'j4_r03_saturation_best_effort_continues' (148665) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_saturation_strict_stops stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(1) after 1.247635088s; fd trace 63257 bytes Some((Complete, 97)); local traces []
+
+thread 'j4_r03_saturation_strict_stops' (148700) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_the_wall_is_enforced_while_the_trace_is_saturated stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(1) after 2.178881287s; fd trace 63257 bytes Some((Complete, 97)); local traces []
+
+thread 'j4_r03_the_wall_is_enforced_while_the_trace_is_saturated' (148735) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+---- j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full stdout ----
+ouro-fixture harness: ouro-fixture not found beside the test binary; building it into /tmp/ouro-fixture-harness-9f28d4b3aa221722/target-ouro-fixture
+j4-trace: exit Some(1) after 3.177213069s; fd trace 63257 bytes Some((Complete, 97)); local traces []
+
+thread 'j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full' (148770) panicked at crates/ouro-jail/tests/common/mod.rs:287:65:
+._event.schema.json: expected value at line 1 column 1
+
+
+failures:
+    j4_r03_a_local_write_failure_is_loss_and_never_tears_the_trace
+    j4_r03_a_slow_consumer_within_the_deadline_loses_nothing
+    j4_r03_disconnect_best_effort_continues
+    j4_r03_disconnect_strict_stops
+    j4_r03_local_cap_best_effort_keeps_a_prefix_and_reserve_notes
+    j4_r03_local_cap_strict_stops
+    j4_r03_saturation_best_effort_continues
+    j4_r03_saturation_strict_stops
+    j4_r03_the_wall_is_enforced_while_the_trace_is_saturated
+    j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full
+
+test result: FAILED. 1 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out; finished in 121.57s
+
+error: test failed, to rerun pass `-p ouro-jail --test j4_trace_linux`

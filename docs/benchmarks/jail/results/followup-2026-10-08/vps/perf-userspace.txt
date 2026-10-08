@@ -1,0 +1,129 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 362  of event 'cpu-clock:u'
+# Event count (approx.): 725450896
+#
+# Overhead  Command          Shared Object         Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                          
+# ........  ...............  ....................  ................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+     5.80%  ouro-jail        ouro-jail             [.] <&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>> as serde_core::ser::Serializer>::serialize_str
+            |
+            ---<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>> as serde_core::ser::Serializer>::serialize_str
+
+     4.42%  ouro-jail        libc.so.6             [.] malloc
+            |
+            ---malloc
+               |          
+                --1.10%--<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+                          <alloc::string::String as core::fmt::Write>::write_str
+
+     3.87%  ouro-jail        libc.so.6             [.] cfree
+            |
+            ---cfree
+
+     3.31%  ouro-jail        ouro-jail             [.] alloc::fmt::format::format_inner
+            |
+            ---alloc::fmt::format::format_inner
+               |          
+                --1.93%--ouro_records::canonical::sha256_prefixed
+
+     3.31%  ouro-jail        ouro-jail             [.] core::fmt::write
+            |
+            ---core::fmt::write
+               |          
+                --2.49%--alloc::fmt::format::format_inner
+                          |          
+                           --2.21%--ouro_records::canonical::sha256_prefixed
+
+     2.49%  ouro-jail-trace  libc.so.6             [.] ptrace
+            |
+            ---ptrace
+               |          
+                --1.66%--<ouro_jail::platform::linux::tracer::session::Session>::restart
+
+     2.49%  ouro-jail-trace  ouro-jail             [.] <ouro_jail::platform::linux::tracer::session::Session>::handle
+            |
+            ---<ouro_jail::platform::linux::tracer::session::Session>::handle
+
+     2.21%  ouro-fixture     libc.so.6             [.] syscall
+            |
+            ---syscall
+               0
+
+     1.66%  ouro-jail        libc.so.6             [.] syscall
+            |
+            ---syscall
+               <std::sync::mpmc::array::Channel<alloc::sync::Arc<std::os::unix::net::stream::UnixStream>>>::recv::{closure#1}
+
+     1.66%  ouro-jail        ouro-jail             [.] <ouro_records::records::Event as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+            |
+            ---<ouro_records::records::Event as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+
+     1.66%  ouro-jail-trace  ouro-jail             [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&i32>
+            |
+            ---<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&i32>
+
+     1.38%  ouro-jail        libc.so.6             [.] 0x00000000000ac802
+            |
+            ---0x7bc648cac802
+
+     1.38%  ouro-jail        libc.so.6             [.] 0x0000000000197a59
+            |
+            ---0x7bc648d97a59
+
+     1.38%  ouro-jail        ouro-jail             [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>>::insert
+            |
+            ---<alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>>::insert
+
+     1.38%  ouro-jail        ouro-jail             [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, alloc::string::String, serde_json::value::Value, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry::{closure#0}>
+            |
+            ---<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, alloc::string::String, serde_json::value::Value, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry::{closure#0}>
+
+     1.10%  ouro-jail        libc.so.6             [.] 0x0000000000197a04
+            |
+            ---0x7bc648d97a04
+
+     1.10%  ouro-jail        ouro-jail             [.] <alloc::collections::btree::map::BTreeMap<_, _, _> as core::clone::Clone>::clone::clone_subtree::<alloc::string::String, serde_json::value::Value, alloc::alloc::Global>
+            |
+            ---<alloc::collections::btree::map::BTreeMap<_, _, _> as core::clone::Clone>::clone::clone_subtree::<alloc::string::String, serde_json::value::Value, alloc::alloc::Global>
+
+     1.10%  ouro-jail        ouro-jail             [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, ouro_jail::launch_profile::EnvEntry>>::dying_next
+            |
+            ---<alloc::collections::btree::map::IntoIter<alloc::string::String, ouro_jail::launch_profile::EnvEntry>>::dying_next
+
+     1.10%  ouro-jail        ouro-jail             [.] <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry
+            |
+            ---<alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry
+
+     1.10%  ouro-jail        ouro-jail             [.] <core::fmt::Formatter>::pad_integral::write_prefix
+            |
+            ---<core::fmt::Formatter>::pad_integral::write_prefix
+
+     1.10%  ouro-jail        ouro-jail             [.] <std::sync::mpmc::array::Channel<ouro_jail::platform::linux::tracer::TracerEvent>>::start_recv
+            |
+            ---<std::sync::mpmc::array::Channel<ouro_jail::platform::linux::tracer::TracerEvent>>::start_recv
+
+     1.10%  ouro-jail        ouro-jail             [.] <u8 as core::fmt::LowerHex>::fmt
+            |
+            ---<u8 as core::fmt::LowerHex>::fmt
+
+     1.10%  ouro-jail        ouro-jail             [.] __rustc::__rust_no_alloc_shim_is_unstable_v2
+            |
+            ---__rustc::__rust_no_alloc_shim_is_unstable_v2
+
+     1.10%  ouro-jail        ouro-jail             [.] ouro_records::canonical::sha256_prefixed
+            |
+            ---ouro_records::canonical::sha256_prefixed
+
+     1.10%  ouro-jail-trace  ouro-jail             [.] <std::sync::mpmc::waker::SyncWaker>::notify
+            |
+            ---<std::sync::mpmc::waker::SyncWaker>::notify
+
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
