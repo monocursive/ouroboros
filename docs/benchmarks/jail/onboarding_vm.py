@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--image-url', required=True)
     parser.add_argument('--binary', type=pathlib.Path, required=True)
     parser.add_argument('--revision', required=True)
+    parser.add_argument('--inputs', help='Expected Jail build-input SHA256 passed to the guest.')
     parser.add_argument('--out', type=pathlib.Path, required=True)
     parser.add_argument('--accelerator', choices=['tcg', 'kvm'], default='tcg')
     parser.add_argument('--cpus', type=int, default=2)
@@ -41,11 +42,12 @@ def main():
     metadata = {'schema': 'ouro.jail.onboarding-vm/1', 'status': 'blocked',
                 'image_url': args.image_url, 'expected_image_sha256': args.image_sha256,
                 'revision': args.revision, 'accelerator': args.accelerator,
+                'expected_inputs': args.inputs,
                 'cpus': args.cpus, 'memory_mib': args.memory_mib,
                 'guest_disk_gib': 12, 'fresh_overlay': True,
                 'host_policy_changes': [], 'host_uname': list(os.uname()),
                 'prerequisites': ['bubblewrap', 'minisign', 'curl', 'ca-certificates',
-                                  'perl', 'git', 'python3'],
+                                  'perl', 'git', 'python3', 'ripgrep'],
                 'private_key_persisted': False, 'production_signing': False}
     vm = None
     temporary = None
@@ -88,7 +90,7 @@ def main():
             '    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n'
             '    ssh_authorized_keys:\n      - ' + public_key + '\n'
             'ssh_pwauth: false\npackage_update: true\n'
-            'packages: [bubblewrap, minisign, curl, ca-certificates, perl, git, python3]\n'
+            'packages: [bubblewrap, minisign, curl, ca-certificates, perl, git, python3, ripgrep]\n'
             'runcmd:\n  - [touch, /home/ubuntu/cloud-ready]\n')
         shutil.copytree(seed, out / 'seed')
         iso = root / 'seed.iso'
@@ -159,9 +161,12 @@ def main():
                 [artifacts, repo / 'crates/ouro-jail/dist/install.sh',
                  script_dir / 'onboarding_guest.py', 'ubuntu@127.0.0.1:'])
         with (out / 'workflow.log').open('wb') as workflow:
-            command = shlex.join(['python3', 'onboarding_guest.py', '--artifacts', 'artifacts',
+            guest_args = ['python3', 'onboarding_guest.py', '--artifacts', 'artifacts',
                                   '--installer', 'install.sh', '--public-key', trusted_key,
-                                  '--revision', args.revision, '--out', 'onboarding-results'])
+                                  '--revision', args.revision, '--out', 'onboarding-results']
+            if args.inputs is not None:
+                guest_args += ['--inputs', args.inputs]
+            command = shlex.join(guest_args)
             attempt = subprocess.run(ssh + [command], stdin=subprocess.DEVNULL,
                      stdout=workflow, stderr=subprocess.STDOUT, timeout=1800)
         metadata['guest_exit'] = attempt.returncode

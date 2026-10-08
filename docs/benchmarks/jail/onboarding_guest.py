@@ -22,12 +22,23 @@ AGENT_URL = ('https://github.com/anomalyco/opencode/releases/download/v1.18.32/'
 AGENT_SHA256 = '763af386ef88a8cab18df00fcf055690e5a55e31a7088beabe02307142a6adce'
 
 
+def verify_build(version, revision, inputs=None):
+    build = version['build']
+    if (build['revision'] != revision or build['dirty'] is not False
+            or build['target'] != 'x86_64-unknown-linux-gnu'
+            or build['opt_level'] != '3' or build['debug_assertions'] is not False):
+        raise ValueError('Expected the named clean optimized x86_64 Linux build.')
+    if inputs is not None and build['inputs'] != inputs:
+        raise ValueError('The artifact does not match the expected Jail source inputs.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--artifacts', type=pathlib.Path, required=True)
     parser.add_argument('--installer', type=pathlib.Path, required=True)
     parser.add_argument('--public-key', required=True)
     parser.add_argument('--revision', required=True)
+    parser.add_argument('--inputs', help='Expected Jail build-input SHA256, independently verified.')
     parser.add_argument('--out', type=pathlib.Path, required=True)
     args = parser.parse_args()
     os.umask(0o077)
@@ -41,6 +52,7 @@ def main():
            'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')}
     result = {'schema': 'ouro.jail.onboarding/1', 'status': 'blocked',
               'expected_revision': args.revision, 'rows': [],
+              'expected_inputs': args.inputs,
               'timer_scope': 'signed install through first sandboxed OpenCode result; '
                              'includes agent download, excludes VM/dependency bootstrap',
               'publication': 'deferred', 'signing_identity': 'ephemeral test key'}
@@ -125,16 +137,14 @@ def main():
                     'cat /proc/sys/kernel/random/boot_id'], check=False)
         vm = run('virtualization', ['systemd-detect-virt']).stdout.decode().strip()
         assert vm in ['qemu', 'kvm'], f'Expected a genuine QEMU VM, received {vm!r}.'
-        for program in ['bwrap', 'minisign', 'shasum', 'curl', 'git']:
+        for program in ['bwrap', 'minisign', 'shasum', 'curl', 'git', 'rg']:
             assert shutil.which(program), f'Missing pre-provisioned prerequisite: {program}'
         workflow_start = time.monotonic()
         run('install', ['sh', args.installer, '--from-dir', args.artifacts,
                         '--public-key', args.public_key, '--yes'])
         version = json.loads(run('version', [binary, 'version', '--json']).stdout)
         result['build'] = version
-        assert version['build']['revision'] == args.revision
-        assert version['build']['dirty'] is False
-        assert version['build']['target'] == 'x86_64-unknown-linux-gnu'
+        verify_build(version, args.revision, args.inputs)
         result['binary_sha256'] = hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest()
         workspace = home / 'onboarding-project'
         workspace.mkdir()
@@ -159,11 +169,15 @@ def main():
         agent.chmod(0o755)
         result['vendor_version'] = run('opencode-version', [agent, '--version']).stdout.decode().strip()
         assert result['vendor_version'] == '1.18.32'
+        run('ripgrep-version', ['rg', '--version'])
+        # Force the agent's file-search path as well as its write tool. Without
+        # rg, OpenCode downloads it from GitHub, outside the starter allowlist.
+        (workspace / 'task.txt').write_text('hello\n')
         run('opencode', [binary, 'run', '--launch', 'opencode', '--workspace', workspace,
                          '--ro', agent_dir, '--limit', 'wall=300s', '--', agent, 'run',
                          '--model', 'opencode/big-pickle',
-                         'Create greeting.txt containing exactly hello followed by a newline. '
-                         'Do not read any other file or use the network yourself.'], timeout=330)
+                         'Use your glob tool to find task.txt, read it, then create greeting.txt '
+                         'with exactly the same contents. Do not use the network yourself.'], timeout=330)
         data = receipt('opencode')
         assert (workspace / 'greeting.txt').read_bytes() == b'hello\n'
         shutil.copyfile(workspace / 'greeting.txt', out / 'greeting.txt')
