@@ -412,15 +412,29 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
 }
 
 /// Takes what the tracer has delivered: waits up to `block` for the first
-/// event, then takes at most 256 more without waiting. Every event taken
+/// event, then takes at most 256 more. A syscall result may coalesce arrivals
+/// for at most 250 microseconds within the caller's original wait budget;
+/// lifecycle facts and nonblocking drains are delivered immediately. This
+/// avoids a consumer wakeup for every syscall in a busy trace while keeping
+/// the same bounded queue, event accounting and idle wait behavior.
+/// Every event taken
 /// must be handed to [`record`]; one read and dropped would be evidence
 /// silently lost.
 #[must_use]
 pub fn drain(tracer: &Tracer, block: Duration) -> Vec<TracerEvent> {
     let mut events = Vec::new();
+    let started = std::time::Instant::now();
     if !block.is_zero()
         && let Ok(event) = tracer.events().recv_timeout(block)
     {
+        if matches!(event, TracerEvent::Syscall { .. }) {
+            let delay = block
+                .saturating_sub(started.elapsed())
+                .min(Duration::from_micros(250));
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+        }
         events.push(event);
     }
     for _ in 0..256 {

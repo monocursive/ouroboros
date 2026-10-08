@@ -14,12 +14,17 @@ import time
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, required=True)
-    p.add_argument('--volume', type=Path, required=True, help='Owned, isolated 8 MiB / 64 inode tmpfs, pre-provisioned by operator')
+    p.add_argument('--volume', type=Path, help='Owned, isolated 8 MiB / 64 inode tmpfs, pre-provisioned by operator')
+    p.add_argument('--performance-only', action='store_true', help='Run paired workloads without the separate quota probes.')
     p.add_argument('--before', type=Path, required=True)
     p.add_argument('--after', type=Path, required=True)
     p.add_argument('--samples', type=int, default=30)
     args = p.parse_args()
-    root, volume = args.root.resolve(), args.volume.resolve()
+    if not args.performance_only and args.volume is None:
+        p.error('--volume is required unless --performance-only is selected')
+    if not 1 <= args.samples <= 1000:
+        p.error('--samples must be 1..1000')
+    root = args.root.resolve()
     root.mkdir(mode=0o700)
     out = root / 'results'; out.mkdir()
     work = root / 'work'; work.mkdir()
@@ -97,6 +102,15 @@ def main():
     (out / 'performance.json').write_text(json.dumps(summary, indent=2) + '\n')
     (out / 'runs.json').write_text(json.dumps(rows, indent=2) + '\n')
 
+    if args.performance_only:
+        for arm in ['before', 'after']:
+            assert hashlib.sha256(getattr(args, arm).read_bytes()).hexdigest() == metadata[arm + '_sha256'], 'binary changed during measurement'
+        (out / 'complete.json').write_text(json.dumps({'performance_samples': args.samples,
+            'resource_checks': 'not_requested', 'rows': len(rows)}) + '\n')
+        print(json.dumps(summary, indent=2))
+        return
+
+    volume = args.volume.resolve()
     ws, scratch = volume / 'ws', volume / 'scratch'
     ws.mkdir(exist_ok=True); scratch.mkdir(exist_ok=True)
     for observe in ['on', 'off']:
