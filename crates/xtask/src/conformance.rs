@@ -96,9 +96,31 @@ pub fn rsh_string(target: &Target) -> String {
     s
 }
 
-/// A full `rsync` argv copying `local` into the run directory.
+/// List tracked and visible untracked source files without ignored caches or secrets.
+/// NUL framing preserves whitespace and newlines in file names.
+fn source_inventory(local: &Path, destination: &Path) -> std::io::Result<()> {
+    let result = Command::new("git")
+        .arg("-C")
+        .arg(local)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .output()?;
+    if !result.status.success() || result.stdout.is_empty() {
+        return Err(std::io::Error::other(
+            "git could not enumerate the source files",
+        ));
+    }
+    std::fs::write(destination, result.stdout)
+}
+
+/// A full `rsync` argv copying the enumerated source files into the run directory.
 #[must_use]
-pub fn rsync_argv(target: &Target, local: &Path, run_dir: &str) -> Vec<String> {
+pub fn rsync_argv(target: &Target, local: &Path, run_dir: &str, source_list: &Path) -> Vec<String> {
     let mut local = local.display().to_string();
     if !local.ends_with('/') {
         local.push('/');
@@ -106,9 +128,11 @@ pub fn rsync_argv(target: &Target, local: &Path, run_dir: &str) -> Vec<String> {
     vec![
         "-az".to_string(),
         "--delete".to_string(),
-        // Anchored: an unanchored `target` would drop any directory of that
-        // name anywhere in the tree, and would also shield a stale remote
-        // `target/` from `--delete`.
+        "--from0".to_string(),
+        "--files-from".to_string(),
+        source_list.display().to_string(),
+        // Defense in depth for local state. Source selection comes from Git;
+        // tracked fixtures named target elsewhere in the tree remain eligible.
         "--exclude".to_string(),
         "/target".to_string(),
         "--exclude".to_string(),
@@ -1401,9 +1425,11 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
 
     if outcomes.remote_created {
         step("rsync the worktree");
+        let source_list = opts.evidence.join("source-files.nul");
+        source_inventory(&opts.worktree, &source_list)?;
         outcomes.rsync = Some(run(
             "rsync",
-            &rsync_argv(&opts.target, &opts.worktree, &run_dir),
+            &rsync_argv(&opts.target, &opts.worktree, &run_dir, &source_list),
             None,
         )?);
     }
@@ -1871,7 +1897,12 @@ mod tests {
 
     #[test]
     fn rsync_excludes_target_and_git_and_ends_the_source_with_a_slash() {
-        let argv = rsync_argv(&target(), Path::new("/w/tree"), "20260922T000000Z-abc123");
+        let argv = rsync_argv(
+            &target(),
+            Path::new("/w/tree"),
+            "20260922T000000Z-abc123",
+            Path::new("/source-files.nul"),
+        );
         assert!(argv.contains(&"--delete".to_string()));
         assert_eq!(argv[argv.len() - 2], "/w/tree/");
         assert_eq!(
@@ -1885,7 +1916,12 @@ mod tests {
 
     #[test]
     fn a_source_path_that_already_ends_in_a_slash_is_not_doubled() {
-        let argv = rsync_argv(&target(), Path::new("/w/tree/"), "d");
+        let argv = rsync_argv(
+            &target(),
+            Path::new("/w/tree/"),
+            "d",
+            Path::new("/source-files.nul"),
+        );
         assert_eq!(argv[argv.len() - 2], "/w/tree/");
     }
 
@@ -3057,7 +3093,12 @@ smoke doctor 0
 
     #[test]
     fn the_rsync_excludes_are_anchored_and_cover_the_local_evidence() {
-        let argv = rsync_argv(&target(), Path::new("/w/tree"), "d");
+        let argv = rsync_argv(
+            &target(),
+            Path::new("/w/tree"),
+            "d",
+            Path::new("/source-files.nul"),
+        );
         let excludes: Vec<&String> = argv
             .iter()
             .enumerate()
@@ -3065,6 +3106,73 @@ smoke doctor 0
             .map(|(i, _)| &argv[i + 1])
             .collect();
         assert_eq!(excludes, vec!["/target", "/.git", "/evidence"]);
+    }
+
+    #[test]
+    fn transfer_inventory_keeps_sources_and_excludes_ignored_caches_and_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(root.path())
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(
+            root.path().join(".gitignore"),
+            ".claude/\nnode_modules/\n.env\n*.fixture\n",
+        )
+        .unwrap();
+        for directory in [
+            ".claude/worktrees/nested",
+            "website/node_modules",
+            "fixtures/target",
+        ] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        for name in [
+            ".claude/worktrees/nested/cache",
+            "website/node_modules/cache",
+            ".env",
+            "fixtures/target/source with spaces\nand newline",
+            "new.rs",
+            "kept.fixture",
+        ] {
+            std::fs::write(root.path().join(name), "fixture").unwrap();
+        }
+        git(&["add", "-f", "kept.fixture"]);
+        let inventory = destination.path().join("source-files.nul");
+        source_inventory(root.path(), &inventory).unwrap();
+        let transfer = Command::new("rsync")
+            .args(["-a", "--from0", "--files-from"])
+            .arg(&inventory)
+            .arg(format!("{}/", root.path().display()))
+            .arg(destination.path().join("copy"))
+            .output()
+            .unwrap();
+        assert!(
+            transfer.status.success(),
+            "{}",
+            String::from_utf8_lossy(&transfer.stderr)
+        );
+        let copied = destination.path().join("copy");
+        for name in [
+            "fixtures/target/source with spaces\nand newline",
+            "new.rs",
+            "kept.fixture",
+        ] {
+            assert!(copied.join(name).is_file(), "missing {name}");
+        }
+        for name in [".claude", "website/node_modules", ".env", ".git"] {
+            assert!(!copied.join(name).exists(), "copied ignored state {name}");
+        }
     }
 
     #[test]
