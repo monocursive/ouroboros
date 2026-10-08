@@ -12,25 +12,54 @@ args = parser.parse_args()
 source = pathlib.Path(__file__).resolve().parent
 host = platform.machine()
 triple = ('aarch64' if host in ('arm64', 'aarch64') else 'x86_64') + ('-apple-darwin' if platform.system() == 'Darwin' else '-unknown-linux-gnu')
+release = '0.1.0-rc.1'
 with tempfile.TemporaryDirectory(prefix='ouro-install-test-') as tmp:
     root = pathlib.Path(tmp)
     subprocess.run(['minisign', '-G', '-W', '-s', str(root/'test.key'), '-p', str(root/'test.pub')], check=True, capture_output=True)
     key = (root/'test.pub').read_text().splitlines()[1]
-    subprocess.run(['python3', str(source/'package.py'), '--binary', str(args.binary.resolve()), '--target', triple, '--out', str(root/'artifacts'), '--signing-key', str(root/'test.key')], check=True, capture_output=True)
-    command = ['sh', str(source/'install.sh'), '--from-dir', str(root/'artifacts'), '--public-key', key, '--prefix', str(root/'installed')]
+    artifacts = root/'artifacts'
+    artifacts.mkdir()
+    # An archive left in --out by an earlier invocation is not signed by this one.
+    (artifacts/f'ouro-jail-0.0.1-{triple}.tar.gz').write_bytes(b'left over')
+    subprocess.run(['python3', str(source/'package.py'), '--binary', str(args.binary.resolve()), '--target', triple,
+                    '--version', release, '--out', str(artifacts), '--signing-key', str(root/'test.key')], check=True, capture_output=True)
+    manifest = (artifacts/'SHA256SUMS').read_text().splitlines()
+    assert sorted(line.split('  ')[1] for line in manifest) == sorted(
+        [f'ouro-jail-{release}-{triple}.tar.gz', 'install.sh']), manifest
+    assert (artifacts/'install.sh').read_bytes() == (source/'install.sh').read_bytes()
+    (artifacts/f'ouro-jail-0.0.1-{triple}.tar.gz').unlink()
+    command = ['sh', str(source/'install.sh'), '--from-dir', str(artifacts), '--public-key', key, '--prefix', str(root/'installed')]
     def run(extra=()):
         return subprocess.run(command + list(extra), stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
     assert run().returncode == 0
     installed = (root/'installed/ouro-jail').read_bytes()
     assert run().returncode != 0
     assert run(['--upgrade']).returncode == 0
-    archive = root/'artifacts'/f'ouro-jail-{triple}.tar.gz'
+    # The installer ships beside the artifacts under the same signature; a
+    # doctored copy refuses before anything is installed.
+    keep = (artifacts/'install.sh').read_bytes()
+    (artifacts/'install.sh').write_bytes(keep + b'# tampered\n')
+    result = run(['--upgrade'])
+    assert result.returncode != 0 and b'install.sh' in result.stderr, result.stderr
+    assert (root/'installed/ouro-jail').read_bytes() == installed
+    (artifacts/'install.sh').write_bytes(keep)
+    # A staged release older than the installed one refuses without an
+    # explicit --allow-downgrade; the installed binary survives the refusal.
+    installed_file = root/'installed/ouro-jail'
+    installed_file.write_text('#!/bin/sh\nprintf \'ouro-jail 9.0.0\\nplatform test\\n\'\n')
+    installed_file.chmod(0o755)
+    result = run(['--upgrade'])
+    assert result.returncode != 0 and b'downgrade' in result.stderr, result.stderr
+    assert installed_file.read_text().startswith('#!/bin/sh')
+    assert run(['--upgrade', '--allow-downgrade']).returncode == 0
+    assert (root/'installed/ouro-jail').read_bytes() == installed
+    archive = artifacts/f'ouro-jail-{release}-{triple}.tar.gz'
     archive.write_bytes(archive.read_bytes() + b'corruption')
     result = run(['--upgrade'])
     assert result.returncode != 0 and b'Checksum verification failed' in result.stderr
     assert (root/'installed/ouro-jail').read_bytes() == installed
-    (root/'artifacts/SHA256SUMS').write_text('tampered manifest\n')
+    (artifacts/'SHA256SUMS').write_text('tampered manifest\n')
     result = run(['--upgrade'])
     assert result.returncode != 0 and b'signature verification failed' in result.stderr
     assert (root/'installed/ouro-jail').read_bytes() == installed
-print('PASS: non-TTY install, explicit upgrade, corrupt archive rejection, signature rejection, installed binary preserved')
+print('PASS: non-TTY install, explicit upgrade, downgrade refusal with explicit override, installer tampering, corrupt archive rejection, signature rejection, installed binary preserved')

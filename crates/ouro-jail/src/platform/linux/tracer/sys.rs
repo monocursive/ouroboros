@@ -407,7 +407,12 @@ pub fn siginfo(pid: pid_t) -> io::Result<(c_int, c_int)> {
 /// Locate the signal frame the kernel has just built for a single-stepped
 /// handler. Called only after checking the kernel's handler-entry siginfo.
 #[cfg(target_arch = "x86_64")]
-pub fn handler_ucontext(pid: pid_t, delivered: u64) -> io::Result<Option<u64>> {
+pub fn handler_ucontext(
+    pid: pid_t,
+    delivered: u64,
+    _site_ip: u64,
+    _next_ip: u64,
+) -> io::Result<Option<u64>> {
     // SAFETY: integer register buffer of the kernel's documented size.
     let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
     ptrace_raw(
@@ -447,21 +452,41 @@ fn arm64_regset<T>(pid: pid_t, request: c_uint, note: u64, value: &mut T) -> io:
 }
 
 #[cfg(target_arch = "aarch64")]
-pub fn handler_ucontext(pid: pid_t, delivered: u64) -> io::Result<Option<u64>> {
+pub fn handler_ucontext(
+    pid: pid_t,
+    delivered: u64,
+    site_ip: u64,
+    next_ip: u64,
+) -> io::Result<Option<u64>> {
     let mut regs = Arm64Regs::default();
     arm64_regset(pid, libc::PTRACE_GETREGSET, 1, &mut regs)?;
     // rt_sigframe is siginfo (128 bytes), then ucontext. The kernel only
     // supplies x2 with SA_SIGINFO, so derive the frame from sp for ordinary
     // handlers too. setup_return always sets x0 to the delivered signal.
-    Ok(if regs.x[0] == delivered && regs.sp & 15 == 0 {
-        regs.sp.checked_add(128)
-    } else {
-        None
-    })
+    // `do_signal` restores x0 before `get_signal`, so a forged SIGTRAP could
+    // satisfy the x0 test at the restart site; require the pc to be neither
+    // the interrupted `svc` nor the instruction after it, which only the
+    // kernel's handler-entry notification can produce.
+    Ok(
+        if regs.x[0] == delivered
+            && regs.sp & 15 == 0
+            && regs.pc != site_ip
+            && regs.pc != next_ip
+        {
+            regs.sp.checked_add(128)
+        } else {
+            None
+        },
+    )
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-pub fn handler_ucontext(_pid: pid_t, _delivered: u64) -> io::Result<Option<u64>> {
+pub fn handler_ucontext(
+    _pid: pid_t,
+    _delivered: u64,
+    _site_ip: u64,
+    _next_ip: u64,
+) -> io::Result<Option<u64>> {
     Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
@@ -647,6 +672,8 @@ mod tests {
             mcontext + std::mem::offset_of!(libc::mcontext_t, pc) as u64
         );
         assert_eq!(std::mem::size_of::<Arm64Regs>(), 34 * 8);
+        assert_eq!(std::mem::offset_of!(Arm64Regs, sp), 31 * 8);
+        assert_eq!(std::mem::offset_of!(Arm64Regs, pc), 32 * 8);
         assert_eq!(std::mem::size_of::<libc::siginfo_t>(), 128);
     }
 
@@ -805,7 +832,7 @@ mod tests {
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");
         let err = siginfo(me).expect_err("not a tracee");
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");
-        let err = handler_ucontext(me, 1).expect_err("not a tracee");
+        let err = handler_ucontext(me, 1, 0, 4).expect_err("not a tracee");
         assert!(
             matches!(err.raw_os_error(), Some(libc::ESRCH | libc::ENOSYS)),
             "{err}"

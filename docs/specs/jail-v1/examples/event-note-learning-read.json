@@ -1,0 +1,27 @@
+{
+  "schema": "ouro.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "wrapper",
+  "source_seq": 7,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "410000000",
+  "operation": "note",
+  "stage": "result",
+  "decision": null,
+  "outcome": {
+    "ok": true,
+    "return_value": null,
+    "errno": null,
+    "completion": "wrapper"
+  },
+  "fields": {
+    "kind": "learning_read",
+    "path": {
+      "kind": "workspace_relative",
+      "value": "notes.txt"
+    },
+    "errno": "EACCES",
+    "syscall": "openat",
+    "path_basis": "argument_snapshot"
+  }
+}

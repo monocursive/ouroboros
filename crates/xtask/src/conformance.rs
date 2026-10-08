@@ -96,7 +96,10 @@ pub fn rsh_string(target: &Target) -> String {
     s
 }
 
-/// List tracked and visible untracked source files without ignored caches or secrets.
+/// List tracked and visible untracked source files without ignored caches or
+/// secrets. Credential material (`.env`, `*.pem`) is excluded by pathspec
+/// even when untracked and unignored, because the list itself is the only
+/// defence: macOS openrsync ignores `--exclude` next to `--files-from`.
 /// NUL framing preserves whitespace and newlines in file names.
 fn source_inventory(local: &Path, destination: &Path) -> std::io::Result<()> {
     let result = Command::new("git")
@@ -108,6 +111,8 @@ fn source_inventory(local: &Path, destination: &Path) -> std::io::Result<()> {
             "--cached",
             "--others",
             "--exclude-standard",
+            ":(exclude)*.pem",
+            ":(exclude)*.env",
         ])
         .output()?;
     if !result.status.success() || result.stdout.is_empty() {
@@ -3144,12 +3149,27 @@ smoke doctor 0
             "fixtures/target/source with spaces\nand newline",
             "new.rs",
             "kept.fixture",
+            // Untracked and not ignored: only the inventory's own pathspec
+            // excludes keep these off the transfer.
+            "staging.env",
+            "server.pem",
         ] {
             std::fs::write(root.path().join(name), "fixture").unwrap();
         }
         git(&["add", "-f", "kept.fixture"]);
         let inventory = destination.path().join("source-files.nul");
         source_inventory(root.path(), &inventory).unwrap();
+        let bytes = std::fs::read(&inventory).unwrap();
+        let listed: Vec<&[u8]> = bytes
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        for secret in [".env", "staging.env", "server.pem"] {
+            assert!(
+                !listed.iter().any(|entry| *entry == secret.as_bytes()),
+                "inventory lists {secret}"
+            );
+        }
         let transfer = Command::new("rsync")
             .args(["-a", "--from0", "--files-from"])
             .arg(&inventory)
@@ -3172,6 +3192,9 @@ smoke doctor 0
         }
         for name in [".claude", "website/node_modules", ".env", ".git"] {
             assert!(!copied.join(name).exists(), "copied ignored state {name}");
+        }
+        for name in ["staging.env", "server.pem"] {
+            assert!(!copied.join(name).exists(), "copied secret {name}");
         }
     }
 

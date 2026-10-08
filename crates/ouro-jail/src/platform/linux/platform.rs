@@ -331,7 +331,7 @@ fn probes_for(requirement: &str) -> &'static [&'static str] {
         "limit:pids" => &["cgroup_pids"],
         "limit:mem" => &["cgroup_memory"],
         "limit:swap" => &["cgroup_swap"],
-        "limit:storage" | "limit:inodes" => &["mount_readonly_bind", "seccomp_filter_load"],
+        "limit:storage" | "limit:inodes" => &["storage_ceiling"],
         "limit:cpu" => &["cgroup_cpu"],
         other if other.starts_with("limit:") => &["cgroup_delegated_leaf"],
         other => inputs_for(other).map_or(&[], |(probes, _, _)| probes),
@@ -364,7 +364,7 @@ fn capability_for(requirement: &str, results: &[ProbeResult], measured_at: &str)
             requirement,
             probes_for(requirement),
             if matches!(requirement, "limit:storage" | "limit:inodes") {
-                "filesystem-capacity-or-user-quota"
+                "bounded-tmpfs-or-user-quota"
             } else {
                 "cgroup-v2-delegated"
             },
@@ -733,7 +733,7 @@ impl Boundary {
             .parent()
             .and_then(Path::parent)
             .unwrap_or(plan.attempt_dir.as_path());
-        validate_stdio(state_root)?;
+        validate_stdio(state_root, &plan.config_dir)?;
 
         // The scratch directory the child sees as /tmp. A managed one is
         // supervisor state and gets the private identity; an operator's
@@ -796,17 +796,15 @@ impl Boundary {
         }
 
         // Protected segments. A bound reached is a refusal, never a shorter
-        // answer (§9.1). Operator-configured protected_segments extend the
-        // built-in literals for the walk (§6.3).
-        let mut names: Vec<String> = jfs::PROTECTED_LITERALS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
-        for extra in &snapshot.filesystem.protected_segments {
-            if !names.iter().any(|name| name == extra) {
-                names.push(extra.clone());
-            }
-        }
+        // answer (§9.1). The walk's names are the snapshot's own segments:
+        // every contained baseline carries exactly its literals (`tool` the
+        // built-in `.git`/`.ouroboros`, `agent` — audit 2026-10-08 M5 — only
+        // `.git/hooks` and `.git/config`, so the rest of Git metadata stays
+        // writable), so merging the built-ins in again here would protect
+        // more than the profile asked for.
+        let mut names: Vec<String> = snapshot.filesystem.protected_segments.clone();
+        names.sort_unstable();
+        names.dedup();
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
         bplan.bounded_storage = super::storage::requested(&snapshot.limits);
@@ -1386,6 +1384,19 @@ impl Boundary {
         if let Err(err) = boundary.discover(bwrap_path, deadline, &filter_digest, &scan) {
             boundary.teardown();
             return Err(err);
+        }
+        // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy,
+        // not refusal counters — their hit evidence is positive-only
+        // saturation sampling (§11.4), so the `limits` class starts degraded
+        // with a null count and names its gap.
+        if boundary
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.limits().iter().any(|limit| limit.hit.is_none()))
+        {
+            boundary
+                .audit
+                .record_limit_evidence_missing("storage_hit_evidence_positive_only");
         }
         if let Some(leaf) = boundary.cgroup.as_mut()
             && let Err(err) = leaf
@@ -2414,14 +2425,31 @@ fn ensure_dir(path: &Path) -> Result<(), JailError> {
 }
 
 /// §8.3 and §9.2: reject socket, directory and anonymous-inode stdio, and
-/// regular-file stdio that resolves into protected supervisor state.
+/// regular-file stdio that resolves into protected supervisor state or the
+/// operator's trusted config directory, and writable regular-file stdin
+/// (audit 2026-10-08 H1).
 ///
 /// `state_root` is the whole runtime state directory, not just this attempt's
 /// own: a redirect into a sibling attempt's receipts is the same disclosure.
+/// `config_dir` holds `config.toml` and `launch/`, the trusted widening
+/// inputs: a redirect of any of the three streams there hands the child the
+/// operator's authority over files later runs trust, in either direction,
+/// so it refuses like the state root.
+///
+/// A regular file on stdin refuses while it is writable by this account.
+/// The sandbox has its own `/proc`, and its `/dev/stdin` reopens the file
+/// through `/proc/self/fd/0`: that reopen checks the inode's permission
+/// bits and the original host mount — never this descriptor's open mode —
+/// so a writable file is write-and-truncate authority outside every grant
+/// (§9.1's closed view, §6.4's uncharged write). A read-only file, or a
+/// pipe, narrows correctly.
+///
 /// A descriptor that cannot be inspected refuses rather than passing, because
 /// "I could not tell what this is" is not a reason to hand it to the child.
-fn validate_stdio(state_root: &Path) -> Result<(), JailError> {
+fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<(), JailError> {
     let state_root = state_root.canonicalize();
+    let config_dir = config_dir.canonicalize();
+    let euid = unsafe { libc::geteuid() };
     for fd in [0, 1, 2] {
         let name = match fd {
             0 => "stdin",
@@ -2469,11 +2497,37 @@ fn validate_stdio(state_root: &Path) -> Result<(), JailError> {
             ));
         }
         if kind == libc::S_IFREG {
+            // Audit 2026-10-08 H1: the child's reopen of `/dev/stdin`
+            // checks the inode's permission bits, not this descriptor's
+            // open mode, so a file this account can write is a reopenable
+            // write handle outside every grant. Group/other write bits
+            // count as writable without resolving group membership:
+            // over-refusing is fail-closed here.
+            if fd == 0 {
+                let mode = st.st_mode & 0o777;
+                let writable = (st.st_uid == euid && mode & 0o200 != 0) || mode & 0o022 != 0;
+                if writable {
+                    return refuse(format!(
+                        "stdin is a regular file writable by this account: the sandbox \
+                         would reopen /dev/stdin against the host mount and write outside \
+                         every grant; make the file read-only or pipe it through cat \
+                         (jail-v1 §9.1)"
+                    ));
+                }
+            }
             let target = fd_target.canonicalize().unwrap_or(fd_target);
             if let Ok(state_root) = state_root.as_ref()
                 && target.starts_with(state_root)
             {
                 return refuse(format!("{name} resolves into the runtime state root"));
+            }
+            if let Ok(config_dir) = config_dir.as_ref()
+                && target.starts_with(config_dir)
+            {
+                return refuse(format!(
+                    "{name} resolves into the trusted config directory (config.toml and \
+                     launch profiles are trusted input)"
+                ));
             }
         }
     }
@@ -3312,6 +3366,7 @@ impl PreparedExecution for LinuxPrepared {
             finished: false,
             evidence_reported: false,
             sampled_at_ns: 0,
+            storage_lost_live: false,
         }))
     }
 
@@ -3347,6 +3402,10 @@ struct LinuxRunning {
     evidence_reported: bool,
     /// Boot-clock time of the last counter sample.
     sampled_at_ns: u64,
+    /// Audit 2026-10-08 L2: storage enforcement was found lost while the
+    /// target still ran — the only timing that may make it `outcome.cause`
+    /// (§6.4). A loss first seen after the target's own end never does.
+    storage_lost_live: bool,
 }
 
 impl LinuxRunning {
@@ -3365,8 +3424,16 @@ impl LinuxRunning {
                     }
                 }
                 Err(_) => {
+                    // Audit 2026-10-08 L1: the loss is sticky (`Storage::sample`
+                    // replays it every call), and losing the storage read must
+                    // not also blind the cgroup ceilings — the sample used to
+                    // return before `leaf.sample()`, dropping later
+                    // mem/swap/pids/cpu hits while their rows said `hit: false`.
+                    self.storage_lost_live |= self.target_outcome.is_none();
+                    self.boundary.audit.record_limit_evidence_missing(
+                        "storage_enforcement_lost",
+                    );
                     self.hard_kill();
-                    return;
                 }
             }
         }
@@ -3807,11 +3874,16 @@ impl RunningExecution for LinuxRunning {
     }
 
     fn limit_cause(&self) -> Option<String> {
-        if self
-            .boundary
-            .storage
-            .as_ref()
-            .is_some_and(super::storage::Storage::lost)
+        // Audit 2026-10-08 L2 (§6.4): a storage enforcement loss becomes the
+        // cause only when it was found while the target still ran. A loss
+        // discovered after the target's own end — including the settlement
+        // sample below — is recorded in `errors[]` but is never the cause.
+        if self.storage_lost_live
+            && self
+                .boundary
+                .storage
+                .as_ref()
+                .is_some_and(super::storage::Storage::lost)
         {
             return Some("storage_enforcement_lost".to_owned());
         }
@@ -3820,6 +3892,16 @@ impl RunningExecution for LinuxRunning {
             .as_ref()
             .is_some_and(ExecutionCgroup::oom_killed)
             .then(|| "memory_oom".to_owned())
+    }
+
+    /// The storage enforcement loss's own message, for the receipt's
+    /// `errors[]` (audit 2026-10-08 L2); `None` while enforcement holds.
+    fn storage_loss(&self) -> Option<String> {
+        self.boundary
+            .storage
+            .as_ref()?
+            .loss()
+            .map(str::to_owned)
     }
 
     // J3-agent begin: the bridge's counts, once it and the mediator stopped
@@ -4429,6 +4511,8 @@ mod tests {
         );
         assert_eq!(super::probes_for("limit:pids"), ["cgroup_pids"]);
         assert_eq!(super::probes_for("limit:mem"), ["cgroup_memory"]);
+        assert_eq!(super::probes_for("limit:storage"), ["storage_ceiling"]);
+        assert_eq!(super::probes_for("limit:inodes"), ["storage_ceiling"]);
         assert_eq!(super::probes_for("limit:cpu"), ["cgroup_cpu"]);
         assert_eq!(
             super::probes_for("protected_coverage:existing_and_root"),
@@ -4497,6 +4581,52 @@ mod tests {
         for placeholder in placeholders {
             let _ = placeholder.remove_if_unchanged();
         }
+    }
+
+    #[test]
+    fn a_missing_root_ouroboros_gets_a_real_placeholder_from_the_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut plan = mount_plan(root);
+        std::fs::create_dir(root.join("workspace/.git")).unwrap();
+        let attempt = root.join("attempt");
+        let (_scan, _pins, _fds, placeholders) = prepare_mounts(
+            &mut plan,
+            &attempt,
+            &jfs::PROTECTED_LITERALS,
+            ProtectedCoverage::ExistingAndRoot,
+        )
+        .unwrap();
+        // The real scan/placeholder path: `prepare_mounts` creates the holder
+        // under the attempt directory and the placeholder object at the root,
+        // and the plan mounts it there. (The returned aggregate scan carries
+        // segments, not per-root literal states — the placeholder count and
+        // the mount row are the observable facts.)
+        assert!(!placeholders.is_empty());
+        let rows = plan.mount_table();
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.kind == "placeholder"
+                    && row.destination == root.join("workspace/.ouroboros")
+            })
+            .expect("a placeholder mount for the absent workspace literal");
+        assert!(
+            Path::new(row.source.as_ref().expect("a holder source"))
+                .starts_with(attempt.join("placeholders")),
+            "the holder is not the attempt's placeholder directory: {row:?}"
+        );
+        assert!(
+            root.join("workspace/.ouroboros").is_dir(),
+            "the placeholder does not exist at the root"
+        );
+        for placeholder in placeholders {
+            let _ = placeholder.remove_if_unchanged();
+        }
+        assert!(
+            !root.join("workspace/.ouroboros").exists(),
+            "placeholder removal left the literal behind"
+        );
     }
 
     #[test]
@@ -4592,6 +4722,43 @@ mod tests {
         let capability = capability_for("limit:wall", &[], "2026-09-22T00:00:00Z");
         assert!(capability.satisfies());
         assert_eq!(capability.mechanism.as_deref(), Some("boottime-deadline"));
+    }
+
+    #[test]
+    fn storage_ceilings_rest_on_the_storage_ceiling_probe() {
+        // L6: the rows no longer claim the filesystem-containment probes.
+        let unmeasured = capability_for("limit:storage", &[], "2026-09-22T00:00:00Z");
+        assert_eq!(unmeasured.status, CapabilityStatus::Skipped);
+        assert_eq!(
+            unmeasured.mechanism.as_deref(),
+            Some("bounded-tmpfs-or-user-quota")
+        );
+        let probe = |status, reason: &'static str| ProbeResult {
+            name: "storage_ceiling",
+            status,
+            mechanism: "bounded-tmpfs-or-user-quota",
+            reason_code: reason,
+            evidence: String::new(),
+        };
+        let refused = capability_for(
+            "limit:storage",
+            &[probe(ProbeStatus::Unavailable, "no_user_hard_quota")],
+            "2026-09-22T00:00:00Z",
+        );
+        assert_eq!(refused.status, CapabilityStatus::Unavailable);
+        assert_eq!(refused.reason_code.as_deref(), Some("no_user_hard_quota"));
+        let unbounded = capability_for(
+            "limit:inodes",
+            &[probe(ProbeStatus::Unavailable, "tmpfs_unbounded")],
+            "2026-09-22T00:00:00Z",
+        );
+        assert_eq!(unbounded.status, CapabilityStatus::Unavailable);
+        assert!(capability_for(
+            "limit:inodes",
+            &[probe(ProbeStatus::Available, "ok")],
+            "2026-09-22T00:00:00Z"
+        )
+        .satisfies());
     }
 
     #[test]

@@ -91,28 +91,59 @@ fn a_required_memory_ceiling_runs_only_when_the_host_can_enforce_it() {
 
 #[test]
 fn a_requested_landlock_domain_is_installed_or_refuses_before_exec() {
-    // SAFETY: the VERSION query reads no pointers and changes no process state.
-    let abi = unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, 0, 0, 1) };
-    let output = Command::new(harness::fixture_path())
-        .args([
-            "sandbox-exec",
-            "--landlock-ro",
-            "/",
-            "--",
-            "/bin/sh",
-            "-c",
-            "printf landlock-child-ran",
-        ])
+    if !common::live() {
+        return;
+    }
+    let jail = Jail::new().unwrap();
+    let workspace = jail.root().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let protected = workspace.join("protected.txt");
+    std::fs::write(&protected, b"outside the inner grant").unwrap();
+    let doctor = Command::new(harness::jail_path())
+        .args(["doctor", "--json"])
+        .env("OURO_CONFIG_DIR", jail.config_dir())
         .output()
         .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if abi > 0 {
-        assert!(output.status.success(), "{stdout}");
-        assert!(stdout.contains("landlock-child-ran"));
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let inner = report["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "agent_inner_sandbox")
+        .expect("measured agent inner sandbox");
+    let available = inner["status"] == "available";
+    // One real `agent` run whose target requests a Landlock domain over a
+    // fresh scratch grant and read-only `/usr` — the probe's own scripted
+    // sandbox — and then reports the raw result of reading and writing a
+    // workspace file that lies outside both grants.
+    let run = jail
+        .args(["run", "--profile", "agent", "--workspace"])
+        .arg(&workspace)
+        .args(["--limit", "wall=10s"])
+        .arg("--")
+        .arg(ouro_jail::platform::linux::bwrap::JAIL_INSIDE_PATH)
+        .arg(ouro_jail::platform::linux::probe::INSIDE_SUBCOMMAND)
+        .arg(format!("inner=inner:{}", protected.display()))
+        .run()
+        .unwrap();
+    let stdout = run.stdout_text();
+    if available {
+        // The requested domain installs and enforces: the protected file's
+        // reads and writes are denied from inside the child itself.
+        assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+        assert!(stdout.contains("inner=landlock:ok"), "{stdout}");
+        assert!(stdout.contains("write:EACCES"), "{stdout}");
+        assert!(stdout.contains("read:EACCES"), "{stdout}");
     } else {
-        assert_eq!(output.status.code(), Some(3), "{stdout}");
-        assert!(!stdout.contains("landlock-child-ran"));
-        assert!(stdout.contains("landlock_create_ruleset"), "{stdout}");
-        eprintln!("host Landlock unavailable; requested domain refused before exec");
+        // Measured unavailable: either the `agent` profile refuses before
+        // exec, or the requested domain fails visibly to the child. The jail
+        // never reports a domain that did not install.
+        assert!(
+            !stdout.contains("landlock:ok"),
+            "doctor measured the inner sandbox unavailable, but the child installed it: {stdout}"
+        );
+        eprintln!(
+            "host Landlock inner sandbox unavailable; the requested domain did not install: {inner}"
+        );
     }
 }

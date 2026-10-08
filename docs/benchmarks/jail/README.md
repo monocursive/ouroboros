@@ -138,7 +138,11 @@ non-atomic external-writer window remain explicit in the specification.
 
 The following maps evidence to the spec without promoting a partial check to a
 passed release milestone. Portable proxy tests use real Unix/TCP sockets on both
-hosts; Linux acceptance additionally exercises the actual namespace bridge.
+hosts; Linux acceptance additionally exercises the actual namespace bridge. The
+per-row evidence is computed, not maintained here: the acceptance map
+(`docs/specs/jail-v1/acceptance-map.toml`) carries every K row's clauses, and
+`cargo xtask gates --log linux=<test.log>` is the verdict that this table
+summarizes.
 
 | Rows | Evidence and remaining gap |
 |---|---|
@@ -157,6 +161,9 @@ hosts; Linux acceptance additionally exercises the actual namespace bridge.
 | K27 | Local signed install/upgrade/corruption checks; clean-VM onboarding and publication deferred. |
 | K28 | All 14 embedded profiles ready under Linux doctor, override/fragment validation tests, explicit experimental statuses. |
 | K29 | Protected-host ES probe refuses before release without the entitlement. SIP-disabled VM event/lifecycle trials are recorded; approval and validation under normal security settings remain pending. |
+| K30 | Sixth audit F4: descriptor-corroborated open claims — every component (absolute), the tail (relative, bare names included), the directory (`O_TMPFILE`) — unit-proven in the tracer and the observer; the mismatch is manufactured, not produced live, and no strict-run integration test exists. |
+| K31 | Sixth audit F5: entry-time `deny` injects `EPERM` with a `command_denied` note, and an exec the entry passed whose kernel-installed image hits a rule is killed at the exec — `killed_at_exec`/`SIGKILL`, no output from the image, no `entry_abandoned` gap — live for both `forbid` (run stops) and `deny` (run settles). |
+| K32 | Sixth audit F6: bytes pipelined after a vault connection's one request are counted in `discarded_bytes` and never forwarded; the one-second drain bound itself is not asserted. |
 
 ## Validation results
 

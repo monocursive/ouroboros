@@ -35,7 +35,7 @@ pub mod agent;
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
 /// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 21] = [
+pub const PROBE_NAMES: [&str; 22] = [
     "bwrap_present",
     "user_namespace",
     "pid_namespace",
@@ -52,6 +52,10 @@ pub const PROBE_NAMES: [&str; 21] = [
     "cgroup_memory",
     "cgroup_swap",
     "cgroup_cpu",
+    // The §6.4 storage ceilings: the host prerequisite a `--limit
+    // storage`/`--limit inodes` run refuses without, measured the way
+    // admission measures a writable mount.
+    "storage_ceiling",
     "apparmor_userns_restriction",
     "nested_user_namespace",
     // J3-agent begin: the unix-peer mediation's kernel mechanism (§10), and
@@ -294,6 +298,7 @@ pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) 
         "cgroup_memory" => probe_cgroup_leaf("cgroup_memory", Some("mem")),
         "cgroup_swap" => probe_cgroup_leaf("cgroup_swap", Some("swap")),
         "cgroup_cpu" => probe_cgroup_leaf("cgroup_cpu", Some("cpu")),
+        "storage_ceiling" => probe_storage_ceiling(),
         "apparmor_userns_restriction" => probe_apparmor(),
         "nested_user_namespace" => probe_nested_userns(jail_exe, bwrap),
         // J3-agent begin
@@ -1212,6 +1217,31 @@ fn probe_apparmor() -> ProbeResult {
     }
 }
 
+/// Whether this host gives a writable filesystem a hard ceiling at all —
+/// bounded tmpfs capacity, or the calling user's ext4/XFS hard quota (§6.4)
+/// — which `--limit storage`/`--limit inodes` runs refuse without. Samples
+/// a scratch directory this process owns, the way admission samples a
+/// run's writable mounts.
+fn probe_storage_ceiling() -> ProbeResult {
+    const NAME: &str = "storage_ceiling";
+    const MECHANISM: &str = "bounded-tmpfs-or-user-quota";
+    let temp = match OwnedTempDir::new("storage-ceiling-probe") {
+        Ok(temp) => temp,
+        Err(err) => return ProbeResult::error(NAME, MECHANISM, format!("temp dir: {err}")),
+    };
+    match super::storage::probe_ceiling(&temp.path) {
+        super::storage::CeilingProbe::Bounded { evidence } => {
+            ProbeResult::new(NAME, ProbeStatus::Available, MECHANISM, "ok", evidence)
+        }
+        super::storage::CeilingProbe::Unbounded { reason, evidence } => {
+            ProbeResult::new(NAME, ProbeStatus::Unavailable, MECHANISM, reason, evidence)
+        }
+        super::storage::CeilingProbe::Failed(evidence) => {
+            ProbeResult::error(NAME, MECHANISM, evidence)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The inside helper
 // ---------------------------------------------------------------------------
@@ -1436,6 +1466,30 @@ mod tests {
         assert!(result.evidence.starts_with("unavailable"), "{result:?}");
     }
     // J4 autoscope end
+
+    #[test]
+    fn the_storage_ceiling_probe_reports_a_known_status_and_reason() {
+        let result = run_one(
+            "storage_ceiling",
+            Path::new("/nonexistent"),
+            Path::new("/nonexistent"),
+        );
+        assert!(
+            matches!(
+                result.status,
+                ProbeStatus::Available | ProbeStatus::Unavailable
+            ),
+            "{result:?}"
+        );
+        assert!(
+            matches!(
+                result.reason_code,
+                "ok" | "unbounded_filesystem" | "tmpfs_unbounded" | "no_user_hard_quota"
+            ),
+            "{result:?}"
+        );
+        assert!(!result.evidence.is_empty(), "{result:?}");
+    }
 
     #[test]
     fn an_unknown_name_is_skipped_not_available() {

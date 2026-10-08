@@ -1453,6 +1453,14 @@ fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
         "every call is either a stable event or an unstable-snapshot gap \
          (events {observed}, gaps {unstable})\n{context}"
     );
+    // The race was actually observed, not merely tolerated: the flipper
+    // thread runs for all 300 calls, so at least one snapshot must have been
+    // caught mid-flip and recorded as an argument_snapshot_unstable gap.
+    assert!(
+        unstable > 0,
+        "no unstable snapshot in {CALLS} racing mkdirs — the race did not \
+         happen and this test proves nothing\n{context}"
+    );
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut created = 0;
     for line in &lines {

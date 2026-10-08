@@ -1258,11 +1258,18 @@ impl Uncontained {
                 }
                 Err(_) => {
                     self.leaf.invalidate_hits();
+                    // Audit 2026-10-08 M2: unreadable counters leave every
+                    // `hit: false` claim unsupported (§11.4).
+                    self.audit
+                        .record_limit_evidence_missing("cgroup_counters_unreadable");
                     self.lose(Subject::Boundary, Loss::VerificationFailed);
                 }
             }
         } else {
             self.leaf.invalidate_hits();
+            // The leaf cannot even be scanned, so no counter claim stands.
+            self.audit
+                .record_limit_evidence_missing("cgroup_leaf_scan_failed");
         }
         self.scan_descendants();
     }

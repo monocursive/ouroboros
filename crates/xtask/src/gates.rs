@@ -58,6 +58,9 @@ pub const VERDICT_SCHEMA: &str = "ouro.jail.gate-verdict/1";
 pub const MAP_PATH: &str = "docs/specs/jail-v1/acceptance-map.toml";
 /// Where the §15 table lives, relative to the repository root.
 pub const SPEC_PATH: &str = "docs/specs/jail-v1.md";
+/// Where the v2 acceptance rows (§11, the K rows) live, relative to the
+/// repository root.
+pub const SPEC_V2_PATH: &str = "docs/specs/jail-v2.md";
 
 /// How a clause is proved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -458,11 +461,24 @@ impl Citation {
     }
 }
 
-/// The §15 rows of the spec, `(id, row text)`, in order.
-pub fn spec_rows(spec: &str) -> Result<Vec<(String, String)>, String> {
+/// The acceptance rows of one spec section, `(id, row text)`, in order.
+/// `header` names the section (`## 15. `), `path` is the file the errors
+/// cite.
+fn spec_rows_in(
+    spec: &str,
+    header: &str,
+    path: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let label = format!(
+        "§{}",
+        header
+            .trim_start_matches('#')
+            .trim()
+            .trim_end_matches('.')
+    );
     let mut lines = spec.lines();
-    if !lines.any(|l| l.starts_with("## 15. ")) {
-        return Err(format!("{SPEC_PATH} has no `## 15.` section"));
+    if !lines.any(|l| l.starts_with(header)) {
+        return Err(format!("{path} has no `{header}` section"));
     }
     let mut rows: Vec<(String, String)> = Vec::new();
     for line in lines {
@@ -479,17 +495,61 @@ pub fn spec_rows(spec: &str) -> Result<Vec<(String, String)>, String> {
             continue;
         }
         let Some(text) = text.strip_suffix(" |") else {
-            return Err(format!("§15 row {id} does not end with ` |`"));
+            return Err(format!("{path} {label} row {id} does not end with ` |`"));
         };
         if rows.iter().any(|(seen, _)| seen == id) {
-            return Err(format!("§15 lists {id} twice"));
+            return Err(format!("{path} {label} lists {id} twice"));
         }
         rows.push((id.to_string(), text.to_string()));
     }
     if rows.is_empty() {
-        return Err(format!("{SPEC_PATH} §15 has no gate rows"));
+        return Err(format!("{path} {label} has no gate rows"));
     }
     Ok(rows)
+}
+
+/// The §15 rows of the jail-v1 spec, `(id, row text)`, in order.
+pub fn spec_rows(spec: &str) -> Result<Vec<(String, String)>, String> {
+    spec_rows_in(spec, "## 15. ", SPEC_PATH)
+}
+
+/// The §11 rows of the jail-v2 spec (the K rows), `(id, row text)`, in
+/// order.
+pub fn spec_v2_rows(spec: &str) -> Result<Vec<(String, String)>, String> {
+    spec_rows_in(spec, "## 11. ", SPEC_V2_PATH)
+}
+
+/// Both spec sources as one row list: jail-v1 §15, then jail-v2 §11. A map
+/// gate is valid if it is a row in either; an id both list is a spec bug.
+///
+/// # Errors
+/// Either spec unreadable or malformed, or an id in both.
+pub fn combine_rows(
+    v1: Vec<(String, String)>,
+    v2: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, String> {
+    for (id, _) in &v2 {
+        if v1.iter().any(|(seen, _)| seen == id) {
+            return Err(format!(
+                "{SPEC_V2_PATH} §11 repeats {id}, which {SPEC_PATH} §15 also lists"
+            ));
+        }
+    }
+    let mut rows = v1;
+    rows.extend(v2);
+    Ok(rows)
+}
+
+/// The repository's rows from both spec sources.
+///
+/// # Errors
+/// Either spec unreadable or malformed.
+pub fn spec_rows_all(root: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+    let v1 = std::fs::read_to_string(root.join(SPEC_PATH))
+        .map_err(|e| format!("cannot read {SPEC_PATH}: {e}"))?;
+    let v2 = std::fs::read_to_string(root.join(SPEC_V2_PATH))
+        .map_err(|e| format!("cannot read {SPEC_V2_PATH}: {e}"))?;
+    combine_rows(spec_rows(&v1)?, spec_v2_rows(&v2)?)
 }
 
 /// Where the map and §15 disagree.
@@ -1556,7 +1616,11 @@ pub fn load_from(
     }
     Ok(Acceptance {
         map: parsed,
-        rows: spec_rows(&spec_text)?,
+        rows: combine_rows(
+            spec_rows(&spec_text)?,
+            spec_v2_rows(&std::fs::read_to_string(root.join(SPEC_V2_PATH))
+                .map_err(|e| format!("cannot read {SPEC_V2_PATH}: {e}"))?)?,
+        )?,
     })
 }
 
@@ -1596,8 +1660,9 @@ pub struct GatesArgs {
     /// The acceptance map; defaults to the repository's.
     #[arg(long, value_name = "PATH")]
     pub map: Option<std::path::PathBuf>,
-    /// The spec whose §15 the map is checked against; defaults to the
-    /// repository's.
+    /// The jail-v1 spec whose §15 the map is checked against; defaults to
+    /// the repository's. jail-v2's §11 rows are always read from the
+    /// repository too.
     #[arg(long, value_name = "PATH")]
     pub spec: Option<std::path::PathBuf>,
     /// Also write the verdict as JSON here.
@@ -2037,10 +2102,11 @@ pub fn resolve_bare_test_ids(add: &mut Additions, root: &std::path::Path) -> Res
 
 /// The comment the map file starts with.
 pub const MAP_HEADER: &str = "\
-# Acceptance map for jail-v1 §15 (J5, `ouro.jail.acceptance-map/1`).
+# Acceptance map for jail-v1 §15 and jail-v2 §11 (J5, `ouro.jail.acceptance-map/1`).
 #
-# Every §15 row, split into the separately testable claims it makes, with the
-# tests (or driver checks) that assert each claim and how they assert it.
+# Every acceptance row — jail-v1 §15 and jail-v2 §11's K rows — split into
+# the separately testable claims it makes, with the tests (or driver checks)
+# that assert each claim and how they assert it.
 # `cargo xtask conformance` evaluates this map against the suite's own
 # `test.log` and fails the run when a gate in its lane fails;
 # `cargo xtask gates --log linux=<test.log> [--log macos=<log>]` does the same
@@ -2053,8 +2119,9 @@ pub const MAP_HEADER: &str = "\
 # and new [[ignored]] pins, and rewrites the file.
 #
 # Rules this file keeps (the honesty invariant):
-# - `row` is the §15 text verbatim; when the spec changes a row, the check
-#   fails until the clauses below are reviewed against the new text.
+# - `row` is the spec's row text verbatim (§15 or §11); when a spec changes
+#   a row, the check fails until the clauses below are reviewed against the
+#   new text.
 # - A test is listed under a clause only if it asserts that clause. A clause
 #   nothing asserts yet is `untested` and fails the verdict; a clause the stock
 #   reference host cannot produce is `recorded-limit` with the document that
@@ -2063,6 +2130,7 @@ pub const MAP_HEADER: &str = "\
 #   `#[ignore]` added to a gate test fails the run instead of passing silently.
 #
 # Seeded by J5-A from the J5 gap analysis §1.2, test by test, at 1328c381.
+# K01-K32 computed from the suite at the M6 fix (2026-10-08).
 ";
 
 /// A TOML basic string (JSON's escapes are a subset TOML accepts).
@@ -2201,9 +2269,7 @@ pub fn run_merge(args: &MergeArgs, root: &std::path::Path) -> std::process::Exit
             Err(e) => return fail(e),
         }
     }
-    if let Ok(spec) = std::fs::read_to_string(root.join(SPEC_PATH))
-        && let Ok(rows) = spec_rows(&spec)
-    {
+    if let Ok(rows) = spec_rows_all(root) {
         for p in spec_problems(&map, &rows) {
             println!("note: {p}");
         }
@@ -2230,6 +2296,8 @@ mod tests {
     /// The checked-in map and spec at this revision.
     const MAP: &str = include_str!("../../../docs/specs/jail-v1/acceptance-map.toml");
     const SPEC: &str = include_str!("../../../docs/specs/jail-v1.md");
+    /// The v2 spec whose §11 carries the K rows.
+    const SPEC_V2: &str = include_str!("../../../docs/specs/jail-v2.md");
 
     fn linux(log: &str) -> BTreeMap<Lane, TestLog> {
         BTreeMap::from([(Lane::Linux, parse_log(log))])
@@ -3553,19 +3621,85 @@ reason = "an `ignore` doc example"
     // ------------------------------------------------------ the real map
 
     #[test]
-    fn the_checked_in_map_is_well_formed_and_agrees_with_section_fifteen() {
+    fn the_checked_in_map_is_well_formed_and_agrees_with_both_spec_sections() {
         let map = Map::parse(MAP).unwrap_or_else(|e| panic!("{e}"));
         let at = map.problems_at(&repo_root());
         assert!(at.is_empty(), "{at:#?}");
-        let rows = spec_rows(SPEC).unwrap();
+        let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
         let problems = spec_problems(&map, &rows);
         assert!(problems.is_empty(), "{problems:#?}");
         for (id, _) in &rows {
             assert!(
                 map.clause.iter().any(|c| &c.gate == id),
-                "§15 {id} has no clause in the map"
+                "{id} has no clause in the map"
             );
         }
+    }
+
+    #[test]
+    fn the_v2_rows_are_read_from_section_eleven_only() {
+        assert!(spec_v2_rows("# no section eleven\n").is_err());
+        let mini = "\
+# spec
+
+## 10. Records
+
+Unrelated prose.
+
+## 11. Acceptance matrix (v2 rows)
+
+| ID | Test and required result |
+|---|---|
+| K01 | A v2 row. |
+| K02 | Another v2 row. |
+
+## 12. Implementation order
+
+| Step | Deliverable |
+|---|---|
+| J6 | closeout |
+";
+        assert_eq!(
+            spec_v2_rows(mini).unwrap(),
+            vec![
+                ("K01".to_string(), "A v2 row.".to_string()),
+                ("K02".to_string(), "Another v2 row.".to_string()),
+            ],
+            "the scan stops at the next `## ` heading, never §12"
+        );
+        let real = spec_v2_rows(SPEC_V2).unwrap();
+        assert_eq!(
+            real.len(),
+            32,
+            "{:?}",
+            real.iter().map(|r| &r.0).collect::<Vec<_>>()
+        );
+        assert_eq!(real[0].0, "K01");
+        assert_eq!(real[31].0, "K32");
+    }
+
+    #[test]
+    fn an_id_both_specs_list_is_a_spec_bug() {
+        let v1 = vec![("K01".to_string(), "one".to_string())];
+        let v2 = vec![
+            ("K01".to_string(), "two".to_string()),
+            ("K02".to_string(), "another".to_string()),
+        ];
+        let err = combine_rows(v1, v2.clone()).unwrap_err();
+        assert!(
+            err.contains("K01") && err.contains("jail-v2.md") && err.contains("jail-v1.md"),
+            "{err}"
+        );
+        let rows = combine_rows(
+            vec![("P01".to_string(), "v1".to_string())],
+            v2.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["P01", "K01", "K02"],
+            "v1's rows first, then v2's"
+        );
     }
 
     #[test]
@@ -3715,7 +3849,7 @@ reason = "an `ignore` doc example"
     #[test]
     fn the_j4_log_under_the_checked_in_map_fails_only_what_it_could_not_prove() {
         let map = Map::parse(MAP).unwrap();
-        let rows = spec_rows(SPEC).unwrap();
+        let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
         let log = parse_log(J4_LOG);
         let v = evaluate(&map, &rows, &linux(J4_LOG), &no_checks());
         assert_only_expected_reasons(&v, &log);
@@ -3743,7 +3877,7 @@ reason = "an `ignore` doc example"
         assert_eq!(results, 1345 + 13);
         assert!(log.clean());
         let map = Map::parse(MAP).unwrap();
-        let rows = spec_rows(SPEC).unwrap();
+        let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
         let v = evaluate(&map, &rows, &linux(BASE_LOG), &no_checks());
         assert_only_expected_reasons(&v, &log);
         // Given the driver checks it did not have, the base still fails

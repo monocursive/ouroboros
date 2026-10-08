@@ -8,6 +8,7 @@
     "crates/ouro-records/src/canonical/jcs.rs",
     "crates/ouro-jail/build.rs",
     "crates/ouro-jail/Cargo.toml",
+    "crates/ouro-jail/data/uts46_unicode17_tables.rs",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -35,4 +36,5 @@
     "crates/ouro-jail/profiles/launch/pi.toml",
     "crates/ouro-jail/profiles/embedded.rs",
     "crates/ouro-jail/profiles/inputs.rs",
+    "docs/specs/jail-v1/network-addresses.json",
 ]

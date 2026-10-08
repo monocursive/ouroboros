@@ -1086,6 +1086,18 @@ fn serve(
     if !shared.rules.permits_destination(&request.destination) {
         return Err(Reason::HostNotAllowed);
     }
+    // Audit 2026-10-08 L21: plaintext HTTP requires a grant that named its
+    // port explicitly (network-rules.md §Normalization). The omitted-port
+    // expansion to 443 is the TLS shape — a plain request riding it has no
+    // explicit rule that permits it — while an explicit `host:PORT` grant
+    // serves whatever scheme its operator named the port for.
+    if request.kind() == RequestKind::Http
+        && !shared
+            .rules
+            .permits_destination_explicit(&request.destination)
+    {
+        return Err(Reason::HostNotAllowed);
+    }
     // Step 2: resolve on the host, once.
     let answers = match &request.destination.host {
         Host::Ip(address) => vec![*address],

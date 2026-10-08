@@ -1355,6 +1355,7 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
                 format!("touch {}", marker.display()).into_bytes(),
             ],
             workspace: workspace.clone(),
+            config_dir: root.path().join("config"),
             launch: None,
             proxy: None,
         };

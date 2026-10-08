@@ -160,6 +160,8 @@ fn event_bytes(event: &TracerEvent) -> usize {
             path,
             kernel_image,
             command,
+            shebangs,
+            kernel_argv,
             ..
         } => {
             path.as_ref().map_or(0, |p| p.bytes.capacity())
@@ -175,6 +177,20 @@ fn event_bytes(event: &TracerEvent) -> usize {
                             .iter()
                             .map(|candidate| candidate.path.capacity())
                             .sum::<usize>()
+                })
+                + shebangs.capacity() * size_of::<Option<ShebangImage>>()
+                + shebangs
+                    .iter()
+                    .map(|shebang| {
+                        shebang.as_ref().map_or(0, |line| {
+                            line.interpreter.capacity()
+                                + line.argument.as_ref().map_or(0, Vec::capacity)
+                        })
+                    })
+                    .sum::<usize>()
+                + kernel_argv.as_ref().map_or(0, |argv| {
+                    argv.capacity() * size_of::<Vec<u8>>()
+                        + argv.iter().map(Vec::capacity).sum::<usize>()
                 })
         }
         _ => 0,
@@ -525,6 +541,23 @@ pub struct CandidateImage {
     pub identity: Option<(u64, u64)>,
 }
 
+/// Audit 2026-10-08 H2: the `#!` evidence for one target-image candidate,
+/// read through the tracee's root while the tracee is stopped at its exec
+/// event. A `#!` target loads the interpreter its script names, not the
+/// script, so confirming the target's exec needs the line the kernel read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShebangImage {
+    /// The interpreter path the script's first line names, as written.
+    pub interpreter: Vec<u8>,
+    /// The interpreter's optional single argument, when the line has one.
+    /// Its presence shifts the script one slot later in the kernel's argv.
+    pub argument: Option<Vec<u8>>,
+    /// The interpreter's `(dev, ino)` in the tracee's root, when it could
+    /// be stat'ed there: the identity that must agree with the loaded
+    /// image's.
+    pub identity: Option<(u64, u64)>,
+}
+
 /// What the observer saw. Pids are host pids, in the supervisor's namespace;
 /// a process inside a pid namespace sees a different number for itself, and
 /// [`nspid`] is how the two are related (§11.3).
@@ -616,6 +649,17 @@ pub enum TracerEvent {
         /// then fails and the denial surfaces on the syscall event), or the
         /// re-check found nothing.
         command: Option<Box<crate::commands::Hit>>,
+        /// Audit 2026-10-08 H2: the `#!` evidence for each target image,
+        /// parallel to the image list and read in the same stopped-exec
+        /// window as `kernel_image` (`None` entries for non-script
+        /// candidates and non-absolute spellings). Empty when this process
+        /// is not the target, so only the target's own exec pays the reads.
+        shebangs: Vec<Option<ShebangImage>>,
+        /// The kernel's own copy of the new argv (`/proc/<tid>/cmdline`),
+        /// read in the same window. `None` when it could not be read; the
+        /// script confirmation then does not happen, exactly as an
+        /// unreadable image does not confirm.
+        kernel_argv: Option<Vec<Vec<u8>>>,
         monotonic_ns: u64,
     },
     /// One completed closed-set call. `ret` is the signed raw return, so a
@@ -1244,13 +1288,25 @@ mod tests {
             digest: String::with_capacity(128),
             forbidden: false,
         };
+        let shebang = ShebangImage {
+            interpreter: Vec::with_capacity(64),
+            argument: Some(Vec::with_capacity(16)),
+            identity: Some((0, 0)),
+        };
+        let mut kernel_argv = Vec::with_capacity(2);
+        kernel_argv.push(Vec::with_capacity(64));
         let allocated = path.capacity()
             + kernel.path.capacity()
             + kernel.candidates.capacity() * size_of::<CandidateImage>()
             + kernel.candidates[0].path.capacity()
             + size_of::<crate::commands::Hit>()
             + command.pattern.capacity()
-            + command.digest.capacity();
+            + command.digest.capacity()
+            + size_of::<Option<ShebangImage>>()
+            + shebang.interpreter.capacity()
+            + shebang.argument.as_ref().map_or(0, Vec::capacity)
+            + kernel_argv.capacity() * size_of::<Vec<u8>>()
+            + kernel_argv[0].capacity();
         let event = TracerEvent::Exec {
             pid: 1,
             start_ticks: None,
@@ -1262,6 +1318,8 @@ mod tests {
             kernel_image: Some(kernel),
             dirfd: None,
             command: Some(Box::new(command)),
+            shebangs: vec![Some(shebang)],
+            kernel_argv: Some(kernel_argv),
             monotonic_ns: 0,
         };
         assert!(event_bytes(&event) >= allocated + size_of::<TracerEvent>());

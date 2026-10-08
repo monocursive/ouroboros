@@ -235,6 +235,71 @@ fn the_walk_finds_nested_and_file_form_protected_segments() {
     }
 }
 
+/// Audit 2026-10-08 M5: a multi-component protected name matches the
+/// entry's whole path beneath the root, so `agent` can protect `.git/hooks`
+/// and `.git/config` while `.git` itself stays writable. Such a name is
+/// never a root literal, and nothing else inside `.git` is protected.
+#[test]
+fn multi_component_names_protect_nested_paths_only() {
+    let dir = temp_dir("multicomponent");
+    let root = dir.path();
+    build_workspace(root);
+    fs::create_dir_all(root.join(".git/hooks")).unwrap();
+
+    let scan = jfs::scan_protected_names(
+        root,
+        &[".git/hooks", ".git/config"],
+        jfs::ScanLimits::DEFAULT,
+    )
+    .expect("scan");
+    let mut found: Vec<String> = scan
+        .segments
+        .iter()
+        .map(|s| {
+            format!(
+                "{} {:?}",
+                s.path.strip_prefix(root).unwrap().display(),
+                s.kind
+            )
+        })
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            ".git/config File".to_owned(),
+            ".git/hooks Directory".to_owned(),
+        ]
+    );
+    // The rest of `.git` is walked, not protected.
+    assert!(scan
+        .directories
+        .iter()
+        .any(|d| d.path == root.join(".git/objects")));
+    assert!(
+        scan.root_literals.is_empty(),
+        "a multi-component name is not a root literal"
+    );
+    assert!(scan.absent_root_literals().is_empty());
+    assert!(scan.skipped_symlinks.is_empty());
+}
+
+/// Audit 2026-10-08 M5: a symlink on the path *to* a deeper protected name
+/// hides whatever lives behind it, so the walk records it and
+/// `existing_and_root` cannot claim coverage it could not see.
+#[test]
+fn a_symlink_on_the_path_to_a_deeper_protected_name_degrades_coverage() {
+    let outside = temp_dir("outside-deep");
+    fs::create_dir_all(outside.path().join(".git/hooks")).unwrap();
+    let dir = temp_dir("symlink-deep");
+    let root = dir.path();
+    std::os::unix::fs::symlink(outside.path().join(".git"), root.join(".git")).unwrap();
+    let scan =
+        jfs::scan_protected_names(root, &[".git/hooks"], jfs::ScanLimits::DEFAULT).unwrap();
+    assert!(scan.segments.is_empty());
+    assert_eq!(scan.skipped_symlinks, vec![root.join(".git")]);
+}
+
 #[test]
 fn root_level_literals_are_reported_present_or_absent() {
     let dir = temp_dir("literals");
@@ -1731,5 +1796,18 @@ fn the_probes_report_the_statuses_this_host_warrants() {
     assert_eq!(
         by_name["apparmor_userns_restriction"].reason_code,
         "restriction_on"
+    );
+    // The storage-ceiling probe reads this host's own filesystem layout,
+    // which the suite does not control; either §3.1 outcome is honest, the
+    // reason code decides which.
+    let ceiling = by_name["storage_ceiling"];
+    assert!(
+        matches!(
+            ceiling.status,
+            probe::ProbeStatus::Available | probe::ProbeStatus::Unavailable
+        ),
+        "storage_ceiling: unexpected {} ({})",
+        ceiling.status,
+        ceiling.evidence
     );
 }

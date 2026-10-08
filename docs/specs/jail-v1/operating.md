@@ -87,8 +87,9 @@ may set it for itself is the host's logind policy. `doctor` reports it
 
 Without lingering, from a plain session, the attempt has no execution leaf:
 
-- `none`, and any explicit `--limit pids=…`, `mem=…` or `cpu=…`, refuse with
-  125 (they require an execution boundary);
+- `none`, and any explicit `--limit pids=…`, `mem=…`, `swap=…` or `cpu=…`,
+  refuse with 125 (they require an execution boundary); `none` also refuses
+  `--limit storage=…` and `--limit inodes=…` unconditionally;
 - the preferred pids ceiling of `agent`, `tool` and `build` is recorded as not
   applied, with a wrapper note;
 - a supervisor killed during bubblewrap's startup can leave the namespace
@@ -246,7 +247,10 @@ directory: mode 0700, owned by you, not a symlink, and outside every grant you
 give the child.
 
 Limits (`--limit`): `wall` (`ms`, `s`, `m`, `h`), `pids`, `mem` (bytes,
-`KiB`, `MiB`, `GiB`) and `cpu` (percent of one core, as a bandwidth ceiling).
+`KiB`, `MiB`, `GiB`), `swap` (same byte grammar; `swap=0` explicitly disables
+swap), `storage` (aggregate writable file-data bytes, same byte grammar),
+`inodes` (aggregate writable inode count) and `cpu` (percent of one core, as a
+bandwidth ceiling).
 Every explicit limit is required: if it cannot be enforced, the run refuses.
 
 ## Launch profiles and credentials

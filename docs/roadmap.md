@@ -51,10 +51,13 @@ OpenCode run in 67.32 seconds. The record names the exact build and host and
 preserves the unsuccessful Ubuntu 22 and stock Ubuntu 24 attempts. This local
 package test does not establish public release availability or wider support.
 
-The [October 8 refresh](benchmarks/jail/validation-2026-10-08.md) repeats this
-with the current frozen Jail inputs. Provisioning ripgrep also makes the real
-OpenCode glob/read/write workflow pass in 82.85 seconds. Stock Ubuntu 24 still
-refuses contained execution; signed-package checks pass on both releases.
+The [October 8 validation](benchmarks/jail/validation-2026-10-08.md) repeated
+this against the frozen Jail inputs: provisioning ripgrep made the real
+OpenCode glob/read/write workflow pass in 82.85 seconds, stock Ubuntu 24 still
+refuses contained execution, and signed-package checks passed on both releases.
+The newer [October 8 follow-up](benchmarks/jail/followup-2026-10-08.md)
+prepares signed native x86_64 and ARM64 packages and passes full reference
+conformance; production signing and publication remain pending.
 
 Before public distribution, we also need to choose the release repository,
 Homebrew tap, and production signing identity. Until those are configured,
@@ -67,11 +70,12 @@ containment tests. Each compatibility record should say which agent, version,
 jail build, host, and policy were used, what worked, and what remains unknown.
 A launch profile stays experimental until that combination has evidence.
 
-Performance measurements need the same care. The
-[recorded benchmark](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
-shows a substantial observation cost on file-heavy work. We'll keep reporting
-startup and workload overhead separately, refresh the measurements against
-a committed build, and add results from actual agent workflows.
+Performance measurements need the same care. The newest
+[October 8 follow-up record](benchmarks/jail/followup-2026-10-08.md) measures
+the observation cost on file-heavy work directly: with observation on,
+file-operation work takes about four times as long as with it off. We'll keep
+reporting startup and workload overhead separately, refresh the measurements
+against a committed build, and add results from actual agent workflows.
 
 The [October 1 working-tree follow-up](benchmarks/sandboxes/observation-and-limits-2026-10-01.md)
 reduces read workload time from 24.53 ms to 6.10 ms on the reference VPS;
@@ -83,11 +87,15 @@ live checks. The [October 2 baseline](specs/jail-v1/evidence/2026-10-02-final/RE
 records a passing conformance run and current tested freeze. Project quotas and
 automatic volume provisioning remain pending.
 
-The same October 8 record passes K17 with 540 measured samples and no exclusions:
-worst added startup is 131.3 ms p95; observation-off file-work overhead is
-34.9%–37.9%. Real-agent matrices retain deadline failures and provider rate
-limits, so their successful cases are not general compatibility claims. The
-new runner checks dependencies first and stops on a provider rate limit.
+Both October 8 records pass K17 with 540 measured samples and no exclusions.
+The validation record's figures are post-start measures: worst added startup
+131.3 ms p95, and file post-start overhead of 34.9%–37.9% with observation
+off. The follow-up record measures file-work time directly: +25.3% plain and
++28.1% delegated against direct with observation off, and +319.6% plain and
++324.5% delegated with observation on. Real-agent matrices retain deadline
+failures and provider rate limits, so their successful cases are not general
+compatibility claims. The new runner checks dependencies first and stops on a
+provider rate limit.
 
 The release checks also include the full test suite, Linux conformance,
 security review, and unresolved findings. Documentation and a successful

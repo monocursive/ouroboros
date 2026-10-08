@@ -11,12 +11,14 @@ OURO_BUILD_REVISION=$(git rev-parse HEAD) OURO_BUILD_DIRTY=true \
   cargo +1.98.1 build --release -p ouro-jail
 python3 crates/ouro-jail/dist/package.py \
   --binary target/release/ouro-jail --target aarch64-apple-darwin \
-  --out /path/to/artifacts --signing-key /path/to/signing.key
+  --version 0.1.0-rc.1 --out /path/to/artifacts --signing-key /path/to/signing.key
 ```
 
 Use the actual target triple of the supplied binary. Set `OURO_BUILD_DIRTY=false`
-only for a clean checkout. A later invocation against the same artifact directory
-signs a manifest covering every staged target archive.
+only for a clean checkout. The release version is part of the archive name. One
+invocation signs exactly its own outputs: the manifest covers the archive it
+created and the `install.sh` copy it stages beside it, never archives an
+earlier run left in the same directory.
 
 Installation requires `minisign`, `tar`, `shasum`, and `curl` for HTTPS downloads.
 It installs no backend or system packages. Obtain the public key through a trusted
@@ -29,9 +31,14 @@ sh crates/ouro-jail/dist/install.sh \
 ```
 
 Use `--base-url https://...` instead of `--from-dir` for published artifacts.
-Use `--upgrade` to replace an existing installation without a TTY. Failure to
-verify the signed manifest or archive checksum preserves the installed binary.
-The distribution includes the project license and the CA-data license notice.
+Use `--upgrade` to replace an existing installation without a TTY. The
+installer selects the manifest's single archive for the host platform, checks
+the staged binary's reported release version against the installed one, and
+refuses a downgrade unless `--allow-downgrade` is given. The signed manifest
+covers `install.sh` itself, and the installer refuses to run when it does not
+match that signed copy. Failure to verify the signed manifest or archive
+checksum preserves the installed binary. The distribution includes the project
+license and the CA-data license notice.
 
 The [2026-09-30 fresh-VM onboarding report](../../../docs/benchmarks/jail/onboarding-2026-09-30.md)
 records signed non-TTY installation, contained `true`, a real OpenCode run and
@@ -62,14 +69,20 @@ ELF architecture and requires the named clean, optimized build-input digest:
 ```sh
 python3 crates/ouro-jail/dist/prepare_release.py stage \
   --binary target/release/ouro-jail --target x86_64-unknown-linux-gnu \
-  --revision "$TESTED_REVISION" --inputs "$TESTED_INPUTS" --out /private/stage-x86
+  --revision "$TESTED_REVISION" --inputs "$TESTED_INPUTS" \
+  --version 0.1.0-rc.1 --out /private/stage-x86
 # On the Pi, use --target aarch64-unknown-linux-gnu and a separate output directory.
 ```
 
+The staged archive name carries that release version, and assembly refuses
+artifacts staged for a different one.
+
 Copy the two staged directories to the release operator's machine. Archive
 bytes are deterministic across source-file timestamps and locations. Assembly
-requires exactly one artifact per architecture and verifies archive contents,
-native build records, source inputs and binary hashes before preparing a draft:
+requires exactly one artifact per architecture, staged for the release version
+being assembled, and verifies archive contents, native build records, source
+inputs and binary hashes before preparing a draft. The manifest it signs lists
+both archives and the `install.sh` copy it stages beside them:
 
 ```sh
 python3 crates/ouro-jail/dist/prepare_release.py assemble \
@@ -103,7 +116,9 @@ python3 -m unittest discover -s crates/ouro-jail/dist -p test_release.py
 
 These tests include real ephemeral signatures, wrong-key rejection, archive and
 binary tampering, architecture/build mismatch, missing/duplicate targets and
-archive reproducibility. They do not establish public release availability.
+archive reproducibility; the installer regression covers per-invocation
+manifest coverage, installer tampering, downgrade refusal and corrupt
+archive/signature rejection. They do not establish public release availability.
 
 The Pi host used for ARM64 validation lacks memory cgroups. Its default `build`
 profile requires a memory ceiling and refuses before execution; `tool` and

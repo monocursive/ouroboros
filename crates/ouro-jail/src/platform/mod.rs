@@ -100,6 +100,10 @@ pub struct PreparedPlan {
     pub argv: Vec<Vec<u8>>,
     /// The absolute resolved workspace.
     pub workspace: PathBuf,
+    /// The operator's config directory (`config.toml` and `launch/` live
+    /// here): trusted input the stdio screening must treat like the state
+    /// root (audit 2026-10-08 H1).
+    pub config_dir: PathBuf,
     // J3-launch begin: vendor state and bind_ro handles staged by the
     // supervisor, bound by descriptor (§9.1, §12). A field, so the platform
     // receives the exact objects staging examined instead of re-resolving
@@ -445,6 +449,13 @@ pub trait RunningExecution {
     /// A resource event that actually caused termination, never inferred from
     /// an exit code or from ordinary CPU bandwidth throttling.
     fn limit_cause(&self) -> Option<String> {
+        None
+    }
+
+    /// The storage enforcement loss's own message, for the receipt's
+    /// `errors[]` (audit 2026-10-08 L2); `None` while enforcement holds or
+    /// the platform enforces no storage ceilings.
+    fn storage_loss(&self) -> Option<String> {
         None
     }
     // J3-none begin: a detected lifetime-integrity loss reaches the next receipt (§9.3)

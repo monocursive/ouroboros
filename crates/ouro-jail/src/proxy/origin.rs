@@ -188,7 +188,14 @@ fn parse_hello(bytes: &[u8]) -> Result<Host, Reason> {
     let mut name = None;
     while !exts.0.is_empty() {
         let kind = exts.word()?;
-        if !seen.insert(kind) || kind == 0xfe0d {
+        if !seen.insert(kind)
+            || matches!(
+                kind,
+                // ECH, draft ECH (fe08-fe0c) and ESNI (ffce): none may pass
+                // with a `tls_sni` claim.
+                0xfe0d | 0xffce | 0xfe08..=0xfe0c
+            )
+        {
             return Err(Reason::OriginUnverified);
         }
         let data = exts.vector()?;
@@ -249,6 +256,11 @@ pub(super) fn http_request(
 mod tests {
     use super::*;
     fn hello(name: &[u8]) -> Vec<u8> {
+        hello_ext(name, &[])
+    }
+    /// A ClientHello with the SNI extension plus one extra extension of the
+    /// given kind (with two bytes of data) per entry.
+    fn hello_ext(name: &[u8], kinds: &[u16]) -> Vec<u8> {
         let mut h = vec![3, 3];
         h.extend([0; 32]);
         h.extend([0, 0, 2, 0x13, 1, 1, 0]);
@@ -260,6 +272,10 @@ mod tests {
         let mut exts = vec![0, 0];
         exts.extend((sni.len() as u16).to_be_bytes());
         exts.extend(sni);
+        for &kind in kinds {
+            exts.extend(kind.to_be_bytes());
+            exts.extend([0, 2, 0, 0]);
+        }
         h.extend((exts.len() as u16).to_be_bytes());
         h.extend(exts);
         let mut handshake = vec![1, 0, 0, h.len() as u8];
@@ -290,5 +306,20 @@ mod tests {
         assert!(tls_name(&[22, 3, 3, 255, 255]).is_err());
         assert!(tls_name(&hello(b"127.0.0.1")).is_err());
         assert!(tls_name(&hello(b"bad\0name")).is_err());
+    }
+    /// ECH, its drafts and ESNI must not pass with a `tls_sni` claim.
+    #[test]
+    fn encrypted_client_hello_refused() {
+        for kind in [0xfe0d, 0xfe08, 0xfe0a, 0xfe0c, 0xffce] {
+            assert!(
+                tls_name(&hello_ext(b"example.com", &[kind])).is_err(),
+                "{kind:#06x} passed"
+            );
+        }
+        // A benign unknown extension still resolves the name.
+        assert_eq!(
+            tls_name(&hello_ext(b"example.com", &[0x001a])),
+            Ok(Some(Host::Name("example.com".into())))
+        );
     }
 }

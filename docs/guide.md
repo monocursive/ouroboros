@@ -105,7 +105,7 @@ only the paths and services it needs.
 | Profile | Good starting point for | Default access |
 | --- | --- | --- |
 | `tool` | Tests and local commands | Writable workspace and scratch; no network. Existing `.git` and `.ouroboros` trees are protected from writes. |
-| `agent` | Coding agents that call a provider | Writable workspace, scratch, and temporary agent state. Network destinations need explicit grants. Git metadata is writable. |
+| `agent` | Coding agents that call a provider | Writable workspace, scratch, and temporary agent state. Network destinations need explicit grants. Git metadata is writable except `.git/hooks` and `.git/config`, which are protected: a contained run could otherwise plant a hook or `core.hooksPath` that runs with your authority on your next `git` command *outside* the jail. Objects, refs, `HEAD` and the index stay writable, so commits work; a `.git` created by a fresh `git clone` inside the run is not protected (nothing existed to protect). |
 | `build` | Builds from read-only inputs | Writable scratch; add read-only inputs and writable outputs. No network. Requires an explicit memory limit and host support. |
 | `none` | Deliberately uncontained execution | Host access. Filesystem and network containment are disabled. |
 

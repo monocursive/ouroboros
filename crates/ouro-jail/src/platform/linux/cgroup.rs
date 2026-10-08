@@ -668,7 +668,14 @@ impl ExecutionCgroup {
                 applied,
                 mechanism: applied.then(|| control.to_owned()),
                 scope: applied.then(|| "tree".to_owned()),
-                hit: applied.then_some(false),
+                // Audit 2026-10-08 M3: a swap ceiling's `max` event counter
+                // rises only on a refault reclaim may never raise, so `false`
+                // would be a negative claim nothing establishes. Swap starts
+                // unknown (§13.2: `null` when unknown); the readable event
+                // counters back every other ceiling's `false`.
+                hit: applied
+                    .then(|| if key == "swap" { None } else { Some(false) })
+                    .flatten(),
             });
         }
         leaf.baseline = leaf.counters()?;
@@ -783,12 +790,24 @@ impl ExecutionCgroup {
     pub fn sample(&mut self) -> io::Result<usize> {
         let now = self.counters()?;
         self.oom_killed |= now.oom > self.baseline.oom;
+        // Audit 2026-10-08 M3: a sampled `swap.current` at or above the
+        // written ceiling is direct hit evidence, beside the `max` event
+        // counter a refault may never raise.
+        let swap_saturated = if self
+            .limits
+            .iter()
+            .any(|limit| limit.applied && limit.key == "swap")
+        {
+            self.swap_saturated()?
+        } else {
+            false
+        };
         let mut hits = 0;
         for limit in self.limits.iter_mut().filter(|limit| limit.applied) {
             let hit = match limit.key.as_str() {
                 "pids" => now.pids > self.baseline.pids,
                 "mem" => now.memory > self.baseline.memory || self.oom_killed,
-                "swap" => now.swap > self.baseline.swap,
+                "swap" => now.swap > self.baseline.swap || swap_saturated,
                 "cpu" => now.cpu > self.baseline.cpu,
                 _ => false,
             };
@@ -798,6 +817,27 @@ impl ExecutionCgroup {
             }
         }
         Ok(hits)
+    }
+
+    /// Whether the leaf's sampled `memory.swap.current` sits at or above its
+    /// written `memory.swap.max`. `max` is unbounded and never saturated.
+    fn swap_saturated(&self) -> io::Result<bool> {
+        let read = |name: &str| -> io::Result<u64> {
+            let text = self.read(name)?;
+            text.trim()
+                .parse()
+                .map_err(|_| io::Error::other(format!("{name} is not a byte count")))
+        };
+        let current = read("memory.swap.current")?;
+        let max = match self.read("memory.swap.max") {
+            Ok(text) if text.trim() == "max" => return Ok(false),
+            Ok(text) => text
+                .trim()
+                .parse()
+                .map_err(|_| io::Error::other("memory.swap.max is not a byte count"))?,
+            Err(error) => return Err(error),
+        };
+        Ok((max > 0 || current > 0) && current >= max)
     }
 
     pub fn limits(&self) -> Vec<crate::records::AppliedLimit> {
@@ -951,6 +991,7 @@ mod tests {
             ("cgroup.events", "populated 0\n"),
             ("memory.swap.events", "high 0\nmax 4\nfail 8\n"),
             ("memory.swap.max", ""),
+            ("memory.swap.current", "0"),
         ] {
             fs::write(dir.path().join(name), value).unwrap();
         }
@@ -971,7 +1012,9 @@ mod tests {
             fs::read_to_string(dir.path().join("memory.swap.max")).unwrap(),
             "0"
         );
-        assert_eq!(leaf.limits()[0].hit, Some(false));
+        // Audit 2026-10-08 M3: a swap ceiling's hit starts unknown, a
+        // negative claim nothing establishes.
+        assert_eq!(leaf.limits()[0].hit, None);
         fs::write(
             dir.path().join("memory.swap.events"),
             "high 0\nmax 4\nfail 9\n",
@@ -982,6 +1025,17 @@ mod tests {
             0,
             "global exhaustion is not our ceiling"
         );
+        assert_eq!(leaf.limits()[0].hit, None);
+        // Saturation is hit evidence too: a sampled `swap.current` at the
+        // written `swap.max` (here 0) attributes the ceiling even with no
+        // `max` event delta.
+        fs::write(dir.path().join("memory.swap.current"), "1").unwrap();
+        assert_eq!(leaf.sample().unwrap(), 1);
+        assert_eq!(leaf.limits()[0].hit, Some(true));
+        // The event-counter path attributes a hit on a fresh leaf as well.
+        fs::write(dir.path().join("memory.swap.current"), "0").unwrap();
+        let mut leaf = ExecutionCgroup::open_created(dir.path(), &limits).unwrap();
+        assert_eq!(leaf.limits()[0].hit, None);
         fs::write(
             dir.path().join("memory.swap.events"),
             "high 0\nmax 5\nfail 10\n",

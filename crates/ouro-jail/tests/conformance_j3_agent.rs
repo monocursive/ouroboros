@@ -2272,9 +2272,10 @@ print(json.dumps(out))
 /// network grant of its own; the target reads both, writes both, and makes a
 /// request allowed only by the profile's grant. Verdict: the copy is a
 /// private writable copy (the source is unchanged), the view is the exact
-/// source read-only; the receipt carries logical ids, modes, the copy's
-/// digest of the source bytes and a null digest with a reason for the view,
-/// and no path or byte of either; the profile's grant reaches the proxy;
+/// source read-only; the receipt carries logical ids and modes, withholds
+/// every digest (audit 2026-09-25-2, S6), and jail state's private record
+/// carries the copy's digest of the source bytes; no path or byte of either
+/// reaches the receipt; the profile's grant reaches the proxy;
 /// vendor state is removed at settlement.
 #[test]
 fn c01_an_agent_launch_profile_stages_both_credential_modes_through_run() {
@@ -2384,6 +2385,51 @@ print(json.dumps(out))
         serde_json::json!([format!("127.0.0.1:{o}")])
     );
     assert_eq!(receipt["state_cleanup"], "complete");
+
+    // C01.2's provenance half, where the receipt withholds it (audit
+    // 2026-09-25-2, S6): jail state's private credential record carries the
+    // copy_rw digest, and it is the digest of the staged bytes; the
+    // bind_ro of the writable filesystem records no digest.
+    let attempts: Vec<PathBuf> = std::fs::read_dir(run.data_dir.join("attempts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(attempts[0].join("jail-state.json")).unwrap(),
+    )
+    .unwrap();
+    let staged = state["vendor_state"]["credentials"]
+        .as_array()
+        .expect("the private credential record")
+        .to_vec();
+    let row = |id: &str| {
+        staged
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("no private record for {id}: {staged:?}"))
+    };
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest as _;
+    hasher.update(b"fixture-token-copy");
+    let expected: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        row("auth")["mode"], "copy_rw",
+        "the private record names the mode"
+    );
+    assert_eq!(
+        row("auth")["content_digest"],
+        serde_json::json!(format!("sha256:{expected}")),
+        "the copy_rw digest is the digest of the staged bytes: {staged:?}"
+    );
+    assert!(
+        row("config")["content_digest"].is_null(),
+        "a bind_ro of a writable filesystem records no digest: {staged:?}"
+    );
 }
 
 // ===========================================================================

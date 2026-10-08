@@ -234,6 +234,18 @@ mod tests {
         );
     }
 
+    /// jail-v2 K22: the documented bound is enforced, not silently ignored.
+    #[test]
+    fn more_than_the_documented_rule_cap_refuses_at_validation() {
+        let rules = |count: usize| Rules {
+            deny: (0..count).map(|i| format!("tool-{i}")).collect(),
+            forbid: Vec::new(),
+        };
+        rules(64).validate().expect("64 rules are the documented cap");
+        let error = rules(65).validate().expect_err("65 rules refuse");
+        assert!(error.contains("at most 64 command rules"), "{error}");
+    }
+
     #[test]
     fn an_exec_with_no_argv_matches_the_exec_path_alone() {
         let rules = Rules {

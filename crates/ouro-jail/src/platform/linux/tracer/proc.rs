@@ -102,6 +102,72 @@ pub fn kernel_exe(tid: pid_t, images: &[Vec<u8>]) -> Option<super::KernelImage> 
     })
 }
 
+/// Audit 2026-10-08 H2: the `#!` evidence for one target-image candidate,
+/// read through the tracee's root while the tracee is stopped at its exec
+/// event: the interpreter the script's first line names, its optional
+/// single argument, and the interpreter's `(dev, ino)` in the tracee's
+/// root. `None` for a non-absolute spelling (the resolved form of the same
+/// file carries the evidence), a file that cannot be read through the
+/// root, or a first line that is not a shebang. The kernel's own buffer
+/// for this line is 256 bytes, which bounds the read: a longer line
+/// cannot have been executed.
+#[must_use]
+pub fn shebang_image(tid: pid_t, script: &[u8]) -> Option<super::ShebangImage> {
+    use std::io::Read as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    if script.first() != Some(&b'/') {
+        return None;
+    }
+    let mut path = format!("/proc/{tid}/root").into_bytes();
+    path.extend_from_slice(script);
+    let mut file = std::fs::File::open(std::ffi::OsStr::from_bytes(&path)).ok()?;
+    let mut buf = [0u8; 256];
+    let read = file.read(&mut buf).ok()?;
+    let line = buf[..read].split(|byte| *byte == b'\n').next().unwrap_or(&buf[..read]);
+    let rest = line.strip_prefix(b"#!")?;
+    // The kernel skips leading blanks and takes at most one argument.
+    let rest = {
+        let start = rest.iter().position(|byte| *byte != b' ').unwrap_or(rest.len());
+        &rest[start..]
+    };
+    let end = rest
+        .iter()
+        .position(|byte| *byte == b' ')
+        .unwrap_or(rest.len());
+    let interpreter = rest[..end].to_vec();
+    if interpreter.is_empty() {
+        return None;
+    }
+    let argument = rest
+        .get(end + 1..)
+        .map(|tail| {
+            let tail = {
+                let stop = tail
+                    .iter()
+                    .rposition(|byte| *byte != b' ')
+                    .map_or(0, |at| at + 1);
+                &tail[..stop]
+            };
+            (!tail.is_empty()).then(|| tail.to_vec())
+        })
+        .flatten();
+    let identity = (interpreter.first() == Some(&b'/'))
+        .then(|| {
+            let mut interpreter_path = format!("/proc/{tid}/root").into_bytes();
+            interpreter_path.extend_from_slice(&interpreter);
+            std::fs::metadata(std::ffi::OsStr::from_bytes(&interpreter_path))
+                .ok()
+                .map(|meta| (meta.dev(), meta.ino()))
+        })
+        .flatten();
+    Some(super::ShebangImage {
+        interpreter,
+        argument,
+        identity,
+    })
+}
+
 /// The raw `/proc/<tid>/cmdline` bytes: the argument area of the image the
 /// kernel installed, read while the tracee is stopped at its exec event
 /// (audit 6 N2). The kernel copied it from the tracee's argv vector into

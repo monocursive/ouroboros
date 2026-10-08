@@ -154,27 +154,30 @@ confirmation. See [permission learning](docs/guide.md#learn-missing-permissions)
 
 ## Performance and validation
 
-In the recorded **29 September 2026** Linux benchmark, a plain-session fixture
-with 5,000 file-operation rounds had these median total runtimes, with 30
-measured samples per mode:
+The newest record is the **8 October 2026**
+[follow-up validation](docs/benchmarks/jail/followup-2026-10-08.md). Its clean
+paired VPS experiment — 60 measured rounds, 5,000 file-operation rounds per
+launch, zero exclusions — improved file-operation work time **7.4%**
+(median 993.28 ms → 921.29 ms) with observation on. Its K17 launch battery
+(540 measured launches) measured a worst added startup p95 of **126.7 ms**
+(plain session); on file-heavy work, observation off added **+25.3%** file-work
+time over direct, and observation on made it **+319.6%** over observation off
+(delegated session: **+28.1%** and **+324.5%**). Observation remains expensive
+on file-heavy work. These are synthetic workloads on the Ubuntu reference host;
+they do not predict agent speed or establish performance for the current
+checkout.
 
-| Execution mode | Median runtime |
-| --- | ---: |
-| Direct, without the jail | 190 ms |
-| Jailed, observation off | 375 ms |
-| Jailed, observation on (default) | 1,167 ms |
+The same record passes full reference conformance (1,993 tests) and prepares
+signed native Linux x86_64 and ARM64 packages locally; repeated real-agent
+qualification, production signing and publication remain pending.
 
-The highest p95 added startup time across tested workloads and sessions was
-**131 ms with observation off**. Observation adds ptrace stops and can be
-expensive on file-heavy work. These are synthetic workloads on the Ubuntu
-reference host using an earlier development build; they do not predict agent
-speed or establish performance for the current checkout.
-
-The full benchmark includes 540 measured launches. All 60 observation-off
-no-op samples returned `exec_unconfirmed` and exit 1 because execution ended
-before it could be confirmed. Their timings are included; they are not
-successful run receipts. See the [method and raw results](docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
-and [validation record](docs/benchmarks/jail/README.md).
+The earlier records are kept for provenance: the
+[8 October validation](docs/benchmarks/jail/validation-2026-10-08.md) and the
+superseded [29 September benchmark](docs/benchmarks/jail/followup-2026-09-29.md).
+In those K17 runs all 60 observation-off no-op samples returned
+`exec_unconfirmed` and exit 1 because execution ended before it could be
+confirmed. Their timings are included; they are not successful run receipts.
+See the [method and raw results](docs/benchmarks/jail/README.md).
 
 ## Local ledger work
 
@@ -197,11 +200,13 @@ closes its scripted durability gate. Historical-custody migration and managed
 project authorization remain open. Local consistency is reported separately from coverage and
 protection from the child.
 
-The [October 8 Jail validation](docs/benchmarks/jail/validation-2026-10-08.md)
-refreshes performance and signed onboarding against the current frozen runtime
-inputs. It also records mixed real-agent results and the corrected ripgrep
-prerequisite; repeated compatibility remains unqualified where trials failed
-or stopped early.
+The [October 8 follow-up record](docs/benchmarks/jail/followup-2026-10-08.md)
+refreshes performance, conformance and signed-package checks against the
+current frozen runtime inputs; the
+[earlier validation](docs/benchmarks/jail/validation-2026-10-08.md) records the
+signed onboarding runs and the corrected ripgrep prerequisite. Repeated
+real-agent compatibility remains unqualified where trials failed or stopped
+early.
 
 ## Planned work
 

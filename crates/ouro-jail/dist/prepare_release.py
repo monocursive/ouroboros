@@ -5,11 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tarfile
 
+from package import VERSION as RELEASE_VERSION
 from package import create_archive
 
 TARGETS = {'x86_64-unknown-linux-gnu': 62, 'aarch64-unknown-linux-gnu': 183}
@@ -36,17 +36,20 @@ def verify_elf(binary_bytes, target):
         raise ValueError('binary ELF architecture does not match its target')
 
 
-def stage(binary, target, revision, inputs, out):
+def stage(binary, target, revision, inputs, out, release_version):
     binary = binary.resolve(strict=True)
     verify_elf(binary.read_bytes()[:20], target)
     before = digest(binary)
     version = json.loads(subprocess.check_output([binary, 'version', '--json'], timeout=15))
     verify_build(version, revision, inputs, target)
+    if not RELEASE_VERSION.fullmatch(release_version):
+        raise ValueError('expected a semantic release version')
     out.mkdir(parents=True, exist_ok=False)
-    archive = create_archive(binary, target, out)
+    archive = create_archive(binary, target, out, release_version)
     if digest(binary) != before:
         raise ValueError('binary changed while packaging')
     record = {'schema': 'ouro.jail.release-artifact/1', 'target': target, 'version': version,
+              'release': release_version,
               'binary_sha256': before, 'archive': archive.name, 'archive_sha256': digest(archive),
               'provenance': 'version queried by executing this binary on its native host'}
     (out / 'artifact.json').write_text(json.dumps(record, indent=2) + '\n')
@@ -59,7 +62,11 @@ def verify_stage(directory, revision, inputs):
         raise ValueError('unsupported native artifact record')
     target = record['target']
     verify_build(record['version'], revision, inputs, target)
-    if record['archive'] != f'ouro-jail-{target}.tar.gz':
+    # The release version names the archive, so a record cannot pass off one
+    # release's archive as another's.
+    if not RELEASE_VERSION.fullmatch(record.get('release', '')):
+        raise ValueError('artifact record does not name a semantic release version')
+    if record['archive'] != f"ouro-jail-{record['release']}-{target}.tar.gz":
         raise ValueError('unexpected archive filename')
     archive = directory / record['archive']
     if digest(archive) != record['archive_sha256']:
@@ -81,11 +88,13 @@ def verify_stage(directory, revision, inputs):
 
 
 def assemble(stages, revision, inputs, version, out, signing_key=None, public_key=None):
-    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', version):
+    if not RELEASE_VERSION.fullmatch(version):
         raise ValueError('expected a semantic release version')
     records = [verify_stage(directory, revision, inputs) for directory in stages]
     if sorted(r['target'] for r in records) != sorted(TARGETS):
         raise ValueError('exactly one native artifact for each Linux architecture is required')
+    if any(r['release'] != version for r in records):
+        raise ValueError('staged artifacts do not all carry this release version')
     if bool(signing_key) != bool(public_key):
         raise ValueError('provide both the signing key and its independently trusted public key')
     out.mkdir(parents=True, exist_ok=False)
@@ -93,9 +102,14 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
         shutil.copyfile(directory / record['archive'], out / record['archive'])
         if digest(out / record['archive']) != record['archive_sha256']:
             raise ValueError('archive changed during assembly')
+    # The installer ships beside the archives and is covered by the same
+    # signature, so what installs a release is part of that release.
+    install_sh = out / 'install.sh'
+    shutil.copyfile(Path(__file__).with_name('install.sh'), install_sh)
+    entries = [(record['archive'], record['archive_sha256']) for record in records]
+    entries.append(('install.sh', digest(install_sh)))
     manifest = out / 'SHA256SUMS'
-    manifest.write_text(''.join(f"{r['archive_sha256']}  {r['archive']}\n"
-                               for r in sorted(records, key=lambda r: r['archive'])))
+    manifest.write_text(''.join(f'{sha256}  {name}\n' for name, sha256 in sorted(entries)))
     if signing_key:
         subprocess.run(['minisign', '-Sm', manifest, '-s', signing_key], check=True)
         subprocess.run(['minisign', '-Vm', manifest, '-P', public_key], check=True)
@@ -109,7 +123,6 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
                         'aarch64': 'Debian 13 Raspberry Pi with matching Unix diagnostics support; memory cgroups and Landlock unavailable; the default build profile refuses'},
             'native_records_are_attestations': 'Review the native builder and validation evidence before signing.'}
     (out / 'release-plan.json').write_text(json.dumps(plan, indent=2) + '\n')
-    shutil.copyfile(Path(__file__).with_name('install.sh'), out / 'install.sh')
     (out / 'RELEASE_NOTES.md').write_text(
         '# Ouro Jail ' + version + ' — release candidate\n\n'
         'Prepared for monocursive/ouroboros. Not published.\n\n'
@@ -126,6 +139,7 @@ def main():
     native = commands.add_parser('stage')
     native.add_argument('--binary', type=Path, required=True)
     native.add_argument('--target', choices=TARGETS, required=True)
+    native.add_argument('--version', required=True)
     release = commands.add_parser('assemble')
     release.add_argument('--stage', type=Path, action='append', required=True)
     release.add_argument('--version', required=True)
@@ -140,7 +154,8 @@ def main():
         parser.error('provide a full 40-character git revision and sha256 build-input digest')
     os.umask(0o077)
     if args.command == 'stage':
-        record = stage(args.binary, args.target, args.revision, args.inputs, args.out)
+        record = stage(args.binary, args.target, args.revision, args.inputs, args.out,
+                       args.version)
     else:
         record = assemble(args.stage, args.revision, args.inputs, args.version, args.out,
                           args.signing_key, args.public_key)

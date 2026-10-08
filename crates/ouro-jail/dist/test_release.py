@@ -26,7 +26,7 @@ class ReleaseTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def fixture(self, target):
+    def fixture(self, target, release='0.1.0-rc.1'):
         binary = self.root / target
         contents = bytearray(64)
         contents[:6] = b'\x7fELF\x02\x01'
@@ -35,18 +35,20 @@ class ReleaseTests(unittest.TestCase):
         out = self.root / ('stage-' + target)
         # Unit fixture only; actual native execution is exercised separately.
         with patch('prepare_release.subprocess.check_output', return_value=json.dumps(version(target)).encode()):
-            stage(binary, target, REVISION, INPUTS, out)
+            stage(binary, target, REVISION, INPUTS, out, release)
         return out
 
     def test_packaging_is_independent_of_source_mtime_and_location(self):
         binary = self.root / 'binary'
         binary.write_bytes(b'fixed test payload')
         target = next(iter(TARGETS))
-        first = create_archive(binary, target, self.root / 'first').read_bytes()
+        first = create_archive(binary, target, self.root / 'first', '0.1.0-rc.1').read_bytes()
         os.utime(binary, (1234567, 1234567))
         other = self.root / 'other'; shutil.copyfile(binary, other)
-        second = create_archive(other, target, self.root / 'second').read_bytes()
+        second = create_archive(other, target, self.root / 'second', '0.1.0-rc.1').read_bytes()
         self.assertEqual(first, second)
+        self.assertEqual(first, create_archive(
+            binary, target, self.root / 'renamed', '9.9.9').read_bytes())
 
     def test_dirty_mismatched_and_debug_builds_refuse(self):
         target = next(iter(TARGETS))
@@ -85,12 +87,25 @@ class ReleaseTests(unittest.TestCase):
         binary = self.root / target
         with patch('prepare_release.subprocess.check_output', return_value=json.dumps(version(other)).encode()):
             with self.assertRaises(ValueError):
-                stage(binary, other, REVISION, INPUTS, self.root / 'wrong')
+                stage(binary, other, REVISION, INPUTS, self.root / 'wrong', '0.1.0-rc.1')
         record = json.loads((directory / 'artifact.json').read_text())
         record['archive'] = '../outside.tar.gz'
         (directory / 'artifact.json').write_text(json.dumps(record))
         with self.assertRaises(ValueError):
             verify_stage(directory, REVISION, INPUTS)
+        record['archive'] = f"ouro-jail-0.0.1-{target}.tar.gz"
+        (directory / 'artifact.json').write_text(json.dumps(record))
+        with self.assertRaises(ValueError):
+            verify_stage(directory, REVISION, INPUTS)
+
+    def test_assembly_refuses_artifacts_from_another_release_version(self):
+        target = next(iter(TARGETS))
+        other = next(t for t in TARGETS if t != target)
+        first = self.fixture(target)
+        second = self.fixture(other, release='0.1.0-rc.2')
+        with self.assertRaises(ValueError):
+            assemble([first, second], REVISION, INPUTS, '0.1.0-rc.1', self.root / 'out')
+        self.assertFalse((self.root / 'out').exists())
 
     def test_unsigned_preparation_remains_unpublished_and_names_signing_blocker(self):
         stages = [self.fixture(t) for t in TARGETS]
@@ -99,6 +114,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(plan['draft'])
         self.assertIn('production_signing_identity_not_configured', plan['publication_blockers'])
         self.assertEqual(plan['repository'], 'monocursive/ouroboros')
+        # The signed manifest covers the archives of this release and the
+        # installer that ships beside them, nothing else.
+        manifest = (self.root / 'out' / 'SHA256SUMS').read_text().splitlines()
+        names = sorted(line.split('  ')[1] for line in manifest)
+        self.assertEqual(names, sorted(
+            [f'ouro-jail-0.1.0-rc.1-{target}.tar.gz' for target in TARGETS] + ['install.sh']))
 
     @unittest.skipUnless(shutil.which('minisign'), 'minisign is required for actual signature checks')
     def test_real_signature_and_wrong_key_rejection(self):

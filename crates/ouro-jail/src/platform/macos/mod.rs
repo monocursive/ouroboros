@@ -142,6 +142,7 @@ mod tests {
                 request: plan,
                 argv: vec![b"/bin/true".to_vec()],
                 workspace: std::path::PathBuf::from("/work"),
+                config_dir: std::path::PathBuf::from("/nonexistent"),
                 // J3-launch begin: the new hand-off field
                 launch: None,
                 // J3-launch end

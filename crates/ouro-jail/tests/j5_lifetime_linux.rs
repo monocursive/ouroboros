@@ -17,9 +17,10 @@
 //! supervisor and lets `gc` reconcile, so a failure leaves nothing in the
 //! shared delegated subtree.
 //!
-//! The control channel is the test's own pipe at a fixed descriptor number
-//! (and, where a test needs one, a gate at another), so a test can wait for
-//! any control message kind while the run is still going.
+//! The control channel is the test's own pipe, placed by `F_DUPFD` at the
+//! lowest free descriptor number of a floor (and, where a test needs one, a
+//! gate above it), so parallel tests never cross-wire channels and a test
+//! can wait for any control message kind while the run is still going.
 //!
 //! Live tests need `OURO_CONFORMANCE=1` on the reference host.
 
@@ -55,29 +56,28 @@ const LINK_BOUND: Duration = Duration::from_secs(5);
 // Owner-side channels: control (and gate) at fixed descriptor numbers
 // ===========================================================================
 
-/// The descriptor number the jail writes control messages to. The harness
-/// numbers its own channels upward from 3, so this never collides.
+/// The lowest descriptor number the owner's channels are placed at. The
+/// harness numbers its own channels upward from 3, so nothing below this is
+/// ever the jail's.
 const CONTROL_FD: RawFd = 100;
-/// The descriptor number the jail reads its gate from.
+/// The lowest descriptor number a gate is placed at, above the control
+/// channel.
 const GATE_FD: RawFd = 101;
 
-/// Put `fd` at descriptor number `at` without close-on-exec, so the next
-/// spawn inherits it. The returned descriptor is this process's copy, to be
-/// dropped right after the spawn.
-fn inheritable_at(fd: &OwnedFd, at: RawFd) -> OwnedFd {
-    // SAFETY: F_GETFD only reads the flags of a descriptor number.
-    assert_eq!(
-        unsafe { libc::fcntl(at, libc::F_GETFD) },
-        -1,
-        "descriptor {at} is already in use in the test process"
-    );
-    // SAFETY: `fd` is a live descriptor this process owns and `at` is free;
-    // `dup2` clears close-on-exec on the copy, which is the point.
-    let placed = unsafe { libc::dup2(fd.as_raw_fd(), at) };
-    assert_eq!(placed, at, "dup2: {}", std::io::Error::last_os_error());
-    // SAFETY: `at` now names a descriptor this process owns and nothing else
-    // refers to.
-    unsafe { OwnedFd::from_raw_fd(at) }
+/// Put `fd` on the lowest free descriptor number `at` or above, without
+/// close-on-exec, so the next spawn inherits it. Returns the number it
+/// landed on; the caller owns that descriptor and drops it right after the
+/// spawn. The number is allocated, not fixed: the tests of this binary run
+/// in parallel in one process and share one descriptor table, so a fixed
+/// number would cross-wire one attempt's control pipe into another's
+/// spawn.
+fn inheritable_at_or_above(fd: &OwnedFd, at: RawFd) -> RawFd {
+    // SAFETY: `fd` is a live descriptor this process owns; F_DUPFD
+    // allocates the lowest free number `at` or above and never sets
+    // close-on-exec on the copy, which is the point.
+    let placed = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, at) };
+    assert!(placed >= at, "F_DUPFD: {}", std::io::Error::last_os_error());
+    placed
 }
 
 /// A running attempt: the spawned supervisor with the owner's end of its
@@ -95,17 +95,23 @@ impl Attempt {
     /// asked).
     fn start(jail: Jail, gate: bool) -> Attempt {
         let (read, write) = harness::pipes::cloexec_pipe().expect("a control pipe");
-        let control_copy = inheritable_at(&write, CONTROL_FD);
+        let control_fd = inheritable_at_or_above(&write, CONTROL_FD);
+        // SAFETY: `control_fd` is a descriptor F_DUPFD just allocated for
+        // this call, owned by nothing else.
+        let control_copy = unsafe { OwnedFd::from_raw_fd(control_fd) };
         drop(write);
-        let mut jail = jail.args(["--control-fd", &CONTROL_FD.to_string()]);
+        let mut jail = jail.args(["--control-fd", &control_fd.to_string()]);
         let mut gate_copy = None;
         let mut gate_writer = None;
         if gate {
             let (gate_read, gate_write) = harness::pipes::cloexec_pipe().expect("a gate pipe");
-            gate_copy = Some(inheritable_at(&gate_read, GATE_FD));
+            let gate_fd = inheritable_at_or_above(&gate_read, GATE_FD);
+            // SAFETY: `gate_fd` is a descriptor F_DUPFD just allocated for
+            // this call, owned by nothing else.
+            gate_copy = Some(unsafe { OwnedFd::from_raw_fd(gate_fd) });
             drop(gate_read);
             gate_writer = Some(std::fs::File::from(gate_write));
-            jail = jail.args(["--gate-fd", &GATE_FD.to_string()]);
+            jail = jail.args(["--gate-fd", &gate_fd.to_string()]);
         }
         let timeout = jail.timeout;
         let spawned = jail.spawn();

@@ -1,9 +1,13 @@
 //! The `tool` seccomp baseline, built from [`super::bpf`].
 //!
-//! Spec: jail-v1 §9.2, north-star §4.3. The filter is architecture-aware, it
-//! is recorded by digest, and every rule here has a live test on the
-//! reference host that makes the raw syscall inside the jail and reports its
-//! errno. A rule with no such test would be a claim, not a boundary.
+//! Spec: jail-v1 §9.2, north-star §4.3. The filter is architecture-aware and
+//! recorded by digest. Every rule here is pinned byte-for-byte by the table
+//! tests, and many rules additionally have a live test on the reference host
+//! that makes the raw syscall inside the jail and reports its errno. Some
+//! rules are table-pinned only, with no live probe yet: `userfaultfd`,
+//! `*_handle_at`, `syslog`, `pidfd_send_signal`, `process_madvise`, `kcmp`,
+//! the `*_pages` rules, `statmount`, `listmount`, `quotactl*`, the clock
+//! setters, and the storage `link`/`linkat` rule.
 //!
 //! Explicit x86_64 and aarch64 syscall numbers are selected by [`super::abi`].
 //! Native tests check the numbers against libc and exercise the installed

@@ -99,8 +99,15 @@ pub fn baseline(profile: ProfileName, platform: Os, lookup: &EnvLookup) -> Profi
             read_write: vec![workspace_root, scratch_root, vendor_root],
             read_only: runtime_roots,
             deny_read: Vec::new(),
-            protected_segments: Vec::new(),
-            protected_coverage: ProtectedCoverage::None,
+            // Audit 2026-10-08 M5: the workspace `.git` stays writable so
+            // commits work, but the hooks directory and the config file are
+            // the two persistence points that execute with the operator's
+            // full authority on their next `git` command *outside* the
+            // jail (`hooks/*`, `core.hooksPath`, `core.fsmonitor`), so they
+            // are protected like `tool` protects the whole tree. Objects
+            // and refs stay writable.
+            protected_segments: vec![".git/hooks".to_owned(), ".git/config".to_owned()],
+            protected_coverage: ProtectedCoverage::ExistingAndRoot,
             network_mode: NetworkMode::Proxy,
             network_allow: Vec::new(),
             limits: Ceilings {
@@ -257,6 +264,22 @@ mod tests {
         );
         assert_eq!(baseline.limits.mem, None);
         assert_eq!(baseline.network_mode, NetworkMode::None);
+        assert_eq!(
+            baseline.protected_coverage,
+            ProtectedCoverage::ExistingAndRoot
+        );
+    }
+
+    /// Audit 2026-10-08 M5: `agent` keeps Git metadata writable so commits
+    /// work, but protects the two persistence points that execute with the
+    /// operator's authority outside the jail.
+    #[test]
+    fn agent_protects_git_persistence_points_and_keeps_the_rest_writable() {
+        let baseline = baseline(ProfileName::Agent, Os::Linux, &empty);
+        assert_eq!(
+            baseline.protected_segments,
+            vec![".git/hooks".to_owned(), ".git/config".to_owned()]
+        );
         assert_eq!(
             baseline.protected_coverage,
             ProtectedCoverage::ExistingAndRoot

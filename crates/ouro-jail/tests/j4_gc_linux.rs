@@ -1016,6 +1016,7 @@ fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
             },
             argv: vec![b"/bin/true".to_vec()],
             workspace,
+            config_dir: attempt.parent().unwrap().parent().unwrap().join("config"),
             launch: None,
             proxy: None,
         };

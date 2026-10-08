@@ -26,7 +26,11 @@ identically to requests, grants and resolver answers.
 If IDNA mapping produces a numeric address, apply the numeric parsing rules
 again; it must not take a hostname-only path. Canonical allow rules always have
 an explicit decimal port without leading zeroes. An omitted port expands to
-one rule, port 443. Plaintext HTTP requires an explicit port-80 grant. IPv6 uses RFC 5952 lowercase compressed form
+one rule, port 443, and that expansion is the TLS shape: plaintext HTTP
+requires a grant that named its port explicitly (any port — an explicit
+`host:8080` grant serves a plaintext origin on 8080), while a plain request
+against an omitted-port grant has no rule that permits it (audit 2026-10-08
+L21). IPv6 uses RFC 5952 lowercase compressed form
 in brackets; IPv4-mapped addresses use their normalized IPv4 form.
 
 Normalize `::ffff:0:0/96` IPv4-mapped IPv6 to the embedded IPv4 before address

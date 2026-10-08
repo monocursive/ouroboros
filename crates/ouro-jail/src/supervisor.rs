@@ -1372,6 +1372,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             request,
             argv,
             workspace: plan.workspace.clone(),
+            config_dir: plan.config_dir.clone(),
             // J3-launch begin: the staged objects, bound by descriptor
             launch: launch_handoff,
             // J3-launch end
@@ -1908,6 +1909,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         &mut journal,
     ) {
         persistence_failed_after(&mut record, &mut outcome_error, error);
+    }
+    // Audit 2026-10-08 L2: a storage enforcement loss is recorded in
+    // `errors[]`; the applied rows it held no longer claim `applied: true`
+    // (see `Storage::limits`), and whether it is `outcome.cause` is decided
+    // by when it was found (`limit_cause`, §6.4).
+    if let Some(reason) = running.storage_loss() {
+        record.errors.push(storage_loss_error(reason).to_object());
     }
     for limit in running.final_limits() {
         if let Some(recorded) = record
@@ -3032,6 +3040,18 @@ fn refuse(
 }
 
 // J4-R begin: persistence failures, the worker's receipts, their acknowledgement
+
+/// The coded error a storage enforcement loss records (audit 2026-10-08 L2):
+/// the message names `storage_enforcement_lost` so consumers can tell it
+/// from observation-evidence loss.
+fn storage_loss_error(reason: String) -> JailError {
+    JailError::new(
+        ErrorCode::EvidenceLost,
+        ErrorStage::Running,
+        Remediation::InspectState,
+        format!("storage_enforcement_lost: {reason}"),
+    )
+}
 
 /// Records a persistence failure after release that stops the tree (§7):
 /// in `errors[]`, as the stop cause unless one came first (D5), and as the
@@ -4610,6 +4630,50 @@ mod tests {
     use super::*;
     use crate::records::Os;
 
+    // Audit 2026-10-08 L22 (L04.4): the production deadline closure —
+    // `ContinuousDeadline::remaining` over `elapsed_since_start_ns`, the
+    // closure `stage_within` and the budgets are given in a real run —
+    // expires on the continuous clock, and the budgets built on it refuse.
+    #[test]
+    fn the_production_deadline_closure_expires_and_the_budget_refuses() {
+        let deadline = ContinuousDeadline::after(Duration::from_millis(50));
+        let first = deadline.remaining();
+        assert!(
+            first > Duration::ZERO && first <= Duration::from_millis(50),
+            "a fresh deadline has its budget left: {first:?}"
+        );
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(
+            deadline.remaining(),
+            Duration::ZERO,
+            "an expired deadline clamps at zero, it does not go negative"
+        );
+        let budget = Budget::new(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(60));
+        let error = budget
+            .check(crate::records::ErrorStage::Preparing)
+            .expect_err("a spent budget refuses");
+        assert_eq!(error.code, ErrorCode::PrepareTimeout);
+        assert_eq!(error.remediation, crate::records::Remediation::Retry);
+    }
+
+    #[test]
+    // Audit 2026-10-08 L2: the storage enforcement loss is a coded error
+    // whose message names the loss, distinguishable from observation-evidence
+    // loss only by that name.
+    fn a_storage_enforcement_loss_is_a_coded_error_naming_the_loss() {
+        let error = storage_loss_error("tmpfs capacity changed after admission".to_owned());
+        let object = error.to_object();
+        assert_eq!(object.code, "evidence_lost");
+        assert_eq!(object.stage, "running");
+        assert!(
+            object.message.starts_with("storage_enforcement_lost: "),
+            "{}",
+            object.message
+        );
+        assert!(object.message.contains("tmpfs capacity changed after admission"));
+    }
+
     #[test]
     fn journal_detects_another_producers_loss_without_a_wrapper_write() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -4652,6 +4716,35 @@ mod tests {
         // An absent file is none of this guard's business.
         assert!(
             refuse_stale_trusted_file(&dir.path().join("absent.toml"), &epoch, "config").is_ok()
+        );
+    }
+
+    /// Audit 2026-10-08 mutation-B07 guard: the settled-marker comparison
+    /// is `<=`, not `<`. A file whose ctime equals the settled marker's
+    /// was written no later than the settle itself — the same clock, one
+    /// tick — so it refuses exactly like one that predates it; only a
+    /// strictly newer ctime is the operator's re-save and is trusted.
+    #[test]
+    fn a_trusted_file_with_the_settled_marker_s_ctime_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let trusted = dir.path().join("config.toml");
+        std::fs::write(&trusted, "[jail]\n").unwrap();
+        let metadata = std::fs::symlink_metadata(&trusted).unwrap();
+        let changed = state::ctime_of(&metadata).expect("a readable ctime");
+        let epoch =
+            |settled| state::UncontainedEpoch { settled: Some(settled), live: Vec::new() };
+        let error = refuse_stale_trusted_file(&trusted, &epoch(changed), "config").unwrap_err();
+        assert_eq!(error.code, crate::records::ErrorCode::UnsafeConfigPath);
+        assert!(
+            error.message.contains("predates the last uncontained"),
+            "{error:?}"
+        );
+        let older = changed
+            .checked_sub(std::time::Duration::from_nanos(1))
+            .unwrap();
+        assert!(
+            refuse_stale_trusted_file(&trusted, &epoch(older), "config").is_ok(),
+            "a ctime strictly after the settle is the operator's own re-save"
         );
     }
 

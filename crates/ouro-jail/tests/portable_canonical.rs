@@ -93,6 +93,9 @@ struct FixtureOptions {
     profile_file: &'static str,
     provenance_variant: usize,
     reorder_profile_sets: bool,
+    /// Extends the profile delta with multi-element read_only and deny_read
+    /// sets, so `reorder_profile_sets` reverses something real.
+    multi_sets: bool,
 }
 
 impl Default for FixtureOptions {
@@ -101,6 +104,7 @@ impl Default for FixtureOptions {
             profile_file: "canonical-input.toml",
             provenance_variant: 0,
             reorder_profile_sets: false,
+            multi_sets: false,
         }
     }
 }
@@ -132,6 +136,18 @@ fn resolve_fixture(options: &FixtureOptions) -> Resolved {
         &file.observation,
     )
     .expect("the fixture's sections parse");
+    if options.multi_sets {
+        for path in ["/usr/share", "/usr/local", "/usr/lib"] {
+            delta
+                .read_only
+                .push(path.as_bytes().to_vec());
+        }
+        for path in ["/usr/share/man", "/usr/share/doc", "/usr/local/etc"] {
+            delta
+                .deny_read
+                .push(path.as_bytes().to_vec());
+        }
+    }
     if options.reorder_profile_sets {
         delta.read_only.reverse();
         delta.deny_read.reverse();
@@ -270,6 +286,42 @@ fn p01_reordering_sets_and_changing_provenance_preserve_the_hash() {
     assert_eq!(
         base.digest, reordered.digest,
         "set order is not part of the digest"
+    );
+
+    // The fixture's own sets are one-element, so reversal alone reorders
+    // nothing; these legs reverse genuinely multi-element sets.
+    let multi = resolve_fixture(&FixtureOptions {
+        multi_sets: true,
+        ..FixtureOptions::default()
+    });
+    let multi_reordered = resolve_fixture(&FixtureOptions {
+        multi_sets: true,
+        reorder_profile_sets: true,
+        ..FixtureOptions::default()
+    });
+    let sets_of = |resolved: &Resolved| -> serde_json::Value {
+        resolved
+            .snapshot
+            .to_canonical_value()
+            .expect("the snapshot canonicalizes")["filesystem"]
+            .clone()
+    };
+    assert!(
+        sets_of(&multi)["read_only"].as_array().expect("read_only").len() >= 4
+            && sets_of(&multi)["deny_read"].as_array().expect("deny_read").len() >= 3,
+        "the multi-set legs really extend the sets"
+    );
+    assert_eq!(
+        sets_of(&multi), sets_of(&multi_reordered),
+        "a reversed multi-element set canonicalizes to the same sets"
+    );
+    assert_eq!(
+        multi.digest, multi_reordered.digest,
+        "the order of multi-element sets is not part of the digest"
+    );
+    assert_ne!(
+        base.digest, multi.digest,
+        "the multi-set legs really change the resolved policy"
     );
 
     let other_provenance = resolve_fixture(&FixtureOptions {

@@ -183,6 +183,11 @@ impl Case {
             .owner()
             .release(release, &attempt, &digest)
             .expect("the owner releases");
+        // R01.7: the enforced phase is transient by design (§7: `jail.json`
+        // holds the latest receipt only, and the trace's `jail.receipt`
+        // notes carry the settled one), so the run finishes first and the
+        // settled, refused and prepared receipts are held to the whole
+        // contract via `assert_run_records` and the prepared read above.
         spawned.wait().expect("the jail finishes")
     }
 }

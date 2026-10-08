@@ -590,12 +590,16 @@ impl fmt::Display for ErrorObject {
 /// function operates on `char`s, so valid multibyte UTF-8 passes through
 /// unchanged, and the spelling itself contains no control character, so
 /// escaping is idempotent.
+///
+/// Security 2026-10-08 (audit M1): the bidi control characters of
+/// [`is_bidi_control`] — invisible `Cf` codepoints that reorder displayed
+/// text — are escaped the same way; other `Cf` characters are left alone.
 #[must_use]
 pub fn escape_control(text: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control() {
+        if character.is_control() || is_bidi_control(character) {
             // Writing to a `String` cannot fail, so the result is ignored.
             let _ = write!(out, "<U+{:04X}>", u32::from(character));
         } else {
@@ -603,6 +607,23 @@ pub fn escape_control(text: &str) -> String {
         }
     }
     out
+}
+
+/// Bidi control characters (`Cf`) that can reorder displayed text.
+///
+/// Security 2026-10-08 (audit M1): these codepoints are invisible and change
+/// how surrounding text renders, so a child-chosen or project-config name
+/// carrying them can disguise what the operator sees. Exactly these are
+/// escaped by [`escape_control`]; other `Cf` characters are left alone.
+#[must_use]
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO
+        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+        | '\u{200E}' | '\u{200F}' // LRM, RLM
+        | '\u{061C}' // Arabic letter mark
+    )
 }
 
 /// §6.1: one line per error on stderr.

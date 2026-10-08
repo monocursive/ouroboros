@@ -1,7 +1,8 @@
-# Acceptance map for jail-v1 §15 (J5, `ouro.jail.acceptance-map/1`).
+# Acceptance map for jail-v1 §15 and jail-v2 §11 (J5, `ouro.jail.acceptance-map/1`).
 #
-# Every §15 row, split into the separately testable claims it makes, with the
-# tests (or driver checks) that assert each claim and how they assert it.
+# Every acceptance row — jail-v1 §15 and jail-v2 §11's K rows — split into
+# the separately testable claims it makes, with the tests (or driver checks)
+# that assert each claim and how they assert it.
 # `cargo xtask conformance` evaluates this map against the suite's own
 # `test.log` and fails the run when a gate in its lane fails;
 # `cargo xtask gates --log linux=<test.log> [--log macos=<log>]` does the same
@@ -14,8 +15,9 @@
 # and new [[ignored]] pins, and rewrites the file.
 #
 # Rules this file keeps (the honesty invariant):
-# - `row` is the §15 text verbatim; when the spec changes a row, the check
-#   fails until the clauses below are reviewed against the new text.
+# - `row` is the spec's row text verbatim (§15 or §11); when a spec changes
+#   a row, the check fails until the clauses below are reviewed against the
+#   new text.
 # - A test is listed under a clause only if it asserts that clause. A clause
 #   nothing asserts yet is `untested` and fails the verdict; a clause the stock
 #   reference host cannot produce is `recorded-limit` with the document that
@@ -24,6 +26,7 @@
 #   `#[ignore]` added to a gate test fails the run instead of passing silently.
 #
 # Seeded by J5-A from the J5 gap analysis §1.2, test by test, at 1328c381.
+# K01-K32 computed from the suite at the M6 fix (2026-10-08).
 
 schema = "ouro.jail.acceptance-map/1"
 
@@ -52,6 +55,7 @@ tag = "portable"
 tests = [
   "ouro-jail/tests/portable_canonical.rs::p01_reordering_sets_and_changing_provenance_preserve_the_hash",
 ]
+note = "The canonical fixture's own sets are one-element, so the test also extends the profile delta with multi-element read_only and deny_read sets and reverses those: the reversal feeds genuinely multi-element sets and the canonicalized sets and digest are asserted equal."
 
 [[clause]]
 id = "P01.3"
@@ -655,7 +659,7 @@ tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::x06_no_tracing_privilege_reaches_the_child",
   "ouro-jail/tests/j5_boundary_linux.rs::r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer",
 ]
-note = "Direct proof (r05_the_supervisors_own_proc): under none — where the supervisor is a reachable same-uid ancestor — the child cannot open the supervisor's /proc/<pid>/environ or /proc/<pid>/fd/<n> (its live trace/control channels), cannot reopen those channels, and cannot ptrace-seize it; all fail EACCES/EPERM. Under tool the supervisor is outside the child's pid namespace and not addressable. Mutation-provable via the PR_SET_DUMPABLE 0 hardening in supervisor.rs run (removed -> the child reads the supervisor's environ/fd and ptraces it, verified RED on host); the lock is the kernel dumpable check, not host Yama (which a peer can waive with PR_SET_PTRACER). The contained test (x06_no_tracing) proves, from inside tool/build/agent, that pidfd_getfd/ptrace against every process the child can address (its own bwrap init, agent launcher/bridge) fail and that the /proc it sees is its pid namespace only; mutation-provable via the capability drop (child CapEff/CapPrm/CapInh/CapAmb empty; adding CAP_SYS_PTRACE with the CapEff verify disabled reddens it). It no longer probes none, which is uncontained (its child is a normal same-uid process that may address and ptrace unrelated same-uid peers — the guarantee that matters there is the supervisor's, above). Fixes the earlier version that never called pidfd_getfd, targeted a pid absent from the child's namespace, and blanket-asserted over unrelated host processes under none."
+note = "Direct proof (r05_the_supervisors_own_proc): under none — where the supervisor is a reachable same-uid ancestor — the child cannot open the supervisor's /proc/<pid>/environ or /proc/<pid>/fd/<n> (its live trace/control channels), cannot reopen those channels, and cannot ptrace-seize it; all fail EACCES/EPERM. Under tool the supervisor is outside the child's pid namespace and not addressable. Mutation-provable via the PR_SET_DUMPABLE 0 hardening in supervisor.rs run (removed -> the child reads the supervisor's environ/fd and ptraces it, verified RED on host); the lock is the kernel dumpable check, not host Yama (which a peer can waive with PR_SET_PTRACER). The contained test (x06_no_tracing) proves, from inside tool/build/agent, that pidfd_getfd/ptrace against every process the child can address (its own bwrap init, agent launcher/bridge) fail and that the /proc it sees is its pid namespace only; mutation-provable via the capability drop (child CapEff/CapPrm/CapInh/CapAmb empty; adding CAP_SYS_PTRACE with the CapEff verify disabled reddens it). The getfd leg is not vacuous: since pidfd_open is denied first, the probe also obtains a pidfd the filter cannot prevent — clone(CLONE_PIDFD) — and asserts every pidfd_getfd against that descriptor fails EPERM (the filter denies the call itself). It no longer probes none, which is uncontained (its child is a normal same-uid process that may address and ptrace unrelated same-uid peers — the guarantee that matters there is the supervisor's, above). Fixes the earlier version that never called pidfd_getfd, targeted a pid absent from the child's namespace, and blanket-asserted over unrelated host processes under none."
 
 # ------------------------------------------------------------------ X07
 
@@ -754,8 +758,9 @@ clause = "A missing root-level .ouroboros is protected"
 tag = "live-lib"
 tests = [
   "ouro-jail/tests/linux_mechanisms.rs::the_tool_profile_grants_what_it_says_and_nothing_else",
+  "ouro-jail/src/lib.rs::platform::linux::platform::tests::a_missing_root_ouroboros_gets_a_real_placeholder_from_the_scan",
 ]
-note = "Through the product's tool plan below the command line."
+note = "Through the product's tool plan below the command line, and through the product's own scan/placeholder path (prepare_mounts): the scan reports the absent root literal, the holder is created under the attempt's placeholder directory, the placeholder object exists at the root, and removal takes it away."
 
 [[clause]]
 id = "F02.2"
@@ -844,8 +849,9 @@ clause = "Through ouro-jail run, each refusal writes a refused receipt that clai
 tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::f04_a_workspace_deeper_than_the_scan_limit_refuses_without_claiming_coverage",
+  "ouro-jail/tests/linux_mechanisms.rs::the_entry_limit_refuses_rather_than_claiming_partial_coverage",
 ]
-note = "The product's refusal paths (platform.rs) are reached by no test. Owned by J5-B2."
+note = "The depth refusal goes through `ouro-jail run` and its refused receipt claims no coverage. The entry-limit refusal through run would need a workspace past 100 000 entries, which is disproportionate for a gate test; the scan-level refusal is the cited test, and the product maps the same ScanError onto the same pre-exec refusal in prepare_mounts. No test produces a refused run receipt whose error names the entry limit."
 
 # ------------------------------------------------------------------ S01
 
@@ -960,9 +966,10 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_pseudofs_linux.rs::s02_a_contained_grant_of_proc_sys_or_cgroupfs_refuses_before_exec",
   "ouro-jail/tests/j5_pseudofs_linux.rs::s02_the_pseudo_fs_refusal_follows_the_source_not_the_spelling",
+  "ouro-jail/tests/j5_pseudofs_linux.rs::s02_an_ancestor_of_a_pseudo_fs_mount_refuses_through_run",
   "ouro-jail/tests/portable_policy.rs::pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology",
 ]
-note = "rev-late F5: a contained tool/agent run accepted --ro /proc, /sys and /sys/fs/cgroup and settled enforced. Now refused with policy_widening at filesystem.read_only/read_write, by fstatfs magic and mount topology on the resolved source (a symlink onto /proc too), before exec. The portable test covers the pure ancestor rule off Linux. Could also key under F01; S02 (host proc/sys/cgroup unreachable) is the closer §15 row."
+note = "rev-late F5: a contained tool/agent run accepted --ro /proc, /sys and /sys/fs/cgroup and settled enforced. Now refused with policy_widening at filesystem.read_only/read_write, by fstatfs magic and mount topology on the resolved source (a symlink onto /proc too), before exec. The ancestor case is driven through run (--ro /sys/fs, an ancestor of the cgroupfs mount; --rw /run, an ancestor of the /run/user/<uid> tmpfs). What a stock host cannot separate there: / — the one strict ancestor of proc/sysfs that is not itself on a pseudo filesystem — is refused earlier by the state-isolation rule, so the pure topology branch with no fstype or mount-point co-evidence remains with the portable rule test. Could also key under F01; S02 (host proc/sys/cgroup unreachable) is the closer §15 row."
 
 # ------------------------------------------------------------------ S03
 
@@ -1343,7 +1350,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::n05_a_late_socket_in_an_extra_grant_is_unreachable",
 ]
-note = "A host socket bound in an operator --rw extra grant AFTER prepared is unreachable (EACCES); the authorized proxy still works. New over conformance_j3_agent's n05 (which binds extra-grant sockets before launch). The late hard-link/symlink-in-workspace cases were dropped as duplicates of that test's late-workspace-socket path."
+note = "A host socket bound in an operator --rw extra grant AFTER prepared is unreachable (EACCES); so are a hard-link and a symlink alias of that same socket, created after the boundary exists — the late-alias legs the dropped conformance_j3_agent cases covered; the authorized proxy still works. New over conformance_j3_agent's n05 (which binds extra-grant sockets before launch)."
 
 [[clause]]
 id = "N05.5"
@@ -1547,8 +1554,9 @@ clause = "An unmatched exit produces a gap, never a result"
 tag = "simulated"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::o03_an_unmatched_exit_is_a_gap_not_a_result",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_exit_with_no_entry_is_one_unmatched_exit_gap",
 ]
-note = "A covered exit with no entry to pair with becomes an unmatched_exit gap in a degraded class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT. Enforcement: self.gap(GapReason::UnmatchedExit, ..) at the seam site in tracer/session.rs; deleting it counts the call as a normal result."
+note = "A covered exit with no entry to pair with becomes an unmatched_exit gap in a degraded class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT. Enforcement: self.gap(GapReason::UnmatchedExit, ..) at the seam site in tracer/session.rs; deleting it counts the call as a normal result. The real branch — handle_exit's exit with no in-flight entry, the site an untriggered seam would hide — is driven directly (no seam) by the second cited unit, which asserts the loss counter and exactly one UnmatchedExit gap event; the seam remains for the live `run` shape that unit cannot produce (audit 2026-10-08 M02/L22)."
 
 [[clause]]
 id = "O03.6"
@@ -1738,6 +1746,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o06_racing_pathname_is_only_a_literal_snapshot",
 ]
+note = "The test asserts its own race-detection signal: with the fixture's flipper thread running for all 300 racing mkdirs, at least one argument_snapshot_unstable gap must be recorded, so the snapshot-only claim is exercised by a race that actually happened, not merely tolerated."
 
 # ------------------------------------------------------------------ L01
 
@@ -2103,6 +2112,7 @@ tests = [
   "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_stop_grace_follows_the_boot_clock",
   "ouro-jail/tests/j5_lifetime_linux.rs::l04_the_preparation_budget_follows_the_boot_clock",
   "ouro-jail/src/lib.rs::credentials::tests::a_wait_ends_when_the_continuous_clock_runs_out_not_the_monotonic_one",
+  "ouro-jail/src/lib.rs::supervisor::tests::the_production_deadline_closure_expires_and_the_budget_refuses",
 ]
 note = "The boot, monotonic and real-time clocks are equal on the reference host (never suspended, never set), so an LD_PRELOAD clock_gettime shim makes them differ inside the real ouro-jail run, measured on the test's own unshifted clock. With only CLOCK_BOOTTIME advanced 120 s: the 20 s execution wall expires within 8 s of the jump, tool and none (red under M12, M12b, RV3); the 2 s stop grace after an operator SIGTERM is over at once, the forced stop within 1 s of a jump made when the cooperative SIGTERM reached the target, tool and none (red under RV2 and W2n: 2.0 s); the 30 s preparation budget, the jump triggered by the owner-bound attempt's own leaf path mid-preparation, refuses before `prepared` with prepare_timeout and remediation retry, tool and none (e15db33f; red under W4a, the old mapping to backend_unavailable/host_setup; the supervisor's budget check before `prepared` is a second mechanism for none: before the j5 merge the none leg announced `prepared` 6 of 6 times without it, on the merged tree none's own establish loop catches the expiry and W4b stays green); the 60 s gate wait refuses within 700 ms of a jump made right after `prepared` (measured 267 ms; red under RV4, a re-check only at the old 1 s poll cap: 1.02 s, and RV8, a monotonic gate deadline: 60 s). Credential staging inside preparation waits on the same boot-clock deadline in 250 ms steps (98afcb9e; the portable unit test is red at 30 s when the wait is one step). Waits that are not §6.4 budgets stay monotonic (J5-B3 spec proposal, wave 2 §3)."
 
@@ -2225,6 +2235,7 @@ tag = "portable"
 tests = [
   "ouro-jail/tests/portable_records.rs::r01_every_event_kind_has_an_example",
 ]
+note = "The corpus covers every fs.deny attempted_operation the schemas admit (proc.exec, fs.create, fs.write, fs.rename, fs.unlink, net.connect) and the command_rule (fields.kind command_denied, transition command_rule) and learning_read wrapper notes, each a checked-in example that round-trips through the Rust types and validates against the schema and the semantic rules."
 
 [[clause]]
 id = "R01.7"
@@ -2239,6 +2250,7 @@ tests = [
   "ouro-jail/tests/j5_records_linux.rs::j5_a_refused_release_writes_records_that_pass_the_frozen_contract",
   "ouro-jail/tests/j5_records_linux.rs::j5_observation_off_records_pass_the_frozen_contract",
 ]
+note = "jail.json holds the latest receipt only (§7) and the trace's jail.receipt notes carry the settled receipt, so the enforced-phase receipt is transient by design and no external reader can hold it to the contract: the cited runs validate the prepared receipt (read at the prepared gate), the settled receipt and every trace and control transcript through common::assert_run_records (schema and semantic rules); the enforced phase's own shape is pinned by the frozen-schema examples. Holding the enforced-phase receipt to the contract externally is the named residual (audit 2026-10-08 L22)."
 
 [[clause]]
 id = "R01.8"
@@ -2627,6 +2639,7 @@ tests = [
   "ouro-jail/tests/portable_launch.rs::c01_c02_a_normal_exit_stages_both_modes_records_provenance_and_cleans_vendor_state",
   "ouro-jail/tests/conformance_j3_credentials.rs::m1_a_read_only_bind_of_a_writable_filesystem_gets_no_digest",
 ]
+note = "The receipt withholds every digest (audit 2026-09-25-2, S6, asserted); the digest lives in jail state's private credential record, which the agent launch-profile test reads and verifies: the copy_rw row's content_digest is the sha256 of the staged bytes, and the bind_ro of the writable filesystem records none."
 
 [[clause]]
 id = "C01.6"
@@ -3109,6 +3122,619 @@ gate = "A01"
 clause = "A real batch agent run records revision, OS, backend, vendor version, profile and receipt, without credential archives"
 tag = "credential"
 note = "Recorded manually in agent-compatibility.md at 3c3638c4 (J3 era); re-run or explicit skip is user decision §4.4 of the J5 contract."
+
+# ------------------------------------------------------------------ K01
+
+[[gate]]
+id = "K01"
+row = "C1: two-stage plaintext Host swap and CONNECT/SNI mismatch each close the tunnel with `proxy.deny` (`origin_mismatch`); a matching first flight relays end-to-end; host-only entries admit :443 only and the refusal names the entry."
+
+[[clause]]
+id = "K01.1"
+gate = "K01"
+clause = "A two-stage plaintext Host swap and a CONNECT/SNI mismatch each close the tunnel with `proxy.deny` (`origin_mismatch`) and never connect upstream; a matching first flight relays end-to-end"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_proxy.rs::a_named_tls_mismatch_never_connects_upstream",
+  "ouro-jail/tests/portable_proxy.rs::named_first_flight_refusals_are_bounded_and_never_connect",
+  "ouro-jail/tests/portable_proxy.rs::n02_allowed_connect_tunnel_yields_one_allow_result_at_close",
+]
+note = "Real Unix/TCP sockets on both hosts. The row's tail, that host-only entries admit :443 only, is K01.2; that the refusal names the entry is not asserted separately."
+
+[[clause]]
+id = "K01.2"
+gate = "K01"
+clause = "Host-only entries admit :443 only, and non-default ports are matched exactly"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_network_rules.rs::n03_omitted_ports_mean_443_and_nondefault_ports_are_exact",
+]
+
+# ------------------------------------------------------------------ K02
+
+[[gate]]
+id = "K02"
+row = "C1: absent SNI, unparseable first bytes and first-flight timeout each yield `origin_unverified`/`origin_timeout` and no upstream connection."
+
+[[clause]]
+id = "K02.1"
+gate = "K02"
+clause = "Absent SNI, unparseable first bytes and a first-flight timeout each yield `origin_unverified`/`origin_timeout` with no upstream connection, within the bounded first-flight budget"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_proxy.rs::named_first_flight_refusals_are_bounded_and_never_connect",
+  "ouro-jail/src/lib.rs::proxy::origin::tests::malformed_and_non_tls_refuse",
+  "ouro-jail/src/lib.rs::proxy::origin::tests::fragmented_hello_and_truncation",
+]
+
+# ------------------------------------------------------------------ K03
+
+[[gate]]
+id = "K03"
+row = "C2: `--profile none` with a `config.toml` or any launch profile present refuses `unsafe_config_path` naming the files; without them it runs. Sixth audit F1: while a `none` run's live marker exists (in the data or the configuration directory) every existing trusted file refuses; after it settles, a trusted file that predates the settled `uncontained.epoch` marker refuses until re-saved; a `none` run that cannot write its live markers refuses before release; a directory planted at the settled marker's path refuses reads and is cleared by the settle."
+
+[[clause]]
+id = "K03.1"
+gate = "K03"
+clause = "A `none` run settles the `uncontained.epoch` marker in both state directories, and a trusted file whose ctime predates that settle refuses `unsafe_config_path` until it is re-saved"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/epoch_guard_linux.rs::a_none_run_settles_the_epoch_and_a_trusted_file_it_predates_refuses",
+  "ouro-jail/src/lib.rs::supervisor::tests::a_trusted_file_that_predates_the_uncontained_epoch_refuses",
+  "ouro-jail/src/lib.rs::supervisor::tests::a_trusted_file_with_the_settled_marker_s_ctime_refuses",
+]
+note = "The live run proves the settle and the refusal end to end through the command line; the units pin the predates comparison and the equal-ctime (<=) boundary the kernel's own stamping cannot produce live."
+
+[[clause]]
+id = "K03.2"
+gate = "K03"
+clause = "While a `none` run's live marker exists (in the data or the configuration directory) every existing trusted file refuses"
+tag = "simulated"
+tests = [
+  "ouro-jail/src/lib.rs::supervisor::tests::a_live_uncontained_run_in_either_marker_directory_refuses_every_trusted_file",
+  "ouro-jail/src/lib.rs::state::tests::an_uncontained_run_is_live_until_its_guard_settles_both_marker_directories",
+]
+note = "The real trigger, a concurrent contained run resolving while a `none` run is live, is not produced; the guard is driven directly for a marker in either directory, and a re-save after the marker is still refused while the run is live."
+
+[[clause]]
+id = "K03.3"
+gate = "K03"
+clause = "A `none` run that cannot write its live markers does not release the workload, and a directory planted at the settled marker's path fails closed and is cleared by the settle"
+tag = "simulated"
+tests = [
+  "ouro-jail/src/lib.rs::state::tests::an_uncontained_run_that_cannot_write_its_live_marker_does_not_arm",
+  "ouro-jail/src/lib.rs::state::tests::a_blocked_settled_marker_fails_closed_and_the_guard_clears_the_obstacle",
+  "ouro-jail/src/lib.rs::state::tests::a_settle_that_cannot_be_written_leaves_the_run_live",
+]
+note = "Library-level, the guard driven directly: arming refuses the run, an unsettleable run stays live (fail-closed), and the settle clears what the child planted."
+
+[[clause]]
+id = "K03.4"
+gate = "K03"
+clause = "A `--profile none` run with a `config.toml` or any launch profile present refuses `unsafe_config_path` naming the files, and runs without them"
+tag = "untested"
+note = "Implemented in check_config_isolation (supervisor.rs) but no test drives a `none` run against a present trusted file."
+
+# ------------------------------------------------------------------ K04
+
+[[gate]]
+id = "K04"
+row = "C3: a child-writable root over the supervisor binary's or backend's directory refuses; the backend is exec'd by pinned descriptor and an identity swap between resolution and spawn refuses at preparing."
+
+[[clause]]
+id = "K04.1"
+gate = "K04"
+clause = "A child-writable root over the backend's directory refuses, the backend is resolved only from absolute PATH entries and exec'd by pinned descriptor, and a replaced or recreated path is caught"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j5_process_linux.rs::p04_a_workspace_containing_the_launch_directory_refuses",
+  "ouro-jail/tests/j5_bwrap_resolution_linux.rs::j5_empty_and_relative_path_entries_never_resolve_bubblewrap",
+  "ouro-jail/tests/linux_mechanisms.rs::a_pinned_path_notices_that_it_was_replaced",
+  "ouro-jail/tests/linux_mechanisms.rs::a_held_handle_denies_a_recreated_directory_the_same_inode",
+]
+note = "The row's supervisor-binary variant and the preparing-stage identity-swap refusal are covered by the same isolation checks (check_binary_isolation, prepare_mounts), not named by a test of their own."
+
+# ------------------------------------------------------------------ K05
+
+[[gate]]
+id = "K05"
+row = "C4: i386 and x32 `clone3` return `ENOSYS` under `none` and create no child; any foreign-arch `clone3` success classifies `untraced_descendant`."
+
+[[clause]]
+id = "K05.1"
+gate = "K05"
+clause = "A foreign-arch `clone3` that succeeds classifies `untraced_descendant`, and the closed-set routing of the compat spellings is the audit's, never a foreign-ABI loss"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/j4_closed_set_linux.rs::j4_clone_untraced_is_a_gap_in_none",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::audit4_compat_abi_listener_and_untraced_clone_route_to_their_gaps",
+]
+
+[[clause]]
+id = "K05.2"
+gate = "K05"
+clause = "i386 and x32 spellings are refused at the arch-first filter (a host without them cannot prove enforcement live)"
+tag = "live-lib"
+tests = [
+  "ouro-jail/tests/unix_peer_linux.rs::non_native_abi_connects_are_refused",
+]
+note = "The row's `clone3` ENOSYS under `none` is the C4 baseline (linux_mechanisms' filter tests); the live i386 int-0x80 clone3 PoC has no fixture."
+
+# ------------------------------------------------------------------ K06
+
+[[gate]]
+id = "K06"
+row = "C5–C7: unreadable/unparseable resolv.conf ships an empty file and records it; `--workspace /dev/shm` and a cross-device alias beneath a guarded tree both refuse."
+
+[[clause]]
+id = "K06.1"
+gate = "K06"
+clause = "A cross-device alias beneath a guarded tree refuses, and the pseudo-fs refusal follows the mount source, not the spelling"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/security_alias_linux.rs::guarded_aliases_are_detected_across_devices_and_below_mountpoints",
+  "ouro-jail/tests/j5_pseudofs_linux.rs::s02_the_pseudo_fs_refusal_follows_the_source_not_the_spelling",
+]
+note = "The row's explicit `--workspace /dev/shm` refusal is the same source check (S02), not named by a test of that exact spelling."
+
+[[clause]]
+id = "K06.2"
+gate = "K06"
+clause = "An unreadable or unparseable resolv.conf ships an empty file and records the failure instead of host bytes"
+tag = "simulated"
+tests = [
+  "ouro-jail/src/lib.rs::platform::linux::platform::tests::resolver_sanitizer_never_falls_back_to_host_bytes",
+]
+
+# ------------------------------------------------------------------ K07
+
+[[gate]]
+id = "K07"
+row = "C8–C10: `--profile` of a fifo / `/dev/zero` symlink / oversized file refuses bounded; a mid-scan directory change re-scans once and refuses on the second; the new deny rows match the regenerated evidence tables."
+
+[[clause]]
+id = "K07.1"
+gate = "K07"
+clause = "The new deny rows match the regenerated evidence tables, and the operator-config read refuses planted shapes bounded (symlink, hard link, mode, size)"
+tag = "live-lib"
+tests = [
+  "ouro-jail/tests/linux_mechanisms.rs::the_baseline_filter_denies_the_syscalls_the_spec_lists",
+  "ouro-jail/tests/linux_mechanisms.rs::the_syscall_numbers_are_this_kernels_numbers",
+  "ouro-jail/src/lib.rs::supervisor::tests::audit4_the_operator_config_read_refuses_planted_shapes",
+]
+note = "C9's mid-scan re-scan-once/refuse-on-second-change is implemented (protected scan) but has no test."
+
+# ------------------------------------------------------------------ K08
+
+[[gate]]
+id = "K08"
+row = "`learn` on a denied-read fixture proposes exactly the existing file as a read-only grant, never its parent tree, cites the receipt digest, and proposes nothing for its denied writes."
+
+[[clause]]
+id = "K08.1"
+gate = "K08"
+clause = "`learn` on a denied-read fixture proposes exactly the existing file as a read-only grant, never its parent tree, cites the receipt digest, and proposes nothing for its denied writes"
+tag = "portable"
+tests = [
+  "ouro-jail/src/lib.rs::learn::tests::proposals_are_exact_filtered_and_receipt_bound",
+  "ouro-jail/tests/portable_learning.rs::learning_filters_network_causes_and_never_grants_denied_writes",
+]
+
+# ------------------------------------------------------------------ K09
+
+[[gate]]
+id = "K09"
+row = "`learn` on the HTTP fixture proposes exactly the two observed hosts; a denied non-allowlist reason proposes nothing."
+
+[[clause]]
+id = "K09.1"
+gate = "K09"
+clause = "`learn` proposes exactly the observed hosts from the HTTP fixture, and a denied non-allowlist reason proposes nothing"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_learning.rs::learning_filters_network_causes_and_never_grants_denied_writes",
+  "ouro-jail/src/lib.rs::learn::tests::proposals_are_exact_filtered_and_receipt_bound",
+]
+note = "The journal is synthesized by the unit, not captured from a live HTTP run."
+
+# ------------------------------------------------------------------ K10
+
+[[gate]]
+id = "K10"
+row = "`learn --adopt` writes the marked fragment atomically after a TTY confirmation, refuses without one, and the next run applies the grants as ordinary operator config."
+
+[[clause]]
+id = "K10.1"
+gate = "K10"
+clause = "`learn --adopt` writes the marked fragment atomically after a TTY confirmation, refuses without one, and the next run applies the grants as ordinary operator config"
+tag = "untested"
+note = "Implemented (learn.rs adopt: TTY requirement, confirmation word, atomic re-read write) but no test drives it."
+
+# ------------------------------------------------------------------ K11
+
+[[gate]]
+id = "K11"
+row = "`learn` of opencode proposes only the observed, justified subset, with incomplete coverage stated."
+
+[[clause]]
+id = "K11.1"
+gate = "K11"
+clause = "`learn` of opencode proposes only the observed, justified subset, with incomplete coverage stated"
+tag = "untested"
+note = "No learn-of-opencode test exists."
+
+# ------------------------------------------------------------------ K12
+
+[[gate]]
+id = "K12"
+row = "SOCKS5: `socks5h` CONNECT relays to allowlisted hosts; the child never resolves (a resolver-less fixture works); `UDP ASSOCIATE`/`BIND` are refused; literals require explicit entries."
+
+[[clause]]
+id = "K12.1"
+gate = "K12"
+clause = "SOCKS5 relays allowlisted hosts through the shared origin gate, refuses `UDP ASSOCIATE` and `BIND` explicitly, and requires an exact entry for literal destinations"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_proxy.rs::socks_named_tls_uses_the_same_origin_gate_and_relay",
+  "ouro-jail/tests/portable_proxy.rs::socks_udp_and_bind_are_explicitly_unsupported",
+  "ouro-jail/tests/portable_proxy.rs::n03_numeric_requests_need_an_exact_grant_and_are_never_resolved",
+]
+note = "The resolver-less live fixture (the child never resolves) is not exercised; the never-resolved half is proven by the literal-requests test."
+
+# ------------------------------------------------------------------ K13
+
+[[gate]]
+id = "K13"
+row = "SOCKS5 results and HTTP CONNECT results share one allowlist, one normalization and one origin-binding path; receipts record transport and origin for both."
+
+[[clause]]
+id = "K13.1"
+gate = "K13"
+clause = "SOCKS5 and HTTP CONNECT share one allowlist, normalization and origin-binding path, and receipts record transport and origin for both"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_proxy.rs::socks_named_tls_uses_the_same_origin_gate_and_relay",
+  "ouro-jail/tests/portable_proxy.rs::n02_results_are_valid_distinct_proxy_source_events",
+  "ouro-jail/tests/portable_network_rules.rs::n03_wildcards_match_labels_beneath_never_the_apex",
+]
+
+# ------------------------------------------------------------------ K14
+
+[[gate]]
+id = "K14"
+row = "Vault (HTTP): the child's environment holds only placeholders; the bridge substitutes on authorized hosts only; a placeholder on a non-authorized host is denied without recording secret material."
+
+[[clause]]
+id = "K14.1"
+gate = "K14"
+clause = "Vault substitution is exact, authorized-host only and plaintext opt-in; a placeholder on a non-authorized host is denied without recording secret material"
+tag = "portable"
+tests = [
+  "ouro-jail/src/lib.rs::vault::tests::plaintext_is_opt_in_and_substitution_is_exact",
+  "ouro-jail/src/lib.rs::vault::tests::tls_vault_substitutes_only_after_both_authorities_and_the_certificate_pass",
+]
+note = "In-process over real sockets on both hosts; the child's environment holding only placeholders is the launch layer's claim, not this unit's."
+
+# ------------------------------------------------------------------ K15
+
+[[gate]]
+id = "K15"
+row = "Vault (TLS): per-attempt CA substitutes end-to-end; the key is absent from the sandbox and from disk; cleanup removes the CA bundle."
+
+[[clause]]
+id = "K15.1"
+gate = "K15"
+clause = "The per-attempt CA substitutes end-to-end only after both authorities and the certificate pass"
+tag = "portable"
+tests = [
+  "ouro-jail/src/lib.rs::vault::tests::tls_vault_substitutes_only_after_both_authorities_and_the_certificate_pass",
+]
+note = "In-process over real sockets on both hosts. The key-absent-from-sandbox and CA-bundle cleanup halves are the cleanup tests' (gc/proxy teardown), not this unit's."
+
+# ------------------------------------------------------------------ K16
+
+[[gate]]
+id = "K16"
+row = "Credential rows record `never_staged: true`, no digest, and launch validation refuses a vaulted credential with no HTTP(S) hosts."
+
+[[clause]]
+id = "K16.1"
+gate = "K16"
+clause = "Credential rows record `never_staged: true` with no digest, and launch validation refuses a vaulted credential with no HTTP(S) hosts"
+tag = "untested"
+note = "The row is written by credentials.rs/supervisor.rs and the 1..64-origins rule lives in Policy::validate; neither has a test."
+
+# ------------------------------------------------------------------ K17
+
+[[gate]]
+id = "K17"
+row = "J6–J9 regression: on `tool`, observation off versus direct execution, p95 added warm startup is under 500 ms for every workload and median post-start overhead on the fixed file workload is at most 100%. These are twice J5's retained 250 ms startup and adjusted 50% post-start ceilings (v1 §5). Both plain and delegated-scope sessions must pass, with at least 30 valid samples per arm, no excluded samples, complete raw records and a predeclared quiet-host threshold. Use `xtask perf`'s no-op, 200-child and 5,000-round file fixtures; report observation-on costs separately. Whole-command timings cannot substitute for these phase measurements."
+
+[[clause]]
+id = "K17.1"
+gate = "K17"
+clause = "The perf fixtures are what the row names: a no-op workload with an empty spawn tree, a fixed-round file workload that leaves nothing behind, and a 200-child spawn tree that runs every child"
+tag = "portable"
+tests = [
+  "ouro-fixture/tests/perf_modes.rs::spawn_tree_zero_is_the_no_op_workload",
+  "ouro-fixture/tests/perf_modes.rs::fileops_performs_every_round_and_leaves_nothing_behind",
+  "ouro-fixture/tests/perf_modes.rs::spawn_tree_runs_every_child_to_completion",
+]
+
+[[clause]]
+id = "K17.2"
+gate = "K17"
+clause = "The budget verdict itself (p95 added startup, median post-start overhead, sample and exclusion rules) is recorded evidence, not a cargo test"
+tag = "recorded-limit"
+limit = "docs/benchmarks/jail/README.md § Acceptance coverage: Pass on the final Linux source: 540 valid measured launches, zero exclusions, 130.6 ms worst p95 added startup and 36.6%–40.1% file post-start overhead. Raw phase records and the summary-bound verdict are in the follow-up."
+note = "The numbers come from the recorded perf run the citation names; re-running them is the perf harness's job, not the suite's."
+
+# ------------------------------------------------------------------ K18
+
+[[gate]]
+id = "K18"
+row = "The bridge's first-flight buffer is bounded: oversized ClientHello, slow drip and pipelined junk cannot wedge a worker or the run."
+
+[[clause]]
+id = "K18.1"
+gate = "K18"
+clause = "The first-flight buffer is bounded: an oversized ClientHello refuses at the size budget, a slow drip ends at the absolute deadline, and fragmented hellos reassemble within the wire-byte bound without wedging a worker"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_proxy.rs::n04_header_overflow_refuses_at_the_32_kib_budget",
+  "ouro-jail/tests/portable_proxy.rs::n04_slow_headers_end_at_the_absolute_deadline_even_while_bytes_trickle",
+  "ouro-jail/tests/portable_proxy.rs::named_first_flight_refusals_are_bounded_and_never_connect",
+  "ouro-jail/src/lib.rs::proxy::origin::tests::fragmented_hello_and_truncation",
+]
+
+# ------------------------------------------------------------------ K19
+
+[[gate]]
+id = "K19"
+row = "`tail` on a settled attempt replays exactly the journal; `--follow` on a live attempt shows events with bounded lag and its output equals the journal at settlement."
+
+[[clause]]
+id = "K19.1"
+gate = "K19"
+clause = "`tail` on a settled attempt replays exactly the journal, `--follow` shows events with bounded lag, and its output equals the journal at settlement"
+tag = "untested"
+note = "Only `--since` filtering is unit-tested (journal.rs); replay, follow lag and settlement equality have no test."
+
+# ------------------------------------------------------------------ K20
+
+[[gate]]
+id = "K20"
+row = "`tail --json` emits the recorded envelopes byte-identically (tail never rewrites evidence)."
+
+[[clause]]
+id = "K20.1"
+gate = "K20"
+clause = "`tail --json` emits the recorded envelopes byte-identically"
+tag = "untested"
+note = "No test compares tail's output bytes to the journal's."
+
+# ------------------------------------------------------------------ K21
+
+[[gate]]
+id = "K21"
+row = "Deny-rules: positional glob matching, basename and path forms, `EPERM` injection with `command_denied` event, `forbid` stopping with `command_forbidden`, and the documented non-boundary (unmatched re-spelling runs) all behave as specified."
+
+[[clause]]
+id = "K21.1"
+gate = "K21"
+clause = "`deny` injects `EPERM` at the entry and records the `command_denied` `command_rule` note before the image loads; `forbid` stops the run with `command_forbidden`; an unmatched re-spelling is not a boundary"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/command_rules_linux.rs::denied_execve_and_execveat_return_eperm_without_running_the_image",
+  "ouro-jail/tests/command_rules_linux.rs::a_matching_child_command_is_still_forbidden",
+  "ouro-jail/tests/command_rules_linux.rs::empty_arguments_do_not_turn_an_allowed_command_into_a_forbidden_one",
+  "ouro-jail/src/lib.rs::commands::tests::positional_and_tail",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
+]
+note = "The glob, basename and path forms are the matcher unit's; the re-check unit is what judges a re-spelled kernel copy as the entry did. K31's script/no-argv shapes are K31.3."
+
+# ------------------------------------------------------------------ K22
+
+[[gate]]
+id = "K22"
+row = "Command rules refuse at resolution on macOS-lane builds and when the rule cap is exceeded."
+
+[[clause]]
+id = "K22.1"
+gate = "K22"
+clause = "More rules than the documented cap refuse at validation"
+tag = "portable"
+tests = [
+  "ouro-jail/src/lib.rs::commands::tests::more_than_the_documented_rule_cap_refuses_at_validation",
+]
+
+[[clause]]
+id = "K22.2"
+gate = "K22"
+clause = "Command rules refuse at resolution on macOS-lane builds"
+tag = "untested"
+lane = "macos"
+note = "The macOS lane has no command-rules test (macos_refusal.rs)."
+
+# ------------------------------------------------------------------ K23
+
+[[gate]]
+id = "K23"
+row = "macOS: the §1.1-equivalent slice (allowed write, protected denial, wall expiry) passes; explicit pids/mem/cpu refuse `unsupported_platform`."
+
+[[clause]]
+id = "K23.1"
+gate = "K23"
+clause = "macOS runs the §1.1-equivalent slice (allowed write, protected denial, wall expiry) and refuses explicit pids/mem/cpu with `unsupported_platform`"
+tag = "untested"
+lane = "macos"
+note = "macos_refusal.rs proves the platform-wide refusal and doctor's unsupported reporting, not the slice or the explicit limits refusals."
+
+# ------------------------------------------------------------------ K24
+
+[[gate]]
+id = "K24"
+row = "macOS: network egress is deny-all except the bridge loopback ports; the bridge enforces the same allowlist and origin binding; a SOCKS5 client works unchanged."
+
+[[clause]]
+id = "K24.1"
+gate = "K24"
+clause = "macOS network egress is deny-all except the bridge loopback ports, with the same allowlist and origin binding, and a SOCKS5 client works unchanged"
+tag = "untested"
+lane = "macos"
+note = "No macOS network path exists to test."
+
+# ------------------------------------------------------------------ K25
+
+[[gate]]
+id = "K25"
+row = "macOS: receipts validate with macOS backend fields, audit classes `unsupported`, and `exec_unconfirmed` semantics as specified."
+
+[[clause]]
+id = "K25.1"
+gate = "K25"
+clause = "macOS runs record the attempt artifacts and report every capability requirement unsupported and unmeasured"
+tag = "live-cli"
+lane = "macos"
+tests = [
+  "ouro-jail/tests/macos_refusal.rs::m01_the_attempt_directory_holds_the_policy_and_the_claim",
+  "ouro-jail/tests/macos_refusal.rs::m03_doctor_reports_every_requirement_as_unsupported_and_unmeasured",
+]
+note = "The row's macOS receipt-field validation and `exec_unconfirmed` semantics are the v2 backend's, which does not exist yet; their Linux-side halves are j5_process/j5_records."
+
+# ------------------------------------------------------------------ K26
+
+[[gate]]
+id = "K26"
+row = "macOS: opencode A01 row recorded (revision, vendor version, profile, receipt)."
+
+[[clause]]
+id = "K26.1"
+gate = "K26"
+clause = "The opencode A01 row is recorded for macOS (revision, vendor version, profile, receipt)"
+tag = "untested"
+lane = "macos"
+note = "A01 exists only as the Linux reference row in agent-compatibility.md."
+
+# ------------------------------------------------------------------ K27
+
+[[gate]]
+id = "K27"
+row = "Install: a clean VM reaches sandboxed `true` and the opencode A01 run in under ten minutes; corrupted artifacts fail signature verification and install nothing; the installer never requires a TTY."
+
+[[clause]]
+id = "K27.1"
+gate = "K27"
+clause = "Install: corrupted artifacts fail verification and install nothing, and the installer never requires a TTY"
+tag = "untested"
+note = "Proved only by the dist harness (crates/ouro-jail/dist/test_install.py, not a cargo test); the clean-VM time bound has no test."
+
+# ------------------------------------------------------------------ K28
+
+[[gate]]
+id = "K28"
+row = "Bundled profiles: `--launch` resolution precedence (operator file wins, noted), fragment conflicts refuse, every bundle has a green `doctor --launch` and a recorded A-row or an explicit unrecorded status."
+
+[[clause]]
+id = "K28.1"
+gate = "K28"
+clause = "`--launch` resolution precedence (the operator file wins, noted) reads only the operator's configuration, the bundled set is the frozen one, and the host's `doctor --launch` report is schema-valid"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_policy.rs::i02_launch_reads_only_the_operators_configuration",
+  "ouro-jail/tests/portable_launch.rs::bundled_resolution_uses_embedded_data_only_when_operator_file_is_absent",
+  "ouro-jail/tests/portable_doctor.rs::this_hosts_doctor_report_is_valid_against_the_schema",
+  "ouro-jail/tests/portable_freeze.rs::the_bundled_launch_profiles_are_the_frozen_ones",
+]
+note = "Fragment-conflict refusal and per-bundle A-row statuses are not named by tests."
+
+# ------------------------------------------------------------------ K29
+
+[[gate]]
+id = "K29"
+row = "macOS native lifetime: setsid/double-fork/spawn-attribute descendants and concurrent forks cannot evade termination after wall expiry, supervisor death or custodian death; identity reuse, event loss and failed final drains never produce a false `tree_empty=true`. Missing required entitlement refuses before workload release."
+
+[[clause]]
+id = "K29.1"
+gate = "K29"
+clause = "macOS native lifetime: descendants cannot evade termination, and identity reuse or event loss never produces a false `tree_empty=true`"
+tag = "untested"
+lane = "macos"
+note = "No macOS native-lifetime test exists; the entitlement refusal is macos_refusal's platform refusal."
+
+# ------------------------------------------------------------------ K30
+
+[[gate]]
+id = "K30"
+row = "Sixth audit F4: a successful open-class call whose `/proc/<tid>/fd/<ret>` link does not corroborate the snapshot (absolute: every component; relative, bare names included: the tail; `O_TMPFILE`: the directory) delivers its event with an incomplete path, counts `path_claims_unverified` in `lifetime.native.details` and records a bookkeeping `path_claim_unverified` gap that degrades no class and never stops a strict run; agreement records none of these."
+
+[[clause]]
+id = "K30.1"
+gate = "K30"
+clause = "An open claim the descriptor does not corroborate (absolute: every component; relative, bare names included: the tail; `O_TMPFILE`: the directory) delivers with an incomplete path, counts `path_claims_unverified`, and records a bookkeeping `path_claim_unverified` gap that degrades no class and accounts for no loss; agreement records none of it"
+tag = "simulated"
+tests = [
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_open_claim_the_descriptor_does_not_corroborate_is_downgraded_not_lost",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::a_path_claim_is_corroborated_by_its_components_not_only_its_name",
+  "ouro-jail/src/lib.rs::platform::linux::observed::tests::a_path_claim_gap_degrades_nothing_and_accounts_for_no_loss",
+]
+note = "The tracer's claim logic driven directly (the kernel's mismatch is manufactured); that the gap never stops a strict run is the observed half's degrades-nothing assertion, not a strict-run integration test."
+
+# ------------------------------------------------------------------ K31
+
+[[gate]]
+id = "K31"
+row = "Sixth audit F5: an exec whose entry argv passed the rules but whose kernel copy (argv or image) hits one kills the process, records a `killed_at_exec` `command_rule` note, and for a `forbid` surfaces `command_forbidden` through the exec event, with no `entry_abandoned` gap for the killed exec; an entry-time hit still denies before the image loads; a `#!` script, an empty argument and an `execve` with no argv are judged as at the entry stop."
+
+[[clause]]
+id = "K31.1"
+gate = "K31"
+clause = "An exec whose entry argv passed the rules but whose kernel-installed image hits one is killed at the exec — `SIGKILL` before the image runs — with a `killed_at_exec` `command_rule` note, the run stopped for a `forbid` and settled for a `deny`, and no `entry_abandoned` gap for the killed exec"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/command_rules_linux.rs::an_exec_the_entry_passed_whose_image_hits_a_forbid_rule_is_killed_at_exec",
+  "ouro-jail/tests/command_rules_linux.rs::a_deny_rule_that_only_the_kernel_copy_hits_kills_the_exec_and_the_run_completes",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap",
+  "ouro-jail/src/lib.rs::platform::linux::observed::tests::an_exec_time_command_hit_is_recorded_and_only_forbid_stops_the_run",
+]
+
+[[clause]]
+id = "K31.2"
+gate = "K31"
+clause = "An entry-time hit still denies before the image loads: `deny` returns `EPERM`, `forbid` stops the run"
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/command_rules_linux.rs::denied_execve_and_execveat_return_eperm_without_running_the_image",
+  "ouro-jail/tests/command_rules_linux.rs::a_matching_child_command_is_still_forbidden",
+]
+
+[[clause]]
+id = "K31.3"
+gate = "K31"
+clause = "A `#!` script, an empty argument and an `execve` with no argv are judged as at the entry stop"
+tag = "live-lib"
+tests = [
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
+  "ouro-jail/tests/command_rules_linux.rs::empty_arguments_do_not_turn_an_allowed_command_into_a_forbidden_one",
+]
+
+# ------------------------------------------------------------------ K32
+
+[[gate]]
+id = "K32"
+row = "Sixth audit F6: bytes the client pipelines after the one request of a vault MITM connection are counted in `discarded_bytes`, bounded by the one-second drain."
+
+[[clause]]
+id = "K32.1"
+gate = "K32"
+clause = "Bytes the client pipelines after a vault connection's one request are counted in `discarded_bytes` and never forwarded"
+tag = "portable"
+tests = [
+  "ouro-jail/src/lib.rs::vault::tests::tls_vault_closes_the_response_and_counts_discarded_pipeline_bytes",
+  "ouro-jail/tests/portable_proxy.rs::n02_a_pipelined_second_request_is_discarded_and_stated",
+  "ouro-jail/tests/portable_proxy.rs::n02_connect_early_data_is_forwarded_in_order_and_counted",
+]
+note = "The one-second drain bound itself is not asserted; the discard is bounded by the connection's own close in these tests."
 
 # ---------------------------------------- the pinned ignored set, linux lane
 

@@ -905,6 +905,179 @@ fn r3_io_uring_as_stdio_refuses_before_exec() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid_fd"));
 }
 
+/// Audit 2026-10-08 H1: a regular-file stdio redirect is a reopenable
+/// handle. A writable regular file on stdin must refuse before the boundary
+/// (the child's `/dev/stdin` reopen checks the inode's permissions, never
+/// the descriptor's open mode), a read-only file must run and stay
+/// unchanged, and no stream may redirect into the trusted config directory.
+#[test]
+fn r3_regular_file_stdio_cannot_reopen_outside_the_plan() {
+    if !live() {
+        return;
+    }
+    let jail = Jail::new().expect("harness");
+    let (workspace, fixture) = workspace_with_fixture(jail.root());
+    let run_with_stdin = |path: &std::path::Path| {
+        let file = std::fs::File::open(path).expect("the redirect target opens");
+        Command::new(harness::jail_path())
+            .arg("run")
+            .arg("--profile")
+            .arg("tool")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--")
+            .arg(&fixture)
+            .arg("exit")
+            .arg("0")
+            .env("OURO_DATA_DIR", jail.data_dir())
+            .env("OURO_CONFIG_DIR", jail.config_dir())
+            .stdin(std::process::Stdio::from(file))
+            .output()
+            .expect("run")
+    };
+
+    // A writable regular file on stdin refuses before the target runs.
+    let writable = jail.root().join("outside-writable.txt");
+    std::fs::write(&writable, b"original\n").expect("write");
+    let output = run_with_stdin(&writable);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "a writable regular file as stdin should refuse: {stderr}"
+    );
+    assert!(stderr.contains("invalid_fd"), "{stderr}");
+    assert!(stderr.contains("writable"), "{stderr}");
+    assert_eq!(
+        std::fs::read(&writable).unwrap(),
+        b"original\n",
+        "the refused run must not have touched the file"
+    );
+
+    // A read-only regular file runs, and a contained child appending to
+    // /dev/stdin still cannot change it: the reopen is narrowed by the
+    // inode's permission bits.
+    use std::os::unix::fs::PermissionsExt as _;
+    let readonly = jail.root().join("outside-readonly.txt");
+    std::fs::write(&readonly, b"original\n").expect("write");
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+    let file = std::fs::File::open(&readonly).expect("open");
+    let output = Command::new(harness::jail_path())
+        .arg("run")
+        .arg("--profile")
+        .arg("tool")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("printf appended >> /dev/stdin; test ! -w /dev/stdin")
+        .env("OURO_DATA_DIR", jail.data_dir())
+        .env("OURO_CONFIG_DIR", jail.config_dir())
+        .stdin(std::process::Stdio::from(file))
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a read-only regular file as stdin must run: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&readonly).unwrap(),
+        b"original\n",
+        "the contained child must not be able to change a read-only stdin file"
+    );
+
+    // No stream may redirect into the trusted config directory. Stdin
+    // cannot probe this — a valid config.toml is 0600, which the writable
+    // rule above already refuses — so the plant vector this leg drives is a
+    // stdout redirect over the operator's config.
+    let config = jail.config_dir().join("config.toml");
+    std::fs::write(&config, b"[jail]\n").expect("write");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("the hardened reader requires operator-only config");
+    let sink = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&config)
+        .expect("the redirect target opens");
+    let output = Command::new(harness::jail_path())
+        .arg("run")
+        .arg("--profile")
+        .arg("tool")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--")
+        .arg(&fixture)
+        .arg("exit")
+        .arg("0")
+        .env("OURO_DATA_DIR", jail.data_dir())
+        .env("OURO_CONFIG_DIR", jail.config_dir())
+        .stdout(std::process::Stdio::from(sink))
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "a trusted config file as stdout should refuse: {stderr}"
+    );
+    assert!(stderr.contains("invalid_fd"), "{stderr}");
+    assert!(stderr.contains("config directory"), "{stderr}");
+    assert_eq!(std::fs::read(&config).unwrap(), b"[jail]\n");
+}
+
+/// Audit 2026-10-08 H2: a `#!` script run directly as the target loads the
+/// interpreter its line names, not the script. The target's exec must
+/// confirm through the interpreter image and the kernel's argv script slot,
+/// so the run completes under the default strict evidence mode — no false
+/// `exec_image_mismatch`, `exec_observed`, exit 0.
+#[test]
+fn r3_a_shebang_target_confirms_and_runs_under_strict_evidence() {
+    if !live() {
+        return;
+    }
+    let case = case();
+    let script = case.workspace.join("s.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nexec {} exit 0\n", case.fixture.display()),
+    )
+    .expect("write");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let run = case
+        .jail
+        .target([script.to_str().unwrap()])
+        .run()
+        .expect("run");
+    assert_eq!(
+        run.code(),
+        Some(0),
+        "a #! target must run under strict evidence: {}",
+        run.stderr_text()
+    );
+    let receipt = settled(&run);
+    assert_eq!(
+        receipt.pointer("/exec_observed"),
+        Some(&serde_json::Value::Bool(true)),
+        "the interpreter rewrite must still confirm the target exec"
+    );
+    assert_eq!(receipt.pointer("/outcome/kind"), Some(&serde_json::json!("exited")));
+    assert_eq!(receipt.pointer("/outcome/code"), Some(&serde_json::json!(0)));
+    let mismatches = audit_events(&run)
+        .into_iter()
+        .filter(|event| {
+            event.get("kind").and_then(serde_json::Value::as_str) == Some("gap")
+                && event
+                    .pointer("/fields/reason")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|reason| reason.contains("exec_image_mismatch"))
+        })
+        .count();
+    assert_eq!(mismatches, 0, "a #! target is not an image mismatch");
+}
+
 // ===========================================================================
 // 4. Lifecycle honesty
 // ===========================================================================
@@ -2065,7 +2238,12 @@ fn r1_a_placeholder_the_run_filled_is_kept_not_removed() {
         let _ = std::fs::remove_file(&planted);
         let _ = std::fs::remove_dir(&git);
     } else {
-        eprintln!("skipped: the placeholder could not be filled from outside");
+        // A bare eprintln is captured by libtest and never reaches the
+        // driver's skip scan, so an unmet precondition would look like a
+        // pass. Decide the way [`common::live`] does.
+        ouro_fixture::harness::skip_or_fail(
+            "the placeholder could not be filled from outside",
+        );
     }
 }
 

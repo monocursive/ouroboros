@@ -250,3 +250,46 @@ fn s02_the_pseudo_fs_refusal_follows_the_source_not_the_spelling() {
     );
     assert!(marker.is_file(), "the ordinary run did not execute");
 }
+
+/// The ancestor leg of the guard is driven through `ouro-jail run`, not only
+/// by the portable rule test: `--ro /sys/fs` is an ancestor of the cgroupfs
+/// mount (and itself on sysfs), and `--rw /run` is an ancestor of the
+/// `/run/user/<uid>` tmpfs submount (or that tmpfs mount itself). Each
+/// refuses with `policy_widening` before exec and the target never runs.
+/// What a stock host cannot separate here: `/`, the one strict ancestor of
+/// proc/sysfs that is not itself on a pseudo filesystem, is refused earlier
+/// by the state-isolation rule (`s02_the_pseudo_fs_refusal_follows_the_source
+/// _not_the_spelling`), so the pure topology branch with no fstype or
+/// mount-point co-evidence stays with the portable rule test.
+#[test]
+fn s02_an_ancestor_of_a_pseudo_fs_mount_refuses_through_run() {
+    if !common::live() {
+        return;
+    }
+    for (profile, grant, ro) in [
+        ("tool", "/sys/fs", true),
+        ("agent", "/sys/fs", true),
+        ("tool", "/run", false),
+        ("agent", "/run", false),
+    ] {
+        if !Path::new(grant).exists() {
+            continue;
+        }
+        let (code, stderr, ran) = if ro {
+            ro_grant_run(profile, Path::new(grant))
+        } else {
+            rw_grant_run(profile, Path::new(grant))
+        };
+        let key = if ro {
+            "filesystem.read_only"
+        } else {
+            "filesystem.read_write"
+        };
+        assert_eq!(code, Some(125), "{profile} --grant {grant}: {stderr}");
+        assert!(!ran, "{profile} --grant {grant}: the target ran");
+        assert!(
+            stderr.contains("policy_widening") && stderr.contains(key),
+            "{profile} --grant {grant}: {stderr}"
+        );
+    }
+}

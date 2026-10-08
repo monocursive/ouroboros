@@ -1289,10 +1289,20 @@ authority; the backend must prevent TIOCSTI-style terminal injection.
 
 Reject socket or directory stdio descriptors for contained runs, and reject
 regular-file stdio that resolves into protected supervisor state, which is
-the whole runtime state root of §6.2, not only this attempt's directory; a
-stdio descriptor that cannot be inspected refuses rather than being skipped. Pipes, tty
-devices, `/dev/null` and operator-selected ordinary file redirects are allowed;
-receipts record descriptor kinds without exposing paths. All other fds close
+the whole runtime state root of §6.2, not only this attempt's directory, or
+into the trusted config directory (`config.toml`, launch profiles); a
+stdio descriptor that cannot be inspected refuses rather than being skipped.
+Pipes, tty devices, `/dev/null` and read-only ordinary file redirects are
+allowed; a writable ordinary file as *stdin* refuses, because the child's
+`/dev/stdin` reopens it through the sandbox's own `/proc` against the host
+mount, and that reopen checks the file's inode permissions — never the
+descriptor's open mode — so a redirect would hand the child write-and-
+truncate authority over the whole file outside every grant. An operator
+selecting a regular-file stdout or stderr sink grants the child that file's
+inode permissions too (append, truncate, and read-back of prior contents
+when the inode allows it); choose a fresh sink per run when earlier contents
+must stay private to the operator. Receipts record descriptor kinds without
+exposing paths. All other fds close
 before exec, including namespace, directory, BPF, proxy-authority, state,
 receipt, gate, control and trace fds. Any inside bridge gets only its declared
 data-plane socket, never supervisor control authority.
@@ -2073,7 +2083,20 @@ agreement is the strongest check a passive observer can make, and any
 disagreement — including memory that can no longer be read — drops the event
 and records one `argument_snapshot_unstable` gap of that call's own classes.
 A falsified classification (a mutation recorded as a read, or a path that
-was never used) can therefore never be presented as an observed fact.
+was never used) therefore cannot be presented as an observed fact — for
+open-class calls outright, and for the others within the residual the next
+paragraph names.
+
+Residual (audit 2026-10-08, L8): the exit re-read is byte-stability, and
+an A-B-A rewrite — flip for the kernel, restore for the re-read — passes
+it. Open-class calls are corroborated against the kernel's own resolution
+of the returned descriptor (`/proc/<tid>/fd/<ret>`, the F4 rule), which no
+tracee rewrite reaches; non-open path operations (rename, unlink, mkdir,
+mknod, link, symlink, truncate, a failed exec, connect) have no such
+kernel record, so for them the exit re-read bounds the claim to "the
+argument memory was stable across the call", not "the kernel used this
+path". A race that rewrites one of those arguments for the kernel and
+restores it before the exit is inside that residual.
 Register arguments need no re-read: the kernel consumes the saved registers
 this stop pair already saw. Security audit 2026-09-26, A1, closes the two
 residuals of that rule. First, an `openat2` whose flags live in memory can
@@ -2098,6 +2121,21 @@ resolves to the image's inode confirms (through symlinks, and after the
 image was unlinked, when the link still resolves), the stripped form
 confirms only when no live file under the stripped name is a different
 image, and a live different file there is the mismatch gap.
+
+Security audit 2026-10-08, H2: a `#!` target loads the interpreter its
+script names, so the kernel's image is not one of the target's spellings,
+and the mismatch rule above would refuse every script target. The
+confirmation therefore also accepts the kernel's own record of that
+rewrite: the image is the interpreter a target candidate's first line
+names — read through the tracee's root at the exec stop, identity first —
+and the kernel's argv (`/proc/<tid>/cmdline`, read in the same stopped
+window) carries the pathname this exec was called with in the interpreter's
+script slot, after the interpreter and its optional single argument, under
+the candidate's own spelling. The interpreter image alone confirms
+nothing: a direct exec of the interpreter that does not run the script
+stays the mismatch gap above. A `binfmt_misc` handler with no `#!` line to
+read is inside the residual: it records the mismatch, never a false
+confirmation.
 
 Only a call the observer must follow takes an in-flight slot: a call outside
 the closed set is classified at its entry and is never `inflight_exhausted`. A
@@ -2283,7 +2321,16 @@ the rules no schema states. A frozen file whose bytes change is, by rule, a new
 identifier: its entry is never re-blessed in place. The drift test and the
 contract validator refuse any byte change under a recorded SHA-256; they cannot
 refuse an edit of the recorded SHA-256 itself, which is visible in review and
-which this rule forbids. No two schema files may declare one `$id`. After
+which this rule forbids.
+
+Superseded rule, kept for the historical record: [jail v2 §0](../jail-v2.md)
+changed it for the pre-release tree. Because this is not live software, a
+frozen schema or artifact may be re-blessed in place under the same
+identifier: its recorded SHA-256 is regenerated together with its fixtures and
+validators in one reviewable commit, and historical milestone evidence stays
+historical. `16336791` re-blessed `jail-receipt` and
+`policy-snapshot` this way, adding the swap/storage/inode limit ceilings —
+new snapshot fields and new receipt limit-row kinds — as additive fields. No two schema files may declare one `$id`. After
 freeze, a breaking semantic change needs a new schema identifier. Additive
 platform details cannot change a shared field's meaning. `explain --json`,
 `gc --json` and the private `jail-state.json` (`ouro.jail.state/1`) are not
@@ -2586,6 +2633,11 @@ Required Linux probes:
 - Filter loading, an allowed operation and a rejected representative syscall.
 - Delegated cgroup creation, target placement, required controllers, force kill
   and empty verification using a tiny owned fixture.
+- The `storage_ceiling` prerequisite of the §6.4 limits: whether a writable
+  filesystem on this host carries a hard ceiling a `--limit storage` or
+  `--limit inodes` run can charge — bounded tmpfs capacity, or the calling
+  user's ext4/XFS hard quota — classified the way admission classifies a
+  writable mount. An unbounded filesystem makes both rows `unavailable`.
 - Observer attachment to a blocked launcher and a matched fixture operation,
   plus unavailable/loss accounting; attaching without following a real call
   is insufficient.

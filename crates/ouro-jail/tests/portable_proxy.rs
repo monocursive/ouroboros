@@ -783,6 +783,61 @@ fn n03_host_and_absolute_uri_disagreement_refuses_before_resolution() {
     harness.stop(WAIT);
 }
 
+/// Plaintext HTTP requires a grant that named its port explicitly (audit
+/// 2026-10-08 L21): a host-only grant is the omitted-port expansion to 443,
+/// the TLS shape, so a plain request to it is refused before resolution.
+/// Any explicitly granted port serves plaintext — 80 or an origin port —
+/// and CONNECT is not subject to the rule.
+#[test]
+fn n03_plaintext_http_requires_a_grant_that_named_its_port() {
+    let resolver = fixtures("", &[]);
+    let closed_port = {
+        let (listener, port) = loopback();
+        drop(listener);
+        port
+    };
+    // Plaintext against a host-only (port 443) grant is refused.
+    let harness = start(&allow(&["127.0.0.1"]), &resolver);
+    let (status, reason) = refused(
+        &harness,
+        "GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+    );
+    assert_eq!((status, reason.as_str()), (403, "host_not_allowed"));
+    harness.stop(WAIT);
+    // The same request under an explicit port-80 grant passes the host rule
+    // and proceeds to connect (which fails on the closed port).
+    let harness = start(&allow(&["127.0.0.1:80"]), &resolver);
+    let (status, reason) = refused(
+        &harness,
+        "GET http://127.0.0.1:80/ HTTP/1.1\r\nHost: 127.0.0.1:80\r\n\r\n",
+    );
+    assert_eq!((status, reason.as_str()), (502, "connect_failed"));
+    harness.stop(WAIT);
+    // An explicit non-80 grant serves a plaintext origin on that port: the
+    // omitted-port expansion is the only shape the rule refuses.
+    let harness = start(
+        &allow(&[&format!("127.0.0.1:{closed_port}")]),
+        &resolver,
+    );
+    let (status, reason) = refused(
+        &harness,
+        &format!("GET http://127.0.0.1:{closed_port}/ HTTP/1.1\r\nHost: 127.0.0.1:{closed_port}\r\n\r\n"),
+    );
+    assert_eq!((status, reason.as_str()), (502, "connect_failed"));
+    harness.stop(WAIT);
+    // CONNECT to a non-80 port is unaffected by the rule.
+    let harness = start(
+        &allow(&[&format!("127.0.0.1:{closed_port}")]),
+        &resolver,
+    );
+    let (status, reason) = refused(
+        &harness,
+        &connect_request(&format!("127.0.0.1:{closed_port}")),
+    );
+    assert_eq!((status, reason.as_str()), (502, "connect_failed"));
+    harness.stop(WAIT);
+}
+
 #[test]
 fn n03_numeric_requests_need_an_exact_grant_and_are_never_resolved() {
     let (listener, port) = loopback();

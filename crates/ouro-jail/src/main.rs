@@ -391,13 +391,28 @@ fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> 
     }))
 }
 
+// Security 2026-10-08 (audit M1): the text rendering is a pure function, so
+// the escaping of untrusted strings is unit-testable; every field a workspace
+// `ouro.toml` or a child-chosen name can carry goes through
+// `records::escape_control` before it reaches the terminal.
 fn print_explain_text(report: &ExplainReport) {
+    print!("{}", explain_text(report));
+}
+
+fn explain_text(report: &ExplainReport) -> String {
+    use std::fmt::Write as _;
     let snapshot = &report.resolved.snapshot;
-    println!("policy {}", report.resolved.policy_name);
-    println!("profile {}", snapshot.profile.as_str());
-    println!("platform {}", snapshot.platform.as_str());
-    println!("digest {}", report.resolved.digest);
-    println!(
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "policy {}",
+        records::escape_control(&report.resolved.policy_name)
+    );
+    let _ = writeln!(out, "profile {}", snapshot.profile.as_str());
+    let _ = writeln!(out, "platform {}", snapshot.platform.as_str());
+    let _ = writeln!(out, "digest {}", report.resolved.digest);
+    let _ = writeln!(
+        out,
         "observation mode={} evidence={}",
         match snapshot.observation.mode {
             records::ObserveMode::On => "on",
@@ -408,17 +423,30 @@ fn print_explain_text(report: &ExplainReport) {
             records::EvidenceMode::BestEffort => "best-effort",
         }
     );
-    println!("network {}", snapshot.network.mode);
+    let _ = writeln!(out, "network {}", snapshot.network.mode);
     for reference in &snapshot.filesystem.read_write {
-        println!("read_write {}", reference.to_display());
+        let _ = writeln!(
+            out,
+            "read_write {}",
+            records::escape_control(&reference.to_display())
+        );
     }
     for reference in &snapshot.filesystem.read_only {
-        println!("read_only {}", reference.to_display());
+        let _ = writeln!(
+            out,
+            "read_only {}",
+            records::escape_control(&reference.to_display())
+        );
     }
     for reference in &snapshot.filesystem.deny_read {
-        println!("deny_read {}", reference.to_display());
+        let _ = writeln!(
+            out,
+            "deny_read {}",
+            records::escape_control(&reference.to_display())
+        );
     }
-    println!(
+    let _ = writeln!(
+        out,
         "protected_coverage {}",
         snapshot.filesystem.protected_coverage.as_str()
     );
@@ -429,7 +457,8 @@ fn print_explain_text(report: &ExplainReport) {
         ("cpu", &snapshot.limits.cpu),
     ] {
         if let Some(ceiling) = ceiling {
-            println!(
+            let _ = writeln!(
+                out,
                 "limit {key}={} required={}",
                 ceiling.value, ceiling.required
             );
@@ -437,28 +466,38 @@ fn print_explain_text(report: &ExplainReport) {
     }
     // J3-launch begin: the launch group by the profile's own names only
     if let Some(launch) = &snapshot.launch {
-        println!(
+        let _ = writeln!(
+            out,
             "launch state_var={} home_is_state={}",
-            launch.state_var.as_deref().unwrap_or("none"),
+            match &launch.state_var {
+                Some(state_var) => records::escape_control(state_var),
+                None => "none".to_owned(),
+            },
             launch.home_is_state
         );
         for subdir in &launch.state_subdirs {
-            println!("launch state_subdir {}", subdir.to_display());
+            let _ = writeln!(
+                out,
+                "launch state_subdir {}",
+                records::escape_control(&subdir.to_display())
+            );
         }
         for credential in &launch.credentials {
-            println!(
+            let _ = writeln!(
+                out,
                 "launch credential {} mode={} dest={} source=omitted",
-                credential.id,
-                credential.mode,
-                credential.dest.to_display()
+                records::escape_control(&credential.id),
+                records::escape_control(&credential.mode),
+                records::escape_control(&credential.dest.to_display())
             );
         }
     }
     // J3-launch end
     for requirement in &report.resolved.requirements {
-        println!("requirement {requirement} unmeasured");
+        let _ = writeln!(out, "requirement {requirement} unmeasured");
     }
-    println!("capabilities unmeasured (explain does not probe)");
+    let _ = writeln!(out, "capabilities unmeasured (explain does not probe)");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -568,15 +607,26 @@ fn binaries_json() -> serde_json::Value {
 }
 // J5-D end
 
+// Security 2026-10-08 (audit M1): the launch-profile name and credential
+// fields come from a workspace `launch.toml`, so they are escaped like every
+// other text rendering; the pure helper is unit-testable.
 fn print_doctor_text(report: &DoctorReport) {
-    println!(
+    print!("{}", doctor_text(report));
+}
+
+fn doctor_text(report: &DoctorReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "platform {} {} ({})",
         report.platform.os.as_str(),
         report.platform.arch,
         report.platform.kernel
     );
     for capability in &report.capabilities {
-        println!(
+        let _ = writeln!(
+            out,
             "capability {} {} scope={} reason={}",
             capability.name,
             status_name(capability),
@@ -586,16 +636,20 @@ fn print_doctor_text(report: &DoctorReport) {
     }
     // J3-launch begin: §14.1 launch readiness, names and statuses only
     if let Some(launch) = &report.launch {
-        println!(
+        let _ = writeln!(
+            out,
             "launch {} {} reason={}",
-            launch.name, launch.support, launch.support_reason
+            records::escape_control(&launch.name),
+            launch.support,
+            launch.support_reason
         );
         for check in &launch.credentials {
-            println!(
+            let _ = writeln!(
+                out,
                 "credential {} mode={} dest={} {} reason={}",
-                check.id,
+                records::escape_control(&check.id),
                 check.mode,
-                check.dest.to_display(),
+                records::escape_control(&check.dest.to_display()),
                 if check.available {
                     "available"
                 } else {
@@ -606,7 +660,8 @@ fn print_doctor_text(report: &DoctorReport) {
         }
     }
     // J3-launch end
-    println!("ready {}", report.ready);
+    let _ = writeln!(out, "ready {}", report.ready);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -650,14 +705,20 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     for entry in &report.entries {
-        let _ = writeln!(
-            out,
-            "{} {} {}",
-            entry.attempt_id, entry.action, entry.reason
-        );
+        // Security 2026-10-08 (audit M1): the attempt id and the path-like
+        // fields are child-chosen or observed on disk, so they are escaped
+        // before reaching the terminal; `action` and `reason` are this
+        // crate's own spellings.
+        let attempt_id = records::escape_control(&entry.attempt_id);
+        let _ = writeln!(out, "{} {} {}", attempt_id, entry.action, entry.reason);
         // J3-agent begin
         if let Some(proxy_dir) = &entry.proxy_dir {
-            let _ = writeln!(out, "{} proxy_dir {proxy_dir}", entry.attempt_id);
+            let _ = writeln!(
+                out,
+                "{} proxy_dir {}",
+                attempt_id,
+                records::escape_control(proxy_dir)
+            );
         }
         // J3-agent end
         // J4-G begin
@@ -669,19 +730,29 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
             ("scratch", &entry.scratch),
         ] {
             if let Some(value) = value {
-                let _ = writeln!(out, "{} {key} {value}", entry.attempt_id);
+                let _ = writeln!(out, "{} {key} {}", attempt_id, records::escape_control(value));
             }
         }
         for action in &entry.recorded {
-            let _ = writeln!(out, "{} recorded {action}", entry.attempt_id);
+            let _ = writeln!(out, "{} recorded {action}", attempt_id);
         }
         // J4-G end
         // J4 W2-S begin
         for name in &entry.leftover_temp_files {
-            let _ = writeln!(out, "{} leftover_temp_file {name}", entry.attempt_id);
+            let _ = writeln!(
+                out,
+                "{} leftover_temp_file {}",
+                attempt_id,
+                records::escape_control(name)
+            );
         }
         if let Some(temp_files) = &entry.temp_files {
-            let _ = writeln!(out, "{} temp_files {temp_files}", entry.attempt_id);
+            let _ = writeln!(
+                out,
+                "{} temp_files {}",
+                attempt_id,
+                records::escape_control(temp_files)
+            );
         }
         // J4 W2-S end
     }
@@ -754,7 +825,10 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
     // §6.1: `--label-only` prints the proposed execution label and describes
     // each capability; it executes nothing and copies no credential.
     if let Some(label) = &report.label {
-        println!("{label}");
+        // Security 2026-10-08 (audit M1): the label carries child-chosen
+        // names (target path, profile), so it is escaped like every other
+        // text rendering.
+        println!("{}", records::escape_control(label));
     }
     for capability in &report.capabilities {
         println!(
@@ -915,6 +989,109 @@ mod tests {
             serde_json::Value::Null
         );
         assert!(!gc_text(&report).contains("execution_boundary"));
+    }
+
+    // Security 2026-10-08 (audit M1): a resolved policy carrying a hostile
+    // workspace `ouro.toml` string must never render raw terminal control
+    // bytes. `minimal_resolved` mirrors `supervisor`'s own test helper.
+    fn m1_resolved() -> ouro_jail::policy::Resolved {
+        let profile = ouro_jail::policy::ProfileName::Tool;
+        let baseline =
+            ouro_jail::profiles::baseline(profile, records::Os::Macos, &|_| None);
+        let inputs = ouro_jail::policy::ResolveInputs {
+            platform: records::Os::Macos,
+            base_profile: profile,
+            policy_name: profile.as_str().to_owned(),
+            baseline,
+            workspace: b"/work".to_vec(),
+            scratch: ouro_jail::policy::ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: Vec::new(),
+        };
+        ouro_jail::policy::resolve(&inputs).expect("resolves")
+    }
+
+    fn m1_explain(mut resolved: ouro_jail::policy::Resolved) -> ExplainReport {
+        resolved.snapshot.filesystem.deny_read.push(
+            ouro_jail::policy::PathRef::host(
+                records::NativeString::from_bytes("sec\u{1b}]52;c;SGVsbG8=\u{7}ret")
+                    .expect("valid"),
+            ),
+        );
+        ExplainReport {
+            resolved,
+            platform: m1_platform(),
+        }
+    }
+
+    fn m1_platform() -> PlatformRecord {
+        PlatformRecord {
+            os: records::Os::Macos,
+            arch: std::env::consts::ARCH.to_owned(),
+            kernel: "test".to_owned(),
+        }
+    }
+
+    /// Audit M1: an OSC-52 payload from a workspace `ouro.toml`
+    /// `deny_read` entry rendered through `explain`'s text output carries no
+    /// raw ESC or BEL — the same class A6 fixed on stderr.
+    #[test]
+    fn an_osc52_deny_read_entry_is_escaped_in_explain_text() {
+        let text = explain_text(&m1_explain(m1_resolved()));
+        assert!(
+            text.contains(
+                "deny_read host:sec<U+001B>]52;c;SGVsbG8=<U+0007>ret"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains('\u{1b}'), "a raw ESC reached stdout: {text}");
+        assert!(!text.contains('\u{7}'), "a raw BEL reached stdout: {text}");
+    }
+
+    /// Audit M1: bidi controls in child-chosen names are escaped, and clean
+    /// ASCII renders byte-identically to the pre-M1 output.
+    #[test]
+    fn bidi_controls_are_escaped_and_clean_text_is_unchanged() {
+        let mut resolved = m1_resolved();
+        resolved.snapshot.filesystem.read_only.push(
+            ouro_jail::policy::PathRef::host(
+                records::NativeString::from_bytes("sec\u{202e}ret").expect("valid"),
+            ),
+        );
+        let text = explain_text(&ExplainReport {
+            resolved,
+            platform: m1_platform(),
+        });
+        assert!(text.contains("read_only host:sec<U+202E>ret"), "{text}");
+        assert!(!text.contains('\u{202e}'), "{text}");
+
+        // Clean input: byte-identical to the pre-M1 renderer.
+        let clean = explain_text(&ExplainReport {
+            resolved: m1_resolved(),
+            platform: m1_platform(),
+        });
+        assert!(clean.starts_with("policy tool\nprofile tool\n"), "{clean}");
+        assert!(clean.lines().any(|line| line == "capabilities unmeasured (explain does not probe)"), "{clean}");
+        assert!(clean.chars().all(|c| c.is_ascii() || !c.is_control()), "{clean}");
+    }
+
+    /// Audit M1: a hostile attempt id in `gc`'s text rendering is escaped
+    /// (the same renderer the A6 fix does not cover).
+    #[test]
+    fn gc_text_escapes_a_hostile_attempt_id() {
+        let mut report = gc_report(Some("removed"));
+        report.entries[0].attempt_id = "att\u{1b}]52;c;YQ==\u{7}".to_owned();
+        let text = gc_text(&report);
+        assert!(text.contains("att<U+001B>]52;c;YQ==<U+0007> retained"), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+
+        // And a bidi control in a leftover temp file name.
+        let mut report = gc_report(None);
+        report.entries[0].leftover_temp_files = vec!["\u{202e}tmp".to_owned()];
+        let text = gc_text(&report);
+        assert!(text.contains("leftover_temp_file <U+202E>tmp"), "{text}");
     }
 
     /// Review F7: `version` announces the closed set only where this build

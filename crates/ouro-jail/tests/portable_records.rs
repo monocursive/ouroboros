@@ -24,7 +24,7 @@ use ouro_jail::records::{
     EvidenceMode, GateExpectation, GateFrame, JailError, JailRecord, Lifetime, NativeLifetime,
     NativeString, ObserveMode, Os, Outcome, OutcomeKind, Phase, PlatformRecord, PolicyRecord,
     ProcessIdentity, ProcessRecord, Receipt, Remediation, SCHEMA_RECEIPT, StateCleanup,
-    parse_release, rfc3339_utc, rfc3339_utc_from_unix, semantic,
+    escape_control, parse_release, rfc3339_utc, rfc3339_utc_from_unix, semantic,
 };
 
 fn specs_dir() -> PathBuf {
@@ -235,7 +235,9 @@ fn r01_every_example_validates_against_its_schema() {
 /// the ones the product writes: `lifecycle` (`supervisor.rs`), `limit`
 /// (`platform/linux/audit.rs`), `lifetime` (`platform/linux/uncontained.rs`),
 /// `helper` (`platform/linux/agent.rs`) and `coverage_gap`
-/// (`platform/linux/audit.rs`, `trace.rs`).
+/// (`platform/linux/audit.rs`, `trace.rs`), `command_denied` (a
+/// `command_rule` hit, `platform/linux/audit.rs`) and `learning_read`
+/// (`platform/linux/audit.rs`).
 #[test]
 fn r01_every_event_kind_has_an_example() {
     let mut kinds = std::collections::BTreeSet::new();
@@ -269,7 +271,11 @@ fn r01_every_event_kind_has_an_example() {
         "audit fs.write syscall_return -",
         "audit fs.rename syscall_return -",
         "audit fs.unlink syscall_return -",
+        "audit fs.deny syscall_return proc.exec",
+        "audit fs.deny syscall_return fs.create",
         "audit fs.deny syscall_return fs.write",
+        "audit fs.deny syscall_return fs.rename",
+        "audit fs.deny syscall_return fs.unlink",
         "audit fs.deny syscall_return net.connect",
         "audit net.connect syscall_return -",
         "proxy net.connect proxy_close allow",
@@ -280,6 +286,8 @@ fn r01_every_event_kind_has_an_example() {
         "wrapper note wrapper lifetime",
         "wrapper note wrapper helper",
         "wrapper note wrapper coverage_gap",
+        "wrapper note wrapper command_denied",
+        "wrapper note wrapper learning_read",
     ] {
         assert!(
             kinds.contains(expected),
@@ -656,6 +664,36 @@ fn an_osc52_payload_in_an_error_is_rendered_without_raw_esc_or_bel() {
         "{line}"
     );
     assert!(!line.contains('\u{1b}'), "{line}");
+}
+
+/// Security 2026-10-08 (audit M1): bidi `Cf` controls are escaped like C0,
+/// so a child-chosen name cannot reorder what the operator reads; other
+/// `Cf` characters (ZWSP, joins) pass through untouched.
+#[test]
+fn bidi_control_characters_are_escaped_but_other_cf_pass_through() {
+    let bidi = "\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\
+                \u{2066}\u{2067}\u{2068}\u{2069}\
+                \u{200e}\u{200f}\u{061c}";
+    let expected = [
+        "<U+202A>", "<U+202B>", "<U+202C>", "<U+202D>", "<U+202E>",
+        "<U+2066>", "<U+2067>", "<U+2068>", "<U+2069>",
+        "<U+200E>", "<U+200F>", "<U+061C>",
+    ]
+    .concat();
+    assert_eq!(escape_control(bidi), expected);
+    // Escaping through the error line keeps the one-line contract: an RLO
+    // in a key path is visible, not an invisible reversal.
+    let line = invalid_config("x")
+        .with_key_path("jail.launch.name\u{202e}spoof")
+        .to_string();
+    assert!(
+        line.contains("jail.launch.name<U+202E>spoof"),
+        "{line}"
+    );
+    assert!(!line.contains('\u{202e}'), "{line}");
+    // Non-bidi Cf characters are ordinary invisible formatting, not
+    // reordering controls: they are not rewritten.
+    assert_eq!(escape_control("a\u{200b}b\u{2060}c"), "a\u{200b}b\u{2060}c");
 }
 
 #[test]

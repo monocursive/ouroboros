@@ -365,6 +365,111 @@ fn s11_protected_access_fails() {
     );
 }
 
+/// Audit 2026-10-08 M5: under `agent`, Git metadata stays writable except
+/// the two persistence points that would execute with the operator's
+/// authority on their next `git` command *outside* the jail. `.git/hooks`
+/// and `.git/config` refuse writes like `tool`'s whole-tree protection,
+/// while refs stay writable so commits work.
+#[test]
+fn s11_agent_protects_git_persistence_points() {
+    if !live() {
+        return;
+    }
+    let validators = validators();
+    let hooks_case = case();
+    std::fs::create_dir_all(hooks_case.workspace.join(".git/hooks")).expect("hooks");
+    std::fs::write(hooks_case.workspace.join(".git/config"), b"[core]\n").expect("config");
+    std::fs::create_dir_all(hooks_case.workspace.join(".git/refs/heads")).expect("refs");
+
+    let plant = hooks_case.workspace.join(".git/hooks/pre-commit");
+    let run = hooks_case
+        .jail
+        .arg("--profile")
+        .arg("agent")
+        .target([
+            hooks_case.fixture.as_os_str(),
+            OsStr::new("open"),
+            plant.as_os_str(),
+            OsStr::new("--create"),
+            OsStr::new("--write"),
+            OsStr::new("--expect"),
+            OsStr::new("EROFS"),
+        ])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(
+        run.code(),
+        Some(0),
+        "planting a hook must fail with EROFS: {}",
+        run.stderr_text()
+    );
+    assert_eq!(field(&fixture_op(&run, "openat"), "/errno"), "EROFS");
+    assert!(!plant.exists(), "a hook was planted");
+
+    let config_case = case();
+    std::fs::create_dir_all(config_case.workspace.join(".git")).expect("git");
+    std::fs::write(config_case.workspace.join(".git/config"), b"[core]\n").expect("config");
+    let config = config_case.workspace.join(".git/config");
+    let run = config_case
+        .jail
+        .arg("--profile")
+        .arg("agent")
+        .target([
+            config_case.fixture.as_os_str(),
+            OsStr::new("open"),
+            config.as_os_str(),
+            OsStr::new("--write"),
+            OsStr::new("--expect"),
+            OsStr::new("EROFS"),
+        ])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(
+        run.code(),
+        Some(0),
+        "rewriting git config must fail with EROFS: {}",
+        run.stderr_text()
+    );
+    assert_eq!(
+        std::fs::read(config).unwrap(),
+        b"[core]\n",
+        "the protected config changed"
+    );
+
+    // Objects and refs stay writable: a commit's writes succeed.
+    let refs_case = case();
+    std::fs::create_dir_all(refs_case.workspace.join(".git/refs/heads")).expect("refs");
+    let head = refs_case.workspace.join(".git/refs/heads/topic");
+    let run = refs_case
+        .jail
+        .arg("--profile")
+        .arg("agent")
+        .target([
+            refs_case.fixture.as_os_str(),
+            OsStr::new("open"),
+            head.as_os_str(),
+            OsStr::new("--create"),
+            OsStr::new("--write"),
+        ])
+        .run()
+        .expect("the jail runs");
+    assert_eq!(
+        run.code(),
+        Some(0),
+        "writing a ref must stay allowed: {}",
+        run.stderr_text()
+    );
+    assert!(head.is_file(), "the ref write did not land");
+
+    let receipts = receipts_of(&run, &validators);
+    let settled = receipts.phase("settled");
+    assert_eq!(field(settled, "/containment"), "enforced");
+    assert_eq!(
+        field(settled, "/applied/filesystem/protected_coverage"),
+        "existing_and_root"
+    );
+}
+
 #[test]
 fn s11_exec_descendant() {
     if !live() {

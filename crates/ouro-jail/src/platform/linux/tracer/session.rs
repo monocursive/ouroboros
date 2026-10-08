@@ -154,6 +154,14 @@ pub(super) trait ProcView: Send {
             .ok()
             .map(|link| link.into_os_string().into_vec())
     }
+    /// The link count of the file `/proc/<tid>/fd/<fd>` resolves to (audit 7
+    /// L7): 0 once the file is unlinked. `None` when it cannot be read.
+    fn fd_nlink(&self, tid: pid_t, fd: i64) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(format!("/proc/{tid}/fd/{fd}"))
+            .ok()
+            .map(|meta| meta.nlink())
+    }
 }
 
 /// `/proc`, read now.
@@ -612,7 +620,26 @@ fn components(path: &[u8]) -> impl DoubleEndedIterator<Item = &[u8]> {
 /// threads, which run while this one is stopped, so a sibling can put a
 /// same-named file at descriptor `ret` before the link is read. That is the
 /// residual of reading a shared table from outside the process.
-fn path_corroborated(snapshot: &[u8], resolved: &[u8], tmpfile: bool) -> bool {
+///
+/// Audit 7 L7, the ` (deleted)` annotation: the kernel appends it to an
+/// unlinked file's link, but a live file can also be
+/// *named* that way, so the annotation alone would let a decoy named
+/// `README.md (deleted)` pass an A-B-A race as a certified `README.md`
+/// claim. When the annotation is present and the open is not an
+/// `O_TMPFILE` (whose descriptor is legitimately unnamed), the link count
+/// read from the descriptor decides: only a file whose count has reached 0
+/// corroborates. `nlink` is `None` when the count could not be read or was
+/// never asked for; an unreadable count does not corroborate. The check only
+/// ever weakens.
+fn path_corroborated(
+    snapshot: &[u8],
+    resolved: &[u8],
+    tmpfile: bool,
+    nlink: Option<u64>,
+) -> bool {
+    if resolved.ends_with(b" (deleted)") && !tmpfile && nlink != Some(0) {
+        return false;
+    }
     let resolved = resolved.strip_suffix(b" (deleted)").unwrap_or(resolved);
     if !resolved.starts_with(b"/") {
         return false;
@@ -817,14 +844,23 @@ impl Session {
     /// These are fixed-size, so admitting them whatever the byte budget can
     /// overshoot it only by their own small size — the alternative is a
     /// supervisor without the exit status it exists to report.
+    ///
+    /// Audit 7 L10: an `Exec` that carries a command hit is critical too.
+    /// The kill itself happens at the exec stop, but the `command_rule` note
+    /// rides on this event, and a best-effort `forbid` needs the
+    /// `Fact::CommandForbidden` it carries to stop the run; a verdict lost
+    /// to queue pressure would leave a forbidden command unreported.
     fn is_critical(event: &TracerEvent) -> bool {
-        matches!(
-            event,
-            TracerEvent::Exit { .. }
-                | TracerEvent::Gap { .. }
-                | TracerEvent::Finished
-                | TracerEvent::UntracedChildExit { .. }
-        )
+        match event {
+            TracerEvent::Exec { command, .. } => command.is_some(),
+            event => matches!(
+                event,
+                TracerEvent::Exit { .. }
+                    | TracerEvent::Gap { .. }
+                    | TracerEvent::Finished
+                    | TracerEvent::UntracedChildExit { .. }
+            ),
+        }
     }
 
     /// The closed-set operations a lost event would have carried, so a gap
@@ -1555,6 +1591,27 @@ impl Session {
             .filter(|(pid, _)| *pid == tgid)
             .map_or(&[][..], |(_, images)| images.as_slice());
         let kernel_image = proc::kernel_exe(tid, images);
+        // Audit 2026-10-08 H2: a `#!` target loads the interpreter its
+        // script names, so the kernel image is not one of the target's own
+        // spellings. The evidence for that rewrite — each candidate's first
+        // line read through the tracee's root, and the kernel's own copy of
+        // the new argv — is read in this same stopped window; the
+        // confirmation decision stays with the observer, which already owns
+        // the kernel image's.
+        let (shebangs, kernel_argv) = if kernel_image.is_some() && !images.is_empty() {
+            (
+                images
+                    .iter()
+                    .map(|candidate| proc::shebang_image(tid, candidate))
+                    .collect(),
+                self.procfs
+                    .cmdline(tid)
+                    .as_deref()
+                    .and_then(proc::parse_cmdline),
+            )
+        } else {
+            (Vec::new(), None)
+        };
         if command.is_some() {
             // The hit is live: the process dies before its image runs an
             // instruction — after the image was read above, so the event
@@ -1573,6 +1630,8 @@ impl Session {
             kernel_image,
             dirfd,
             command,
+            shebangs,
+            kernel_argv,
             monotonic_ns: clock::boottime_ns(),
         });
     }
@@ -1616,6 +1675,28 @@ impl Session {
             return Some(InFlight::Untraced);
         }
         None
+    }
+
+    /// Whether a covered, register-sourced read-only open is filtered at
+    /// its entry (`--read-open-fast-path`), counted as such. An `openat2`
+    /// never is: its flags live in tracee memory the kernel re-reads after
+    /// this stop (audit 2026-09-25-2, S1), so a read-only verdict there is
+    /// only an assertion until the exit re-read confirms it, and the call
+    /// is followed to its exit. Filtered at entry, a sibling flipping
+    /// `open_how.flags` between the two kernel reads could perform a
+    /// covered mutation with no event and no gap.
+    fn filter_readonly_open_at_entry(&mut self, entry: &'static Entry) -> bool {
+        if matches!(entry.flags, FlagSource::OpenHow { .. }) {
+            return false;
+        }
+        // A read-only open is outside `linux-closed-v1`. It is not a loss,
+        // it is not an event, and the tracee is continued from here rather
+        // than stepped to a syscall exit nobody reads. It is filtered before
+        // the in-flight bound is consulted (J4 O-1): with the table full it
+        // is still not a call the observer had to follow, so refusing it
+        // would record a read as lost evidence.
+        self.summary.filtered_readonly_opens += 1;
+        true
     }
 
     /// A `PTRACE_EVENT_SECCOMP` stop: the tracee is at the entry of a call
@@ -1708,22 +1789,9 @@ impl Session {
             && !closed_set::open_is_covered(flags)
         {
             // Register-sourced flags are the kernel's own saved pt_regs, so
-            // an entry-time read-only verdict is final. `openat2`'s flags
-            // live in tracee memory the kernel re-reads after this stop
-            // (audit 2026-09-25-2, S1): a read-only verdict there is only an
-            // assertion until an exit re-read confirms it, so the call is
-            // followed to its exit. Unfollowed, a sibling flipping
-            // `open_how.flags` between the two kernel reads could perform a
-            // covered mutation with no event and no gap.
-            if !matches!(entry.flags, FlagSource::OpenHow { .. }) {
-                // A read-only open is outside `linux-closed-v1`. It is not a
-                // loss, it is not an event, and the tracee is continued from
-                // here rather than stepped to a syscall exit nobody reads.
-                // It is filtered before the in-flight bound is consulted
-                // (J4 O-1): with the table full it is still not a call the
-                // observer had to follow, so refusing it would record a read
-                // as lost evidence.
-                self.summary.filtered_readonly_opens += 1;
+            // an entry-time read-only verdict is final. `openat2`'s verdict
+            // never is — see [`Session::filter_readonly_open_at_entry`].
+            if self.filter_readonly_open_at_entry(entry) {
                 return;
             }
             // The verification follow costs an in-flight slot like any
@@ -2146,7 +2214,19 @@ impl Session {
             let corroborated = self
                 .procfs
                 .fd_link(tid, rval)
-                .is_some_and(|resolved| path_corroborated(&snapshot.bytes, &resolved, tmpfile));
+                .is_some_and(|resolved| {
+                    // Audit 7 L7: the kernel's ` (deleted)` annotation can
+                    // also be a live file's literal name, so when the raw
+                    // link carries it the descriptor's link count — read
+                    // while the tracee is stopped — must agree the file is
+                    // truly unlinked.
+                    let nlink = if resolved.ends_with(b" (deleted)") {
+                        self.procfs.fd_nlink(tid, rval)
+                    } else {
+                        None
+                    };
+                    path_corroborated(&snapshot.bytes, &resolved, tmpfile, nlink)
+                });
             if !corroborated {
                 self.summary.path_claims_unverified += 1;
                 self.gap(GapReason::PathClaimUnverified, OpSet::EMPTY, Some(1));
@@ -2299,7 +2379,9 @@ impl Session {
             sys::PTRACE_EVENT_STOP | sys::PTRACE_EVENT_EXIT | sys::PTRACE_EVENT_EXEC => None,
             0 if signal != sys::SYSCALL_STOP_SIG => {
                 if signal == libc::SIGTRAP {
-                    if let Some(uc) = delivered.and_then(|sig| self.handler_entry(tid, sig)) {
+                    if let Some(uc) =
+                        delivered.and_then(|sig| self.handler_entry(tid, sig, site.ip, site.ip + 4))
+                    {
                         // The kernel has set up a handler and settled the
                         // call. This notification is not a signal: nothing
                         // is delivered for it.
@@ -2349,12 +2431,18 @@ impl Session {
     /// tracee: `si_code` is the notification's own, then the native register
     /// reader verifies the delivered signal and locates the kernel frame.
     /// An ordinary signal-delivery stop is not this handler-entry stop.
-    fn handler_entry(&mut self, tid: pid_t, delivered: libc::c_int) -> Option<u64> {
+    fn handler_entry(
+        &mut self,
+        tid: pid_t,
+        delivered: libc::c_int,
+        site_ip: u64,
+        next_ip: u64,
+    ) -> Option<u64> {
         let (signo, code) = sys::siginfo(tid).ok()?;
         if signo != libc::SIGTRAP || code != sys::SI_CODE_HANDLER_ENTRY {
             return None;
         }
-        sys::handler_ucontext(tid, u64::try_from(delivered).ok()?).ok()?
+        sys::handler_ucontext(tid, u64::try_from(delivered).ok()?, site_ip, next_ip).ok()?
     }
 
     /// The interrupted result register and PC the kernel saved in the frame
@@ -3076,6 +3164,92 @@ mod tests {
             "the raced call never counts as filtered"
         );
     }
+
+    /// Security 2026-09-25-2 (audit S1), mutation-B10 guard: the entry
+    /// filter never takes an `openat2`, whatever its flags claim — its
+    /// verdict is memory-sourced and only the exit re-read may certify it —
+    /// while a read-only `open`/`openat` (register-sourced) is the entry
+    /// fast path and is counted as filtered.
+    #[test]
+    fn the_entry_filter_never_takes_a_readonly_openat2() {
+        let (mut session, _rx) = stalled_session();
+        let openat2 = closed_set::lookup(437).expect("openat2");
+        let openat = closed_set::lookup(u64::from(crate::platform::linux::abi::nr(257, 56)))
+            .expect("openat");
+        assert!(
+            !session.filter_readonly_open_at_entry(openat2),
+            "an openat2 is always followed to its exit (audit 2026-09-25-2 S1)"
+        );
+        assert_eq!(
+            session.summary.filtered_readonly_opens, 0,
+            "the followed call is not counted as filtered either"
+        );
+        assert!(
+            session.filter_readonly_open_at_entry(openat),
+            "a register-sourced read-only open is the entry fast path"
+        );
+        assert_eq!(session.summary.filtered_readonly_opens, 1);
+    }
+
+    /// Mutation-M02 guard: the REAL unmatched-exit branch of
+    /// `handle_exit` — a syscall exit with no entry to pair (the O03.2
+    /// seam's manufactured gap is this same shape, but the branch here is
+    /// reached without the seam) — counts the loss and records one
+    /// `unmatched_exit` gap over every class. Both shapes reach it: a
+    /// thread this tracer tracks whose entry was never seen, and one it
+    /// does not track at all.
+    #[test]
+    fn an_exit_with_no_entry_is_one_unmatched_exit_gap() {
+        let (mut session, rx) = stalled_session();
+        // A tracked thread whose pending entry is gone: the entry was
+        // never seen for this exit.
+        let pid = std::process::id() as pid_t;
+        session.tasks.insert(
+            pid,
+            Task {
+                tgid: pid,
+                start_ticks: None,
+                pending: None,
+                site: Site {
+                    arch: sys::AUDIT_ARCH,
+                    nr: 257,
+                    ip: 0,
+                    arg0: 0,
+                },
+                entry_fresh: false,
+                restart: None,
+            },
+        );
+        session.handle_exit(pid, 0);
+        assert_eq!(
+            session.summary.loss.unmatched_exits, 1,
+            "the tracked-but-unentered exit is counted"
+        );
+        match rx.try_recv() {
+            Ok(TracerEvent::Gap {
+                reason: GapReason::UnmatchedExit,
+                count: Some(1),
+                ..
+            }) => {}
+            other => panic!("expected one unmatched_exit gap, got {other:?}"),
+        }
+        // A thread this tracer does not track at all: the same branch, and
+        // the count and the gap are not swallowed by the first.
+        session.handle_exit(pid.wrapping_add(1 << 20), 0);
+        assert_eq!(
+            session.summary.loss.unmatched_exits, 2,
+            "the untracked exit is counted too"
+        );
+        match rx.try_recv() {
+            Ok(TracerEvent::Gap {
+                reason: GapReason::UnmatchedExit,
+                count: Some(1),
+                ..
+            }) => {}
+            other => panic!("expected a second unmatched_exit gap, got {other:?}"),
+        }
+    }
+
     fn fork(child: pid_t) -> TracerEvent {
         TracerEvent::Fork {
             parent: 1,
@@ -4598,46 +4772,52 @@ mod tests {
     #[test]
     fn a_path_claim_is_corroborated_by_its_components_not_only_its_name() {
         // Absolute: exactly the resolved path.
-        assert!(path_corroborated(b"/w/out.txt", b"/w/out.txt", false));
-        assert!(path_corroborated(b"/w//./out.txt", b"/w/out.txt", false));
+        assert!(path_corroborated(b"/w/out.txt", b"/w/out.txt", false, None));
+        assert!(path_corroborated(b"/w//./out.txt", b"/w/out.txt", false, None));
         assert!(
-            !path_corroborated(b"/w/public/x", b"/w/secret/x", false),
+            !path_corroborated(b"/w/public/x", b"/w/secret/x", false, None),
             "a rewritten directory component"
         );
-        assert!(!path_corroborated(b"/w/a", b"/w/b", false));
+        assert!(!path_corroborated(b"/w/a", b"/w/b", false, None));
         // Relative: the tail of the resolved path, bare names included.
-        assert!(path_corroborated(b"out.txt", b"/w/out.txt", false));
-        assert!(path_corroborated(b"sub/out.txt", b"/w/sub/out.txt", false));
+        assert!(path_corroborated(b"out.txt", b"/w/out.txt", false, None));
+        assert!(path_corroborated(b"sub/out.txt", b"/w/sub/out.txt", false, None));
         assert!(
-            !path_corroborated(b"a", b"/w/b", false),
+            !path_corroborated(b"a", b"/w/b", false, None),
             "a bare name is checked too"
         );
         assert!(!path_corroborated(
             b"sub/out.txt",
             b"/w/other/out.txt",
-            false
+            false,
+            None
         ));
         // Past a `..`, only what follows the last one.
-        assert!(path_corroborated(b"../out/x", b"/w/out/x", false));
-        assert!(!path_corroborated(b"../out/x", b"/w/in/x", false));
-        assert!(!path_corroborated(b"a/..", b"/w", false));
-        // Unlinked since: the annotation is the kernel's.
-        assert!(path_corroborated(b"/w/gone", b"/w/gone (deleted)", false));
+        assert!(path_corroborated(b"../out/x", b"/w/out/x", false, None));
+        assert!(!path_corroborated(b"../out/x", b"/w/in/x", false, None));
+        assert!(!path_corroborated(b"a/..", b"/w", false, None));
+        // Unlinked since: the annotation is the kernel's and the count
+        // agrees; a live decoy *named* `gone (deleted)` or an unreadable
+        // count does not corroborate (audit 7 L7).
+        assert!(path_corroborated(b"/w/gone", b"/w/gone (deleted)", false, Some(0)));
+        assert!(!path_corroborated(b"/w/gone", b"/w/gone (deleted)", false, Some(1)));
+        assert!(!path_corroborated(b"/w/gone", b"/w/gone (deleted)", false, None));
         // O_TMPFILE names the directory; its descriptor is `#<ino>` inside.
-        assert!(path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", true));
-        assert!(path_corroborated(b"/tmp/", b"/tmp/#1234 (deleted)", true));
+        assert!(path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", true, None));
+        assert!(path_corroborated(b"/tmp/", b"/tmp/#1234 (deleted)", true, None));
         assert!(!path_corroborated(
             b"/tmp",
             b"/var/tmp/#1234 (deleted)",
-            true
+            true,
+            None
         ));
         assert!(
-            !path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", false),
+            !path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", false, Some(0)),
             "only an O_TMPFILE open drops the name"
         );
         // No path at all: the pipe or terminal behind /dev/stderr.
-        assert!(!path_corroborated(b"/dev/stderr", b"pipe:[4242]", false));
-        assert!(!path_corroborated(b"/dev/stderr", b"/dev/pts/3", false));
+        assert!(!path_corroborated(b"/dev/stderr", b"pipe:[4242]", false, None));
+        assert!(!path_corroborated(b"/dev/stderr", b"/dev/pts/3", false, None));
     }
 
     /// Audit-6 review: a claim the descriptor does not corroborate is

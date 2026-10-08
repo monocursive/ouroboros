@@ -93,16 +93,21 @@ fn pinned_channel() -> String {
 /// The build inputs' digest, computed here independently of the product
 /// (review F8: provenance is measured, not asserted). The rule, which
 /// build.rs documents too: SHA-256 over every file under
-/// `crates/ouro-jail/src` plus `crates/ouro-jail/build.rs`,
-/// `crates/ouro-jail/Cargo.toml`, `Cargo.toml`, `Cargo.lock` and
-/// `rust-toolchain.toml`, the shared records crate and embedded `profiles/` data, sorted by their `/`-separated path relative to the
-/// repository root, each as `path NUL u64-LE(length) bytes`.
+/// `crates/ouro-jail/src` plus the declared `profiles/inputs.rs` entries —
+/// `crates/ouro-jail/build.rs`, `crates/ouro-jail/Cargo.toml`, the UTS46
+/// tables compiled in through `include!`, `Cargo.toml`, `Cargo.lock`,
+/// `rust-toolchain.toml`, the shared records crate, the embedded
+/// `profiles/` data and the frozen network address table — sorted by their
+/// `/`-separated path relative to the repository root, each as
+/// `path NUL u64-LE(length) bytes`.
 fn build_inputs_digest() -> String {
     use sha2::Digest as _;
     let root = repo_root();
     let mut files: Vec<String> = [
         "crates/ouro-jail/build.rs",
         "crates/ouro-jail/Cargo.toml",
+        "crates/ouro-jail/data/uts46_unicode17_tables.rs",
+        "docs/specs/jail-v1/network-addresses.json",
         "crates/ouro-records/Cargo.toml",
         "Cargo.toml",
         "Cargo.lock",
@@ -146,6 +151,130 @@ fn build_inputs_digest() -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!("sha256:{hex}")
+}
+
+/// The string literals in a macro-argument window, tolerating `concat!`
+/// layouts that span lines (audit 2026-10-08 M4).
+fn string_literals(window: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = window.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut literal = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    if let Some(escaped) = chars.next() {
+                        literal.push(escaped);
+                    }
+                }
+                '"' => break,
+                _ => literal.push(c),
+            }
+        }
+        out.push(literal);
+    }
+    out
+}
+
+/// Lexically folds `.` and `..` so a resolved target can be compared with
+/// the repository-root-relative input paths.
+fn normalize(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Every `include!`/`include_str!`/`include_bytes!` target that is compiled
+/// into the binary must be a declared build input: a file the compiler
+/// reads but the digest ignores silently breaks the "digest of the files
+/// the binary is built from" claim, which is how the two compiled-in files
+/// of audit 2026-10-08 M4 escaped it.
+#[test]
+fn every_compiled_in_include_target_is_a_build_input() {
+    let root = repo_root();
+    let manifest = std::fs::read_to_string(root.join("crates/ouro-jail/profiles/inputs.rs"))
+        .expect("profiles/inputs.rs readable");
+    let declared: Vec<String> = manifest
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_suffix(','))
+        .filter(|line| line.starts_with('"') && line.ends_with('"'))
+        .map(|line| line[1..line.len() - 1].to_owned())
+        .collect();
+    // The manifest itself is the definition the product digests; a parse
+    // that lost entries would pass vacuously.
+    assert!(
+        declared.len() >= 38,
+        "the inputs manifest did not parse: {declared:?}"
+    );
+
+    let mut sources = vec![root.join("crates/ouro-jail/build.rs")];
+    for dir in ["crates/ouro-jail/src", "crates/ouro-jail/profiles"] {
+        let mut stack = vec![root.join(dir)];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("readable") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    sources.push(path);
+                }
+            }
+        }
+    }
+
+    let manifest_dir = root.join("crates/ouro-jail");
+    let mut seen = 0;
+    for source in &sources {
+        let text = std::fs::read_to_string(source).expect("readable");
+        for token in ["include!", "include_str!", "include_bytes!"] {
+            let mut rest = text.as_str();
+            while let Some(index) = rest.find(token) {
+                let window = &rest[index..(index + 400).min(rest.len())];
+                rest = &rest[index + token.len()..];
+                let literals = string_literals(window);
+                let target = if window.contains("CARGO_MANIFEST_DIR") {
+                    literals
+                        .iter()
+                        .find(|literal| literal.starts_with('/'))
+                        .map(|literal| manifest_dir.join(literal.trim_start_matches('/')))
+                } else {
+                    literals
+                        .first()
+                        .map(|literal| source.parent().expect("a dir").join(literal))
+                }
+                .expect("an include target");
+                seen += 1;
+                let target = normalize(&target);
+                let relative = target
+                    .strip_prefix(&root)
+                    .expect("inside the repository")
+                    .to_str()
+                    .expect("UTF-8")
+                    .replace('\\', "/");
+                let is_input = relative.starts_with("crates/ouro-jail/src/")
+                    || declared.iter().any(|entry| *entry == relative);
+                assert!(
+                    is_input,
+                    "{token} target {relative} (from {}) is not a build input; \
+                     add it to crates/ouro-jail/profiles/inputs.rs",
+                    source.strip_prefix(&root).unwrap_or(source).display()
+                );
+            }
+        }
+    }
+    assert!(seen >= 25, "the scanner found {seen} include targets");
 }
 
 /// The opt-level this test (and so the binary, built by the same cargo

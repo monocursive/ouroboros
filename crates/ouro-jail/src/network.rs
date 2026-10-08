@@ -301,6 +301,10 @@ pub struct HostRule {
     pub pattern: HostPattern,
     /// The explicit destination port.
     pub port: u16,
+    /// Whether the grant named the port itself, rather than the §10
+    /// omitted-port expansion to 443. Plaintext HTTP requires an explicit
+    /// port (audit 2026-10-08 L21): an omitted port is the TLS shape.
+    pub explicit_port: bool,
 }
 
 fn labels_of(name: &str) -> Vec<String> {
@@ -370,8 +374,16 @@ impl HostRule {
             ));
         }
         Ok(match port {
-            Some(port) => vec![HostRule { pattern, port }],
-            None => vec![HostRule { pattern, port: 443 }],
+            Some(port) => vec![HostRule {
+                pattern,
+                port,
+                explicit_port: true,
+            }],
+            None => vec![HostRule {
+                pattern,
+                port: 443,
+                explicit_port: false,
+            }],
         })
     }
 
@@ -510,6 +522,16 @@ impl Rules {
     #[must_use]
     pub fn permits_destination(&self, destination: &Destination) -> bool {
         self.allow.iter().any(|rule| rule.permits(destination))
+    }
+
+    /// Audit 2026-10-08 L21: whether a rule that named its port explicitly
+    /// permits the destination. Plaintext HTTP rides only explicit ports;
+    /// the omitted-port expansion to 443 is the TLS shape (§10).
+    #[must_use]
+    pub fn permits_destination_explicit(&self, destination: &Destination) -> bool {
+        self.allow
+            .iter()
+            .any(|rule| rule.explicit_port && rule.permits(destination))
     }
 
     /// Whether an explicit numeric grant exists for this exact normalized

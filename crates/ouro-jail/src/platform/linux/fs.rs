@@ -303,10 +303,15 @@ fn scan_directory(
         skipped_symlinks: Vec::new(),
         root_found: Vec::new(),
     };
-    walk(&root_dir, root, 1, names, &mut state)?;
+    walk(&root_dir, root, b"", 1, names, &mut state)?;
 
+    // Audit 2026-10-08 M5: only single-component names are root literals —
+    // a multi-component name like `.git/hooks` protects what exists and
+    // claims nothing for a path that does not (§4.4: a segment created
+    // later is outside the claim either way).
     let root_literals = names
         .iter()
+        .filter(|name| !name.contains('/'))
         .map(|name| {
             let state = state
                 .root_found
@@ -341,6 +346,7 @@ struct WalkState {
 fn walk(
     dir: &DirHandle,
     dir_path: &Path,
+    relative: &[u8],
     depth: usize,
     names: &[&str],
     state: &mut WalkState,
@@ -367,7 +373,7 @@ fn walk(
             }
         })?;
 
-    let mut subdirs: Vec<CString> = Vec::new();
+    let mut subdirs: Vec<(CString, Vec<u8>)> = Vec::new();
     for name in entries {
         state.entries_seen += 1;
         if state.entries_seen > state.limits.max_entries {
@@ -377,6 +383,11 @@ fn walk(
         }
         let name_os = OsStr::from_bytes(name.to_bytes());
         let child_path = dir_path.join(name_os);
+        let mut child_relative = relative.to_vec();
+        if !child_relative.is_empty() {
+            child_relative.push(b'/');
+        }
+        child_relative.extend_from_slice(name.to_bytes());
         let meta = dir
             .stat_child_nofollow(&name)
             .map_err(|errno| ScanError::Unreadable {
@@ -384,7 +395,22 @@ fn walk(
                 errno,
             })?;
 
-        let literal = names.iter().find(|l| name_os == OsStr::new(**l)).copied();
+        // A single-component name matches any directory entry; a
+        // multi-component name (audit 2026-10-08 M5) matches the entry's
+        // whole path beneath the writable root, so `.git/hooks` protects a
+        // nested hooks directory while `.git` itself stays writable. A
+        // multi-component name never matches at the root: it is not a root
+        // literal and a writable root is never itself protected.
+        let literal = names
+            .iter()
+            .copied()
+            .find(|literal| {
+                if literal.contains('/') {
+                    depth > 1 && literal.as_bytes() == child_relative.as_slice()
+                } else {
+                    name_os == OsStr::new(*literal)
+                }
+            });
 
         if let Some(literal) = literal {
             if meta.is_symlink {
@@ -412,12 +438,27 @@ fn walk(
             continue;
         }
 
+        // A symlink on the path *to* a deeper protected name hides whatever
+        // lives behind it, so `existing_and_root` cannot claim coverage it
+        // could not see (audit 2026-10-08 M5): a `.git` symlink while
+        // `.git/hooks` is protected is recorded like a protected symlink.
+        if meta.is_symlink
+            && names.iter().any(|literal| {
+                let literal = literal.as_bytes();
+                literal.starts_with(child_relative.as_slice())
+                    && literal.get(child_relative.len()) == Some(&b'/')
+            })
+        {
+            state.skipped_symlinks.push(child_path.clone());
+            continue;
+        }
+
         if meta.is_dir && !meta.is_symlink {
-            subdirs.push(name);
+            subdirs.push((name, child_relative));
         }
     }
 
-    for name in subdirs {
+    for (name, child_relative) in subdirs {
         if depth + 1 > state.limits.max_depth {
             let child = dir_path.join(OsStr::from_bytes(name.to_bytes()));
             return Err(ScanError::DepthLimit {
@@ -432,7 +473,7 @@ fn walk(
                 path: child_path.clone(),
                 errno,
             })?;
-        walk(&child, &child_path, depth + 1, names, state)?;
+        walk(&child, &child_path, &child_relative, depth + 1, names, state)?;
     }
     Ok(())
 }

@@ -1,7 +1,23 @@
-# Current pre-release contract baseline. This project is not live; identifiers
-# and producers evolve in place as authorized by the operator. Hashes make
-# contract changes reviewable and must be regenerated with their fixtures.
-# Historical milestone evidence remains historical, not proof for this tree.
+# Current pre-release contract baseline. This project is not live; per the
+# jail v2 preamble (§0), a frozen schema or artifact may be re-blessed in
+# place under the same identifier: the recorded SHA-256 is regenerated
+# together with its fixtures and validators in one reviewable commit, and
+# historical milestone evidence remains historical, not proof for this tree.
+#
+# Re-blessing record:
+# - 16336791 re-blessed jail-receipt.schema.json and
+#   policy-snapshot.schema.json in place under their existing identifiers
+#   (ouro.jail.receipt/1, ouro.jail.policy-snapshot/1). Rationale: additive
+#   fields only — the swap, storage and inodes limit ceilings (new snapshot
+#   fields; new receipt limit-row kinds, with the receipt's limit-row
+#   maximum raised from 4 to 7) plus their enforcement-loss handling. No
+#   shared field changed meaning, so no new identifier was required.
+# - audit 2026-10-08 (L21) re-blessed network-rules.md in place under
+#   ouro.jail.network/1. Rationale: the §Normalization text now states the
+#   enforced rule — plaintext HTTP requires a grant that named its port
+#   explicitly; the omitted-port expansion to 443 is the TLS shape. The
+#   wire vocabulary (ouro.jail.network/1) is unchanged; the change brings
+#   the prose in line with what the proxy enforces.
 
 schema = "ouro.jail.frozen-schemas/1"
 milestone = "milestone-1"
@@ -60,7 +76,7 @@ sha256 = "edf4136339056ea2905c1f6507bc93600288417d42757fabc1acb8bd3ea835a9"
 [[frozen_artifact]]
 file = "canonicalization.md"
 identifiers = ["ouro.jail.policy/1", "ouro.jail.policy-file/1", "ouro.jail.policy-snapshot/1"]
-sha256 = "c4f809f34adb8090e245a9b89d3dada7aa95a4b0b419907b6280047674e2c56e"
+sha256 = "ff74c9a353ae048f2841ee50e9013c7f8f0939e3e24486bd63cb1b9797a7beb7"
 
 # the golden snapshot
 [[frozen_artifact]]
@@ -84,7 +100,7 @@ sha256 = "ff361096e68e18b34f8866b2c86ac47a29db4b966a03d1214de7f89d76b3b14b"
 [[frozen_artifact]]
 file = "network-rules.md"
 identifiers = ["ouro.jail.network/1"]
-sha256 = "a68ad3e107a5d90fd88fe8cc476adbcede59bc895183418655692a008f67508c"
+sha256 = "c9e50b8bd834e2318738a95f2e97146063b56775d3281228877cd3dccfc38c17"
 
 # the address table
 [[frozen_artifact]]

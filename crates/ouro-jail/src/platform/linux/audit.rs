@@ -129,6 +129,25 @@ impl AuditWriter {
         self.limit_hits += 1;
     }
 
+    /// Records that an applied ceiling's hit evidence is missing or was
+    /// lost (audit 2026-10-08 M2): storage and inode ceilings sample
+    /// saturation positively only, and unreadable cgroup counters leave
+    /// their `false` claims unsupported. §11.4: missing hit evidence makes
+    /// coverage degraded and the count null, and a degraded class names
+    /// its gap.
+    pub fn record_limit_evidence_missing(&mut self, reason: &str) {
+        self.push_gap(Gap {
+            classes: vec![CoverageClass::Limits.as_str().to_owned()],
+            source: "audit".to_owned(),
+            // Nothing observes the evidence to come back: the hole stays
+            // open-ended, like a child's own lost notifications (§13.1).
+            start_ns: now_ns().to_string(),
+            end_ns: None,
+            reason: reason.to_owned(),
+            lost_count: None,
+        });
+    }
+
     /// Records why a requested ceiling stays unapplied: the explanatory
     /// wrapper note §6.4 asks for when a preferred controller is missing.
     pub fn record_limit_unapplied(&mut self, key: &str, reason: &str) {
@@ -698,6 +717,12 @@ impl AuditWriter {
         }
         if self.gaps.len() >= 64 {
             let existing = self.gaps.last_mut().expect("nonempty bounded gaps");
+            // Audit 7 L13: an open-ended loss (`end_ns: null`) merged into a
+            // closed interval must leave the interval open — only a
+            // presented or written `end` bounds it, never a merge.
+            if gap.end_ns.is_none() {
+                existing.end_ns = None;
+            }
             existing.reason = "coalesced_losses".to_owned();
             extend_gap_interval(existing, from_ns, to_ns);
             existing.lost_count = None;
@@ -775,7 +800,14 @@ impl AuditWriter {
                 lost_count: None,
             });
         }
-        let audit_status = if self.degraded.is_empty() && !tracer.thread_panicked {
+        // Audit 2026-10-08 M2: the `limits` class degrades on missing hit
+        // evidence too, but it is the wrapper's own class (§11.4) — its
+        // degradation says nothing about the audit source's health.
+        let audit_source_degraded = self
+            .degraded
+            .iter()
+            .any(|class| *class != CoverageClass::Limits);
+        let audit_status = if !audit_source_degraded && !tracer.thread_panicked {
             SourceStatus::Active
         } else {
             SourceStatus::Degraded
@@ -827,13 +859,34 @@ impl AuditWriter {
     }
 
     /// The `limits` class, which is a wrapper fact and exists with observation
-    /// off as well (§11.4).
+    /// off as well (§11.4). Hit evidence that is missing — positive-only
+    /// sampling, or counters that became unreadable — degrades it and nulls
+    /// its count, and the degraded class names its gap (§11.4).
     #[must_use]
     pub fn limits_class(&self) -> ClassSummary {
+        let degraded = self.degraded.contains(&CoverageClass::Limits);
         ClassSummary {
-            status: SourceStatus::Active,
-            observed_count: Some(self.limit_hits),
-            gaps: Vec::new(),
+            status: if degraded {
+                SourceStatus::Degraded
+            } else {
+                SourceStatus::Active
+            },
+            // §11.4: "Unsupported and degraded counts are null."
+            observed_count: if degraded {
+                None
+            } else {
+                Some(self.limit_hits)
+            },
+            gaps: self
+                .gaps
+                .iter()
+                .filter(|gap| {
+                    gap.classes
+                        .iter()
+                        .any(|name| name == CoverageClass::Limits.as_str())
+                })
+                .cloned()
+                .collect(),
         }
     }
 
@@ -1215,6 +1268,40 @@ mod tests {
         assert_eq!(writer.count(CoverageClass::Exec), 0);
     }
 
+    // Audit 2026-10-08 M2: missing hit evidence degrades the `limits` class.
+    #[test]
+    fn missing_limit_hit_evidence_degrades_the_limits_class() {
+        let mut writer = writer();
+        writer.record_limit_hit();
+        writer.record_limit_evidence_missing("storage_hit_evidence_positive_only");
+        let summary = writer.summary(&TracerSummary::default(), true);
+        assert_degraded_classes_name_their_gaps(&summary);
+        let limits = &summary.classes[&CoverageClass::Limits];
+        assert_eq!(limits.status, SourceStatus::Degraded);
+        // §11.4: the count is null, not the hits that were still proven.
+        assert_eq!(limits.observed_count, None);
+        assert_eq!(limits.gaps.len(), 1, "{limits:?}");
+        assert_eq!(limits.gaps[0].reason, "storage_hit_evidence_positive_only");
+        assert_eq!(limits.gaps[0].source, "audit");
+        assert!(limits.gaps[0].end_ns.is_none(), "nothing ends the hole");
+        // A second, different reason adds its own gap; the same reason
+        // coalesces into the first.
+        writer.record_limit_evidence_missing("storage_hit_evidence_positive_only");
+        writer.record_limit_evidence_missing("cgroup_counters_unreadable");
+        let summary = writer.summary(&TracerSummary::default(), true);
+        assert_degraded_classes_name_their_gaps(&summary);
+        let limits = &summary.classes[&CoverageClass::Limits];
+        assert_eq!(limits.gaps.len(), 2, "{limits:?}");
+        // Without missing evidence the class stays active with its count.
+        let mut clean = AuditWriter::new("att_x", None, b"/work/space", b"/tmp");
+        clean.record_limit_hit();
+        let summary = clean.summary(&TracerSummary::default(), true);
+        let limits = &summary.classes[&CoverageClass::Limits];
+        assert_eq!(limits.status, SourceStatus::Active);
+        assert_eq!(limits.observed_count, Some(1));
+        assert!(limits.gaps.is_empty());
+    }
+
     // J5-C begin: review item 12, a degraded class always names its gap
     /// A trace whose lock a panicking thread held: every later `lock()` is
     /// `Err(PoisonError)`.
@@ -1551,6 +1638,69 @@ mod tests {
             .find(|gap| gap.reason == "foreign_abi")
             .unwrap();
         assert_eq!(foreign.end_ns.as_deref(), Some("2"));
+    }
+
+    /// Audit 7 L13: at the 64-gap bound, an open-ended loss merged into the
+    /// closed `coalesced_losses` interval leaves it open — a merge never
+    /// gives the loss an end.
+    #[test]
+    fn an_open_ended_loss_merged_at_the_gap_bound_leaves_the_interval_open() {
+        let mut writer = writer();
+        // Distinct (reason, classes) keys, so none of the 64 coalesces.
+        let ops = [
+            OpSet::of(ClosedOp::Exec),
+            OpSet::of(ClosedOp::Open),
+            OpSet::of(ClosedOp::Connect),
+        ];
+        let reasons = [
+            GapReason::QueueFull,
+            GapReason::MediationResponseUndelivered,
+            GapReason::UnmatchedExit,
+            GapReason::EntryAbandoned,
+            GapReason::InflightExhausted,
+            GapReason::PathUnreadable,
+            GapReason::SockaddrUnreadable,
+            GapReason::FlagsUnavailable,
+            GapReason::SyscallInfoUnavailable,
+            GapReason::IdentityUnavailable,
+            GapReason::FinalStatusUnknown,
+            GapReason::UnexpectedTraceStop,
+            GapReason::TraceesAbandoned,
+            GapReason::UnreapedChildren,
+            GapReason::RestartFailed,
+            GapReason::LifecycleDropped,
+            GapReason::DeathUnattributed,
+            GapReason::ForeignAbi,
+            GapReason::RestartUnresolved,
+            GapReason::ArgumentSnapshotUnstable,
+            GapReason::MemoryFlagsUnverified,
+            GapReason::ExecImageMismatch,
+            GapReason::PathClaimUnverified,
+        ];
+        for i in 0..64 {
+            writer.record_gap(
+                reasons[i % reasons.len()],
+                ops[i % 3],
+                i as u64,
+                i as u64 + 1,
+                Some(1),
+            );
+        }
+        assert_eq!(writer.gaps().len(), 64);
+        let bounded = writer.gaps().last().unwrap();
+        assert_eq!(bounded.end_ns.as_deref(), Some("64"));
+        writer.record_gap(GapReason::ChildNotificationListener, OpSet::ALL, 30, 99, None);
+        assert_eq!(writer.gaps().len(), 64, "the bound merges instead of growing");
+        let merged = writer.gaps().last().unwrap();
+        assert_eq!(merged.reason, "coalesced_losses");
+        assert_eq!(
+            merged.end_ns, None,
+            "the open-ended loss keeps the interval open"
+        );
+        assert_eq!(
+            merged.start_ns, "30",
+            "the interval covers the union, from the earliest loss merged in"
+        );
     }
 
     /// J4 O02: every audit result names its process by pid and birth, and

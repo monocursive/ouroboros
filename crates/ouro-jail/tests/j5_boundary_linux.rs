@@ -806,8 +806,10 @@ fn s03_the_outer_boundaries_cannot_be_reversed_inside_agent() {
         return;
     }
     const SCRIPT: &str = r#"
-import ctypes, errno, json, os, struct
+import ctypes, errno, json, os, platform, struct
 libc = ctypes.CDLL(None, use_errno=True)
+# __NR_ptrace: 101 on x86_64, 117 on aarch64 (where 101 is nanosleep).
+SYS_PTRACE = 101 if platform.machine() == "x86_64" else 26
 libc.syscall.restype = ctypes.c_long
 out = {}
 
@@ -844,7 +846,7 @@ out["filters"] = status("Seccomp_filters")
 # not touch, so its EPERM is the seccomp baseline alone (isolates the clause).
 out["keyctl_after_allow"] = call(250, 0, 0, 0, 0)
 # ptrace(PTRACE_TRACEME): defence in depth (observer + baseline) when observed.
-out["ptrace_after_allow"] = call(101, 0, 0, 0, 0)
+out["ptrace_after_allow"] = call(SYS_PTRACE, 0, 0, 0, 0)
 
 # --- cgroup: the execution boundary is not reachable from inside ---
 try:
@@ -1284,6 +1286,21 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
             "--expect",
             "EACCES"
         ],
+        // Late aliases of that same late socket — a hard link and a symlink
+        // both created after the boundary exists — name the same host peer
+        // and are refused the same way.
+        [
+            "unix-connect",
+            extra_rw.join("late-alias.sock"),
+            "--expect",
+            "EACCES"
+        ],
+        [
+            "unix-connect",
+            extra_rw.join("late-sym.sock"),
+            "--expect",
+            "EACCES"
+        ],
         // The authorized proxy socket is itself refused for the target
         // (audit F2): only the bridge may name it, so the mediation's
         // carve-out cannot skip the bridge.
@@ -1308,6 +1325,18 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
     // The host peer is bound now, after the boundary and its mounts exist in
     // the extra grant: no launch-time enumeration saw it.
     let extra = UnixProbe::bind(&extra_rw.join("late-extra.sock")).unwrap();
+    // The aliases are late too: made after the boundary and its mounts
+    // exist, so no launch-time enumeration saw them either.
+    std::fs::hard_link(
+        extra_rw.join("late-extra.sock"),
+        extra_rw.join("late-alias.sock"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        extra_rw.join("late-extra.sock"),
+        extra_rw.join("late-sym.sock"),
+    )
+    .unwrap();
     spawned
         .owner()
         .release(
@@ -1327,12 +1356,14 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
     assert_eq!(extra.stop(), 0, "the extra-grant host peer was reached");
     let lines = run.fixture_lines();
     let connects = ops(&lines, "connect");
-    assert_eq!(connects.len(), 2, "{lines:#?}");
-    assert_eq!(connects[0]["errno"], "EACCES", "{}", connects[0]);
-    assert_eq!(
-        connects[1]["errno"], "EACCES",
-        "the proxy socket is bridge-only"
-    );
+    assert_eq!(connects.len(), 4, "{lines:#?}");
+    for (index, why) in [(0, "the late socket"), (1, "the late hard link"), (2, "the late symlink"), (3, "the proxy socket")] {
+        assert_eq!(
+            connects[index]["errno"], "EACCES",
+            "{why} was reachable: {}",
+            connects[index]
+        );
+    }
     settled(&run);
 }
 
@@ -1849,8 +1880,10 @@ fn o03_an_unmatched_exit_is_a_gap_not_a_result() {
 /// steal each of its first descriptors with `pidfd_getfd`, and try to seize it
 /// with `ptrace(PTRACE_SEIZE)`. Reports one JSON object per target.
 const X06_PROBE: &str = r#"
-import os, ctypes, json
+import os, ctypes, json, platform
 libc = ctypes.CDLL(None, use_errno=True)
+# __NR_ptrace: 101 on x86_64, 117 on aarch64 (where 101 is nanosleep).
+SYS_PTRACE = 101 if platform.machine() == "x86_64" else 26
 def call(nr, *a):
     ctypes.set_errno(0)
     rc = libc.syscall(nr, *[ctypes.c_long(x) for x in a])
@@ -1867,7 +1900,7 @@ def probe(pid):
             getfd.append(0 if r[0] >= 0 else r[1])
             if r[0] >= 0: os.close(r[0])
         os.close(pfd[0])
-    pt = call(101, 0x4206, pid, 0, 0)    # ptrace(PTRACE_SEIZE)
+    pt = call(SYS_PTRACE, 0x4206, pid, 0, 0)    # ptrace(PTRACE_SEIZE)
     return {'pid': pid, 'comm': comm(pid), 'pidfd_ok': pfd[0] >= 0,
             'getfd_errnos': getfd, 'ptrace_ok': pt[0] >= 0, 'ptrace_errno': pt[1]}
 def caps():
@@ -1878,12 +1911,31 @@ def caps():
     return out
 me = os.getpid()
 addressable = [probe(int(d)) for d in os.listdir('/proc') if d.isdigit() and int(d) != me]
+
+# The filter denies pidfd_open, so a plain probe's getfd list is vacuous:
+# obtain a pidfd WITHOUT pidfd_open — clone(CLONE_PIDFD) — and then run
+# pidfd_getfd against that descriptor, which the filter must deny on its own.
+SYS_CLONE = 56 if platform.machine() == 'x86_64' else 220
+CLONE_PIDFD = 0x1000
+pidfd = ctypes.c_int(-1)
+cloned = call(SYS_CLONE, CLONE_PIDFD | 17, 0, ctypes.addressof(pidfd), 0, 0)
+if cloned[0] == 0:
+    import time; time.sleep(0.4); os._exit(0)
+direct = {'pidfd_ok': cloned[0] > 0 and pidfd.value >= 0, 'getfd_errnos': []}
+if direct['pidfd_ok']:
+    for n in range(0, 6):
+        r = call(438, pidfd.value, n, 0)   # pidfd_getfd
+        direct['getfd_errnos'].append(0 if r[0] >= 0 else r[1])
+        if r[0] >= 0: os.close(r[0])
+    os.close(pidfd.value)
+    os.waitpid(cloned[0], 0)
+
 ancestors = []; p = os.getppid(); seen = set()
 while p > 1 and p not in seen:
     seen.add(p); ancestors.append(probe(p))
     try: p = int(open('/proc/%d/stat' % p).read().split(') ')[1].split()[1])
     except (OSError, IndexError): break
-print(json.dumps({'me': me, 'caps': caps(), 'addressable': addressable, 'ancestors': ancestors}))
+print(json.dumps({'me': me, 'caps': caps(), 'addressable': addressable, 'ancestors': ancestors, 'direct_getfd': direct}))
 "#;
 
 /// No CONTAINED target may steal a descriptor or seize a tracer over any
@@ -1930,6 +1982,27 @@ fn x06_no_tracing_privilege_reaches_the_child() {
             );
         }
         assert_no_tracing(profile, &out);
+        // The pidfd_getfd leg is not vacuous: with a pidfd the filter could
+        // not prevent (clone(CLONE_PIDFD), since pidfd_open is denied first),
+        // every pidfd_getfd still fails EPERM — the filter denies the call
+        // itself.
+        let direct = &out["direct_getfd"];
+        assert_eq!(
+            direct["pidfd_ok"], true,
+            "{profile}: clone(CLONE_PIDFD) did not yield a pidfd: {direct}"
+        );
+        let errnos = direct["getfd_errnos"].as_array().expect("getfd_errnos");
+        assert!(
+            !errnos.is_empty(),
+            "{profile}: the direct pidfd_getfd leg did not run: {direct}"
+        );
+        for errno in errnos {
+            assert_eq!(
+                errno.as_i64(),
+                Some(i64::from(libc::EPERM)),
+                "{profile}: pidfd_getfd on a real pidfd did not fail EPERM: {direct}"
+            );
+        }
         // Contained: the child's /proc is its own pid namespace only — a small
         // set of low pids; the supervisor/observer (host processes) are absent.
         let pids: Vec<i64> = out["addressable"]
@@ -2110,8 +2183,10 @@ fn r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer() {
     // the trace/control fd numbers from its cmdline, and tries to open its
     // environ and those fds and to ptrace-seize it.
     const CODE: &str = r#"
-import os, ctypes, json
+import os, ctypes, json, platform
 libc = ctypes.CDLL(None, use_errno=True)
+# __NR_ptrace: 101 on x86_64, 117 on aarch64 (where 101 is nanosleep).
+SYS_PTRACE = 101 if platform.machine() == "x86_64" else 26
 libc.syscall.restype = ctypes.c_long
 def comm(p):
     try: return open('/proc/%d/comm' % p).read().strip()
@@ -2135,7 +2210,7 @@ for flag in (b'--trace-fd', b'--control-fd'):
         n = int(argv[argv.index(flag) + 1])
         out[flag.decode()] = attempt(lambda: os.close(os.open('/proc/%d/fd/%d' % (sup, n), os.O_WRONLY)))
 ctypes.set_errno(0)
-r = libc.syscall(101, 0x4206, sup, 0, 0)  # ptrace(PTRACE_SEIZE, sup)
+r = libc.syscall(SYS_PTRACE, 0x4206, sup, 0, 0)  # ptrace(PTRACE_SEIZE, sup)
 out['ptrace'] = 'ok' if r >= 0 else ctypes.get_errno()
 print(json.dumps(out))
 "#;

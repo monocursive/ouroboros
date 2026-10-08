@@ -15,7 +15,8 @@ use serde_json::{Map, Value};
 
 use super::audit::{AuditWriter, CommandEnforcement};
 use super::tracer::{
-    GapReason, KernelImage, OpSet, PathSnapshot, Tracer, TracerConfig, TracerEvent, TracerSummary,
+    GapReason, KernelImage, OpSet, PathSnapshot, ShebangImage, Tracer, TracerConfig, TracerEvent,
+    TracerSummary,
 };
 
 /// Test seam (J4 decision S9): a smaller in-flight bound, so a live test can
@@ -282,6 +283,56 @@ fn kernel_confirms(images: &[Vec<u8>], kernel: &KernelImage) -> bool {
     false
 }
 
+/// Audit 2026-10-08 H2: whether the kernel's own records show the `#!`
+/// rewrite of one of `images`. The kernel loaded the interpreter a script
+/// candidate's first line names — identity agreement in the tracee's root
+/// decides, with the interpreter's raw spelling as the weaker form — and
+/// the kernel's own argv carries the pathname this exec was called with in
+/// the interpreter's script slot, the slot after the interpreter and its
+/// optional single argument, and that pathname is the candidate's own
+/// spelling. A tracee that execs the interpreter directly cannot place the
+/// script in that slot without making the interpreter run the script, so
+/// argv shape alone does not confirm anything here.
+fn script_kernel_confirms(
+    images: &[Vec<u8>],
+    path: Option<&PathSnapshot>,
+    kernel: &KernelImage,
+    kernel_argv: Option<&[Vec<u8>]>,
+    shebangs: &[Option<ShebangImage>],
+) -> bool {
+    let Some(argv) = kernel_argv else {
+        return false;
+    };
+    let Some(snapshot) = path else {
+        return false;
+    };
+    for (candidate, shebang) in images.iter().zip(shebangs) {
+        let Some(shebang) = shebang else {
+            continue;
+        };
+        // The loaded image must be the interpreter the line names.
+        let image_is_interpreter = kernel
+            .identity
+            .is_some_and(|identity| shebang.identity == Some(identity))
+            || kernel
+                .path
+                .strip_suffix(b" (deleted)")
+                .unwrap_or(&kernel.path)
+                == shebang.interpreter.as_slice();
+        if !image_is_interpreter {
+            continue;
+        }
+        let slot = usize::from(shebang.argument.is_some()) + 1;
+        if argv.get(slot).is_some_and(|script| {
+            script.as_slice() == snapshot.bytes.as_slice()
+                && snapshot.bytes.as_slice() == candidate.as_slice()
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Records `event` in `audit` and returns the fact it establishes.
 pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent) -> Fact {
     match event {
@@ -294,6 +345,8 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             kernel_image,
             dirfd,
             command,
+            shebangs,
+            kernel_argv,
             ..
         } => {
             audit.record_exec(*pid, *start_ticks, *syscall, path.as_ref(), *dirfd);
@@ -324,7 +377,15 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             // [`kernel_confirms`]'s — inode first, raw bytes second, the
             // deleted-suffix form only when no live candidate contradicts.
             if let Some(kernel) = kernel_image.as_ref() {
-                if kernel_confirms(target.images, kernel) {
+                if kernel_confirms(target.images, kernel)
+                    || script_kernel_confirms(
+                        target.images,
+                        path.as_ref(),
+                        kernel,
+                        kernel_argv.as_deref(),
+                        shebangs,
+                    )
+                {
                     return Fact::TargetExec;
                 }
                 if is_target_image(target.images, path.as_ref(), None) {
@@ -486,7 +547,12 @@ pub fn stop(
             u64::try_from(summary.unreaped_children.len()).ok(),
         );
     }
-    if summary.loss.lifecycle_dropped > 0 || (summary.loss.total() > 0 && !audit.has_loss_gaps()) {
+    // Audit 7 L9: a lifecycle drop no longer lands here. Drops counted at
+    // the emit site carry their own named `queue_full` gap, so repeating
+    // them as an all-class gap from 0 to the end overstated every class's
+    // exposure. This catch-all stays for losses recorded without a gap of
+    // their own.
+    if summary.loss.total() > 0 && !audit.has_loss_gaps() {
         audit.record_gap(
             GapReason::QueueFull,
             OpSet::ALL,
@@ -526,6 +592,16 @@ mod tests {
         path: Option<PathSnapshot>,
         kernel_image: Option<KernelImage>,
     ) -> TracerEvent {
+        exec_with_evidence(pid, path, kernel_image, Vec::new(), None)
+    }
+
+    fn exec_with_evidence(
+        pid: pid_t,
+        path: Option<PathSnapshot>,
+        kernel_image: Option<KernelImage>,
+        shebangs: Vec<Option<ShebangImage>>,
+        kernel_argv: Option<Vec<Vec<u8>>>,
+    ) -> TracerEvent {
         TracerEvent::Exec {
             pid,
             // J4-O begin
@@ -536,6 +612,8 @@ mod tests {
             kernel_image,
             dirfd: None,
             command: None,
+            shebangs,
+            kernel_argv,
             monotonic_ns: 1,
         }
     }
@@ -667,6 +745,144 @@ mod tests {
             Fact::Nothing
         );
         assert!(!quiet.has_gaps(), "a non-target image is not a mismatch");
+    }
+
+    /// Audit 2026-10-08 H2: a `#!` target loads the interpreter its script
+    /// names, so the kernel image is not one of the target's spellings.
+    /// The exec still confirms when the kernel's own records show that
+    /// rewrite: the interpreter is the loaded image (by identity), and the
+    /// kernel's argv carries the exec'd pathname in the script slot, after
+    /// the interpreter and its optional single argument.
+    #[test]
+    fn a_shebang_target_confirms_through_the_interpreter_image() {
+        let images = vec![b"/w/s.sh".to_vec()];
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let shebangs = vec![Some(ShebangImage {
+            interpreter: b"/bin/sh".to_vec(),
+            argument: None,
+            identity: Some((7, 8)),
+        })];
+        let kernel = Some(KernelImage {
+            // The kernel link names the resolved interpreter, not the
+            // script and not the line's own spelling.
+            path: b"/usr/bin/dash".to_vec(),
+            identity: Some((7, 8)),
+            candidates: vec![super::super::tracer::CandidateImage {
+                path: b"/w/s.sh".to_vec(),
+                identity: None,
+            }],
+        });
+        let argv = |args: &[&[u8]]| -> Option<Vec<Vec<u8>>> {
+            Some(args.iter().map(|arg| arg.to_vec()).collect())
+        };
+        let mut audit = AuditWriter::new("att_h2a", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_evidence(
+                    LAUNCHER,
+                    snapshot(b"/w/s.sh", true),
+                    kernel.clone(),
+                    shebangs,
+                    argv(&[b"/bin/sh", b"/w/s.sh", b"arg"]),
+                ),
+            ),
+            Fact::TargetExec
+        );
+        assert!(!audit.has_gaps());
+
+        // An interpreter argument shifts the script one slot later, the
+        // `#!/usr/bin/env python3` shape.
+        let images = vec![b"/w/p.py".to_vec()];
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let shebangs = vec![Some(ShebangImage {
+            interpreter: b"/usr/bin/env".to_vec(),
+            argument: Some(b"python3".to_vec()),
+            identity: Some((7, 8)),
+        })];
+        let mut audit = AuditWriter::new("att_h2b", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_evidence(
+                    LAUNCHER,
+                    snapshot(b"/w/p.py", true),
+                    kernel,
+                    shebangs,
+                    argv(&[b"/usr/bin/env", b"python3", b"/w/p.py"]),
+                ),
+            ),
+            Fact::TargetExec
+        );
+        assert!(!audit.has_gaps());
+    }
+
+    /// Audit 2026-10-08 H2: the interpreter image alone confirms nothing.
+    /// Without the candidate in the kernel's argv script slot — a direct
+    /// exec of the interpreter, whatever its argv says — a snapshot naming
+    /// the script stays a contradiction the gap names (I06), and a script
+    /// slot naming another pathname is an ordinary inner exec.
+    #[test]
+    fn the_interpreter_image_alone_does_not_confirm_a_script_target() {
+        let images = vec![b"/w/s.sh".to_vec()];
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let shebangs = vec![Some(ShebangImage {
+            interpreter: b"/bin/sh".to_vec(),
+            argument: None,
+            identity: Some((7, 8)),
+        })];
+        let kernel = Some(KernelImage {
+            path: b"/usr/bin/dash".to_vec(),
+            identity: Some((7, 8)),
+            candidates: Vec::new(),
+        });
+        let argv = |args: &[&[u8]]| -> Option<Vec<Vec<u8>>> {
+            Some(args.iter().map(|arg| arg.to_vec()).collect())
+        };
+        let mut audit = AuditWriter::new("att_h2c", None, b"/work", b"");
+        // A direct interpreter exec: nothing in the script slot.
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_evidence(
+                    LAUNCHER,
+                    snapshot(b"/w/s.sh", true),
+                    kernel.clone(),
+                    shebangs.clone(),
+                    argv(&[b"/bin/sh", b"-c", b"evil"]),
+                ),
+            ),
+            Fact::CoverageLost(GapReason::ExecImageMismatch)
+        );
+        assert!(audit.has_gaps());
+        // The slot names another pathname than the candidate's spelling:
+        // the file the kernel passed the interpreter is not the candidate.
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_evidence(
+                    LAUNCHER,
+                    snapshot(b"/w/other.sh", true),
+                    kernel,
+                    shebangs,
+                    argv(&[b"/bin/sh", b"/w/other.sh"]),
+                ),
+            ),
+            Fact::Nothing
+        );
     }
 
     /// Security 2026-09-27 (audit 4 B3): the raw link plus the image inode
@@ -1124,6 +1340,8 @@ mod tests {
                 digest: "sha256:x".to_owned(),
                 forbidden,
             })),
+            shebangs: Vec::new(),
+            kernel_argv: None,
             monotonic_ns: 1,
         };
         assert_eq!(
