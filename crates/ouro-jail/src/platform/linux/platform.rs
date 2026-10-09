@@ -2596,18 +2596,19 @@ impl StdioRelay {
         } else {
             (write_end, read_end)
         };
-        // SAFETY: a successful dup returns a newly owned descriptor.
-        let origin = match unsafe { OwnedFd::from_raw_fd(libc::dup(fd)) } {
-            Ok(origin) => origin,
-            Err(_) => {
-                return Err(error(
-                    ErrorCode::InvalidFd,
-                    ErrorStage::Preparing,
-                    Remediation::Configuration,
-                    "the operator's stdio descriptor could not be kept for the relay",
-                ));
-            }
-        };
+        // SAFETY: dup returns a newly owned descriptor, or -1 on failure
+        // which is checked before it is owned.
+        let duped = unsafe { libc::dup(fd) };
+        if duped < 0 {
+            return Err(error(
+                ErrorCode::InvalidFd,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                "the operator's stdio descriptor could not be kept for the relay".to_owned(),
+            ));
+        }
+        // SAFETY: `duped` was just created and is owned here.
+        let origin = unsafe { OwnedFd::from_raw_fd(duped) };
         match fd {
             0 => command.stdin(std::process::Stdio::from(child_end)),
             1 => command.stdout(std::process::Stdio::from(child_end)),

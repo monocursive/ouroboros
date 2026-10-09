@@ -191,6 +191,7 @@ fn parse_binfmt_registration(text: &str) -> Option<BinfmtRegistration> {
     let mut interpreter: Option<(Vec<u8>, Option<Vec<u8>>)> = None;
     let mut extension: Option<Vec<u8>> = None;
     let mut magic: Option<Vec<u8>> = None;
+    let mut mask = Vec::new();
     for line in text.lines() {
         // The real files serve `enabled` as a bare word.
         if line == "enabled" {
