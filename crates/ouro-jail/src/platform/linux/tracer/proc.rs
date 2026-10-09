@@ -168,6 +168,165 @@ pub fn shebang_image(tid: pid_t, script: &[u8]) -> Option<super::ShebangImage> {
     })
 }
 
+/// One `/proc/sys/fs/binfmt_misc` registration, parsed.
+struct BinfmtRegistration {
+    /// The interpreter path as written.
+    interpreter: Vec<u8>,
+    /// The registration's optional fixed argument, which shifts the script
+    /// one slot later in the kernel's argv.
+    argument: Option<Vec<u8>>,
+    /// An extension match: the candidate's name must end with it.
+    extension: Option<Vec<u8>>,
+    /// A magic match: the candidate's first `magic.len()` bytes, compared
+    /// under `mask` (byte `i` of the mask applies to byte `i` of the magic;
+    /// a missing mask byte is all-ones).
+    magic: Option<Vec<u8>>,
+    mask: Vec<u8>,
+}
+
+/// Parses one registration file's text. Returns `None` for disabled
+/// registrations and malformed shapes.
+fn parse_binfmt_registration(text: &str) -> Option<BinfmtRegistration> {
+    let mut enabled = false;
+    let mut interpreter: Option<(Vec<u8>, Option<Vec<u8>>)> = None;
+    let mut extension: Option<Vec<u8>> = None;
+    let mut magic: Option<Vec<u8>> = None;
+    for line in text.lines() {
+        // The real files serve `enabled` as a bare word.
+        if line == "enabled" {
+            enabled = true;
+            continue;
+        }
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        match key {
+            "interpreter" => {
+                // The interpreter line may carry one optional argument.
+                let bytes = value.as_bytes();
+                let (path, argument) = match bytes.iter().position(|b| *b == b' ') {
+                    Some(at) => (bytes[..at].to_vec(), Some(bytes[at + 1..].to_vec())),
+                    None => (bytes.to_vec(), None),
+                };
+                interpreter = Some((path, argument));
+            }
+            "extension" => extension = Some(value.as_bytes().to_vec()),
+            "magic" => magic = hex_bytes(value),
+            "mask" => mask = hex_bytes(value).unwrap_or_default(),
+            _ => {}
+        }
+    }
+    if !enabled {
+        return None;
+    }
+    let (interpreter, argument) = interpreter?;
+    if magic.is_none() && extension.is_none() {
+        return None;
+    }
+    Some(BinfmtRegistration {
+        interpreter,
+        argument,
+        extension,
+        magic,
+        mask,
+    })
+}
+
+/// Hex to bytes; `None` on odd length or non-hex input.
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if bytes.len() % 2 != 0 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..bytes.len() / 2)
+        .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}
+
+/// Whether one registration matches a candidate: by name extension, or by
+/// the candidate's leading bytes under the registration's mask.
+fn binfmt_matches(
+    registration: &BinfmtRegistration,
+    candidate_name: &[u8],
+    candidate_head: Option<&[u8]>,
+) -> bool {
+    if let Some(extension) = &registration.extension {
+        return candidate_name.ends_with(extension);
+    }
+    let Some(magic) = &registration.magic else {
+        return false;
+    };
+    let Some(head) = candidate_head else {
+        return false;
+    };
+    if head.len() < magic.len() {
+        return false;
+    }
+    magic.iter().enumerate().all(|(index, byte)| {
+        let mask_byte = registration.mask.get(index).copied().unwrap_or(0xff);
+        byte & mask_byte == head[index] & mask_byte
+    })
+}
+
+/// Audit 2026-10-08 H2 residual: the `binfmt_misc` image a candidate would
+/// load, as the same evidence shape the `#!` rule uses. The kernel hands a
+/// registered handler the file the way it hands an interpreter a script —
+/// interpreter (and optional fixed argument) first, the exec'd pathname in
+/// the script slot — so the confirmation rule is the same. Registrations
+/// live in the host's `/proc/sys/fs/binfmt_misc` (not namespaced), a magic
+/// registration matches the candidate's leading bytes read through the
+/// tracee's root, and the interpreter is resolved where the kernel resolves
+/// it, on the host. `None` when no enabled registration matches.
+#[must_use]
+pub fn binfmt_image(tid: pid_t, candidate: &[u8]) -> Option<super::ShebangImage> {
+    let registrations = std::fs::read_dir("/proc/sys/fs/binfmt_misc").ok()?;
+    let parsed: Vec<BinfmtRegistration> = registrations
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| parse_binfmt_registration(&text))
+        .collect();
+    if parsed.is_empty() {
+        return None;
+    }
+    let name = candidate.rsplit(|b| *b == b'/').next().unwrap_or(candidate);
+    let head = {
+        use std::io::Read as _;
+        use std::os::unix::ffi::OsStrExt as _;
+        let mut path = format!("/proc/{tid}/root").into_bytes();
+        path.extend_from_slice(candidate);
+        let mut head = [0u8; 256];
+        std::fs::File::open(std::ffi::OsStr::from_bytes(&path))
+            .and_then(|mut file| file.read(&mut head))
+            .ok()
+            .map(|read| head[..read].to_vec())
+    };
+    for registration in parsed {
+        if !binfmt_matches(&registration, name, head.as_deref()) {
+            continue;
+        }
+        let identity = (registration.interpreter.first() == Some(&b'/'))
+            .then(|| {
+                use std::os::unix::ffi::OsStrExt as _;
+                use std::os::unix::fs::MetadataExt as _;
+                let path = std::ffi::OsStr::from_bytes(&registration.interpreter);
+                // Where the kernel resolves the handler: the host root.
+                // `/proc/1/root` is that root even from a containerised
+                // supervisor; fall back to this namespace's view.
+                std::fs::metadata(format!("/proc/1/root{}", path.to_string_lossy()))
+                    .or_else(|_| std::fs::metadata(path))
+                    .ok()
+                    .map(|meta| (meta.dev(), meta.ino()))
+            })
+            .flatten();
+        return Some(super::ShebangImage {
+            interpreter: registration.interpreter,
+            argument: registration.argument,
+            identity,
+        });
+    }
+    None
+}
+
 /// The raw `/proc/<tid>/cmdline` bytes: the argument area of the image the
 /// kernel installed, read while the tracee is stopped at its exec event
 /// (audit 6 N2). The kernel copied it from the tracee's argv vector into
@@ -534,5 +693,55 @@ mod tests {
             cmdline_bytes(me).as_deref().and_then(parse_cmdline),
             Some(own)
         );
+    }
+
+    /// Audit 2026-10-08 H2 residual: a `binfmt_misc` registration parses
+    /// with its optional fixed argument, and matches by extension or by
+    /// masked magic — the same evidence shape the `#!` rule consumes. The
+    /// text is the shape `/proc/sys/fs/binfmt_misc` serves.
+    #[test]
+    fn binfmt_registrations_parse_and_match() {
+        let text = concat!(
+            "enabled\n",
+            "interpreter /usr/bin/qemu-aarch64\n",
+            "flags: OC\n",
+            "offset 0\n",
+            "magic 7f454c4602010100\n",
+            "mask ffffffffffffff00\n",
+        );
+        let registration = parse_binfmt_registration(text).expect("parses");
+        assert_eq!(registration.interpreter, b"/usr/bin/qemu-aarch64");
+        assert!(registration.argument.is_none());
+        // A matching ELF header; the masked byte is ignored either way.
+        let elf = b"\x7f\x45\x4c\x46\x02\x01\x01\x9b";
+        assert!(binfmt_matches(&registration, b"any", Some(elf)));
+        let elf_masked = b"\x7f\x45\x4c\x46\x02\x01\x01\x00";
+        assert!(binfmt_matches(&registration, b"any", Some(elf_masked)));
+        let other = b"\x7f\x45\x4c\x46\x02\x01\x02\x00";
+        assert!(!binfmt_matches(&registration, b"any", Some(other)));
+        // Without the candidate's bytes there is no magic match.
+        assert!(!binfmt_matches(&registration, b"any", None));
+
+        // Extension matching, and the interpreter's fixed argument.
+        let text = concat!(
+            "enabled\n",
+            "interpreter /usr/bin/run -flag\n",
+            "extension .jar\n",
+        );
+        let registration = parse_binfmt_registration(text).expect("parses");
+        assert_eq!(
+            registration.argument.as_deref(),
+            Some(&b"-flag"[..]),
+            "the interpreter line's argument splits off"
+        );
+        assert!(binfmt_matches(&registration, b"app.jar", None));
+        assert!(!binfmt_matches(&registration, b"app.ja", None));
+
+        // Disabled and malformed registrations refuse.
+        assert!(parse_binfmt_registration("interpreter /bin/x\nmagic 00\n").is_none());
+        assert!(parse_binfmt_registration("enabled\ninterpreter /bin/x\n").is_none());
+        assert!(hex_bytes("0g").is_none());
+        assert!(hex_bytes("0").is_none());
+        assert_eq!(hex_bytes("7fFF").as_deref(), Some(&[0x7f, 0xff][..]));
     }
 }

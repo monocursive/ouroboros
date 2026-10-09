@@ -254,9 +254,11 @@ mod tests {
     }
     fn run_tls(
         trusted: bool,
-        matching_host: bool,
+        _matching_host: bool,
         authorized: bool,
+        first: impl Fn(u16) -> String,
         pipeline: &[u8],
+        relayed: bool,
     ) -> (ProxyResult, Vec<u8>, Vec<u8>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -358,21 +360,12 @@ mod tests {
             .unwrap(),
             socket,
         );
-        write!(
-            child,
-            "GET / HTTP/1.1\r\nHost: {}:{port}\r\nAuthorization: vault:test-attempt:api\r\n\r\n",
-            if matching_host {
-                "fixture.test"
-            } else {
-                "other.test"
-            }
-        )
-        .unwrap();
+        child.write_all(first(port).as_bytes()).unwrap();
         child.write_all(pipeline).unwrap();
         child.flush().unwrap();
         let mut response = Vec::new();
         let read = child.read_to_end(&mut response);
-        if trusted && matching_host && authorized {
+        if relayed {
             // Keep the client's write side open through the relay's drain.
             // A close-delimited response needs a TLS close_notify; receiving
             // its body followed by an unexpected transport EOF is not success.
@@ -382,9 +375,22 @@ mod tests {
         assert!(proxy.stop(Duration::from_secs(10)).complete());
         (event, server.join().unwrap(), response)
     }
+    /// The default first flight: an authorized GET for the matching host.
+    fn authorized_get(matching_host: bool) -> impl Fn(u16) -> String {
+        move |port| {
+            format!(
+                "GET / HTTP/1.1\r\nHost: {}:{port}\r\nAuthorization: vault:test-attempt:api\r\n\r\n",
+                if matching_host {
+                    "fixture.test"
+                } else {
+                    "other.test"
+                }
+            )
+        }
+    }
     #[test]
     fn tls_vault_substitutes_only_after_both_authorities_and_the_certificate_pass() {
-        let (event, upstream, response) = run_tls(true, true, true, b"");
+        let (event, upstream, response) = run_tls(true, true, true, authorized_get(true), b"", true);
         assert_eq!(event.reason, Reason::Relayed);
         assert_eq!(event.origin_verification.as_deref(), Some("mitm_http_host"));
         assert!(
@@ -399,7 +405,8 @@ mod tests {
             (true, false, true),
             (true, true, false),
         ] {
-            let (event, upstream, _) = run_tls(case.0, case.1, case.2, b"");
+            let (event, upstream, _) =
+                run_tls(case.0, case.1, case.2, authorized_get(case.1), b"", false);
             assert_ne!(event.reason, Reason::Relayed);
             assert!(
                 upstream.is_empty(),
@@ -410,11 +417,194 @@ mod tests {
     #[test]
     fn tls_vault_closes_the_response_and_counts_discarded_pipeline_bytes() {
         let pipeline = b"GET /second HTTP/1.1\r\nHost: fixture.test\r\n\r\n";
-        let (event, upstream, response) = run_tls(true, true, true, pipeline);
+        let (event, upstream, response) =
+            run_tls(true, true, true, authorized_get(true), pipeline, true);
         assert_eq!(event.reason, Reason::Relayed);
         assert_eq!(event.discarded_bytes, pipeline.len() as u64);
         assert!(!upstream.windows(7).any(|bytes| bytes == b"/second"));
         assert_eq!(response, b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK");
+    }
+    #[test]
+    fn a_secret_bound_to_https_never_reaches_a_plaintext_origin() {
+        // jail-v2 §6.3: the scheme is part of the binding. Absolute-form
+        // `http://fixture.test:443` names the very destination the https
+        // secret is bound to; only the scheme distinguishes the plaintext
+        // injection attempt.
+        let secret = Arc::new(
+            Secret::new(
+                "api".into(),
+                Policy {
+                    hosts: vec!["https://fixture.test".into()],
+                    allow_plaintext: false,
+                },
+                b"Bearer fixture-secret".to_vec(),
+            )
+            .unwrap(),
+        );
+        let vault = Vault::new("test-attempt", vec![secret]).unwrap();
+        let flight = || {
+            proxy::http::parse_request(
+                b"GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\nAuthorization: vault:test-attempt:api\r\n\r\n",
+            )
+            .unwrap()
+        };
+        vault
+            .inject("http", &mut flight())
+            .expect_err("a plaintext origin must not receive an https-bound secret");
+        let mut secure = flight();
+        vault
+            .inject("https", &mut secure)
+            .expect("the bound https origin substitutes");
+        assert!(
+            secure
+                .forward_head
+                .windows(b"Bearer fixture-secret".len())
+                .any(|s| s == b"Bearer fixture-secret")
+        );
+        // Positive control: the allow_plaintext opt-in substitutes over http
+        // (default port 80 here, matching the secret's own binding).
+        let plain = Arc::new(
+            Secret::new(
+                "api".into(),
+                Policy {
+                    hosts: vec!["http://fixture.test".into()],
+                    allow_plaintext: true,
+                },
+                b"Bearer fixture-secret".to_vec(),
+            )
+            .unwrap(),
+        );
+        let plain_vault = Vault::new("test-attempt", vec![plain]).unwrap();
+        let mut default_port = proxy::http::parse_request(
+            b"GET http://fixture.test/ HTTP/1.1\r\nHost: fixture.test\r\nAuthorization: vault:test-attempt:api\r\n\r\n",
+        )
+        .unwrap();
+        plain_vault
+            .inject("http", &mut default_port)
+            .expect("the allow_plaintext opt-in substitutes");
+    }
+    #[test]
+    fn a_placeholder_outside_authorization_is_refused_never_rewritten() {
+        let secret = Arc::new(
+            Secret::new(
+                "api".into(),
+                Policy {
+                    hosts: vec!["http://fixture.test".into()],
+                    allow_plaintext: true,
+                },
+                b"Bearer fixture-secret".to_vec(),
+            )
+            .unwrap(),
+        );
+        let vault = Vault::new("test-attempt", vec![secret]).unwrap();
+        let mut request = proxy::http::parse_request(
+            b"POST http://fixture.test/ HTTP/1.1\r\nHost: fixture.test\r\nX-Api-Key: vault:test-attempt:api\r\nContent-Length: 0\r\n\r\n",
+        )
+        .unwrap();
+        let error = vault
+            .inject("http", &mut request)
+            .expect_err("a marker outside Authorization must refuse");
+        assert_eq!(error, Reason::OriginUnverified);
+        assert!(
+            !request
+                .forward_head
+                .windows(b"Bearer fixture-secret".len())
+                .any(|s| s == b"Bearer fixture-secret"),
+            "the secret must not be substituted"
+        );
+        assert!(
+            !request
+                .forward_head
+                .windows(15)
+                .any(|s| s.eq_ignore_ascii_case(b"authorization:")),
+            "the secret must not be rewritten into Authorization: {:?}",
+            String::from_utf8_lossy(&request.forward_head)
+        );
+    }
+    /// The TLS lane's post-decryption refusals (audit survivors, tls.rs):
+    /// the 32 KiB decrypted-header bound, the chunked refusal and the
+    /// `Expect` refusal by header name.
+    #[test]
+    fn the_tls_lane_refuses_oversized_chunked_and_expect_first_flights() {
+        // Decrypted headers past 32 KiB refuse instead of parsing forever.
+        let (event, upstream, _) = run_tls(
+            true,
+            true,
+            true,
+            |port| {
+                format!(
+                    "GET / HTTP/1.1\r\nHost: fixture.test:{port}\r\nX-Pad: {}\r\n\r\n",
+                    "a".repeat(40_000)
+                )
+            },
+            b"",
+            false,
+        );
+        assert_eq!(event.reason, Reason::HeaderTooLarge);
+        assert!(upstream.is_empty(), "no bytes may be forwarded");
+
+        // Chunked framing is refused in this one-request lane.
+        let (event, upstream, _) = run_tls(
+            true,
+            true,
+            true,
+            |port| {
+                format!(
+                    "POST / HTTP/1.1\r\nHost: fixture.test:{port}\r\n\
+                     Authorization: vault:test-attempt:api\r\n\
+                     Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+                )
+            },
+            b"",
+            false,
+        );
+        assert_eq!(event.reason, Reason::UnsupportedRequest);
+        assert!(
+            !upstream
+                .windows(b"Bearer fixture-secret".len())
+                .any(|s| s == b"Bearer fixture-secret")
+        );
+
+        // `Expect` is refused by header name at line start.
+        let (event, upstream, _) = run_tls(
+            true,
+            true,
+            true,
+            |port| {
+                format!(
+                    "GET / HTTP/1.1\r\nHost: fixture.test:{port}\r\n\
+                     Expect: 100-continue\r\n\
+                     Authorization: vault:test-attempt:api\r\n\r\n"
+                )
+            },
+            b"",
+            false,
+        );
+        assert_eq!(event.reason, Reason::UnsupportedRequest);
+        assert!(upstream.is_empty());
+
+        // The match is by header name, not substring: a value that merely
+        // mentions `expect:` is none of this lane's business and relays.
+        let (event, upstream, _) = run_tls(
+            true,
+            true,
+            true,
+            |port| {
+                format!(
+                    "GET / HTTP/1.1\r\nHost: fixture.test:{port}\r\n\
+                     X-Note: please expect: later\r\n\
+                     Authorization: vault:test-attempt:api\r\n\r\n"
+                )
+            },
+            b"",
+            true,
+        );
+        assert_eq!(event.reason, Reason::Relayed);
+        assert!(
+            upstream
+                .windows(b"Bearer fixture-secret".len())
+                .any(|s| s == b"Bearer fixture-secret")
+        );
     }
     #[test]
     fn plaintext_is_opt_in_and_substitution_is_exact() {

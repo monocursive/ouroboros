@@ -1075,6 +1075,109 @@ mod tests {
         }
     }
 
+    /// The audit: no test parsed `mode = "vault"`. A valid vault credential
+    /// parses to the expected declaration; every invalid shape refuses.
+    #[test]
+    fn vault_credentials_parse_and_invalid_shapes_refuse() {
+        let profile = parse_ok(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "vault"
+hosts = ["https://api.example.com"]
+"#,
+        );
+        let credential = profile
+            .credentials
+            .iter()
+            .find(|credential| credential.id == "api")
+            .expect("the vault credential parses");
+        assert_eq!(credential.mode, "vault");
+        assert_eq!(credential.dest.as_bytes(), b".vault-api");
+        let vault = credential.vault.as_ref().expect("vault mode carries a policy");
+        assert_eq!(vault.hosts, vec!["https://api.example.com".to_owned()]);
+        assert!(!vault.allow_plaintext);
+
+        // An unknown mode string refuses.
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "carrier"
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api.mode"));
+
+        // Vault credentials need hosts.
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "vault"
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api"));
+        assert!(error.message.contains("1..64"), "{}", error.message);
+
+        // Plaintext hosts still need the allow_plaintext opt-in.
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "vault"
+hosts = ["http://api.example.com"]
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api"));
+        assert!(error.message.contains("allow_plaintext"), "{}", error.message);
+
+        // Vault credentials take no destination file.
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "vault"
+hosts = ["https://api.example.com"]
+dest = "token"
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api"));
+        assert!(
+            error.message.contains("no destination file"),
+            "{}",
+            error.message
+        );
+
+        // Hosts outside vault mode refuse rather than dropping silently.
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+dest = "token"
+mode = "copy_rw"
+hosts = ["https://api.example.com"]
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api"));
+        assert!(
+            error.message.contains("require vault mode"),
+            "{}",
+            error.message
+        );
+    }
+
     #[test]
     fn filesystem_narrowing_keys_refuse_rather_than_parse_into_silence() {
         let error = parse_err(

@@ -246,6 +246,34 @@ mod tests {
         assert!(error.contains("at most 64 command rules"), "{error}");
     }
 
+    /// A command matching both a deny and a forbid rule yields the forbid:
+    /// the forbid list is evaluated first, so forbid wins.
+    #[test]
+    fn forbid_wins_when_a_command_matches_both_a_deny_and_a_forbid() {
+        let rules = Rules {
+            deny: vec!["git **".into()],
+            forbid: vec!["git push --force **".into()],
+        };
+        rules.validate().unwrap();
+        let args: Vec<Vec<u8>> = "git push --force upstream"
+            .split(' ')
+            .map(|s| s.as_bytes().to_vec())
+            .collect();
+        let hit = rules
+            .check(Some(&args), None)
+            .expect("a doubly matched command still hits");
+        assert!(hit.forbidden, "forbid wins over deny: {hit:?}");
+        assert_eq!(hit.pattern, "git push --force **");
+        // The same argv under deny alone is an ordinary (non-forbidden) hit.
+        let deny_only = Rules {
+            deny: vec!["git **".into()],
+            forbid: Vec::new(),
+        };
+        deny_only.validate().unwrap();
+        let hit = deny_only.check(Some(&args), None).expect("deny hits");
+        assert!(!hit.forbidden);
+    }
+
     #[test]
     fn an_exec_with_no_argv_matches_the_exec_path_alone() {
         let rules = Rules {

@@ -1277,4 +1277,83 @@ mod tests {
         assert_eq!(error.code, ErrorCode::EvidenceLost);
         assert_eq!(sink.written(), 0);
     }
+
+    // Portable-mutation regressions (audit 2026-10-08) begin
+
+    /// T1 (§13.3): `last_healthy_ns` does not advance across a failed write,
+    /// so the loss note's interval starts at the last *healthy* point, not
+    /// after the lost frame.
+    #[test]
+    fn the_loss_interval_starts_at_the_last_healthy_write() {
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        let trace = shared(FileSink::with_bounds(
+            file.reopen().expect("a handle"),
+            4096,
+            2048,
+        ));
+        let mut writer = trace.lock().unwrap();
+        let event = crate::records::Event::lifecycle_note(
+            "att_test",
+            0,
+            std::time::SystemTime::now(),
+            0,
+            "small",
+        );
+        writer
+            .write_event(&event, Priority::Normal)
+            .expect("the first event fits");
+        let healthy = crate::platform::elapsed_since_start_ns();
+        // Long enough that a last_healthy_ns advanced across the failing
+        // write would be measurably later than `healthy`.
+        std::thread::sleep(Duration::from_millis(60));
+        let before = crate::platform::elapsed_since_start_ns();
+        let too_big = crate::records::Event::lifecycle_note(
+            "att_test",
+            1,
+            std::time::SystemTime::now(),
+            0,
+            &"x".repeat(8000),
+        );
+        assert!(
+            writer.write_event(&too_big, Priority::Normal).is_err(),
+            "the second event exceeds the payload budget"
+        );
+        let start = writer.loss_start_ns().expect("the loss was noted");
+        assert!(
+            start + 30_000_000 < before,
+            "the loss interval starts at the last healthy write ({start}), not \
+             after the lost frame (before {before})"
+        );
+        assert!(start <= healthy + 5_000_000, "{start} vs {healthy}");
+    }
+
+    /// T4: an `FdSink` that refuses an oversized frame latches `Lost`, so
+    /// every ordinary frame afterwards is refused too: the stream stays a
+    /// prefix, never a hole plus later frames (§13.3).
+    #[test]
+    fn an_fd_sink_that_drops_an_oversized_frame_latches_lost() {
+        use std::os::fd::IntoRawFd as _;
+        let file = tempfile::NamedTempFile::new().expect("a temporary file");
+        let fd = file.reopen().expect("a handle").into_raw_fd();
+        // SAFETY: the write end was just created here and handed over whole.
+        let mut sink = unsafe { FdSink::from_raw_fd(fd) }.expect("nonblocking");
+        let error = sink
+            .write_frame(&[b'x'; EVENT_MAX + 1], Priority::Normal)
+            .expect_err("an oversized frame refuses");
+        assert_eq!(error.code, ErrorCode::EvidenceLost);
+        let error = sink
+            .write_frame(b"{\"n\":1}", Priority::Normal)
+            .expect_err("after the oversized frame the sink is latched lost");
+        assert!(
+            error.message.contains("marked lost"),
+            "the refusal must come from the latch, not the queue: {error:?}"
+        );
+        assert_eq!(sink.loss().expect("the loss is kept").lost_frames, Some(2));
+        sink.finish();
+        assert!(
+            std::fs::read(file.path()).expect("readable").is_empty(),
+            "no frame reached the trace, not even after the loss"
+        );
+    }
+    // Portable-mutation regressions end
 }

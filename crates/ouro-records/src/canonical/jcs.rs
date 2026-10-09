@@ -120,3 +120,25 @@ fn write_string(text: &str, out: &mut Vec<u8>) {
     }
     out.push(b'"');
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R5 (audit 2026-10-08): control characters serialize as lowercase
+    /// `\u00XX` (RFC 8785 §3.2.2.2). The expectation here is hand-written
+    /// bytes, not a round trip through this serializer, so an uppercase
+    /// `\u001B` cannot pass by agreeing with itself.
+    #[test]
+    fn control_escapes_are_lowercase_hex_against_hand_written_bytes() {
+        let mut out = Vec::new();
+        write_string("\u{1b}", &mut out);
+        assert_eq!(out, b"\"\\u001b\"");
+        let mut out = Vec::new();
+        write_string("\u{1}\u{8}\u{c}\u{1f}\"\\/\n\r\té", &mut out);
+        assert_eq!(
+            out,
+            b"\"\\u0001\\b\\f\\u001f\\\"\\\\/\\n\\r\\t\xc3\xa9\"".as_slice()
+        );
+    }
+}

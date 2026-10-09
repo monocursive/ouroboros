@@ -211,4 +211,66 @@ mod tests {
             assert!(!super::valid_timestamp(bad));
         }
     }
+
+    // Portable-mutation regressions (audit 2026-10-08) begin
+
+    /// J1: a torn final frame — truncated mid-frame, no LF — is never
+    /// printed as evidence; the tail refuses.
+    #[test]
+    fn a_torn_final_frame_is_refused_not_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempt = dir.path().join("attempt");
+        std::fs::create_dir(&attempt).unwrap();
+        std::fs::write(attempt.join("jail.lock"), b"").unwrap();
+        let whole = b"{\"observed_at\":\"2026-09-28T12:00:00Z\"}\n";
+        std::fs::write(
+            attempt.join("trace.ndjson"),
+            [whole.as_slice(), &b"{\"observed_at\":\"2026-"[..]].concat(),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        let error = super::tail(&attempt, false, true, None, &mut output)
+            .expect_err("a torn final frame must refuse");
+        assert!(error.contains("incomplete"), "{error}");
+        // Only the complete frame is evidence; nothing torn is printed.
+        assert_eq!(output, whole);
+    }
+
+    /// J3: a frame over the 1 MiB bound is refused, even when it is complete
+    /// and valid JSON — a bounded reader never prints an unbounded frame.
+    #[test]
+    fn an_oversized_frame_is_refused_even_when_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempt = dir.path().join("attempt");
+        std::fs::create_dir(&attempt).unwrap();
+        std::fs::write(attempt.join("jail.lock"), b"").unwrap();
+        let mut frame = b"{\"observed_at\":\"2026-09-28T12:00:00Z\",\"pad\":\"".to_vec();
+        frame.resize(1024 * 1024 + 512, b'x');
+        frame.extend(b"\"}\n");
+        std::fs::write(attempt.join("trace.ndjson"), &frame).unwrap();
+        let mut output = Vec::new();
+        let error = super::tail(&attempt, false, true, None, &mut output)
+            .expect_err("a frame over 1 MiB must refuse");
+        assert!(error.contains("1 MiB"), "{error}");
+        assert!(output.is_empty());
+    }
+
+    /// J4: a `--attempt` value is an attempt id, never a path: `../x` must
+    /// refuse before it can name a directory outside `attempts/`.
+    #[test]
+    fn an_attempt_selection_may_not_contain_path_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["../x", "att_../../etc", "a/b", ".", ".."] {
+            assert!(
+                super::attempt_path(dir.path(), Some(bad)).is_err(),
+                "`{bad}` must refuse"
+            );
+        }
+        let good = "att_00000000-0000-4000-8000-000000000001";
+        assert_eq!(
+            super::attempt_path(dir.path(), Some(good)).unwrap(),
+            dir.path().join("attempts").join(good)
+        );
+    }
+    // Portable-mutation regressions end
 }

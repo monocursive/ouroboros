@@ -905,63 +905,26 @@ fn r3_io_uring_as_stdio_refuses_before_exec() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid_fd"));
 }
 
-/// Audit 2026-10-08 H1: a regular-file stdio redirect is a reopenable
-/// handle. A writable regular file on stdin must refuse before the boundary
-/// (the child's `/dev/stdin` reopen checks the inode's permissions, never
-/// the descriptor's open mode), a read-only file must run and stay
-/// unchanged, and no stream may redirect into the trusted config directory.
+/// Audit 2026-10-08 H1 (follow-up): a regular-file stdio redirect is
+/// relayed through a supervisor-owned pipe, so the child holds no
+/// reopenable handle on the operator's file. A writable file on stdin runs
+/// and stays unchanged (the child's `/dev/stdin` is a pipe end), the
+/// child's stdout reaches the operator's sink through the relay, and no
+/// stream may redirect into the trusted config directory.
 #[test]
-fn r3_regular_file_stdio_cannot_reopen_outside_the_plan() {
+fn r3_regular_file_stdio_is_relayed_and_cannot_reopen_outside_the_plan() {
     if !live() {
         return;
     }
     let jail = Jail::new().expect("harness");
     let (workspace, fixture) = workspace_with_fixture(jail.root());
-    let run_with_stdin = |path: &std::path::Path| {
-        let file = std::fs::File::open(path).expect("the redirect target opens");
-        Command::new(harness::jail_path())
-            .arg("run")
-            .arg("--profile")
-            .arg("tool")
-            .arg("--workspace")
-            .arg(&workspace)
-            .arg("--")
-            .arg(&fixture)
-            .arg("exit")
-            .arg("0")
-            .env("OURO_DATA_DIR", jail.data_dir())
-            .env("OURO_CONFIG_DIR", jail.config_dir())
-            .stdin(std::process::Stdio::from(file))
-            .output()
-            .expect("run")
-    };
 
-    // A writable regular file on stdin refuses before the target runs.
+    // A writable regular file on stdin runs: the child's stdin is a pipe
+    // fed by the supervisor, and a contained append through /dev/stdin
+    // cannot reach the file.
     let writable = jail.root().join("outside-writable.txt");
     std::fs::write(&writable, b"original\n").expect("write");
-    let output = run_with_stdin(&writable);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(125),
-        "a writable regular file as stdin should refuse: {stderr}"
-    );
-    assert!(stderr.contains("invalid_fd"), "{stderr}");
-    assert!(stderr.contains("writable"), "{stderr}");
-    assert_eq!(
-        std::fs::read(&writable).unwrap(),
-        b"original\n",
-        "the refused run must not have touched the file"
-    );
-
-    // A read-only regular file runs, and a contained child appending to
-    // /dev/stdin still cannot change it: the reopen is narrowed by the
-    // inode's permission bits.
-    use std::os::unix::fs::PermissionsExt as _;
-    let readonly = jail.root().join("outside-readonly.txt");
-    std::fs::write(&readonly, b"original\n").expect("write");
-    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).expect("chmod");
-    let file = std::fs::File::open(&readonly).expect("open");
+    let file = std::fs::File::open(&writable).expect("open");
     let output = Command::new(harness::jail_path())
         .arg("run")
         .arg("--profile")
@@ -971,7 +934,7 @@ fn r3_regular_file_stdio_cannot_reopen_outside_the_plan() {
         .arg("--")
         .arg("/bin/sh")
         .arg("-c")
-        .arg("printf appended >> /dev/stdin; test ! -w /dev/stdin")
+        .arg("printf appended >> /dev/stdin 2>/dev/null; true")
         .env("OURO_DATA_DIR", jail.data_dir())
         .env("OURO_CONFIG_DIR", jail.config_dir())
         .stdin(std::process::Stdio::from(file))
@@ -981,20 +944,93 @@ fn r3_regular_file_stdio_cannot_reopen_outside_the_plan() {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "a read-only regular file as stdin must run: {stderr}"
+        "a writable regular file as stdin must run through the relay: {stderr}"
     );
     assert_eq!(
-        std::fs::read(&readonly).unwrap(),
+        std::fs::read(&writable).unwrap(),
         b"original\n",
-        "the contained child must not be able to change a read-only stdin file"
+        "the contained child must not be able to change a relayed stdin file"
     );
 
-    // No stream may redirect into the trusted config directory. Stdin
-    // cannot probe this — a valid config.toml is 0600, which the writable
-    // rule above already refuses — so the plant vector this leg drives is a
-    // stdout redirect over the operator's config.
+    // The relay delivers the child's stdout and stderr into the operator's
+    // sinks, preserving the redirect's meaning.
+    let out = jail.root().join("relayed-out.txt");
+    let err = jail.root().join("relayed-err.txt");
+    {
+        let sink = std::fs::File::create(&out).expect("create");
+        let esink = std::fs::File::create(&err).expect("create");
+        let output = Command::new(harness::jail_path())
+            .arg("run")
+            .arg("--profile")
+            .arg("tool")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("printf relayed-out; printf relayed-err >&2")
+            .env("OURO_DATA_DIR", jail.data_dir())
+            .env("OURO_CONFIG_DIR", jail.config_dir())
+            .stdout(std::process::Stdio::from(sink))
+            .stderr(std::process::Stdio::from(esink))
+            .output()
+            .expect("run");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "the relayed run must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        b"relayed-out",
+        "the child's stdout must reach the operator's sink through the relay"
+    );
+    assert_eq!(
+        std::fs::read(&err).unwrap(),
+        b"relayed-err",
+        "the child's stderr must reach the operator's sink through the relay"
+    );
+
+    // A large payload crosses the relay in bounded pieces: well past one
+    // pipe capacity.
+    let big = jail.root().join("relayed-big.txt");
+    {
+        let sink = std::fs::File::create(&big).expect("create");
+        let output = Command::new(harness::jail_path())
+            .arg("run")
+            .arg("--profile")
+            .arg("tool")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("i=0; while [ $i -lt 512 ]; do printf 0123456789abcdef; i=$((i+1)); done")
+            .env("OURO_DATA_DIR", jail.data_dir())
+            .env("OURO_CONFIG_DIR", jail.config_dir())
+            .stdout(std::process::Stdio::from(sink))
+            .output()
+            .expect("run");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "the large relayed stream must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        std::fs::read(&big).unwrap().len(),
+        512 * 16,
+        "the relay must deliver a multi-pipe-capacity stream whole"
+    );
+
+    // No stream may redirect into the trusted config directory: the relay
+    // would have the supervisor itself copy child bytes into trusted input.
     let config = jail.config_dir().join("config.toml");
     std::fs::write(&config, b"[jail]\n").expect("write");
+    use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
         .expect("the hardened reader requires operator-only config");
     let sink = std::fs::OpenOptions::new()

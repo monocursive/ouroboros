@@ -346,3 +346,16 @@ read-back, `check_binary_isolation`'s path basis, `ouro-ledger`'s weaker
 config guard under `none`, reproducibility limited to archive packaging,
 and the aarch64 notes. None is a containment or honesty defect at the
 severity the findings carry; they stay on file for the next pass.
+
+## Revision 20 follow-ups (2026-10-09)
+
+The three follow-ups the seventh audit's recommendations named, plus the
+portable-mutation survivors beyond its priority set.
+
+| Follow-up | Resolution | Contract / acceptance |
+|---|---|---|
+| H1's full fix: relay regular-file stdio | Every regular file on any of the three streams is relayed through a supervisor-owned pipe: the child inherits a pipe end, the supervisor copies between the pipe and the operator's own descriptor (blocking, mode- and offset-preserving), staging at most one pipe capacity per stream, pumping in the supervision loop with a shortened sleep while data moves, and draining for a bounded window before the outcome is recorded. A writable stdin is no longer refused — `agent < prompt.md` runs and the child cannot reopen, truncate or read back the file at all. Sockets, directories, anonymous inodes, and redirects into the state root or config directory still refuse | §8.3 (`review_linux.rs::r3_regular_file_stdio_is_relayed_and_cannot_reopen_outside_the_plan`) |
+| H2 residual: `binfmt_misc` confirmation | The same confirmation rule with registration evidence: the supervisor matches the candidate against the host's `/proc/sys/fs/binfmt_misc` entries (extension or masked magic, candidate bytes read through the tracee's root), resolves the registered interpreter where the kernel does, and confirms under the identical identity and script-slot conditions; no matching registration keeps the mismatch gap | §11.3 (`proc.rs::binfmt_registrations_parse_and_match`) |
+| Compatibility rows for an npm-shim agent | Gemini CLI 0.63.0 (`#!/usr/bin/env node`, npm-installed): its `--version` runs under the bundled `gemini` launch profile — the `#!` shim path the H2 fix opened — recorded in [agent-compatibility.md](agent-compatibility.md) with the receipt and revision of the run | §15 A01; agent-compatibility.md |
+| Portable-mutation survivors (records/state cluster) | G2, S1, T1, S2, G4, R1, R5, G5, J1/J3/J4, T4, L1 each gained a killing regression test in the owning module; kills proven by apply-and-revert for G2, R1, R5 | gc.rs, state.rs, trace.rs, journal.rs, learn.rs, ouro-records semantic.rs, jcs.rs |
+| Portable-mutation survivors (network/config cluster) | The vault's scheme binding, duplicate-extension refusal, Authorization-only placement, the TLS 32 KiB bound and chunked/Expect refusals, the project `[jail.commands]` refusal, the deny_read boundary-plumbing refusal and bwrap's mask, the vault-mode grammar, the execution-boundary requirement for pids/mem/swap/cpu, and forbid/deny precedence each gained a killing test; kills proven for the scheme binding, precedence and duplicate extension | vault.rs, origin.rs, tls.rs, config.rs, policy.rs, bwrap.rs, launch_profile.rs, capability.rs, commands.rs; portable_policy.rs |

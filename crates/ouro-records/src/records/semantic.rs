@@ -610,3 +610,45 @@ pub fn control(messages: &[Value]) -> Vec<Violation> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R1 (audit 2026-10-08): the `trace_loss_recorded` rule compares the
+    /// receipt's loss gap *source* against the trace note's source. A gap
+    /// claiming the loss on another source than the note names must violate,
+    /// even when start, classes and end agree.
+    #[test]
+    fn a_loss_gap_from_another_source_than_the_note_violates() {
+        let note = serde_json::json!({
+            "attempt_id": "att_test", "source": "wrapper", "operation": "note",
+            "source_seq": 1,
+            "fields": {
+                "kind": "coverage_gap", "reason": "trace_transport_loss",
+                "source": "wrapper", "start_ns": "100", "end_ns": null,
+                "classes": ["exec"],
+            },
+        });
+        let receipt = serde_json::json!({
+            "attempt_id": "att_test",
+            "coverage": {"exec": {"status": "active", "gaps": [{
+                "reason": "trace_transport_loss", "source": "proxy",
+                "start_ns": "100", "end_ns": null, "classes": ["exec"],
+            }]}},
+        });
+        let events = [note];
+        let mut out = Vec::new();
+        loss_recorded(&events, &receipt, &mut out);
+        assert!(
+            out.iter().any(|v| v.rule == "trace_loss_recorded"),
+            "a proxy loss on the receipt against a wrapper note must violate: {out:?}"
+        );
+        // The same story with matching sources records no violation.
+        let mut agreeing = receipt.clone();
+        agreeing["coverage"]["exec"]["gaps"][0]["source"] = "wrapper".into();
+        let mut out = Vec::new();
+        loss_recorded(&events, &agreeing, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+    }
+}

@@ -650,6 +650,10 @@ struct Boundary {
     cgroup_lost: bool,
     /// Why no execution cgroup exists, when preferred ceilings run unenforced.
     cgroup_unavailable: Option<String>,
+    /// Audit 2026-10-08 H1 follow-up: the regular-file stdio streams,
+    /// relayed through supervisor-owned pipes so the child holds no
+    /// reopenable handle on any file.
+    stdio_relays: Vec<StdioRelay>,
     watcher: super::watch::Watcher,
     // J3-agent begin: the agent network, and the filter count read back
     /// The proxy, mediator and bridge of an `agent` attempt.
@@ -733,7 +737,7 @@ impl Boundary {
             .parent()
             .and_then(Path::parent)
             .unwrap_or(plan.attempt_dir.as_path());
-        validate_stdio(state_root, &plan.config_dir)?;
+        let stdio_plans = validate_stdio(state_root, &plan.config_dir)?;
 
         // The scratch directory the child sees as /tmp. A managed one is
         // supervisor state and gets the private identity; an operator's
@@ -1231,7 +1235,21 @@ impl Boundary {
                 )
             })?;
         }
-        // §8.3: stdio is inherited without capture; every other descriptor the
+        // §8.3: stdio passes through without capture except regular files,
+        // which are relayed through supervisor-owned pipes (audit
+        // 2026-10-08 H1): the child gets a pipe end here and never the
+        // file, so no `/dev/stdin` reopen can reach the host mount. Every
+        // other descriptor the supervisor holds is closed on exec.
+        let mut stdio_relays = Vec::new();
+        for (fd, plan) in stdio_plans.into_iter().enumerate() {
+            if plan == StdioPlan::Relay {
+                stdio_relays.push(StdioRelay::attach(
+                    i32::try_from(fd).unwrap_or(-1),
+                    fd == 0,
+                    &mut command,
+                )?);
+            }
+        }
         fds.apply(&mut command);
         let mut child = command.spawn().map_err(|err| {
             preparing(
@@ -1352,6 +1370,7 @@ impl Boundary {
             cgroup_lost: false,
             cgroup_unavailable,
             storage: None,
+            stdio_relays,
             watcher,
             // J3-agent begin
             agent: agent.take(),
@@ -2426,30 +2445,33 @@ fn ensure_dir(path: &Path) -> Result<(), JailError> {
 
 /// §8.3 and §9.2: reject socket, directory and anonymous-inode stdio, and
 /// regular-file stdio that resolves into protected supervisor state or the
-/// operator's trusted config directory, and writable regular-file stdin
-/// (audit 2026-10-08 H1).
+/// operator's trusted config directory (audit 2026-10-08 H1). Every other
+/// regular file is relayed through a supervisor-owned pipe; everything else
+/// passes through untouched.
 ///
 /// `state_root` is the whole runtime state directory, not just this attempt's
 /// own: a redirect into a sibling attempt's receipts is the same disclosure.
 /// `config_dir` holds `config.toml` and `launch/`, the trusted widening
-/// inputs: a redirect of any of the three streams there hands the child the
-/// operator's authority over files later runs trust, in either direction,
-/// so it refuses like the state root.
+/// inputs: a redirect of any of the three streams there would have the
+/// supervisor itself copy child bytes into (or out of) files later runs
+/// trust, so it refuses like the state root even under the relay.
 ///
-/// A regular file on stdin refuses while it is writable by this account.
-/// The sandbox has its own `/proc`, and its `/dev/stdin` reopens the file
-/// through `/proc/self/fd/0`: that reopen checks the inode's permission
-/// bits and the original host mount — never this descriptor's open mode —
-/// so a writable file is write-and-truncate authority outside every grant
-/// (§9.1's closed view, §6.4's uncharged write). A read-only file, or a
-/// pipe, narrows correctly.
+/// The relay (audit 2026-10-08 H1 follow-up) closes the reopen hole: the
+/// sandbox has its own `/proc`, and a regular file inherited directly is
+/// reopenable through `/dev/stdin` against the inode's permission bits and
+/// the host mount — never the descriptor's open mode — which is
+/// write-and-truncate authority outside every grant (§9.1's closed view,
+/// §6.4's uncharged write). A pipe end is not reopenable at all, so the
+/// child never learns the file, its path, or its permissions; the
+/// supervisor's copies run on the operator's own descriptor, preserving its
+/// open mode and offset.
 ///
 /// A descriptor that cannot be inspected refuses rather than passing, because
 /// "I could not tell what this is" is not a reason to hand it to the child.
-fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<(), JailError> {
+fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<[StdioPlan; 3], JailError> {
     let state_root = state_root.canonicalize();
     let config_dir = config_dir.canonicalize();
-    let euid = unsafe { libc::geteuid() };
+    let mut plans = [StdioPlan::Pass, StdioPlan::Pass, StdioPlan::Pass];
     for fd in [0, 1, 2] {
         let name = match fd {
             0 => "stdin",
@@ -2497,24 +2519,6 @@ fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<(), JailError>
             ));
         }
         if kind == libc::S_IFREG {
-            // Audit 2026-10-08 H1: the child's reopen of `/dev/stdin`
-            // checks the inode's permission bits, not this descriptor's
-            // open mode, so a file this account can write is a reopenable
-            // write handle outside every grant. Group/other write bits
-            // count as writable without resolving group membership:
-            // over-refusing is fail-closed here.
-            if fd == 0 {
-                let mode = st.st_mode & 0o777;
-                let writable = (st.st_uid == euid && mode & 0o200 != 0) || mode & 0o022 != 0;
-                if writable {
-                    return refuse(format!(
-                        "stdin is a regular file writable by this account: the sandbox \
-                         would reopen /dev/stdin against the host mount and write outside \
-                         every grant; make the file read-only or pipe it through cat \
-                         (jail-v1 §9.1)"
-                    ));
-                }
-            }
             let target = fd_target.canonicalize().unwrap_or(fd_target);
             if let Ok(state_root) = state_root.as_ref()
                 && target.starts_with(state_root)
@@ -2529,9 +2533,202 @@ fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<(), JailError>
                      launch profiles are trusted input)"
                 ));
             }
+            plans[fd as usize] = StdioPlan::Relay;
         }
     }
-    Ok(())
+    Ok(plans)
+}
+
+/// What the child inherits on one stdio stream (audit 2026-10-08 H1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StdioPlan {
+    /// Passed through untouched: a tty, a pipe, `/dev/null`.
+    Pass,
+    /// A regular file, relayed through a supervisor-owned pipe.
+    Relay,
+}
+
+/// One relayed stdio stream (audit 2026-10-08 H1 follow-up): the child holds
+/// one end of a supervisor-owned pipe; the supervisor copies between the
+/// pipe and the operator's original descriptor, which keeps its open mode
+/// and offset. The child never owns a reopenable handle on the file.
+struct StdioRelay {
+    /// A duplicate of the operator's original descriptor, taken at spawn:
+    /// the supervisor later points its own stdout elsewhere (§8.3,
+    /// revision 19), and the relay must keep copying into what the
+    /// operator actually opened. It is a regular file, so reads and writes
+    /// complete.
+    origin: OwnedFd,
+    /// This side of the pipe, non-blocking; `None` once closed.
+    ours: Option<OwnedFd>,
+    /// `true` for stdin (origin → child); `false` for stdout/stderr
+    /// (child → origin).
+    to_child: bool,
+    /// Staged bytes between the two sides, bounded by [`RELAY_BUFFER`].
+    buffer: Vec<u8>,
+    /// The origin reached end-of-file (stdin direction).
+    origin_eof: bool,
+    /// The child's side closed (output directions), or the child's end was
+    /// delivered (stdin direction): nothing more to move.
+    finished: bool,
+}
+
+/// The staging bound per relayed stream: one pipe capacity, so a slow
+/// consumer never grows supervisor memory.
+const RELAY_BUFFER: usize = 1 << 16;
+
+impl StdioRelay {
+    /// Create the pipe for one stream and hand the child its end through the
+    /// command's stdio configuration. The operator's descriptor is
+    /// duplicated immediately, before the supervisor redirects its own
+    /// copies (§8.3, revision 19).
+    fn attach(fd: RawFd, to_child: bool, command: &mut Command) -> Result<Self, JailError> {
+        let (read_end, write_end) = exec::pipe().map_err(|err| {
+            error(
+                ErrorCode::InvalidFd,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                format!("a regular-file stdio stream could not be relayed through a pipe: {err}"),
+            )
+        })?;
+        let (child_end, ours) = if to_child {
+            (read_end, write_end)
+        } else {
+            (write_end, read_end)
+        };
+        // SAFETY: a successful dup returns a newly owned descriptor.
+        let origin = match unsafe { OwnedFd::from_raw_fd(libc::dup(fd)) } {
+            Ok(origin) => origin,
+            Err(_) => {
+                return Err(error(
+                    ErrorCode::InvalidFd,
+                    ErrorStage::Preparing,
+                    Remediation::Configuration,
+                    "the operator's stdio descriptor could not be kept for the relay",
+                ));
+            }
+        };
+        match fd {
+            0 => command.stdin(std::process::Stdio::from(child_end)),
+            1 => command.stdout(std::process::Stdio::from(child_end)),
+            _ => command.stderr(std::process::Stdio::from(child_end)),
+        };
+        set_nonblocking(ours.as_raw_fd()).map_err(|err| {
+            error(
+                ErrorCode::InvalidFd,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                format!("a stdio relay pipe could not be made non-blocking: {err}"),
+            )
+        })?;
+        Ok(Self {
+            origin,
+            ours: Some(ours),
+            to_child,
+            buffer: Vec::with_capacity(RELAY_BUFFER),
+            origin_eof: false,
+            finished: false,
+        })
+    }
+
+    /// Move as much as both sides accept right now. Returns `true` while
+    /// progress was made, so the caller can shorten its sleep. Regular-file
+    /// reads and writes block until complete, so each call is bounded by the
+    /// buffer; pipe operations are non-blocking.
+    fn pump(&mut self) -> bool {
+        let mut progress = false;
+        if self.to_child {
+            while !self.origin_eof && self.buffer.len() < RELAY_BUFFER {
+                let mut chunk = [0u8; RELAY_BUFFER];
+                // SAFETY: `chunk` is a writable buffer of the given length;
+                // read writes into it only.
+                let read = unsafe {
+                    libc::read(
+                        self.origin.as_raw_fd(),
+                        chunk.as_mut_ptr().cast(),
+                        RELAY_BUFFER - self.buffer.len(),
+                    )
+                };
+                if read <= 0 {
+                    // EOF, or an error: either way the input has ended. A
+                    // relay that can read no more closes the child's end.
+                    self.origin_eof = true;
+                    break;
+                }
+                self.buffer.extend_from_slice(&chunk[..read as usize]);
+                progress = true;
+            }
+            if !self.buffer.is_empty()
+                && let Some(ours) = self.ours.as_ref()
+            {
+                // SAFETY: write reads only from the buffer slice.
+                let written =
+                    unsafe { libc::write(ours.as_raw_fd(), self.buffer.as_ptr().cast(), self.buffer.len()) };
+                if written > 0 {
+                    self.buffer.drain(..written as usize);
+                    progress = true;
+                }
+            }
+            if self.origin_eof && self.buffer.is_empty() {
+                // Closing this side gives the child its end-of-file.
+                self.ours = None;
+                self.finished = true;
+            }
+        } else {
+            while let Some(ours) = self.ours.as_ref() {
+                if self.buffer.len() >= RELAY_BUFFER {
+                    break;
+                }
+                let mut chunk = [0u8; RELAY_BUFFER];
+                // SAFETY: `chunk` is a writable buffer of the given length.
+                let read = unsafe {
+                    libc::read(
+                        ours.as_raw_fd(),
+                        chunk.as_mut_ptr().cast(),
+                        RELAY_BUFFER - self.buffer.len(),
+                    )
+                };
+                if read > 0 {
+                    self.buffer.extend_from_slice(&chunk[..read as usize]);
+                    progress = true;
+                } else {
+                    // EAGAIN (nothing to read) or EOF/error: stop reading,
+                    // and remember the stream's end.
+                    if read == 0 {
+                        self.ours = None;
+                        self.finished = true;
+                    }
+                    break;
+                }
+            }
+            if !self.buffer.is_empty() {
+                // SAFETY: write reads only from the buffer slice; the origin
+                // is a regular file, so this completes.
+                let written = unsafe {
+                    libc::write(
+                        self.origin.as_raw_fd(),
+                        self.buffer.as_ptr().cast(),
+                        self.buffer.len(),
+                    )
+                };
+                if written > 0 {
+                    self.buffer.drain(..written as usize);
+                    progress = true;
+                } else if written < 0 {
+                    // The operator's descriptor stopped accepting bytes
+                    // (ENOSPC and the like): drop them rather than wedge the
+                    // run, like any pipe whose reader went away.
+                    self.buffer.clear();
+                }
+            }
+        }
+        progress
+    }
+
+    /// Whether both sides are done and nothing is staged.
+    fn done(&self) -> bool {
+        self.finished && self.buffer.is_empty()
+    }
 }
 
 /// The coverage the plan actually obtained, derived from the walk.
@@ -3697,6 +3894,14 @@ impl RunningExecution for LinuxRunning {
             }
             // J3-agent end
             self.pump_status();
+            // Audit 2026-10-08 H1: move relayed stdio while the run is
+            // live; a relay making progress keeps the loop spinning fast so
+            // a chatty child is not throttled to the poll cadence.
+            let relay_active = self
+                .boundary
+                .stdio_relays
+                .iter_mut()
+                .any(|relay| relay.pump());
             self.boundary.release_watcher_after_backend();
             self.sample_limits(false);
             self.check_exec_without_tracer();
@@ -3732,6 +3937,33 @@ impl RunningExecution for LinuxRunning {
                 // The counters must be in hand before the outcome is
                 // classified: an OOM kill is attributed from them.
                 self.sample_limits(true);
+                // The child's end has closed by now; deliver what it wrote
+                // through the relays before the outcome is recorded.
+                let drain = clock::Deadline::after(Duration::from_millis(250));
+                while self
+                    .boundary
+                    .stdio_relays
+                    .iter()
+                    .any(|relay| !relay.done())
+                    && !drain.expired()
+                {
+                    self.boundary
+                        .stdio_relays
+                        .iter_mut()
+                        .for_each(|relay| {
+                            let _ = relay.pump();
+                        });
+                    if self.boundary.stdio_relays.iter().all(|relay| relay.buffer.is_empty())
+                        && self
+                            .boundary
+                            .stdio_relays
+                            .iter()
+                            .all(|relay| relay.finished)
+                    {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
             }
             if done && let Some(event) = self.terminal_event() {
                 return event;
@@ -3741,7 +3973,11 @@ impl RunningExecution for LinuxRunning {
                     reason: "termination could not be observed within the tree budget".to_owned(),
                 };
             }
-            let step = step_for(deadline);
+            let step = if relay_active {
+                std::cmp::min(step_for(deadline), Duration::from_millis(2))
+            } else {
+                step_for(deadline)
+            };
             if self.boundary.tracer.is_some() {
                 self.pump_tracer(step);
             } else {

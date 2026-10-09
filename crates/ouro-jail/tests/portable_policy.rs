@@ -342,6 +342,50 @@ fn p02_an_object_that_does_not_exist_is_an_unknown_subset() {
     );
 }
 
+/// Audit 2026-09-25-2, S3: a project `deny_read` over the boundary's own
+/// plumbing (`/`, `/run`, `/run/ouro` and beneath) refuses instead of
+/// rendering a mask over the jail's machinery.
+#[test]
+fn project_deny_read_over_boundary_plumbing_refuses() {
+    for spelling in ["/", "/run", "/run/ouro", "/run/ouro/jail", "/run/ouro/staging/x"] {
+        let workspace = Workspace::new();
+        let error = workspace
+            .resolve_project(
+                ProfileName::Tool,
+                |_| {},
+                PolicyDelta {
+                    deny_read: vec![spelling.as_bytes().to_vec()],
+                    ..PolicyDelta::default()
+                },
+            )
+            .expect_err("denying boundary plumbing must refuse");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{spelling}");
+        assert_eq!(
+            error.key_path.as_deref(),
+            Some("jail.filesystem.deny_read"),
+            "{spelling}"
+        );
+        assert!(
+            error.message.contains("boundary's own plumbing"),
+            "{spelling}: {}",
+            error.message
+        );
+    }
+    // A sibling prefix that only looks like the plumbing (`/run/ouroboros`)
+    // is an ordinary denial, not the boundary's machinery.
+    let workspace = Workspace::new();
+    workspace
+        .resolve_project(
+            ProfileName::Tool,
+            |_| {},
+            PolicyDelta {
+                deny_read: vec![b"/run/ouroboros".to_vec()],
+                ..PolicyDelta::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("/run/ouroboros is not the plumbing: {error}"));
+}
+
 #[test]
 fn p02_a_denial_is_never_a_widening_however_it_is_spelled() {
     let workspace = Workspace::new();

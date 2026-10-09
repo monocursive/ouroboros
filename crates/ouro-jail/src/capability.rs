@@ -325,4 +325,33 @@ mod tests {
                 .any(|item| item == REQ_CLOSED_SET_OBSERVATION)
         );
     }
+
+    /// Every tree-enforced ceiling — pids, mem, swap and cpu — needs the
+    /// execution boundary, not just pids (audit survivor, capability.rs).
+    #[test]
+    fn every_tree_enforced_limit_requires_the_execution_boundary() {
+        for key in ["pids", "mem", "swap", "cpu"] {
+            let mut snapshot = snapshot_for(ProfileName::None);
+            let ceiling = crate::policy::LimitCeiling {
+                value: "1".to_owned(),
+                required: true,
+            };
+            match key {
+                "pids" => snapshot.limits.pids = Some(ceiling),
+                "mem" => snapshot.limits.mem = Some(ceiling),
+                "swap" => snapshot.limits.swap = Some(ceiling),
+                "cpu" => snapshot.limits.cpu = Some(ceiling),
+                other => unreachable!("{other}"),
+            }
+            let requirements = requirements(&snapshot);
+            assert!(
+                requirements.iter().any(|item| *item == format!("limit:{key}")),
+                "{key} ceiling is a requirement: {requirements:?}"
+            );
+            assert!(
+                requirements.iter().any(|item| item == REQ_EXECUTION_BOUNDARY),
+                "{key} requires the execution boundary: {requirements:?}"
+            );
+        }
+    }
 }

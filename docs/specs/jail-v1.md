@@ -1292,17 +1292,17 @@ regular-file stdio that resolves into protected supervisor state, which is
 the whole runtime state root of §6.2, not only this attempt's directory, or
 into the trusted config directory (`config.toml`, launch profiles); a
 stdio descriptor that cannot be inspected refuses rather than being skipped.
-Pipes, tty devices, `/dev/null` and read-only ordinary file redirects are
-allowed; a writable ordinary file as *stdin* refuses, because the child's
-`/dev/stdin` reopens it through the sandbox's own `/proc` against the host
-mount, and that reopen checks the file's inode permissions — never the
-descriptor's open mode — so a redirect would hand the child write-and-
-truncate authority over the whole file outside every grant. An operator
-selecting a regular-file stdout or stderr sink grants the child that file's
-inode permissions too (append, truncate, and read-back of prior contents
-when the inode allows it); choose a fresh sink per run when earlier contents
-must stay private to the operator. Receipts record descriptor kinds without
-exposing paths. All other fds close
+Pipes, tty devices and `/dev/null` pass through untouched. An ordinary file
+on any of the three streams is *relayed* (audit 2026-10-08 H1): the child
+inherits a supervisor-owned pipe end, and the supervisor copies between the
+pipe and the operator's own descriptor, which keeps its open mode and
+offset. The child therefore never holds a reopenable handle on the file —
+its `/dev/stdin` is a pipe, and a reopen through the sandbox's own `/proc`
+reaches the pipe, not the host mount — so a redirect grants no write,
+truncate or read-back authority over the file at all. The supervisor's
+copies are unobservable to the child, stage at most one pipe capacity per
+stream, and stop when either side reaches its end. Receipts record
+descriptor kinds without exposing paths. All other fds close
 before exec, including namespace, directory, BPF, proxy-authority, state,
 receipt, gate, control and trace fds. Any inside bridge gets only its declared
 data-plane socket, never supervisor control authority.
@@ -2133,9 +2133,18 @@ window) carries the pathname this exec was called with in the interpreter's
 script slot, after the interpreter and its optional single argument, under
 the candidate's own spelling. The interpreter image alone confirms
 nothing: a direct exec of the interpreter that does not run the script
-stays the mismatch gap above. A `binfmt_misc` handler with no `#!` line to
-read is inside the residual: it records the mismatch, never a false
-confirmation.
+stays the mismatch gap above.
+
+A `binfmt_misc` handler is the same rule with different evidence: the
+registration lives in the host's `/proc/sys/fs/binfmt_misc`, so instead of
+reading a `#!` line the supervisor matches the candidate against the
+registered extension or masked magic (the candidate's leading bytes read
+through the tracee's root), resolves the registered interpreter where the
+kernel resolves it, and confirms under the identical identity and script-
+slot conditions. A host with no matching registration, or one whose
+interpreter cannot be resolved, records the mismatch — never a false
+confirmation — because the interpreter's image must be the registration's
+own, not merely any image the argv shape could describe.
 
 Only a call the observer must follow takes an in-flight slot: a call outside
 the closed set is classified at its entry and is never `inflight_exhausted`. A

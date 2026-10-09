@@ -1602,7 +1602,10 @@ impl Session {
             (
                 images
                     .iter()
-                    .map(|candidate| proc::shebang_image(tid, candidate))
+                    .map(|candidate| {
+                        proc::shebang_image(tid, candidate)
+                            .or_else(|| proc::binfmt_image(tid, candidate))
+                    })
                     .collect(),
                 self.procfs
                     .cmdline(tid)

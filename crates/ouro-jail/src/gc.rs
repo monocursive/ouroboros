@@ -2827,4 +2827,102 @@ mod tests {
             assert_eq!(seam_max_entries(ignored, 100), 100, "{ignored:?}");
         }
     }
+
+    // Portable-mutation regressions (audit 2026-10-08) begin
+
+    /// G2: `receipt_is_none` in the tree-never-existed test. Without it gc
+    /// treats a dead owner's enforced receipt as if none had been written and
+    /// cleans the vendor state, though the receipt may be the only witness of
+    /// a tree this state root never learned to name (audit 2026-09-25-2, S4).
+    #[test]
+    fn an_enforced_receipt_is_not_a_tree_that_never_existed() {
+        let mut no_leaf = state();
+        no_leaf.leaf = None;
+        let mut enforced = receipt(None);
+        enforced.leaf = LeafSource::NotRecorded(
+            "the receipt registers no execution cgroup".to_owned(),
+        );
+        // Dead owner, no registered leaf, an enforced receipt: the receipt
+        // withdraws the proof, whatever it claims about the tree.
+        let decided = decision(decide(&facts(no_leaf.clone(), enforced)));
+        assert!(
+            !decided.tree_never_existed,
+            "an enforced receipt keeps the vendor state (audit 2026-09-25-2, S4)"
+        );
+        assert!(decided.retain.is_none());
+        assert!(
+            matches!(decided.scratch, ScratchStep::Keep(_)),
+            "{:?}",
+            decided.scratch
+        );
+        // The same state with no receipt at all is the tree-never-existed
+        // case, and it still cleans.
+        let mut facts_none = facts(no_leaf, receipt(None));
+        facts_none.receipt = Ok(None);
+        let decided = decision(decide(&facts_none));
+        assert!(decided.tree_never_existed, "{decided:?}");
+        assert!(decided.retain.is_none());
+    }
+
+    /// G4: lost boundary integrity retains a name-only leaf's scratch, like
+    /// an identified leaf's, for explicit recovery.
+    #[test]
+    fn lost_integrity_retains_a_name_only_leafs_scratch() {
+        let own = leaf_name_of("att_00000000-0000-4000-8000-000000000001");
+        let mut named = state();
+        named.leaf = Some(RegisteredLeaf::Named(
+            std::path::Path::new("/sys/fs/cgroup/x").join(&own),
+        ));
+        let mut lost = receipt(None);
+        lost.integrity = "lost".to_owned();
+        lost.leaf = LeafSource::NotRecorded(
+            "the receipt registers no execution cgroup".to_owned(),
+        );
+        let decided = decision(decide(&facts(named, lost)));
+        assert!(
+            matches!(decided.cgroup, CgroupStep::Report(_)),
+            "{:?}",
+            decided.cgroup
+        );
+        assert!(
+            matches!(decided.scratch, ScratchStep::Keep(_)),
+            "lost integrity keeps the scratch of a name-only leaf too: {:?}",
+            decided.scratch
+        );
+    }
+
+    /// G5: `leftovers` removes only regular files. A symlink or FIFO left
+    /// under a temporary record name is not what a crash left, and unlinking
+    /// it would destroy something else's object.
+    #[test]
+    fn a_symlink_or_fifo_named_like_a_temp_file_is_never_unlinked() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let attempt = AttemptDir::from_root(dir.path().to_path_buf());
+        let target = dir.path().join("operator-file");
+        std::fs::write(&target, b"mine").unwrap();
+        let id = "00000000-0000-4000-8000-000000000009";
+        let linked = dir.path().join(format!(".jail.json.{id}.tmp"));
+        symlink(&target, &linked).unwrap();
+        let fifo = dir.path().join(format!(".policy.json.{id}.tmp"));
+        let fifo_name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        let mut meter = Meter {
+            max: 1000,
+            charged: 0,
+        };
+        let mut entry = Entry::default();
+        let failure = leftovers(&attempt, true, false, &mut meter, &mut entry);
+        assert!(failure.is_none(), "{failure:?}");
+        assert!(
+            std::fs::symlink_metadata(&linked).is_ok(),
+            "the symlink survives gc"
+        );
+        assert!(
+            std::fs::symlink_metadata(&fifo).is_ok(),
+            "the FIFO survives gc"
+        );
+        assert!(std::fs::read(&target).is_ok(), "the target is untouched");
+    }
+    // Portable-mutation regressions end
 }

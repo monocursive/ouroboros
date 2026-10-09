@@ -1377,6 +1377,34 @@ mod tests {
         assert!(text.contains("--setenv TMPDIR /tmp"));
     }
 
+    /// Audit 2026-09-25-2, S3: a mask renders last over every other row, so
+    /// one over the boundary's own plumbing must refuse the plan outright.
+    #[test]
+    fn a_mask_over_the_boundary_plumbing_refuses_the_plan() {
+        for path in [
+            "/",
+            "/run",
+            "/run/ouro",
+            "/run/ouro/jail",
+            "/run/ouro/proxy/x.sock",
+        ] {
+            let mut plan = sample_plan();
+            plan.masked.push(path.into());
+            assert!(
+                matches!(
+                    plan.render(),
+                    Err(PlanError::MaskedBoundaryPlumbing(_))
+                ),
+                "masking {path} must refuse"
+            );
+        }
+        // A sibling prefix that is not the plumbing still renders.
+        let mut plan = sample_plan();
+        plan.masked.push("/run/ouroboros".into());
+        plan.render()
+            .expect("/run/ouroboros is not boundary plumbing");
+    }
+
     #[test]
     fn a_writable_parent_never_hides_readonly_children_or_masks() {
         let mut plan = sample_plan();

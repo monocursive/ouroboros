@@ -430,4 +430,44 @@ mod tests {
                 .contains("incomplete")
         );
     }
+
+    // Portable-mutation regressions (audit 2026-10-08) begin
+
+    /// L1: the refusal list for learning roots (`/`, `/etc`, `/home`,
+    /// `/Users`, `/proc`, `/sys`, `/dev`) must not be emptiable: a read of
+    /// such a root is recorded as unresolved, never proposed as a grant.
+    #[test]
+    fn reads_of_refusal_roots_are_never_proposed() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let attempt = root.join("attempt");
+        let workspace = root.join("work");
+        std::fs::create_dir(&attempt).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(attempt.join("jail.json"), br#"{"attempt_id":"fixture"}"#).unwrap();
+        let mut journal = String::new();
+        for (seq, path) in ["/etc", "/"].iter().enumerate() {
+            let event = json!({
+                "attempt_id": "fixture", "operation": "note", "source": "wrapper",
+                "source_seq": seq,
+                "fields": {"kind": "learning_read", "errno": "EACCES", "path": path},
+            });
+            journal.push_str(&format!("{event}\n"));
+        }
+        std::fs::write(attempt.join("trace.ndjson"), &journal).unwrap();
+        let proposal = derive(&attempt, &workspace, 1).unwrap();
+        assert!(
+            proposal.read_only.is_empty(),
+            "no refusal root is proposed: {:?}",
+            proposal.read_only
+        );
+        for path in ["/etc", "/"] {
+            assert!(
+                proposal.unresolved_reads.iter().any(|read| read == path),
+                "`{path}` must be unresolved: {:?}",
+                proposal.unresolved_reads
+            );
+        }
+    }
+    // Portable-mutation regressions end
 }

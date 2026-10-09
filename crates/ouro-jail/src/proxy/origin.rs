@@ -322,4 +322,20 @@ mod tests {
             Ok(Some(Host::Name("example.com".into())))
         );
     }
+    /// jail-v2 §6.2: a ClientHello carrying the same extension kind twice
+    /// refuses, even when both are individually benign.
+    #[test]
+    fn a_duplicated_extension_kind_refuses() {
+        for kinds in [
+            &[0x001a, 0x001a][..],
+            // A repeated SNI kind must also refuse on the duplicate check,
+            // not merely because its re-parsed body is malformed.
+            &[0x0000, 0x001a][..],
+        ] {
+            assert!(
+                tls_name(&hello_ext(b"example.com", kinds)).is_err(),
+                "{kinds:?} repeated and passed"
+            );
+        }
+    }
 }

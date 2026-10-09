@@ -2667,4 +2667,61 @@ mod tests {
             "variant nibble b is valid"
         );
     }
+
+    // Portable-mutation regressions (audit 2026-10-08) begin
+
+    /// S1: the epoch takes the *newest* settled marker across the marker
+    /// directories, not the last directory's. A `config.toml` written
+    /// between a newer data-dir marker and an older config-dir marker must
+    /// not be dated after the epoch.
+    #[test]
+    fn the_epoch_takes_the_newest_settled_marker_across_directories() {
+        let dir = private_tempdir();
+        let data = dir.path().join("data");
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let dirs = [data.as_path(), config.as_path()];
+        let ctime = |path: &Path| ctime_of(&path.symlink_metadata().unwrap()).unwrap();
+        // The config directory settles first; then a trusted file is
+        // written; then the data directory settles last.
+        std::fs::write(uncontained_settled_path(&config), b"").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let trusted = dir.path().join("config.toml");
+        std::fs::write(&trusted, b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(uncontained_settled_path(&data), b"").unwrap();
+        let epoch = uncontained_epoch(&dirs).unwrap();
+        assert_eq!(
+            epoch.settled,
+            Some(ctime(&uncontained_settled_path(&data))),
+            "the newest marker wins, not the last directory's: a file written \
+             between the two markers must not be trusted"
+        );
+        // The symmetric case: the newest marker is in the config directory.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(uncontained_settled_path(&config), b"").unwrap();
+        let epoch = uncontained_epoch(&dirs).unwrap();
+        assert_eq!(
+            epoch.settled,
+            Some(ctime(&uncontained_settled_path(&config)))
+        );
+    }
+
+    /// S2: a marker directory that cannot be listed is refused, not skipped:
+    /// skipping it would hide the live markers of a run in progress or one
+    /// that ended without settling, and every trusted file would be dated.
+    #[test]
+    fn an_unreadable_marker_directory_is_refused_not_skipped() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = private_tempdir();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let error = uncontained_epoch(&[data.as_path()])
+            .unwrap_err_or_panic("an unreadable marker directory must refuse");
+        assert_eq!(error.code, ErrorCode::UnsafeStatePath, "{error:?}");
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    // Portable-mutation regressions end
 }

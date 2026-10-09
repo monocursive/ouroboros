@@ -660,6 +660,18 @@ mod tests {
         assert!(parse_operator_config("[ledger]\nretian='7d'").is_err());
     }
 
+    /// A project `ouro.toml` may not carry `[jail.commands]`: without this
+    /// refusal the operator-only rules would be silently dropped.
+    #[test]
+    fn a_project_file_may_not_carry_command_rules() {
+        let error = parse_project_config("[jail.commands]\ndeny = [\"git push --force\"]\n")
+            .expect_err("project command rules must refuse");
+        assert_eq!(error.key_path.as_deref(), Some("jail.commands"));
+        assert!(error.message.contains("operator-only"), "{}", error.message);
+        // Without the section the same shape parses.
+        assert!(parse_project_config("").is_ok());
+    }
+
     #[test]
     fn wall_units_scale_and_a_bare_integer_refuses() {
         assert_eq!(
