@@ -208,7 +208,7 @@ path = "/usr/local/bin:/usr/bin:/bin"
 
 [[baseline]]
 profile = "agent"
-digest = "sha256:105b0adf2f0f112d511d6d2cedb294945dd355b0027f75636a330a25b1d714c4"
+digest = "sha256:519d673c0605923a1fac5a8ffb1700373dd76abe30fa3f5dd6d40bc971d5d21e"
 snapshot = '''
 {
   "environment": {
@@ -229,8 +229,11 @@ snapshot = '''
   },
   "filesystem": {
     "deny_read": [],
-    "protected_coverage": "none",
-    "protected_segments": [],
+    "protected_coverage": "existing_and_root",
+    "protected_segments": [
+      ".git/config",
+      ".git/hooks"
+    ],
     "read_only": [
       {
         "path": "/bin",
@@ -1136,14 +1139,14 @@ sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 [tested]
 debug_assertions = false
 dirty = false
-inputs = "sha256:c708778d02dc8448268e0fada49487247574d5d50498a4c9142ef1a0d185afea"
+inputs = "sha256:2d71b469102e6f228ba3e562668e07ceb09ec0f0f273c091cd475c5a6cdffc07"
 opt_level = "3"
-ouro_jail_sha256 = "fc2a54da0d08f47ea589a179484ae56995c20dcf9ce7dfa3228244d4529bd2a3"
+ouro_jail_sha256 = "f407a4b69864bc287492875b7e4d5f629a1b29e5fbfb260095d75820cf805f5b"
 platform_arch = "x86_64"
 platform_kernel = "Linux 7.0.0-31-generic"
 platform_os = "linux"
 ready = true
-revision = "d972bb0dfbd52255d8577caac620e56a485f250a"
+revision = "373f17cb8ac80f142c7b9c845348dbfc495bb74a"
 rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
 target = "x86_64-unknown-linux-gnu"
 unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
@@ -1174,7 +1177,7 @@ unpackaged_files = []
 
 [tested.host.cgroup]
 controllers = ["cpu", "memory", "pids"]
-delegated_root = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service"
+delegated_root = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service"
 root_controllers = ["cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem"]
 subtree_control = ["cpu", "memory", "pids"]
 
@@ -1191,5 +1194,5 @@ swap_total_kib = 8388604
 "user.max_user_namespaces" = "11829"
 
 [tested.supervisor_scope]
-cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p2065016-i14645967.scope"
+cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/r7doc.scope"
 state = "already_delegated"
