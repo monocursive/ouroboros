@@ -1139,17 +1139,17 @@ sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 [tested]
 debug_assertions = false
 dirty = false
-inputs = "sha256:2d71b469102e6f228ba3e562668e07ceb09ec0f0f273c091cd475c5a6cdffc07"
+inputs = "sha256:e391b0d0ac00d2b46321841c2341a988f8d6bbf4d160862f46fff5c545f1fe14"
 opt_level = "3"
-ouro_jail_sha256 = "f407a4b69864bc287492875b7e4d5f629a1b29e5fbfb260095d75820cf805f5b"
+ouro_jail_sha256 = "a42aaa9a6f8a63ba08448316595e8e14349474a82089179cab3f81f88979b5d9"
 platform_arch = "x86_64"
 platform_kernel = "Linux 7.0.0-31-generic"
 platform_os = "linux"
 ready = true
-revision = "373f17cb8ac80f142c7b9c845348dbfc495bb74a"
+revision = "bfaaceba82607bc3a9df55df2c03b6766a0074b2"
 rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
 target = "x86_64-unknown-linux-gnu"
-unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
+unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code"]
 verification = ["inputs_match_tree", "revision_is_ancestor_of_head", "inputs_match_revision", "frozen_inputs_unchanged_since_revision"]
 
 [tested.backend]
@@ -1194,5 +1194,6 @@ swap_total_kib = 8388604
 "user.max_user_namespaces" = "11829"
 
 [tested.supervisor_scope]
-cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/r7doc.scope"
-state = "already_delegated"
+cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-3059571-44b6438da9bc45c6.scope"
+state = "entered"
+unit = "ouro-jail-3059571-44b6438da9bc45c6.scope"
