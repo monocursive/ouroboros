@@ -31,6 +31,36 @@ Its private half is stored outside the repository at
 with file mode 0600. It is unencrypted for local noninteractive signing; maintain
 a private backup for future releases. Private key material is never sent to CI.
 
+## Current publication blockers
+
+On 10 October 2026, the dedicated key and distribution pipeline are provisioned,
+but `ouro-jail-v0.1.0-rc.1` has not been published. The
+[Rust CI run for `16ee37fe`](https://github.com/monocursive/ouroboros/actions/runs/38055149695)
+passed its source tests and failed the acceptance verdict. The
+[acceptance map](specs/jail-v1/acceptance-map.toml) still marks these twelve
+clauses `untested`:
+
+| Clause | Missing evidence |
+|---|---|
+| K03.4 | A `none` run with a present trusted configuration file. |
+| K10.1 | Interactive learning adoption, confirmation and atomic write. |
+| K11.1 | Evidence-supported learning from an opencode run. |
+| K16.1 | Credential staging status and the vault origin requirement. |
+| K19.1 | Journal replay, live-follow lag and equality at settlement. |
+| K20.1 | Byte-identical JSON tail output. |
+| K22.2 | Command-rule refusal on macOS. |
+| K23.1 | Native macOS execution and explicit resource-limit refusal. |
+| K24.1 | Native macOS network containment and bridge enforcement. |
+| K26.1 | A recorded macOS opencode A01 run. |
+| K27.1 | A clean-VM install and opencode A01 within ten minutes. |
+| K29.1 | Native macOS descendant lifetime and entitlement refusal. |
+
+[Jail v2's evidence discipline](specs/jail-v2.md#14-implementation-and-evidence-discipline)
+makes these release gates. `untested` fails the verdict in every lane; declaring
+this package Linux-only does not close the macOS clauses. Keep the missing
+evidence visible and require a successful acceptance verdict before signing and
+publishing. Installer regression tests do not close these runtime gates.
+
 ## Prepare and validate
 
 Commit and review the release tree. Require `rust`, `contracts` and the actual

@@ -136,6 +136,15 @@ class ReleaseTests(unittest.TestCase):
             assemble([first, second], REVISION, INPUTS, '0.1.0-rc.1', self.root / 'out')
         self.assertFalse((self.root / 'out').exists())
 
+    def test_bootstrap_help_follows_the_assembled_release(self):
+        stages = [self.fixture(target, release='0.1.0-rc.2') for target in TARGETS]
+        out = self.root / 'out'
+        assemble(stages, REVISION, INPUTS, '0.1.0-rc.2', out)
+        result = subprocess.run(['bash', str(out / 'bootstrap.sh'), '--help'],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('The default version is 0.1.0-rc.2;', result.stdout)
+
     def test_unsigned_preparation_remains_unpublished_and_names_signing_blocker(self):
         stages = [self.fixture(t) for t in TARGETS]
         plan = assemble(stages, REVISION, INPUTS, '0.1.0-rc.1', self.root / 'out')

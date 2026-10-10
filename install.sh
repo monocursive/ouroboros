@@ -19,12 +19,12 @@ main() (
 
     fail() { printf 'ouro installer: %s\n' "$*" >&2; exit 1; }
     usage() {
-        cat <<'EOF'
+        cat <<EOF
 Usage: bash install.sh [--version VERSION] [--bin-dir /absolute/path]
                        [--public-key KEY] [--allow-downgrade]
 
 Installs Ouroboros Jail's Linux developer preview into ~/.local/bin.
-The default version is 0.1.0-rc.1; --version also accepts vVERSION or
+The default version is $version; --version also accepts vVERSION or
 ouro-jail-vVERSION. Run again to upgrade. Downgrades require --allow-downgrade.
 Requires curl, minisign, tar, and sha256sum or shasum. No sudo or Rust compiler.
 Linux binaries require glibc 2.39 or newer; Alpine/musl is unsupported.
@@ -38,7 +38,7 @@ EOF
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--bin-dir|--prefix|--public-key|--base-url|--from-dir)
-                [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 needs a value"
+                if [ "$#" -lt 2 ] || [ -z "${2-}" ]; then fail "$1 needs a value"; fi
                 case "$1" in
                     --version) version=$2 ;;
                     --bin-dir|--prefix) prefix=$2 ;;
@@ -73,7 +73,9 @@ EOF
     command -v getconf >/dev/null 2>&1 || fail 'glibc 2.39 or newer is required; getconf is missing'
     libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || fail 'glibc 2.39 or newer is required; Alpine/musl is unsupported'
     read -r libc_name libc_version <<<"$libc"
-    [ "$libc_name" = glibc ] && [[ "$libc_version" =~ ^[0-9]+\.[0-9]+$ ]] || fail 'cannot determine the glibc version'
+    if [ "$libc_name" != glibc ] || ! [[ "$libc_version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        fail 'cannot determine the glibc version'
+    fi
     awk -v v="$libc_version" 'BEGIN {split(v,n,"."); exit !(n[1]>2 || (n[1]==2 && n[2]>=39))}' ||
         fail "glibc $libc_version is too old; this preview requires glibc 2.39 or newer"
     if command -v sha256sum >/dev/null 2>&1; then
