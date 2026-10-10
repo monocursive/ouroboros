@@ -66,7 +66,10 @@ fn storage_admission_counts_workspace_and_scratch_aliases_once() {
         assert_eq!(limits_class["status"], "degraded");
         assert!(limits_class["observed_count"].is_null());
         let gaps = limits_class["gaps"].as_array().unwrap();
-        assert!(gaps.iter().any(|gap| gap["reason"] == "storage_hit_evidence_positive_only"));
+        assert!(
+            gaps.iter()
+                .any(|gap| gap["reason"] == "storage_hit_evidence_positive_only")
+        );
     }
 }
 
@@ -150,7 +153,10 @@ fn hard_links_are_denied_under_a_storage_ceiling_and_allowed_without_it() {
     let path = CString::new(ws.as_os_str().as_bytes()).unwrap();
     let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: terminated path and writable statfs output.
-    assert_eq!(unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) }, 0);
+    assert_eq!(
+        unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) },
+        0
+    );
     // SAFETY: successful statfs initialized the structure.
     let stats = unsafe { stats.assume_init() };
     if stats.f_type != libc::TMPFS_MAGIC || stats.f_blocks == 0 || stats.f_files == 0 {
@@ -188,7 +194,12 @@ fn hard_links_are_denied_under_a_storage_ceiling_and_allowed_without_it() {
             ])
             .run()
             .unwrap();
-        assert_eq!(unlimited.code(), Some(0), "{via}: {}", unlimited.stderr_text());
+        assert_eq!(
+            unlimited.code(),
+            Some(0),
+            "{via}: {}",
+            unlimited.stderr_text()
+        );
         std::fs::remove_file(ws.join("to")).unwrap();
 
         // The same link under a ceiling: EPERM, and the receipt says the
@@ -244,7 +255,10 @@ fn storage_limits_refuse_a_writable_filesystem_with_no_hard_ceiling() {
     let path = CString::new(ws.as_os_str().as_bytes()).unwrap();
     let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: terminated path and writable statfs output.
-    assert_eq!(unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) }, 0);
+    assert_eq!(
+        unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) },
+        0
+    );
     // SAFETY: successful statfs initialized the structure.
     let stats = unsafe { stats.assume_init() };
     if stats.f_type != libc::TMPFS_MAGIC || stats.f_blocks != 0 {

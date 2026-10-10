@@ -1908,6 +1908,8 @@ fn doctor_readiness_needs_every_credential_and_reports_support_apart_from_it() {
     let args = cli::DoctorArgs {
         profile: None,
         launch: Some("fixture".into()),
+        workspace: None,
+        scratch: None,
         json: true,
     };
     let report = supervisor::doctor(&ctx, &args).unwrap();

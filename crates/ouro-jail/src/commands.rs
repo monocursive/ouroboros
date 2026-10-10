@@ -241,7 +241,9 @@ mod tests {
             deny: (0..count).map(|i| format!("tool-{i}")).collect(),
             forbid: Vec::new(),
         };
-        rules(64).validate().expect("64 rules are the documented cap");
+        rules(64)
+            .validate()
+            .expect("64 rules are the documented cap");
         let error = rules(65).validate().expect_err("65 rules refuse");
         assert!(error.contains("at most 64 command rules"), "{error}");
     }

@@ -66,7 +66,7 @@ pub const OPERATOR_FILE_MAX: u64 = 256 * 1024;
 pub struct Context {
     /// The platform this build targets.
     pub platform: Box<dyn Platform>,
-    /// The four allowed environment settings.
+    /// The allowed environment settings (§6.2 step 3).
     pub env_settings: EnvSettings,
     /// The invocation directory, which CLI paths resolve against.
     pub cwd: PathBuf,
@@ -932,14 +932,16 @@ pub fn explain(ctx: &Context, args: &ExplainArgs) -> Result<ExplainReport, JailE
 /// # Errors
 /// Returns the resolution errors of [`resolve_plan`].
 pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailError> {
-    // §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`:
-    // the override flags belong to `run` and `explain`, and cli::DoctorArgs
-    // does not define them, so only selection reaches the resolver here.
+    // §6.1's grammar carries the selection flags; the workspace and scratch
+    // roots are the same ones `run` accepts, so a doctor call can name the
+    // plan it is checking instead of inheriting the invocation directory.
     let plan = resolve_plan(
         ctx,
         &PolicyArgs {
             profile: args.profile.clone(),
             launch: args.launch.clone(),
+            workspace: args.workspace.clone(),
+            scratch: args.scratch.clone(),
             ..PolicyArgs::default()
         },
     )?;
@@ -1272,7 +1274,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     };
 
     let mut control = open_control(args)?;
-    let trace = open_trace(args, &attempt_dir)?;
+    let trace = open_trace(ctx, args, &attempt_dir)?;
     // J5-C begin: review item 15, a loss note names what this attempt covers
     if let Ok(mut writer) = trace.lock() {
         writer.set_stream_classes(&stream_classes(&plan));
@@ -1684,6 +1686,26 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         // J3-none end
         match running.wait(crate::platform::Deadline { at: wall_deadline }) {
             RunEvent::Poll => continue,
+            RunEvent::StdioFailed {
+                reason,
+                after_target_end,
+            } => {
+                let error = JailError::new(
+                    ErrorCode::StdioFailed,
+                    ErrorStage::Running,
+                    Remediation::Configuration,
+                    reason,
+                );
+                record.errors.push(error.to_object());
+                if !after_target_end {
+                    record
+                        .outcome
+                        .cause
+                        .get_or_insert("stdio_failure".to_owned());
+                    running.request_stop(StopReason::StdioFailure);
+                }
+                outcome_error.get_or_insert(error);
+            }
             RunEvent::ExecConfirmed => {
                 // §11.2: exec is a confirmed transition, and there is exactly
                 // one per attempt. A repeat would advance the receipt revision
@@ -2150,9 +2172,28 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         &receipt,
     );
 
+    // Issue draft 03: in best-effort mode the process exit code is the
+    // child's own when the child ended naturally. The evidence gap stays in
+    // the receipt's errors, in the degraded coverage and on stderr, but a
+    // wrapper that trusts the exit code must see the child's status, not
+    // evidence_lost's 1. Strict mode keeps failing loudly, as does any
+    // non-evidence error.
+    let best_effort_natural_end = plan.resolved.snapshot.observation.evidence
+        == crate::records::EvidenceMode::BestEffort
+        && record.outcome.kind == OutcomeKind::Exited
+        && record.outcome.cause.as_deref() != Some("evidence_loss")
+        && outcome_error
+            .as_ref()
+            .is_none_or(|error| error.code == ErrorCode::EvidenceLost)
+        && record
+            .errors
+            .iter()
+            .all(|error| error.code == ErrorCode::EvidenceLost.as_str());
     let exit_code = if let Some(error) = &tree_error {
         error.exit_code()
-    } else if let Some(error) = &outcome_error {
+    } else if let Some(error) = &outcome_error
+        && !best_effort_natural_end
+    {
         error.exit_code()
     } else {
         match record.outcome.kind {
@@ -2732,7 +2773,10 @@ fn canonical_existing_prefix(path: &Path) -> PathBuf {
 /// symlink, clobbered an unrelated file and could overwrite another attempt's
 /// `policy.json`. §7 requires the copy to live "outside every child-visible
 /// root", to not be "a symlink, device or existing unrelated file", and the
-/// state directory is not a place for a second copy either.
+/// state directory is not a place for a second copy either. A file that is
+/// itself a prior `ouro.jail.receipt/1` copy is not unrelated: the write is a
+/// temp-file rename, so replacing it is the atomic replacement `--help`
+/// promises, and a retry after a refused run no longer needs a fresh path.
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for a path that fails any of those.
@@ -2742,11 +2786,13 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
     };
     let key = "--receipt";
     match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && prior_receipt_copy(path) => {}
         Ok(_) => {
             return Err(usage(
                 key,
                 format!(
-                    "{} already exists; the receipt copy never replaces an existing file, symlink or device",
+                    "{} already exists; the receipt copy only replaces a prior \
+                     receipt copy, never another file, symlink or device",
                     path.display()
                 ),
             ));
@@ -2818,6 +2864,30 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
         }
     }
     Ok(())
+}
+
+/// Whether an existing regular file is a prior receipt copy: small enough to
+/// be one and carrying the `ouro.jail.receipt/1` schema identifier. Anything
+/// else — truncated, huge or foreign — stays untouched.
+fn prior_receipt_copy(path: &Path) -> bool {
+    const RECEIPT_COPY_MAX: u64 = 8 * 1024 * 1024;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > RECEIPT_COPY_MAX {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("schema")
+                .and_then(|schema| schema.as_str())
+                .is_some_and(|schema| schema == crate::records::SCHEMA_RECEIPT)
+        })
 }
 
 /// The longest single wait for the gate between deadline checks.
@@ -4255,7 +4325,11 @@ fn open_control(args: &RunArgs) -> Result<Option<ControlSink>, JailError> {
     }))
 }
 
-fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, JailError> {
+fn open_trace(
+    ctx: &Context,
+    args: &RunArgs,
+    attempt_dir: &AttemptDir,
+) -> Result<SharedTrace, JailError> {
     if let Some(fd) = args.trace_fd {
         // J5-C, wave 3: the write-size test seam (S9), recorded like every
         // `OURO_JAIL_TEST_*` variable.
@@ -4283,11 +4357,14 @@ fn open_trace(args: &RunArgs, attempt_dir: &AttemptDir) -> Result<SharedTrace, J
                 format!("{}: {error}", path.display()),
             )
         })?;
-    // S9: the only environment input here is the shrink-only test seam; the
-    // sink names it in every loss it records, so the receipt that reports
-    // the loss also reports the seam.
+    // S9 + issue draft 03: the environment inputs here are the operator's
+    // trace budget and the shrink-only test seam; the sink names either in
+    // every loss it records, so the receipt that reports the loss also
+    // reports the override.
+    let env_cap = ctx.env_settings.trace_cap.map(|cap| cap.to_string());
     Ok(trace::shared(FileSink::for_attempt(
         file,
+        env_cap.as_deref(),
         std::env::var(trace::TRACE_CAP_SEAM).ok().as_deref(),
     )))
 }
@@ -4671,7 +4748,11 @@ mod tests {
             "{}",
             object.message
         );
-        assert!(object.message.contains("tmpfs capacity changed after admission"));
+        assert!(
+            object
+                .message
+                .contains("tmpfs capacity changed after admission")
+        );
     }
 
     #[test]
@@ -4731,8 +4812,10 @@ mod tests {
         std::fs::write(&trusted, "[jail]\n").unwrap();
         let metadata = std::fs::symlink_metadata(&trusted).unwrap();
         let changed = state::ctime_of(&metadata).expect("a readable ctime");
-        let epoch =
-            |settled| state::UncontainedEpoch { settled: Some(settled), live: Vec::new() };
+        let epoch = |settled| state::UncontainedEpoch {
+            settled: Some(settled),
+            live: Vec::new(),
+        };
         let error = refuse_stale_trusted_file(&trusted, &epoch(changed), "config").unwrap_err();
         assert_eq!(error.code, crate::records::ErrorCode::UnsafeConfigPath);
         assert!(
@@ -4909,6 +4992,7 @@ mod tests {
             sources: vec!["audit".to_owned()],
             observed_count: Some(0),
             gaps: Vec::new(),
+            resolver_refused: None,
         };
         let mut coverage = crate::observer::CoverageSummary::unobserved().to_coverage();
         coverage.exec = active();

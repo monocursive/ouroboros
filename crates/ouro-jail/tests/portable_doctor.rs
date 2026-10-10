@@ -263,8 +263,8 @@ fn every_compiled_in_include_target_is_a_build_input() {
                     .to_str()
                     .expect("UTF-8")
                     .replace('\\', "/");
-                let is_input = relative.starts_with("crates/ouro-jail/src/")
-                    || declared.iter().any(|entry| *entry == relative);
+                let is_input =
+                    relative.starts_with("crates/ouro-jail/src/") || declared.contains(&relative);
                 assert!(
                     is_input,
                     "{token} target {relative} (from {}) is not a build input; \

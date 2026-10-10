@@ -32,10 +32,19 @@ enum PathClass {
     WorkspaceRelative(Vec<u8>),
     /// Its relationship to the scratch directory is established.
     ScratchRelative(Vec<u8>),
+    /// Its relationship to a named root (an operator grant, or a system
+    /// read-only root) is established (issue draft 10).
+    RootRelative { root: String, rest: Vec<u8> },
     /// Neither, so only a digest of the snapshot is emitted.
     Digest(String, &'static str),
     /// Nothing can be said about it, with a reason.
     Unavailable(&'static str),
+}
+
+/// One named root a classified path can be relative to (issue draft 10).
+struct NamedRoot {
+    bytes: Vec<u8>,
+    label: String,
 }
 
 // J3-agent begin: one mediated connect, as the audit writer needs it
@@ -53,10 +62,20 @@ pub struct MediatedConnect {
     pub family: Option<u16>,
     /// Whether the whole address was read.
     pub address_complete: bool,
+    /// The address fact read from the `sockaddr` (issue drafts 13/14).
+    pub peer: Option<super::unixpeer::Peer>,
     /// The value accepted as the child's `connect` response: 0 or `-errno`.
     pub ret: i64,
     /// The mediator's safe reason code.
     pub reason: &'static str,
+}
+
+/// A complete path snapshot over raw bytes.
+fn snap_bytes(bytes: &[u8]) -> super::tracer::PathSnapshot {
+    super::tracer::PathSnapshot {
+        bytes: bytes.to_vec(),
+        complete: true,
+    }
 }
 // J3-agent end
 
@@ -78,6 +97,9 @@ pub struct AuditWriter {
     seq: u64,
     workspace: Vec<u8>,
     scratch_inside: Vec<u8>,
+    /// Named roots a path can be relative to (issue draft 10), most
+    /// specific first.
+    roots: Vec<NamedRoot>,
     counts: BTreeMap<CoverageClass, u64>,
     degraded: BTreeSet<CoverageClass>,
     gaps: Vec<Gap>,
@@ -108,6 +130,7 @@ impl AuditWriter {
             seq: 0,
             workspace: workspace.to_vec(),
             scratch_inside: scratch_inside.to_vec(),
+            roots: Vec::new(),
             counts: BTreeMap::new(),
             degraded: BTreeSet::new(),
             gaps: Vec::new(),
@@ -118,6 +141,19 @@ impl AuditWriter {
         }
     }
 
+    /// Names additional roots a classified path can be relative to (issue
+    /// draft 10): operator grants by their in-jail spelling, and the system
+    /// read-only roots. More specific roots are matched first.
+    #[must_use]
+    pub fn with_roots(mut self, roots: Vec<(Vec<u8>, String)>) -> Self {
+        let mut roots: Vec<NamedRoot> = roots
+            .into_iter()
+            .map(|(bytes, label)| NamedRoot { bytes, label })
+            .collect();
+        roots.sort_by_key(|root| std::cmp::Reverse(root.bytes.len()));
+        self.roots = roots;
+        self
+    }
     /// Learning is explicit because absolute read-path snapshots may disclose host paths.
     pub fn with_learning(mut self, learning: bool) -> Self {
         self.learning = learning;
@@ -355,8 +391,14 @@ impl AuditWriter {
             self.emit(&event, CoverageClass::FsDeny);
             return;
         }
-        let denied = matches!(errno, Some(libc::EACCES | libc::EPERM));
+        // A write refused by the filesystem itself — EROFS on a read-only
+        // grant, EBUSY on a rename or unlink across one — is a denial of a
+        // mutation just like EACCES/EPERM (issue draft 09); the receipt's
+        // fs.deny must not read 0 while the trace shows refused writes.
         let base = op.audit_operation(args.flags);
+        let denied = matches!(errno, Some(libc::EACCES | libc::EPERM))
+            || (matches!(base, "fs.write" | "fs.create" | "fs.rename" | "fs.unlink")
+                && matches!(errno, Some(libc::EROFS | libc::EBUSY)));
         let operation = if denied { "fs.deny" } else { base };
 
         let mut fields = Map::new();
@@ -370,9 +412,21 @@ impl AuditWriter {
             "path_basis".to_owned(),
             Value::from("argument_snapshot".to_owned()),
         );
-        self.describe_path(&mut fields, "path", args.path.as_ref(), args.dirfd);
+        self.describe_path_in(
+            &mut fields,
+            "path",
+            args.path.as_ref(),
+            args.dirfd,
+            args.cwd.as_deref(),
+        );
         if args.path2.is_some() {
-            self.describe_path(&mut fields, "path2", args.path2.as_ref(), args.dirfd2);
+            self.describe_path_in(
+                &mut fields,
+                "path2",
+                args.path2.as_ref(),
+                args.dirfd2,
+                args.cwd.as_deref(),
+            );
         }
         if denied {
             fields.insert(
@@ -439,19 +493,19 @@ impl AuditWriter {
     /// outranks the observer's `SECCOMP_RET_TRACE` — so for `agent` the
     /// mediator is the witness of every native `connect` in the attempt's
     /// tree, and this is the audit source's `net.connect` result for it, with
-    /// the return value the kernel accepted for the child's `connect`. It follows the
-    /// closed set's classification exactly: an `EACCES`/`EPERM` result is one
-    /// `fs.deny` with `attempted_operation = net.connect`, counted under
-    /// `fs.deny` only. `fields.observation` says which mechanism saw it; the
-    /// mediator's safe reason code is recorded as `mediator_reason`, and the
-    /// audit `decision` stays null (§13.1). Proxy-source facts are never
-    /// merged into it: the proxy emits its own `net.connect` results.
+    /// the return value the kernel accepted for the child's `connect`.
+    /// Whatever its verdict it is network evidence (issue draft 13: a
+    /// refused AF_UNIX connect is not a "denied write"); the socket path or
+    /// internet address the child named is reported (issue drafts 13/14), the
+    /// mediator's safe reason code is recorded as `mediator_reason`, and a
+    /// failed direct internet connect is marked `egress: blocked` (issue
+    /// draft 14). The audit `decision` stays null (§13.1). Proxy-source
+    /// facts are never merged into it: the proxy emits its own `net.connect`
+    /// results.
     pub fn record_mediated_connect(&mut self, record: &MediatedConnect) {
         let errno = (record.ret < 0)
             .then(|| i32::try_from(-record.ret).ok())
             .flatten();
-        let denied = matches!(errno, Some(libc::EACCES | libc::EPERM));
-        let operation = if denied { "fs.deny" } else { "net.connect" };
         let mut fields = Map::new();
         fields.insert("syscall".to_owned(), Value::from("connect"));
         fields.insert(
@@ -466,7 +520,40 @@ impl AuditWriter {
             "path_basis".to_owned(),
             Value::from("argument_snapshot".to_owned()),
         );
-        self.describe_path(&mut fields, "path", None, None);
+        let unix_path = record.peer.as_ref().and_then(|peer| match peer {
+            crate::platform::linux::unixpeer::Peer::UnixPath(bytes) => Some(snap_bytes(bytes)),
+            _ => None,
+        });
+        if record
+            .peer
+            .as_ref()
+            .is_some_and(|peer| matches!(peer, crate::platform::linux::unixpeer::Peer::Abstract(_)))
+        {
+            let mut abstracted = Map::new();
+            abstracted.insert("kind".to_owned(), Value::from("unavailable"));
+            abstracted.insert(
+                "reason".to_owned(),
+                Value::from("abstract_socket".to_owned()),
+            );
+            fields.insert("path".to_owned(), Value::Object(abstracted));
+            fields.insert("path_complete".to_owned(), Value::from(false));
+        } else {
+            self.describe_path(&mut fields, "path", unix_path.as_ref(), None);
+        }
+        if let Some(crate::platform::linux::unixpeer::Peer::Internet { port, address }) =
+            record.peer.as_ref()
+        {
+            fields.insert(
+                "address".to_owned(),
+                Value::from(format!("{address}:{port}")),
+            );
+            // A direct connect that failed in the empty network namespace is
+            // a blocked egress attempt (issue draft 14): exactly the case an
+            // operator most wants named.
+            if matches!(errno, Some(libc::ENETUNREACH | libc::ECONNREFUSED)) {
+                fields.insert("egress".to_owned(), Value::from("blocked"));
+            }
+        }
         fields.insert(
             "address_family".to_owned(),
             record
@@ -482,12 +569,6 @@ impl AuditWriter {
             Value::from("seccomp_user_notification"),
         );
         fields.insert("mediator_reason".to_owned(), Value::from(record.reason));
-        if denied {
-            fields.insert(
-                "attempted_operation".to_owned(),
-                Value::from("net.connect".to_owned()),
-            );
-        }
         let outcome = EventOutcome {
             ok: Some(record.ret >= 0),
             return_value: Some(record.ret),
@@ -503,12 +584,12 @@ impl AuditWriter {
             seq,
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
-            operation,
+            "net.connect",
             outcome,
             fields,
         );
-        if self.emit(&event, class_of(operation)) {
-            self.bump(class_of(operation));
+        if self.emit(&event, class_of("net.connect")) {
+            self.bump(class_of("net.connect"));
         }
     }
 
@@ -839,6 +920,7 @@ impl AuditWriter {
                         .filter(|gap| gap.classes.iter().any(|name| name == class.as_str()))
                         .cloned()
                         .collect(),
+                    resolver_refused: 0,
                 },
             );
         }
@@ -887,6 +969,7 @@ impl AuditWriter {
                 })
                 .cloned()
                 .collect(),
+            resolver_refused: 0,
         }
     }
 
@@ -896,6 +979,19 @@ impl AuditWriter {
         key: &str,
         snapshot: Option<&PathSnapshot>,
         dirfd: Option<i32>,
+    ) {
+        self.describe_path_in(fields, key, snapshot, dirfd, None);
+    }
+
+    /// [`describe_path`] with the thread's observed working directory, which
+    /// a relative pathname is resolved against (issue draft 12).
+    fn describe_path_in(
+        &self,
+        fields: &mut Map<String, Value>,
+        key: &str,
+        snapshot: Option<&PathSnapshot>,
+        dirfd: Option<i32>,
+        cwd: Option<&[u8]>,
     ) {
         // The nested {kind, value} shape is the documented contract
         // (examples/event-open.json): a consumer reads fields.path.kind and
@@ -907,7 +1003,7 @@ impl AuditWriter {
         {
             fields.insert(format!("{key}_dirfd"), Value::from(i64::from(fd)));
         }
-        let path = match self.classify(snapshot, dirfd) {
+        let path = match self.classify(snapshot, dirfd, cwd) {
             PathClass::WorkspaceRelative(bytes) => serde_json::json!({
                 "kind": "workspace_relative",
                 "value": native_value(&bytes),
@@ -915,6 +1011,11 @@ impl AuditWriter {
             PathClass::ScratchRelative(bytes) => serde_json::json!({
                 "kind": "scratch_relative",
                 "value": native_value(&bytes),
+            }),
+            PathClass::RootRelative { root, rest } => serde_json::json!({
+                "kind": "root_relative",
+                "root": root,
+                "value": native_value(&rest),
             }),
             PathClass::Digest(digest, reason) => serde_json::json!({
                 "kind": "digest",
@@ -929,7 +1030,12 @@ impl AuditWriter {
         fields.insert(key.to_owned(), path);
     }
 
-    fn classify(&self, snapshot: Option<&PathSnapshot>, dirfd: Option<i32>) -> PathClass {
+    fn classify(
+        &self,
+        snapshot: Option<&PathSnapshot>,
+        dirfd: Option<i32>,
+        cwd: Option<&[u8]>,
+    ) -> PathClass {
         let Some(snapshot) = snapshot else {
             return PathClass::Unavailable("argument_not_read");
         };
@@ -951,7 +1057,26 @@ impl AuditWriter {
             );
         }
         if bytes[0] != b'/' {
-            // §11.3: a relative path is never appended to a host cwd.
+            // Issue draft 12: a relative pathname the kernel resolves
+            // against the thread's own cwd is resolved against that cwd,
+            // observed at the syscall stop. Only the true dirfd cases (and a
+            // cwd that could not be read) keep their distinct reasons.
+            if dirfd.is_none_or(|fd| fd == AT_FDCWD)
+                && let Some(cwd) = cwd
+                && cwd.first() == Some(&b'/')
+            {
+                let mut joined = cwd.to_vec();
+                joined.push(b'/');
+                joined.extend_from_slice(bytes);
+                return self.classify(
+                    Some(&PathSnapshot {
+                        bytes: joined,
+                        complete: true,
+                    }),
+                    None,
+                    None,
+                );
+            }
             return match dirfd {
                 Some(fd) if fd != AT_FDCWD => PathClass::Unavailable("relative_to_dirfd"),
                 _ => PathClass::Unavailable("relative_to_unobserved_cwd"),
@@ -962,6 +1087,14 @@ impl AuditWriter {
         }
         if let Some(rest) = strip_root(bytes, &self.scratch_inside) {
             return PathClass::ScratchRelative(rest);
+        }
+        for root in &self.roots {
+            if let Some(rest) = strip_root(bytes, &root.bytes) {
+                return PathClass::RootRelative {
+                    root: root.label.clone(),
+                    rest,
+                };
+            }
         }
         PathClass::Digest(
             crate::canonical::sha256_prefixed(bytes),
@@ -1133,19 +1266,102 @@ mod tests {
         }
     }
 
+    /// Issue drafts 13/14: a mediated connect is network evidence whatever
+    /// its verdict, names the socket path or internet address, and a failed
+    /// direct internet connect is marked blocked egress.
+    #[test]
+    fn mediated_connects_are_net_evidence_with_their_address_named() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
+        let mut writer = AuditWriter::new("att_test", Some(trace), b"/work/space", b"/tmp");
+        writer.record_mediated_connect(&MediatedConnect {
+            tid: 12,
+            tgid: Some(12),
+            tgid_start: Some(99),
+            family: Some(1),
+            address_complete: true,
+            peer: Some(crate::platform::linux::unixpeer::Peer::UnixPath(
+                b"/work/space/run/nscd".to_vec(),
+            )),
+            ret: -i64::from(libc::EACCES),
+            reason: "path_unresolved",
+        });
+        assert_eq!(writer.count(CoverageClass::Net), 1);
+        assert_eq!(writer.count(CoverageClass::FsDeny), 0);
+
+        writer.record_mediated_connect(&MediatedConnect {
+            tid: 13,
+            tgid: Some(12),
+            tgid_start: Some(99),
+            family: Some(2),
+            address_complete: true,
+            peer: Some(crate::platform::linux::unixpeer::Peer::Internet {
+                port: 80,
+                address: "169.254.169.254".parse().unwrap(),
+            }),
+            ret: -i64::from(libc::ENETUNREACH),
+            reason: "non_unix",
+        });
+        let events: Vec<Value> = std::fs::read_to_string(file.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let unix_deny = events
+            .iter()
+            .find(|event| event["fields"]["mediator_reason"] == "path_unresolved")
+            .expect("the refused pathname connect");
+        assert_eq!(unix_deny["operation"], "net.connect");
+        assert_eq!(unix_deny["outcome"]["errno"], "EACCES");
+        assert_eq!(unix_deny["fields"]["path"]["kind"], "workspace_relative");
+        assert_eq!(unix_deny["fields"]["path"]["value"], "run/nscd");
+        let blocked = events
+            .iter()
+            .find(|event| event["fields"]["mediator_reason"] == "non_unix")
+            .expect("the direct connect");
+        assert_eq!(blocked["operation"], "net.connect");
+        assert_eq!(blocked["fields"]["address"], "169.254.169.254:80");
+        assert_eq!(blocked["fields"]["egress"], "blocked");
+        assert_eq!(blocked["outcome"]["errno"], "ENETUNREACH");
+
+        writer.record_mediated_connect(&MediatedConnect {
+            tid: 14,
+            tgid: Some(12),
+            tgid_start: Some(99),
+            family: Some(1),
+            address_complete: true,
+            peer: Some(crate::platform::linux::unixpeer::Peer::Abstract(
+                b"ouro".to_vec(),
+            )),
+            ret: 0,
+            reason: "abstract",
+        });
+        let events: Vec<Value> = std::fs::read_to_string(file.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let abstracted = events
+            .iter()
+            .find(|event| event["fields"]["mediator_reason"] == "abstract")
+            .expect("the abstract connect");
+        assert_eq!(abstracted["fields"]["path"]["reason"], "abstract_socket");
+        assert_eq!(abstracted["fields"]["path_complete"], false);
+    }
+
     #[test]
     fn a_workspace_path_is_reported_relative_to_the_workspace() {
         let writer = writer();
         assert_eq!(
-            writer.classify(Some(&snap("/work/space/src/lib.rs")), Some(AT_FDCWD)),
+            writer.classify(Some(&snap("/work/space/src/lib.rs")), Some(AT_FDCWD), None),
             PathClass::WorkspaceRelative(b"src/lib.rs".to_vec())
         );
         assert_eq!(
-            writer.classify(Some(&snap("/work/space")), None),
+            writer.classify(Some(&snap("/work/space")), None, None),
             PathClass::WorkspaceRelative(Vec::new())
         );
         assert_eq!(
-            writer.classify(Some(&snap("/tmp/scratch.txt")), None),
+            writer.classify(Some(&snap("/tmp/scratch.txt")), None, None),
             PathClass::ScratchRelative(b"scratch.txt".to_vec())
         );
     }
@@ -1155,7 +1371,7 @@ mod tests {
         let writer = writer();
         // `/work/spacex` shares a byte prefix with `/work/space` and is not
         // inside it.
-        match writer.classify(Some(&snap("/work/spacex/f")), None) {
+        match writer.classify(Some(&snap("/work/spacex/f")), None, None) {
             PathClass::Digest(digest, reason) => {
                 assert!(digest.starts_with("sha256:"));
                 assert_eq!(reason, "outside_known_roots");
@@ -1172,7 +1388,7 @@ mod tests {
             "/work/space/link/../../token",
         ] {
             assert!(matches!(
-                writer().classify(Some(&snap(path)), None),
+                writer().classify(Some(&snap(path)), None, None),
                 PathClass::Digest(_, _)
             ));
         }
@@ -1446,11 +1662,11 @@ mod tests {
     fn a_relative_path_is_never_joined_to_a_guessed_cwd() {
         let writer = writer();
         assert_eq!(
-            writer.classify(Some(&snap("relative/file")), Some(AT_FDCWD)),
+            writer.classify(Some(&snap("relative/file")), Some(AT_FDCWD), None),
             PathClass::Unavailable("relative_to_unobserved_cwd")
         );
         assert_eq!(
-            writer.classify(Some(&snap("relative/file")), Some(7)),
+            writer.classify(Some(&snap("relative/file")), Some(7), None),
             PathClass::Unavailable("relative_to_dirfd")
         );
     }
@@ -1463,11 +1679,11 @@ mod tests {
             complete: false,
         };
         assert_eq!(
-            writer.classify(Some(&truncated), None),
+            writer.classify(Some(&truncated), None, None),
             PathClass::Unavailable("path_truncated")
         );
         assert_eq!(
-            writer.classify(None, None),
+            writer.classify(None, None, None),
             PathClass::Unavailable("argument_not_read")
         );
     }
@@ -1575,10 +1791,15 @@ mod tests {
         writer.record_exit(10, Some(1), 0);
         assert_eq!(
             writer.count(CoverageClass::FsWrite),
-            2,
-            "EROFS stays an fs event"
+            1,
+            "only the successful open counts as fs.write"
         );
-        assert_eq!(writer.count(CoverageClass::FsDeny), 1);
+        assert_eq!(
+            writer.count(CoverageClass::FsDeny),
+            2,
+            "EROFS on a write-class open is a denied mutation (issue draft 09), \
+             like EACCES"
+        );
         assert_eq!(writer.count(CoverageClass::Exec), 2);
     }
 
@@ -1689,8 +1910,18 @@ mod tests {
         assert_eq!(writer.gaps().len(), 64);
         let bounded = writer.gaps().last().unwrap();
         assert_eq!(bounded.end_ns.as_deref(), Some("64"));
-        writer.record_gap(GapReason::ChildNotificationListener, OpSet::ALL, 30, 99, None);
-        assert_eq!(writer.gaps().len(), 64, "the bound merges instead of growing");
+        writer.record_gap(
+            GapReason::ChildNotificationListener,
+            OpSet::ALL,
+            30,
+            99,
+            None,
+        );
+        assert_eq!(
+            writer.gaps().len(),
+            64,
+            "the bound merges instead of growing"
+        );
         let merged = writer.gaps().last().unwrap();
         assert_eq!(merged.reason, "coalesced_losses");
         assert_eq!(
@@ -1736,6 +1967,7 @@ mod tests {
             tgid_start: Some(4343),
             family: Some(2),
             address_complete: true,
+            peer: None,
             ret: 0,
             reason: "non_unix",
         });
@@ -1745,6 +1977,7 @@ mod tests {
             tgid_start: Some(1),
             family: Some(2),
             address_complete: true,
+            peer: None,
             ret: 0,
             reason: "non_unix",
         });

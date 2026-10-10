@@ -256,6 +256,7 @@ impl RunningExecution for Running {
                 status: ouro_jail::records::SourceStatus::Active,
                 observed_count: Some(0),
                 gaps: Vec::new(),
+                resolver_refused: 0,
             },
         );
         Some(summary)
@@ -281,6 +282,7 @@ fn observed_summary() -> ouro_jail::observer::CoverageSummary {
         status: SourceStatus::Active,
         observed_count: Some(count),
         gaps: Vec::new(),
+        resolver_refused: 0,
     };
     CoverageSummary {
         backend: Some("ptrace".into()),
@@ -300,6 +302,7 @@ fn observed_summary() -> ouro_jail::observer::CoverageSummary {
                     status: SourceStatus::Degraded,
                     observed_count: None,
                     gaps: Vec::new(),
+                    resolver_refused: 0,
                 },
             ),
             (CoverageClass::FsDeny, active(0)),

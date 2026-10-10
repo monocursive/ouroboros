@@ -730,7 +730,12 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
             ("scratch", &entry.scratch),
         ] {
             if let Some(value) = value {
-                let _ = writeln!(out, "{} {key} {}", attempt_id, records::escape_control(value));
+                let _ = writeln!(
+                    out,
+                    "{} {key} {}",
+                    attempt_id,
+                    records::escape_control(value)
+                );
             }
         }
         for action in &entry.recorded {
@@ -996,8 +1001,7 @@ mod tests {
     // bytes. `minimal_resolved` mirrors `supervisor`'s own test helper.
     fn m1_resolved() -> ouro_jail::policy::Resolved {
         let profile = ouro_jail::policy::ProfileName::Tool;
-        let baseline =
-            ouro_jail::profiles::baseline(profile, records::Os::Macos, &|_| None);
+        let baseline = ouro_jail::profiles::baseline(profile, records::Os::Macos, &|_| None);
         let inputs = ouro_jail::policy::ResolveInputs {
             platform: records::Os::Macos,
             base_profile: profile,
@@ -1014,12 +1018,14 @@ mod tests {
     }
 
     fn m1_explain(mut resolved: ouro_jail::policy::Resolved) -> ExplainReport {
-        resolved.snapshot.filesystem.deny_read.push(
-            ouro_jail::policy::PathRef::host(
+        resolved
+            .snapshot
+            .filesystem
+            .deny_read
+            .push(ouro_jail::policy::PathRef::host(
                 records::NativeString::from_bytes("sec\u{1b}]52;c;SGVsbG8=\u{7}ret")
                     .expect("valid"),
-            ),
-        );
+            ));
         ExplainReport {
             resolved,
             platform: m1_platform(),
@@ -1041,9 +1047,7 @@ mod tests {
     fn an_osc52_deny_read_entry_is_escaped_in_explain_text() {
         let text = explain_text(&m1_explain(m1_resolved()));
         assert!(
-            text.contains(
-                "deny_read host:sec<U+001B>]52;c;SGVsbG8=<U+0007>ret"
-            ),
+            text.contains("deny_read host:sec<U+001B>]52;c;SGVsbG8=<U+0007>ret"),
             "{text}"
         );
         assert!(!text.contains('\u{1b}'), "a raw ESC reached stdout: {text}");
@@ -1055,11 +1059,13 @@ mod tests {
     #[test]
     fn bidi_controls_are_escaped_and_clean_text_is_unchanged() {
         let mut resolved = m1_resolved();
-        resolved.snapshot.filesystem.read_only.push(
-            ouro_jail::policy::PathRef::host(
+        resolved
+            .snapshot
+            .filesystem
+            .read_only
+            .push(ouro_jail::policy::PathRef::host(
                 records::NativeString::from_bytes("sec\u{202e}ret").expect("valid"),
-            ),
-        );
+            ));
         let text = explain_text(&ExplainReport {
             resolved,
             platform: m1_platform(),
@@ -1073,8 +1079,16 @@ mod tests {
             platform: m1_platform(),
         });
         assert!(clean.starts_with("policy tool\nprofile tool\n"), "{clean}");
-        assert!(clean.lines().any(|line| line == "capabilities unmeasured (explain does not probe)"), "{clean}");
-        assert!(clean.chars().all(|c| c.is_ascii() || !c.is_control()), "{clean}");
+        assert!(
+            clean
+                .lines()
+                .any(|line| line == "capabilities unmeasured (explain does not probe)"),
+            "{clean}"
+        );
+        assert!(
+            clean.chars().all(|c| c.is_ascii() || !c.is_control()),
+            "{clean}"
+        );
     }
 
     /// Audit M1: a hostile attempt id in `gc`'s text rendering is escaped
@@ -1084,7 +1098,10 @@ mod tests {
         let mut report = gc_report(Some("removed"));
         report.entries[0].attempt_id = "att\u{1b}]52;c;YQ==\u{7}".to_owned();
         let text = gc_text(&report);
-        assert!(text.contains("att<U+001B>]52;c;YQ==<U+0007> retained"), "{text}");
+        assert!(
+            text.contains("att<U+001B>]52;c;YQ==<U+0007> retained"),
+            "{text}"
+        );
         assert!(!text.contains('\u{1b}'), "{text}");
 
         // And a bidi control in a leftover temp file name.

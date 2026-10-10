@@ -76,6 +76,19 @@ pub struct BwrapVersion {
     pub patch: u32,
 }
 
+impl BwrapVersion {
+    /// Whether this backend is new enough for the argv this product
+    /// renders: `--bind-fd` and `--ro-bind-fd` arrived in 0.10.0.
+    #[must_use]
+    pub fn at_least(&self, minimum: (u32, u32, u32)) -> bool {
+        (self.major, self.minor, self.patch) >= minimum
+    }
+}
+
+/// The oldest bubblewrap the rendered argv works with: 0.10.0 introduced
+/// `--bind-fd` and `--ro-bind-fd`, which every contained run uses.
+pub const MINIMUM_VERSION: (u32, u32, u32) = (0, 10, 0);
+
 /// Parse `bubblewrap 0.11.1`.
 #[must_use]
 pub fn parse_version(line: &str) -> Option<BwrapVersion> {
@@ -615,6 +628,10 @@ pub struct BwrapPlan {
     /// Extra writable binds from operator `--rw` grants, applied after the
     /// workspace bind so a grant inside it stays writable (§6.1).
     pub extra_rw_binds: Vec<(PathBuf, PathBuf)>,
+    /// Operator `--rw` grants of allowlisted device nodes (issue draft 15):
+    /// NVIDIA nodes, bound individually with `--dev-bind` so a contained
+    /// profile can use a GPU without ever seeing devtmpfs.
+    pub extra_dev_binds: Vec<(PathBuf, PathBuf)>,
     /// Denied subtrees, masked with a `tmpfs` over the path after every
     /// other mount (north-star §4.3: denied subtrees inside visible parents
     /// are "absent or masked by the backend").
@@ -806,6 +823,7 @@ impl BwrapPlan {
             protected: Vec::new(),
             extra_ro_binds: Vec::new(),
             extra_rw_binds: Vec::new(),
+            extra_dev_binds: Vec::new(),
             masked: Vec::new(),
             placeholders: Vec::new(),
             jail_exe: jail_exe.to_owned(),
@@ -900,6 +918,13 @@ impl BwrapPlan {
                 kind,
                 source: source.map(PathBuf::into_os_string),
                 destination: destination.into_os_string(),
+            });
+        }
+        for (source, destination) in &self.extra_dev_binds {
+            rows.push(MountRow {
+                kind: "dev-bind",
+                source: Some(source.as_os_str().to_owned()),
+                destination: destination.as_os_str().to_owned(),
             });
         }
         let mut readonly = self.extra_ro_binds.clone();
@@ -1086,6 +1111,7 @@ impl BwrapPlan {
                     "tmpfs-mask" => "--tmpfs",
                     "proc" => "--proc",
                     "dev" => "--dev",
+                    "dev-bind" => "--dev-bind",
                     "cwd" => "--tmpfs",
                     // J3-launch begin: checked above to have a descriptor
                     "vendor-state" => "--bind-fd",
@@ -1323,6 +1349,29 @@ mod tests {
         plan
     }
 
+    /// Issue draft 15: an allowlisted device grant renders `--dev-bind`,
+    /// binding the single node instead of any devtmpfs surface.
+    #[test]
+    fn a_device_grant_renders_dev_bind() {
+        let mut plan = sample_plan();
+        plan.extra_dev_binds
+            .push((PathBuf::from("/dev/nvidia0"), PathBuf::from("/dev/nvidia0")));
+        let rendered = plan.render().unwrap();
+        let text: Vec<&str> = rendered
+            .argv
+            .iter()
+            .map(|arg| arg.to_str().expect("UTF-8"))
+            .collect();
+        let at = text
+            .iter()
+            .position(|arg| *arg == "--dev-bind")
+            .expect("a --dev-bind row");
+        assert_eq!(
+            (&text[at + 1], &text[at + 2]),
+            (&"/dev/nvidia0", &"/dev/nvidia0")
+        );
+    }
+
     #[test]
     fn the_argv_has_the_profile_the_north_star_describes() {
         let rendered = sample_plan().render().unwrap();
@@ -1391,10 +1440,7 @@ mod tests {
             let mut plan = sample_plan();
             plan.masked.push(path.into());
             assert!(
-                matches!(
-                    plan.render(),
-                    Err(PlanError::MaskedBoundaryPlumbing(_))
-                ),
+                matches!(plan.render(), Err(PlanError::MaskedBoundaryPlumbing(_))),
                 "masking {path} must refuse"
             );
         }

@@ -375,6 +375,11 @@ fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdi
 }
 
 /// A call that stopped at its entry and has not yet returned.
+///
+/// One entry exists per in-flight syscall, so the variants' size difference
+/// (the closed-set call's captured arguments) costs at most a few hundred
+/// bytes per stopped task.
+#[allow(clippy::large_enum_variant)]
 enum InFlight {
     /// A closed-set call, with the arguments read at its entry.
     Closed(Pending),
@@ -631,12 +636,7 @@ fn components(path: &[u8]) -> impl DoubleEndedIterator<Item = &[u8]> {
 /// corroborates. `nlink` is `None` when the count could not be read or was
 /// never asked for; an unreadable count does not corroborate. The check only
 /// ever weakens.
-fn path_corroborated(
-    snapshot: &[u8],
-    resolved: &[u8],
-    tmpfile: bool,
-    nlink: Option<u64>,
-) -> bool {
+fn path_corroborated(snapshot: &[u8], resolved: &[u8], tmpfile: bool, nlink: Option<u64>) -> bool {
     if resolved.ends_with(b" (deleted)") && !tmpfile && nlink != Some(0) {
         return false;
     }
@@ -2214,22 +2214,19 @@ impl Session {
                 .args
                 .flags
                 .is_some_and(|flags| flags & (libc::O_TMPFILE as u64) == libc::O_TMPFILE as u64);
-            let corroborated = self
-                .procfs
-                .fd_link(tid, rval)
-                .is_some_and(|resolved| {
-                    // Audit 7 L7: the kernel's ` (deleted)` annotation can
-                    // also be a live file's literal name, so when the raw
-                    // link carries it the descriptor's link count — read
-                    // while the tracee is stopped — must agree the file is
-                    // truly unlinked.
-                    let nlink = if resolved.ends_with(b" (deleted)") {
-                        self.procfs.fd_nlink(tid, rval)
-                    } else {
-                        None
-                    };
-                    path_corroborated(&snapshot.bytes, &resolved, tmpfile, nlink)
-                });
+            let corroborated = self.procfs.fd_link(tid, rval).is_some_and(|resolved| {
+                // Audit 7 L7: the kernel's ` (deleted)` annotation can
+                // also be a live file's literal name, so when the raw
+                // link carries it the descriptor's link count — read
+                // while the tracee is stopped — must agree the file is
+                // truly unlinked.
+                let nlink = if resolved.ends_with(b" (deleted)") {
+                    self.procfs.fd_nlink(tid, rval)
+                } else {
+                    None
+                };
+                path_corroborated(&snapshot.bytes, &resolved, tmpfile, nlink)
+            });
             if !corroborated {
                 self.summary.path_claims_unverified += 1;
                 self.gap(GapReason::PathClaimUnverified, OpSet::EMPTY, Some(1));
@@ -2744,6 +2741,11 @@ impl Session {
         if let Some(index) = entry.dirfd2 {
             args.dirfd2 = Some(raw[index as usize] as i32);
         }
+        // Issue draft 12: a relative pathname the kernel resolves against
+        // the thread's own cwd is resolved against that cwd at
+        // classification; the snapshot itself stays the raw argument, so the
+        // exit-side stability check compares what the tracee still holds.
+        args.cwd = Self::observed_cwd(tid, args.path.as_ref(), args.path2.as_ref());
         if let Some((ptr, len)) = entry.sockaddr {
             let (snapshot, unreadable) =
                 self.read_sockaddr(tid, raw[ptr as usize], raw[len as usize]);
@@ -2763,6 +2765,29 @@ impl Session {
         }
     }
 
+    /// The stopped thread's working directory, read from `/proc/<tid>/cwd`,
+    /// when one of the call's path arguments is a complete relative pathname
+    /// the kernel resolves against it (issue draft 12). The true dirfd cases
+    /// resolve against their descriptor instead and read nothing.
+    fn observed_cwd(
+        tid: pid_t,
+        path: Option<&PathSnapshot>,
+        path2: Option<&PathSnapshot>,
+    ) -> Option<Box<[u8]>> {
+        use std::os::unix::ffi::OsStringExt as _;
+        let relative = |snapshot: Option<&PathSnapshot>| {
+            snapshot.is_some_and(|snapshot| {
+                snapshot.complete && snapshot.bytes.first().is_some_and(|byte| *byte != b'/')
+            })
+        };
+        if !relative(path) && !relative(path2) {
+            return None;
+        }
+        std::fs::read_link(format!("/proc/{tid}/cwd"))
+            .ok()
+            .map(|link| link.into_os_string().into_vec().into_boxed_slice())
+            .filter(|bytes| bytes.first() == Some(&b'/'))
+    }
     /// A NUL-terminated pathname argument, bounded by `path_snapshot_max`.
     ///
     /// `complete` is false when the bytes ran out before a NUL or when the
@@ -4015,6 +4040,58 @@ mod tests {
         assert_eq!(session.summary.loss.lifecycle_dropped, 14, "room again");
     }
 
+    #[test]
+    fn relative_syscall_cwd_counts_against_admission_and_handoff_credit() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let handed = Arc::new(AtomicUsize::new(0));
+        let charge = EVENT_FIXED_BYTES + 512;
+        let config = TracerConfig {
+            queue_bytes_max: 64 * 1024 + 2 * charge,
+            ..TracerConfig::default()
+        };
+        let mut session = Session::new(config, tx, Arc::clone(&handed), 0, Box::new(LiveProc));
+        let syscall = || TracerEvent::Syscall {
+            pid: 1,
+            start_ticks: None,
+            tid: 1,
+            op: ClosedOp::Open,
+            syscall: "openat",
+            args: super::super::Args {
+                cwd: Some(vec![b'x'; 512].into_boxed_slice()),
+                ..Default::default()
+            },
+            ret: 3,
+            monotonic_ns: 0,
+        };
+        session.emit(syscall());
+        session.emit(syscall());
+        assert_eq!(handed.load(Ordering::Relaxed), 2 * charge);
+        // Skip the already-tested backpressure wait: a stalled consumer
+        // must immediately refuse the third retained working directory.
+        session.stalled = true;
+        session.emit(syscall());
+        assert_eq!(session.summary.loss.queue_dropped, 1);
+        assert_eq!(handed.load(Ordering::Relaxed), 2 * charge);
+        let events = super::super::Events::new(rx, Arc::clone(&handed));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            TracerEvent::Syscall { .. }
+        ));
+        assert_eq!(handed.load(Ordering::Relaxed), charge);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            TracerEvent::Syscall { .. }
+        ));
+        assert_eq!(handed.load(Ordering::Relaxed), 0);
+        session.emit(syscall());
+        assert_eq!(
+            session.summary.loss.queue_dropped, 1,
+            "credit frees room again"
+        );
+        while events.try_recv().is_ok() {}
+        assert_eq!(handed.load(Ordering::Relaxed), 0);
+    }
+
     // ------------------------------------------------ O-3, with a real kernel
 
     /// A child of this test, seized by the calling thread, that has the
@@ -4776,7 +4853,12 @@ mod tests {
     fn a_path_claim_is_corroborated_by_its_components_not_only_its_name() {
         // Absolute: exactly the resolved path.
         assert!(path_corroborated(b"/w/out.txt", b"/w/out.txt", false, None));
-        assert!(path_corroborated(b"/w//./out.txt", b"/w/out.txt", false, None));
+        assert!(path_corroborated(
+            b"/w//./out.txt",
+            b"/w/out.txt",
+            false,
+            None
+        ));
         assert!(
             !path_corroborated(b"/w/public/x", b"/w/secret/x", false, None),
             "a rewritten directory component"
@@ -4784,7 +4866,12 @@ mod tests {
         assert!(!path_corroborated(b"/w/a", b"/w/b", false, None));
         // Relative: the tail of the resolved path, bare names included.
         assert!(path_corroborated(b"out.txt", b"/w/out.txt", false, None));
-        assert!(path_corroborated(b"sub/out.txt", b"/w/sub/out.txt", false, None));
+        assert!(path_corroborated(
+            b"sub/out.txt",
+            b"/w/sub/out.txt",
+            false,
+            None
+        ));
         assert!(
             !path_corroborated(b"a", b"/w/b", false, None),
             "a bare name is checked too"
@@ -4802,12 +4889,37 @@ mod tests {
         // Unlinked since: the annotation is the kernel's and the count
         // agrees; a live decoy *named* `gone (deleted)` or an unreadable
         // count does not corroborate (audit 7 L7).
-        assert!(path_corroborated(b"/w/gone", b"/w/gone (deleted)", false, Some(0)));
-        assert!(!path_corroborated(b"/w/gone", b"/w/gone (deleted)", false, Some(1)));
-        assert!(!path_corroborated(b"/w/gone", b"/w/gone (deleted)", false, None));
+        assert!(path_corroborated(
+            b"/w/gone",
+            b"/w/gone (deleted)",
+            false,
+            Some(0)
+        ));
+        assert!(!path_corroborated(
+            b"/w/gone",
+            b"/w/gone (deleted)",
+            false,
+            Some(1)
+        ));
+        assert!(!path_corroborated(
+            b"/w/gone",
+            b"/w/gone (deleted)",
+            false,
+            None
+        ));
         // O_TMPFILE names the directory; its descriptor is `#<ino>` inside.
-        assert!(path_corroborated(b"/tmp", b"/tmp/#1234 (deleted)", true, None));
-        assert!(path_corroborated(b"/tmp/", b"/tmp/#1234 (deleted)", true, None));
+        assert!(path_corroborated(
+            b"/tmp",
+            b"/tmp/#1234 (deleted)",
+            true,
+            None
+        ));
+        assert!(path_corroborated(
+            b"/tmp/",
+            b"/tmp/#1234 (deleted)",
+            true,
+            None
+        ));
         assert!(!path_corroborated(
             b"/tmp",
             b"/var/tmp/#1234 (deleted)",
@@ -4819,8 +4931,18 @@ mod tests {
             "only an O_TMPFILE open drops the name"
         );
         // No path at all: the pipe or terminal behind /dev/stderr.
-        assert!(!path_corroborated(b"/dev/stderr", b"pipe:[4242]", false, None));
-        assert!(!path_corroborated(b"/dev/stderr", b"/dev/pts/3", false, None));
+        assert!(!path_corroborated(
+            b"/dev/stderr",
+            b"pipe:[4242]",
+            false,
+            None
+        ));
+        assert!(!path_corroborated(
+            b"/dev/stderr",
+            b"/dev/pts/3",
+            false,
+            None
+        ));
     }
 
     /// Audit-6 review: a claim the descriptor does not corroborate is

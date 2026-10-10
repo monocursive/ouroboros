@@ -263,21 +263,45 @@ pub const TRACE_CAP_SEAM: &str = "OURO_JAIL_TEST_TRACE_CAP";
 /// The smallest cap [`TRACE_CAP_SEAM`] accepts: room for a few notes.
 pub const TRACE_CAP_SEAM_MIN: u64 = 4096;
 
-/// The local `(cap, reserve)` for this attempt, given the seam's value.
+/// The operator's local trace budget (issue draft 03): plain decimal bytes
+/// in `TRACE_CAP_SEAM_MIN..=TRACE_CAP_MAX`, read from the documented
+/// environment allow-list. Raising it can only preserve more evidence; the
+/// sink names the override in every loss reason while one is in force.
+pub const TRACE_CAP_ENV: &str = "OURO_JAIL_TRACE_CAP";
+
+/// The largest local trace cap an operator may ask for: a bound against
+/// typos, not a physical limit.
+pub const TRACE_CAP_MAX: u64 = 1024 * 1024 * 1024;
+
+fn decimal_bytes(text: &str) -> Option<u64> {
+    text.parse::<u64>().ok().filter(|_| {
+        // Plain decimal digits only, no sign and no leading zero.
+        !text.starts_with('0') && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// The cap [`TRACE_CAP_ENV`] asks for, when it is a decimal byte count in
+/// range.
+#[must_use]
+pub fn env_cap(env: Option<&str>) -> u64 {
+    env.and_then(decimal_bytes)
+        .filter(|cap| (TRACE_CAP_SEAM_MIN..=TRACE_CAP_MAX).contains(cap))
+        .unwrap_or(LOCAL_CAP)
+}
+
+/// The local `(cap, reserve)` for this attempt, given the operator's
+/// [`TRACE_CAP_ENV`] value and the seam's value.
 ///
 /// A shrunk cap keeps half of itself as the reserve, up to [`LOCAL_RESERVE`],
 /// so the final gap and receipt notes still fit in a small cap.
 #[must_use]
-pub fn local_bounds(seam: Option<&str>) -> (u64, u64) {
-    seam.filter(|text| {
-        // Plain decimal digits only, no sign and no leading zero.
-        !text.starts_with('0') && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
-    })
-    .and_then(|text| text.parse::<u64>().ok())
-    .filter(|cap| (TRACE_CAP_SEAM_MIN..=LOCAL_CAP).contains(cap))
-    .map_or((LOCAL_CAP, LOCAL_RESERVE), |cap| {
-        (cap, LOCAL_RESERVE.min(cap / 2))
-    })
+pub fn local_bounds(env: Option<&str>, seam: Option<&str>) -> (u64, u64) {
+    let base = env_cap(env);
+    let cap = seam
+        .and_then(decimal_bytes)
+        .filter(|cap| (TRACE_CAP_SEAM_MIN..=base).contains(cap))
+        .unwrap_or(base);
+    (cap, LOCAL_RESERVE.min(cap / 2))
 }
 
 // J5-C begin: wave 3, the trace-fd write-size seam (R03.5)
@@ -429,17 +453,28 @@ impl FileSink {
     }
 
     /// Opens the attempt's sink with the bounds [`local_bounds`] gives for
-    /// `seam` (the value of [`TRACE_CAP_SEAM`], if any). When the seam
-    /// shrinks the cap, every loss reason names it and its value, so the
-    /// receipt that records the loss also records the seam.
+    /// the operator's [`TRACE_CAP_ENV`] value and `seam` (the value of
+    /// [`TRACE_CAP_SEAM`], if any). When either moves the cap, every loss
+    /// reason names it and its value, so the receipt that records the loss
+    /// also records the override.
     #[must_use]
-    pub fn for_attempt(file: File, seam: Option<&str>) -> Self {
-        let (cap, reserve) = local_bounds(seam);
+    pub fn for_attempt(file: File, env: Option<&str>, seam: Option<&str>) -> Self {
+        let base = env_cap(env);
+        let (cap, reserve) = local_bounds(env, seam);
         let mut sink = Self::with_bounds(file, cap, reserve);
-        if cap != LOCAL_CAP {
-            sink.seam = Some(format!(
+        let mut notes = Vec::new();
+        if base != LOCAL_CAP {
+            notes.push(format!(
+                "the local trace cap was set to {base} bytes by {TRACE_CAP_ENV}"
+            ));
+        }
+        if cap != base {
+            notes.push(format!(
                 "the local trace cap was shrunk to {cap} bytes by the test seam {TRACE_CAP_SEAM}"
             ));
+        }
+        if !notes.is_empty() {
+            sink.seam = Some(notes.join("; "));
         }
         sink
     }

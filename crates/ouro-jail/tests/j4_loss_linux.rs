@@ -1215,8 +1215,13 @@ fn r04(profile: &str, evidence: &str) {
     assert_eq!(denied, 0, "{label}: {out:#?}");
     assert_eq!(other, R04_CONNECTS as u64, "{label}: {out:#?}");
 
-    // The jail exits 1 for the loss in both modes, with the error recorded.
-    assert_eq!(run.code(), Some(1), "{label}: stderr {}", run.stderr_text());
+    // Strict fails for the loss; best-effort preserves the child's exit.
+    assert_eq!(
+        run.code(),
+        Some(if strict { 1 } else { 0 }),
+        "{label}: stderr {}",
+        run.stderr_text()
+    );
     assert!(
         error_codes(&settled).contains(&"evidence_lost".to_owned()),
         "{label}: {:#}",
@@ -1298,7 +1303,8 @@ fn j4_r04_ptrace_loss_best_effort_none() {
 /// `openat(FIFO)` when the target exits.
 ///
 /// J4 wave 2 (R-1, R-2): the loss is always an `evidence_lost` error and the
-/// jail exits 1, whenever the supervisor reads it — in the run loop, while
+/// jail exits 1 under strict, while best-effort preserves the child's exit,
+/// whenever the supervisor reads it — in the run loop, while
 /// it verifies the tree, or only from the observer's final account (slice L
 /// measured exit 0 with `errors: []` in 11 of 12 runs, and otherwise
 /// `outcome.cause: evidence_loss` beside `exited 0`). The loss came after
@@ -1346,8 +1352,8 @@ fn teardown_loss(profile: &str, evidence: &str) {
     );
     assert_eq!(
         run.code(),
-        Some(1),
-        "{label}: a degraded class at settlement exits 1: stderr {}",
+        Some(if evidence == "strict" { 1 } else { 0 }),
+        "{label}: settlement loss preserves best-effort exit: stderr {}",
         run.stderr_text()
     );
     // R-2: after the target's own end, so never its cause.
@@ -1604,7 +1610,7 @@ fn j4_o03_exhaustion_through_the_product() {
     );
     // J4 W3, T2: a call that was not followed could have been a denial too,
     // so the same gap degrades `fs.deny` (audit.rs `classes_for`); and a
-    // best-effort loss is still a tool error.
+    // best-effort loss is still recorded in the receipt.
     let deny = assert_degraded(&settled, "fs.deny", "inflight_exhausted");
     assert_eq!(deny["lost_count"], 20, "the same twenty calls: {deny:#}");
     assert_active(&settled, "net", 1);
@@ -1617,8 +1623,8 @@ fn j4_o03_exhaustion_through_the_product() {
     );
     assert_eq!(
         run.code(),
-        Some(1),
-        "best-effort exits 1 for the loss: {}",
+        Some(0),
+        "best-effort preserves the child's exit despite the loss: {}",
         run.stderr_text()
     );
 
@@ -1657,7 +1663,11 @@ fn j4_o03_exhaustion_through_the_product() {
         "the dropped mkdir has no result: {:#?}",
         audit_events(&run)
     );
-    assert_eq!(run.code(), Some(1), "best-effort exits 1 for the loss");
+    assert_eq!(
+        run.code(),
+        Some(0),
+        "best-effort preserves the child's exit despite the loss"
+    );
 }
 
 /// J4 W3, loss review finding 5: a seam set twice in the jail's
@@ -1878,38 +1888,54 @@ fn denied_connect(profile: &str) {
         denied >= 1,
         "{profile}: the fixture must have made a denied connect: {out:#?}"
     );
-    assert_active(&settled, "fs.deny", denied);
-    assert_active(&settled, "net", other);
+    // Issue draft 13: the agent profile's mediated connects are network
+    // evidence whatever their verdict; only the directly traced profiles
+    // classify an EACCES/EPERM connect under fs.deny.
+    let (denied_fs, denied_net) = if profile == "agent" {
+        (0, denied)
+    } else {
+        (denied, 0)
+    };
+    assert_active(&settled, "fs.deny", denied_fs);
+    assert_active(&settled, "net", other + denied_net);
     let audit = audit_events(&run);
     let denials: Vec<&&Value> = audit
         .iter()
         .filter(|event| event["operation"] == "fs.deny")
         .collect();
-    assert_eq!(denials.len() as u64, denied, "{profile}: {denials:#?}");
+    assert_eq!(denials.len() as u64, denied_fs, "{profile}: {denials:#?}");
     for event in &denials {
         assert_eq!(
             event["fields"]["attempted_operation"], "net.connect",
             "{profile}: {event:#}"
         );
-        if profile == "agent" {
-            assert_eq!(
-                event["fields"]["observation"], "seccomp_user_notification",
-                "{profile}: {event:#}"
-            );
-        }
+    }
+    let refused: Vec<&&Value> = audit
+        .iter()
+        .filter(|event| {
+            event["operation"] == "net.connect"
+                && matches!(
+                    event["outcome"]["errno"].as_str(),
+                    Some("EACCES") | Some("EPERM")
+                )
+        })
+        .collect();
+    assert_eq!(refused.len() as u64, denied_net, "{profile}: {refused:#?}");
+    for event in &refused {
+        assert_eq!(
+            event["fields"]["observation"], "seccomp_user_notification",
+            "{profile}: {event:#}"
+        );
     }
     let nets: Vec<&&Value> = audit
         .iter()
         .filter(|event| event["operation"] == "net.connect")
         .collect();
-    assert_eq!(nets.len() as u64, other, "{profile}: {nets:#?}");
-    for event in &nets {
-        let errno = event["outcome"]["errno"].as_str().unwrap_or("");
-        assert!(
-            errno != "EACCES" && errno != "EPERM",
-            "{profile}: a denial counted under net: {event:#}"
-        );
-    }
+    assert_eq!(
+        nets.len() as u64,
+        other + denied_net,
+        "{profile}: {nets:#?}"
+    );
 }
 
 #[test]

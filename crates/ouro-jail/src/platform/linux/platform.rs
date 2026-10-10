@@ -225,6 +225,79 @@ pub fn resolved_bwrap() -> Result<&'static Path, &'static str> {
 }
 // J5-D end
 
+/// Whether the resolved bubblewrap is new enough for the rendered argv,
+/// computed once per process from the backend every run resolves anyway:
+/// `Ok(())`, or a message naming the version it reports and the floor it
+/// misses.
+static BWRAP_MEETS_MINIMUM: std::sync::LazyLock<Result<(), String>> =
+    std::sync::LazyLock::new(|| {
+        let bwrap = resolved_bwrap().map_err(str::to_owned)?;
+        match bwrap::bwrap_version(bwrap) {
+            Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => Ok(()),
+            Ok(version) => Err(format!(
+                "the resolved bubblewrap ({}) reports {}; every contained run renders \
+                 --bind-fd/--ro-bind-fd, which need bubblewrap >= 0.10.0",
+                bwrap.display(),
+                version.raw
+            )),
+            Err(e) => Err(format!(
+                "the resolved bubblewrap ({}) could not be asked for its version: {e}",
+                bwrap.display()
+            )),
+        }
+    });
+
+/// The named roots the audit path classification knows besides the workspace
+/// and scratch (issue draft 10): every operator grant by its in-jail
+/// spelling, and the system read-only roots, so exec paths like
+/// `/usr/bin/git` and writes under a `--ro` grant are named instead of
+/// digested.
+fn audit_named_roots(bplan: &bwrap::BwrapPlan) -> Vec<(Vec<u8>, String)> {
+    let mut roots = Vec::new();
+    for (_, dest) in bplan
+        .extra_ro_binds
+        .iter()
+        .chain(bplan.extra_rw_binds.iter())
+        .chain(bplan.extra_dev_binds.iter())
+    {
+        roots.push((
+            dest.as_os_str().as_bytes().to_vec(),
+            dest.display().to_string(),
+        ));
+    }
+    for path in bwrap::RUNTIME_ROOTS.iter().chain(std::iter::once(&"/etc")) {
+        roots.push((path.as_bytes().to_vec(), "system".to_owned()));
+    }
+    roots
+}
+
+/// Whether `path` is one of the device nodes a contained run may bind
+/// individually (issue draft 15): the NVIDIA class an ML workload needs —
+/// `nvidia[0-9]*`, `nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`,
+/// `nvidia-modeset` — directly under `/dev`, and really a character device.
+/// Anything else under `/dev` keeps the §9.1 pseudo-filesystem refusal:
+/// `/dev/kvm`, `/dev/fuse` and devtmpfs itself are host surfaces this
+/// allowlist does not vouch for.
+pub(crate) fn is_allowed_device_node(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+    if path.parent() != Some(Path::new("/dev")) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let named = matches!(
+        name,
+        "nvidiactl" | "nvidia-uvm" | "nvidia-uvm-tools" | "nvidia-modeset"
+    ) || name
+        .strip_prefix("nvidia")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
+    named
+        && std::fs::metadata(path)
+            .map(|meta| meta.file_type().is_char_device())
+            .unwrap_or(false)
+}
+
 fn error(
     code: ErrorCode,
     stage: ErrorStage,
@@ -528,6 +601,18 @@ impl Platform for LinuxPlatform {
                 format!("bubblewrap is not available: {reason}"),
             )
         })?;
+        // A backend too old for the rendered argv (`--bind-fd` and
+        // `--ro-bind-fd` arrived in 0.10.0) refuses here with the version it
+        // reports, instead of exiting 125 during setup behind an empty
+        // diagnostic.
+        if let Err(reason) = BWRAP_MEETS_MINIMUM.clone() {
+            return Err(error(
+                ErrorCode::BackendUnavailable,
+                ErrorStage::Preparing,
+                Remediation::HostSetup,
+                reason,
+            ));
+        }
         let pin = self
             .backend_pin
             .as_ref()
@@ -928,7 +1013,31 @@ impl Boundary {
         // resolved paths, host-rooted writable grants become binds, and
         // denied subtrees are masked with a tmpfs over the path. Grants under
         // the workspace or scratch are covered by the base binds and layered
-        // by mount order.
+        for reference in &snapshot.filesystem.read_write {
+            if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
+                // Issue draft 15: an allowlisted device node (the NVIDIA
+                // class) binds individually with `--dev-bind`, never as a
+                // devtmpfs surface.
+                if is_allowed_device_node(&host) {
+                    let destination = resolve_path_ref(reference, &plan.workspace)?;
+                    bplan
+                        .extra_dev_binds
+                        .push((host, PathBuf::from(destination)));
+                    continue;
+                }
+                if (bplan.workspace_access == Some(true) && host.starts_with(&plan.workspace))
+                    || host.starts_with(&scratch)
+                {
+                    // Inside a base writable bind already; layering an extra
+                    // bind of the same content would add nothing.
+                    continue;
+                }
+                let destination = resolve_path_ref(reference, &plan.workspace)?;
+                bplan
+                    .extra_rw_binds
+                    .push((host, PathBuf::from(destination)));
+            }
+        }
         for reference in &snapshot.filesystem.read_only {
             if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
                 // The runtime plan already renders merged-/usr aliases as
@@ -949,24 +1058,21 @@ impl Boundary {
                 {
                     continue;
                 }
-                let destination = resolve_path_ref(reference, &plan.workspace)?;
-                bplan
-                    .extra_ro_binds
-                    .push((host, PathBuf::from(destination)));
-            }
-        }
-        for reference in &snapshot.filesystem.read_write {
-            if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
-                if (bplan.workspace_access == Some(true) && host.starts_with(&plan.workspace))
-                    || host.starts_with(&scratch)
-                {
-                    // Inside a base writable bind already; layering an extra
-                    // bind of the same content would add nothing.
-                    continue;
+                if is_allowed_device_node(&host) {
+                    return Err(error(
+                        ErrorCode::InvalidConfig,
+                        ErrorStage::Preparing,
+                        Remediation::Configuration,
+                        format!(
+                            "the device grant {} binds only read-write (--rw): bubblewrap has \
+                             no read-only device bind",
+                            host.display()
+                        ),
+                    ));
                 }
                 let destination = resolve_path_ref(reference, &plan.workspace)?;
                 bplan
-                    .extra_rw_binds
+                    .extra_ro_binds
                     .push((host, PathBuf::from(destination)));
             }
         }
@@ -1235,17 +1341,18 @@ impl Boundary {
                 )
             })?;
         }
-        // §8.3: stdio passes through without capture except regular files,
+        // §8.3: stdio passes through without capture except regular files and sockets,
         // which are relayed through supervisor-owned pipes (audit
         // 2026-10-08 H1): the child gets a pipe end here and never the
         // file, so no `/dev/stdin` reopen can reach the host mount. Every
         // other descriptor the supervisor holds is closed on exec.
         let mut stdio_relays = Vec::new();
         for (fd, plan) in stdio_plans.into_iter().enumerate() {
-            if plan == StdioPlan::Relay {
+            if let StdioPlan::Relay { socket } = plan {
                 stdio_relays.push(StdioRelay::attach(
                     i32::try_from(fd).unwrap_or(-1),
                     fd == 0,
+                    socket,
                     &mut command,
                 )?);
             }
@@ -1323,7 +1430,8 @@ impl Boundary {
                 plan.workspace.as_os_str().as_bytes(),
                 bwrap::SCRATCH_INSIDE_PATH.as_bytes(),
             )
-            .with_learning(snapshot.observation.learning),
+            .with_learning(snapshot.observation.learning)
+            .with_roots(audit_named_roots(&bplan)),
             snapshot,
             workspace: workspace_path,
             child: Some(child),
@@ -1479,13 +1587,26 @@ impl Boundary {
                 break pid;
             }
             if self.status.eof || self.exited() {
-                return Err(preparing(
-                    ErrorCode::BackendUnavailable,
+                let diagnostic = self.diagnostic().trim().to_owned();
+                let detail = if diagnostic.is_empty() {
+                    // bwrap's own message (for example "Unknown option")
+                    // went to this console's stderr, which the supervisor
+                    // passes through untouched; the error must still say
+                    // something useful instead of ending on a colon.
+                    let status = self
+                        .child
+                        .as_mut()
+                        .and_then(|child| child.try_wait().ok().flatten())
+                        .and_then(|wait| wait.code().map(|code| format!("exit {code}")))
+                        .unwrap_or_else(|| "no wait status".to_owned());
                     format!(
-                        "bubblewrap exited during setup: {}",
-                        self.diagnostic().trim()
-                    ),
-                ));
+                        "bubblewrap exited during setup ({status}) without a status \
+                         document; its own stderr on this console names the cause"
+                    )
+                } else {
+                    format!("bubblewrap exited during setup: {diagnostic}")
+                };
+                return Err(preparing(ErrorCode::BackendUnavailable, detail));
             }
             if deadline.expired() {
                 return Err(prepare_timeout(
@@ -2497,10 +2618,18 @@ fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<[StdioPlan; 3]
             ));
         }
         let kind = st.st_mode & libc::S_IFMT;
-        if kind == libc::S_IFSOCK || kind == libc::S_IFDIR {
+        if kind == libc::S_IFDIR {
             return refuse(format!(
-                "{name} is a socket or a directory, which a contained run refuses"
+                "{name} is a directory, which a contained run refuses"
             ));
+        }
+        // A socket is bridged through a supervisor-owned pipe (issue draft
+        // 11): socketpairs are how supervisors, systemd units and test
+        // harnesses hand a child its stdio, and the pipe keeps the child
+        // from using the socket for anything but byte I/O (no recvmsg, no
+        // descriptor passing) exactly as for a regular file.
+        if kind == libc::S_IFSOCK {
+            plans[fd as usize] = StdioPlan::Relay { socket: true };
         }
         // An inherited io_uring ring can issue operations through the ring
         // even when the child's io_uring syscalls are blocked. All Linux
@@ -2533,7 +2662,7 @@ fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<[StdioPlan; 3]
                      launch profiles are trusted input)"
                 ));
             }
-            plans[fd as usize] = StdioPlan::Relay;
+            plans[fd as usize] = StdioPlan::Relay { socket: false };
         }
     }
     Ok(plans)
@@ -2544,8 +2673,8 @@ fn validate_stdio(state_root: &Path, config_dir: &Path) -> Result<[StdioPlan; 3]
 enum StdioPlan {
     /// Passed through untouched: a tty, a pipe, `/dev/null`.
     Pass,
-    /// A regular file, relayed through a supervisor-owned pipe.
-    Relay,
+    /// A regular file or socket, relayed through a supervisor-owned pipe.
+    Relay { socket: bool },
 }
 
 /// One relayed stdio stream (audit 2026-10-08 H1 follow-up): the child holds
@@ -2556,9 +2685,11 @@ struct StdioRelay {
     /// A duplicate of the operator's original descriptor, taken at spawn:
     /// the supervisor later points its own stdout elsewhere (§8.3,
     /// revision 19), and the relay must keep copying into what the
-    /// operator actually opened. It is a regular file, so reads and writes
-    /// complete.
+    /// operator actually opened.
     origin: OwnedFd,
+    /// Sockets use per-call nonblocking I/O without changing the shared
+    /// descriptor's flags.
+    origin_socket: bool,
     /// This side of the pipe, non-blocking; `None` once closed.
     ours: Option<OwnedFd>,
     /// `true` for stdin (origin → child); `false` for stdout/stderr
@@ -2582,13 +2713,18 @@ impl StdioRelay {
     /// command's stdio configuration. The operator's descriptor is
     /// duplicated immediately, before the supervisor redirects its own
     /// copies (§8.3, revision 19).
-    fn attach(fd: RawFd, to_child: bool, command: &mut Command) -> Result<Self, JailError> {
+    fn attach(
+        fd: RawFd,
+        to_child: bool,
+        socket: bool,
+        command: &mut Command,
+    ) -> Result<Self, JailError> {
         let (read_end, write_end) = exec::pipe().map_err(|err| {
             error(
                 ErrorCode::InvalidFd,
                 ErrorStage::Preparing,
                 Remediation::Configuration,
-                format!("a regular-file stdio stream could not be relayed through a pipe: {err}"),
+                format!("a stdio stream could not be relayed through a pipe: {err}"),
             )
         })?;
         let (child_end, ours) = if to_child {
@@ -2624,6 +2760,7 @@ impl StdioRelay {
         })?;
         Ok(Self {
             origin,
+            origin_socket: socket,
             ours: Some(ours),
             to_child,
             buffer: Vec::with_capacity(RELAY_BUFFER),
@@ -2635,39 +2772,48 @@ impl StdioRelay {
     /// Move as much as both sides accept right now. Returns `true` while
     /// progress was made, so the caller can shorten its sleep. Regular-file
     /// reads and writes block until complete, so each call is bounded by the
-    /// buffer; pipe operations are non-blocking.
-    fn pump(&mut self) -> bool {
+    /// buffer; pipe and socket operations are non-blocking.
+    fn pump(&mut self) -> std::io::Result<bool> {
         let mut progress = false;
         if self.to_child {
             while !self.origin_eof && self.buffer.len() < RELAY_BUFFER {
+                if !origin_ready(self.origin.as_raw_fd(), true) {
+                    // A socket origin never blocks the pump loop (issue
+                    // draft 11); a regular file is always ready.
+                    break;
+                }
                 let mut chunk = [0u8; RELAY_BUFFER];
-                // SAFETY: `chunk` is a writable buffer of the given length;
-                // read writes into it only.
-                let read = unsafe {
-                    libc::read(
-                        self.origin.as_raw_fd(),
-                        chunk.as_mut_ptr().cast(),
-                        RELAY_BUFFER - self.buffer.len(),
-                    )
+                let read = match relay_read(
+                    self.origin.as_raw_fd(),
+                    &mut chunk[..RELAY_BUFFER - self.buffer.len()],
+                    self.origin_socket,
+                ) {
+                    Ok(read) => read,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => return Err(err),
                 };
-                if read <= 0 {
-                    // EOF, or an error: either way the input has ended. A
-                    // relay that can read no more closes the child's end.
+                if read == 0 {
                     self.origin_eof = true;
                     break;
                 }
-                self.buffer.extend_from_slice(&chunk[..read as usize]);
+                self.buffer.extend_from_slice(&chunk[..read]);
                 progress = true;
             }
             if !self.buffer.is_empty()
                 && let Some(ours) = self.ours.as_ref()
             {
-                // SAFETY: write reads only from the buffer slice.
-                let written =
-                    unsafe { libc::write(ours.as_raw_fd(), self.buffer.as_ptr().cast(), self.buffer.len()) };
-                if written > 0 {
-                    self.buffer.drain(..written as usize);
-                    progress = true;
+                match relay_write(ours.as_raw_fd(), &self.buffer, false) {
+                    Ok(written) => {
+                        self.buffer.drain(..written);
+                        progress = true;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                        // A child may legitimately stop consuming stdin.
+                        self.buffer.clear();
+                        self.origin_eof = true;
+                    }
+                    Err(err) => return Err(err),
                 }
             }
             if self.origin_eof && self.buffer.is_empty() {
@@ -2681,55 +2827,131 @@ impl StdioRelay {
                     break;
                 }
                 let mut chunk = [0u8; RELAY_BUFFER];
-                // SAFETY: `chunk` is a writable buffer of the given length.
-                let read = unsafe {
-                    libc::read(
-                        ours.as_raw_fd(),
-                        chunk.as_mut_ptr().cast(),
-                        RELAY_BUFFER - self.buffer.len(),
-                    )
+                let read = match relay_read(
+                    ours.as_raw_fd(),
+                    &mut chunk[..RELAY_BUFFER - self.buffer.len()],
+                    false,
+                ) {
+                    Ok(read) => read,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) => return Err(err),
                 };
                 if read > 0 {
-                    self.buffer.extend_from_slice(&chunk[..read as usize]);
+                    self.buffer.extend_from_slice(&chunk[..read]);
                     progress = true;
                 } else {
-                    // EAGAIN (nothing to read) or EOF/error: stop reading,
-                    // and remember the stream's end.
-                    if read == 0 {
-                        self.ours = None;
-                        self.finished = true;
-                    }
+                    self.ours = None;
+                    self.finished = true;
                     break;
                 }
             }
-            if !self.buffer.is_empty() {
-                // SAFETY: write reads only from the buffer slice; the origin
-                // is a regular file, so this completes.
-                let written = unsafe {
-                    libc::write(
-                        self.origin.as_raw_fd(),
-                        self.buffer.as_ptr().cast(),
-                        self.buffer.len(),
-                    )
-                };
-                if written > 0 {
-                    self.buffer.drain(..written as usize);
-                    progress = true;
-                } else if written < 0 {
-                    // The operator's descriptor stopped accepting bytes
-                    // (ENOSPC and the like): drop them rather than wedge the
-                    // run, like any pipe whose reader went away.
-                    self.buffer.clear();
+            if !self.buffer.is_empty() && origin_ready(self.origin.as_raw_fd(), false) {
+                match relay_write(self.origin.as_raw_fd(), &self.buffer, self.origin_socket) {
+                    Ok(written) => {
+                        self.buffer.drain(..written);
+                        progress = true;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(err) => return Err(err),
                 }
             }
         }
-        progress
+        Ok(progress)
     }
 
     /// Whether both sides are done and nothing is staged.
     fn done(&self) -> bool {
         self.finished && self.buffer.is_empty()
     }
+}
+
+/// Whether a relay origin is ready to read (`for_read`) or write right now,
+/// asked with a zero-timeout poll so a socket origin never blocks the pump
+/// loop (issue draft 11). A regular file is always ready; a socket that
+/// would block is simply visited again on a later pump.
+fn origin_ready(fd: RawFd, for_read: bool) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: if for_read {
+            libc::POLLIN
+        } else {
+            libc::POLLOUT
+        },
+        revents: 0,
+    };
+    // SAFETY: `pollfd` is a live, correctly sized struct; the timeout is
+    // zero, so the call cannot block.
+    let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
+    ready > 0
+        && pollfd.revents & (libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLERR) != 0
+}
+
+fn relay_read(fd: RawFd, buffer: &mut [u8], socket: bool) -> std::io::Result<usize> {
+    loop {
+        // SAFETY: read writes only into this live writable slice.
+        let read = unsafe {
+            if socket {
+                libc::recv(
+                    fd,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            } else {
+                libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len())
+            }
+        };
+        if read >= 0 {
+            return Ok(read as usize);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+fn relay_write(fd: RawFd, buffer: &[u8], socket: bool) -> std::io::Result<usize> {
+    loop {
+        // SAFETY: write reads only from this live slice.
+        let written = unsafe {
+            if socket {
+                libc::send(
+                    fd,
+                    buffer.as_ptr().cast(),
+                    buffer.len(),
+                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                )
+            } else {
+                libc::write(fd, buffer.as_ptr().cast(), buffer.len())
+            }
+        };
+        if written > 0 {
+            return Ok(written as usize);
+        }
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+/// Visit every stream, including when an earlier stream made progress.
+fn pump_stdio_relays(relays: &mut [StdioRelay]) -> std::io::Result<bool> {
+    let mut progress = false;
+    let mut failure = None;
+    for relay in relays {
+        match relay.pump() {
+            Ok(active) => progress |= active,
+            Err(err) => {
+                failure.get_or_insert(err);
+            }
+        }
+    }
+    failure.map_or(Ok(progress), Err)
 }
 
 /// The coverage the plan actually obtained, derived from the walk.
@@ -3082,6 +3304,11 @@ pub(crate) fn refuse_pseudo_fs_grants(
     }
     let mounts = pseudo_fs_mount_points();
     for (source, _destination) in binds {
+        // Issue draft 15: an allowlisted device node is exactly the narrow
+        // exception — one character device under /dev, never devtmpfs.
+        if is_allowed_device_node(source) {
+            continue;
+        }
         // The check follows symlinks to the real object (`--ro <link>` where
         // the link resolves onto a pseudo filesystem must refuse); the later
         // pin opens with RESOLVE_NO_SYMLINKS for race safety.
@@ -3261,7 +3488,12 @@ fn prepare_mounts(
         )
     };
     let mut pins = BTreeMap::<PathBuf, jfs::PinnedPath>::new();
-    let mut roots = plan.extra_rw_binds.clone();
+    let mut roots: Vec<(PathBuf, PathBuf)> = plan
+        .extra_rw_binds
+        .iter()
+        .chain(plan.extra_dev_binds.iter())
+        .cloned()
+        .collect();
     if plan.workspace_access == Some(true) {
         roots.push((plan.workspace.clone(), plan.workspace.clone()));
     }
@@ -3607,6 +3839,22 @@ struct LinuxRunning {
 }
 
 impl LinuxRunning {
+    fn pump_stdio(&mut self) -> bool {
+        match pump_stdio_relays(&mut self.boundary.stdio_relays) {
+            Ok(active) => active,
+            Err(err) => {
+                self.pending.push(RunEvent::StdioFailed {
+                    reason: format!("a stdio relay failed: {err}"),
+                    after_target_end: self.target_outcome.is_some() || self.bwrap_status.is_some(),
+                });
+                // Failed streams cannot deliver more. Close them once and
+                // let the supervisor record the error and stop a live tree.
+                self.boundary.stdio_relays.clear();
+                false
+            }
+        }
+    }
+
     fn sample_limits(&mut self, force: bool) {
         let now = boottime_ns();
         let interval = u64::try_from(LIMIT_SAMPLE_INTERVAL.as_nanos()).unwrap_or(u64::MAX);
@@ -3628,9 +3876,9 @@ impl LinuxRunning {
                     // return before `leaf.sample()`, dropping later
                     // mem/swap/pids/cpu hits while their rows said `hit: false`.
                     self.storage_lost_live |= self.target_outcome.is_none();
-                    self.boundary.audit.record_limit_evidence_missing(
-                        "storage_enforcement_lost",
-                    );
+                    self.boundary
+                        .audit
+                        .record_limit_evidence_missing("storage_enforcement_lost");
                     self.hard_kill();
                 }
             }
@@ -3898,11 +4146,7 @@ impl RunningExecution for LinuxRunning {
             // Audit 2026-10-08 H1: move relayed stdio while the run is
             // live; a relay making progress keeps the loop spinning fast so
             // a chatty child is not throttled to the poll cadence.
-            let relay_active = self
-                .boundary
-                .stdio_relays
-                .iter_mut()
-                .any(|relay| relay.pump());
+            let relay_active = self.pump_stdio();
             self.boundary.release_watcher_after_backend();
             self.sample_limits(false);
             self.check_exec_without_tracer();
@@ -3941,20 +4185,15 @@ impl RunningExecution for LinuxRunning {
                 // The child's end has closed by now; deliver what it wrote
                 // through the relays before the outcome is recorded.
                 let drain = clock::Deadline::after(Duration::from_millis(250));
-                while self
-                    .boundary
-                    .stdio_relays
-                    .iter()
-                    .any(|relay| !relay.done())
+                while self.boundary.stdio_relays.iter().any(|relay| !relay.done())
                     && !drain.expired()
                 {
-                    self.boundary
+                    self.pump_stdio();
+                    if self
+                        .boundary
                         .stdio_relays
-                        .iter_mut()
-                        .for_each(|relay| {
-                            let _ = relay.pump();
-                        });
-                    if self.boundary.stdio_relays.iter().all(|relay| relay.buffer.is_empty())
+                        .iter()
+                        .all(|relay| relay.buffer.is_empty())
                         && self
                             .boundary
                             .stdio_relays
@@ -3964,6 +4203,23 @@ impl RunningExecution for LinuxRunning {
                         break;
                     }
                     std::thread::yield_now();
+                }
+                if self
+                    .boundary
+                    .stdio_relays
+                    .iter()
+                    .any(|relay| !relay.to_child && !relay.buffer.is_empty())
+                {
+                    self.pending.push(RunEvent::StdioFailed {
+                        reason:
+                            "a stdio relay could not drain its output within the delivery budget"
+                                .to_owned(),
+                        after_target_end: true,
+                    });
+                    self.boundary.stdio_relays.clear();
+                }
+                if !self.pending.is_empty() {
+                    return self.pending.remove(0);
                 }
             }
             if done && let Some(event) = self.terminal_event() {
@@ -4134,11 +4390,7 @@ impl RunningExecution for LinuxRunning {
     /// The storage enforcement loss's own message, for the receipt's
     /// `errors[]` (audit 2026-10-08 L2); `None` while enforcement holds.
     fn storage_loss(&self) -> Option<String> {
-        self.boundary
-            .storage
-            .as_ref()?
-            .loss()
-            .map(str::to_owned)
+        self.boundary.storage.as_ref()?.loss().map(str::to_owned)
     }
 
     // J3-agent begin: the bridge's counts, once it and the mediator stopped
@@ -4478,6 +4730,184 @@ impl Drop for Boundary {
 
 #[cfg(test)]
 mod tests {
+
+    /// Issue draft 15: only the NVIDIA class under `/dev` is allowlisted,
+    /// and only as a real character device.
+    #[test]
+    fn only_nvidia_device_nodes_are_allowlisted() {
+        for refused in [
+            "/dev/kvm",
+            "/dev/fuse",
+            "/dev/nvidia0/inner",
+            "/dev/nvidia",
+            "/dev/nvidia-uvm-extra",
+            "/usr/bin/nvidia0",
+            "/dev",
+        ] {
+            assert!(
+                !is_allowed_device_node(Path::new(refused)),
+                "{refused} is not an allowlisted device node"
+            );
+        }
+        // On a GPU host the nodes themselves qualify; where they are absent
+        // the metadata check keeps the answer false.
+        let on_gpu_host = Path::new("/dev/nvidiactl").exists();
+        assert_eq!(
+            is_allowed_device_node(Path::new("/dev/nvidiactl")),
+            on_gpu_host
+        );
+    }
+    fn output_relay(origin: std::fs::File) -> (super::StdioRelay, std::os::fd::OwnedFd) {
+        let (ours, child) = super::exec::pipe().unwrap();
+        use std::os::fd::AsRawFd as _;
+        super::set_nonblocking(ours.as_raw_fd()).unwrap();
+        (
+            super::StdioRelay {
+                origin: origin.into(),
+                origin_socket: false,
+                ours: Some(ours),
+                to_child: false,
+                buffer: Vec::new(),
+                origin_eof: false,
+                finished: false,
+            },
+            child,
+        )
+    }
+
+    #[test]
+    fn blocking_socket_output_retains_backpressure_without_blocking_the_relay() {
+        use std::io::Read as _;
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+        let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let size: libc::c_int = 4096;
+        // SAFETY: a live socket and a correctly sized, initialized option.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&raw const size).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let (mut relay, writer) = output_relay(std::fs::File::from(OwnedFd::from(socket)));
+        relay.origin_socket = true;
+        relay.buffer = vec![b'x'; super::RELAY_BUFFER];
+        drop(writer);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            tx.send((relay.pump(), relay)).unwrap();
+        });
+        let (result, mut relay) = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(peer);
+                worker.join().unwrap();
+                panic!("a socket write must not block supervision: {error}");
+            }
+        };
+        worker.join().unwrap();
+        assert!(result.unwrap());
+        assert!(
+            !relay.buffer.is_empty(),
+            "backpressure retains undelivered output"
+        );
+        // SAFETY: querying flags on the live origin descriptor.
+        let flags = unsafe { libc::fcntl(relay.origin.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "shared origin flags stay unchanged"
+        );
+        peer.set_nonblocking(true).unwrap();
+        let mut delivered = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while delivered.len() < super::RELAY_BUFFER {
+            let mut chunk = [0u8; 8192];
+            match peer.read(&mut chunk) {
+                Ok(read) => delivered.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("socket delivery failed: {error}"),
+            }
+            relay.pump().unwrap();
+            assert!(std::time::Instant::now() < deadline, "output did not drain");
+        }
+        assert_eq!(delivered, vec![b'x'; super::RELAY_BUFFER]);
+        assert!(relay.done());
+    }
+
+    #[test]
+    fn relay_batch_services_stderr_while_stdout_is_active() {
+        use std::io::{Read as _, Seek as _};
+        use std::os::fd::AsRawFd as _;
+        let mut stdout = tempfile::tempfile().unwrap();
+        let mut stderr = tempfile::tempfile().unwrap();
+        let (out, out_writer) = output_relay(stdout.try_clone().unwrap());
+        let (err, err_writer) = output_relay(stderr.try_clone().unwrap());
+        super::relay_write(out_writer.as_raw_fd(), b"stdout remains active", false).unwrap();
+        super::relay_write(err_writer.as_raw_fd(), b"stderr must arrive now", false).unwrap();
+        let mut relays = [out, err];
+        assert!(super::pump_stdio_relays(&mut relays).unwrap());
+        let mut text = String::new();
+        stderr.rewind().unwrap();
+        stderr.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "stderr must arrive now");
+        text.clear();
+        stdout.rewind().unwrap();
+        stdout.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "stdout remains active");
+    }
+
+    #[test]
+    fn relay_output_errors_preserve_undelivered_bytes() {
+        use std::os::fd::AsRawFd as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-only");
+        std::fs::write(&path, b"original").unwrap();
+        let (mut relay, writer) = output_relay(std::fs::File::open(&path).unwrap());
+        super::relay_write(writer.as_raw_fd(), b"undelivered", false).unwrap();
+        drop(writer);
+        assert_eq!(relay.pump().unwrap_err().raw_os_error(), Some(libc::EBADF));
+        assert_eq!(relay.buffer, b"undelivered");
+        assert!(!relay.done());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        let (mut relay, writer) = output_relay(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        );
+        super::relay_write(writer.as_raw_fd(), b"disk full", false).unwrap();
+        assert_eq!(relay.pump().unwrap_err().raw_os_error(), Some(libc::ENOSPC));
+        assert_eq!(relay.buffer, b"disk full");
+    }
+
+    #[test]
+    fn relay_input_errors_are_not_eof() {
+        use std::os::fd::AsRawFd as _;
+        let dir = tempfile::tempdir().unwrap();
+        let origin = std::fs::File::create(dir.path().join("write-only")).unwrap();
+        let (read, write) = super::exec::pipe().unwrap();
+        super::set_nonblocking(write.as_raw_fd()).unwrap();
+        let mut relay = super::StdioRelay {
+            origin: origin.into(),
+            origin_socket: false,
+            ours: Some(write),
+            to_child: true,
+            buffer: Vec::new(),
+            origin_eof: false,
+            finished: false,
+        };
+        assert_eq!(relay.pump().unwrap_err().raw_os_error(), Some(libc::EBADF));
+        assert!(!relay.origin_eof);
+        drop(read);
+    }
+
     // J5-D begin: bubblewrap resolution (review F1, F2)
     fn executable(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -4844,8 +5274,7 @@ mod tests {
         let row = rows
             .iter()
             .find(|row| {
-                row.kind == "placeholder"
-                    && row.destination == root.join("workspace/.ouroboros")
+                row.kind == "placeholder" && row.destination == root.join("workspace/.ouroboros")
             })
             .expect("a placeholder mount for the absent workspace literal");
         assert!(
@@ -4990,12 +5419,14 @@ mod tests {
             "2026-09-22T00:00:00Z",
         );
         assert_eq!(unbounded.status, CapabilityStatus::Unavailable);
-        assert!(capability_for(
-            "limit:inodes",
-            &[probe(ProbeStatus::Available, "ok")],
-            "2026-09-22T00:00:00Z"
-        )
-        .satisfies());
+        assert!(
+            capability_for(
+                "limit:inodes",
+                &[probe(ProbeStatus::Available, "ok")],
+                "2026-09-22T00:00:00Z"
+            )
+            .satisfies()
+        );
     }
 
     #[test]

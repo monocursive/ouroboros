@@ -1499,6 +1499,152 @@ fn p04_a_receipt_path_inside_the_scratch_root_refuses() {
     );
 }
 
+/// Issue draft 11: socket stdio runs both ways. The supervisor bridges a
+/// socketpair (how supervisors, systemd units and test harnesses hand a
+/// child its streams) through pipes: the peer's bytes reach the child's
+/// stdin and the child's stdout reaches the peer.
+#[test]
+fn p04_socket_stdio_is_bridged_both_ways() {
+    if !common::live() {
+        return;
+    }
+    let c = case("tool");
+    let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().expect("a socketpair");
+    let take = |stream: &std::os::unix::net::UnixStream| {
+        std::os::fd::OwnedFd::from(stream.try_clone().expect("cloned"))
+    };
+    let cloned = theirs.try_clone().expect("cloned");
+    let mut child = std::process::Command::new(harness::jail_path())
+        .arg("run")
+        .args(["--profile", "tool"])
+        .arg("--workspace")
+        .arg(&c.workspace)
+        .arg("--")
+        .args([
+            "sh",
+            "-c",
+            "read line; printf '%s\\n' \"socket-echo:$line\"",
+        ])
+        .stdin(std::process::Stdio::from(take(&cloned)))
+        .stdout(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+            theirs,
+        )))
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .stderr(std::process::Stdio::piped())
+        .env("OURO_DATA_DIR", c.jail.data_dir())
+        .env("OURO_CONFIG_DIR", c.jail.config_dir())
+        .spawn()
+        .expect("the jail spawns with socket stdio");
+    use std::io::{Read as _, Write as _};
+    ours.write_all(b"hello\n").expect("stdin reaches the child");
+    let mut said = [0u8; 128];
+    ours.set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("a timeout");
+    let read = loop {
+        match ours.read(&mut said) {
+            Ok(read) => break read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => panic!("the child's reply: {error}"),
+        }
+    };
+    let mut stderr = Vec::new();
+    if let Some(mut err) = child.stderr.take() {
+        use std::io::Read as _;
+        err.read_to_end(&mut stderr).ok();
+    }
+    let _ = child.wait();
+    drop(ours);
+    assert_eq!(
+        &said[..read],
+        b"socket-echo:hello\n",
+        "the bridge carried both ways"
+    );
+    assert!(
+        !String::from_utf8_lossy(&stderr).contains("invalid_fd"),
+        "socket stdio is never refused: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+}
+
+#[test]
+fn p04_socket_backpressure_does_not_delay_wall_expiry() {
+    if !common::live() {
+        return;
+    }
+    let c = case("tool");
+    let (peer, socket) = std::os::unix::net::UnixStream::pair().unwrap();
+    use std::os::fd::AsRawFd as _;
+    let size: libc::c_int = 4096;
+    // SAFETY: a live socket and the complete initialized option value.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const size).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    let receipt_path = c.jail.root().join("backpressure-receipt.json");
+    let mut child = std::process::Command::new(harness::jail_path())
+        .args(["run", "--profile", "tool", "--workspace"])
+        .arg(&c.workspace)
+        .args(["--limit", "wall=1s", "--receipt"])
+        .arg(&receipt_path)
+        .args([
+            "--",
+            "/bin/sh",
+            "-c",
+            "dd if=/dev/zero bs=65536 count=16 2>/dev/null; sleep 30",
+        ])
+        .stdout(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+            socket,
+        )))
+        .stderr(std::process::Stdio::piped())
+        .env("OURO_DATA_DIR", c.jail.data_dir())
+        .env("OURO_CONFIG_DIR", c.jail.config_dir())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("a socket reader that stops draining must not prevent wall expiry");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    drop(peer);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+    common::check_receipt(&receipt).unwrap();
+    assert_eq!(receipt["outcome"]["cause"], "wall_expiry");
+    assert!(
+        receipt["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "stdio_failed")
+    );
+    assert!(
+        receipt["applied"]["limits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|limit| limit["key"] == "wall" && limit["hit"] == true)
+    );
+}
+
 /// P04.6: the state root overlapping an operator grant refuses before exec,
 /// in both directions: an `--ro` grant of the state root's parent (the root
 /// is beneath the grant) and an `--rw` grant beneath the state root.

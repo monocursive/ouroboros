@@ -28,6 +28,7 @@ pub const ENVIRONMENT_ALLOW_LIST: &[&str] = &[
     "OURO_DATA_DIR",
     "OURO_JAIL_OBSERVE",
     "OURO_JAIL_EVIDENCE",
+    "OURO_JAIL_TRACE_CAP",
 ];
 
 fn invalid(key: &str, message: impl Into<String>) -> JailError {
@@ -607,9 +608,11 @@ pub struct EnvSettings {
     pub observe: Option<ObserveMode>,
     /// `OURO_JAIL_EVIDENCE`.
     pub evidence: Option<EvidenceMode>,
+    /// `OURO_JAIL_TRACE_CAP`: the local trace budget in bytes.
+    pub trace_cap: Option<u64>,
 }
 
-/// Reads the four allowed environment settings; ignores every other variable.
+/// Reads the allowed environment settings; ignores every other variable.
 ///
 /// No environment-derived path or host grant is accepted (§6.2), so the two
 /// path variables only relocate the operator's own directories.
@@ -636,6 +639,28 @@ pub fn env_settings(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<EnvSett
             .to_str()
             .ok_or_else(|| invalid("OURO_JAIL_EVIDENCE", "the value is not UTF-8"))?;
         settings.evidence = Some(parse_evidence("OURO_JAIL_EVIDENCE", text)?);
+    }
+    if let Some(value) = lookup("OURO_JAIL_TRACE_CAP") {
+        let text = value
+            .to_str()
+            .ok_or_else(|| invalid("OURO_JAIL_TRACE_CAP", "the value is not UTF-8"))?;
+        let cap = text.parse::<u64>().map_err(|_| {
+            invalid(
+                "OURO_JAIL_TRACE_CAP",
+                "the value must be plain decimal bytes",
+            )
+        })?;
+        if !(crate::trace::TRACE_CAP_SEAM_MIN..=crate::trace::TRACE_CAP_MAX).contains(&cap) {
+            return Err(invalid(
+                "OURO_JAIL_TRACE_CAP",
+                format!(
+                    "the local trace budget must be {}..={} bytes",
+                    crate::trace::TRACE_CAP_SEAM_MIN,
+                    crate::trace::TRACE_CAP_MAX
+                ),
+            ));
+        }
+        settings.trace_cap = Some(cap);
     }
     Ok(settings)
 }
@@ -812,6 +837,7 @@ mod tests {
         assert_eq!(settings.config_dir, None);
         assert_eq!(settings.data_dir, None);
         assert_eq!(settings.evidence, None);
-        assert_eq!(ENVIRONMENT_ALLOW_LIST.len(), 4);
+        assert_eq!(settings.trace_cap, None);
+        assert_eq!(ENVIRONMENT_ALLOW_LIST.len(), 5);
     }
 }

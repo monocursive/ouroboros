@@ -2839,9 +2839,8 @@ mod tests {
         let mut no_leaf = state();
         no_leaf.leaf = None;
         let mut enforced = receipt(None);
-        enforced.leaf = LeafSource::NotRecorded(
-            "the receipt registers no execution cgroup".to_owned(),
-        );
+        enforced.leaf =
+            LeafSource::NotRecorded("the receipt registers no execution cgroup".to_owned());
         // Dead owner, no registered leaf, an enforced receipt: the receipt
         // withdraws the proof, whatever it claims about the tree.
         let decided = decision(decide(&facts(no_leaf.clone(), enforced)));
@@ -2875,9 +2874,7 @@ mod tests {
         ));
         let mut lost = receipt(None);
         lost.integrity = "lost".to_owned();
-        lost.leaf = LeafSource::NotRecorded(
-            "the receipt registers no execution cgroup".to_owned(),
-        );
+        lost.leaf = LeafSource::NotRecorded("the receipt registers no execution cgroup".to_owned());
         let decided = decision(decide(&facts(named, lost)));
         assert!(
             matches!(decided.cgroup, CgroupStep::Report(_)),

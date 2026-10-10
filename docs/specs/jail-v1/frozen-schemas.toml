@@ -18,6 +18,22 @@
 #   explicitly; the omitted-port expansion to 443 is the TLS shape. The
 #   wire vocabulary (ouro.jail.network/1) is unchanged; the change brings
 #   the prose in line with what the proxy enforces.
+# - 2026-10-10 re-blessed policy-snapshot.schema.json in place under
+#   ouro.jail.policy-snapshot/1. Rationale: additive field only — a vault
+#   credential may declare the header its placeholder belongs in (`header`
+#   with `name` and an optional `prefix`, issue draft 08). No shared field
+#   changed meaning.
+# - 2026-10-10 re-blessed jail-receipt.schema.json in place under
+#   ouro.jail.receipt/1. Rationale: additive field only — a coverage entry
+#   may carry `resolver_refused`, counting proxy connections refused for
+#   resolver capacity separately from policy denials (issue draft 04). No
+#   shared field changed meaning.
+# - 2026-10-10 re-blessed jail-event.schema.json in place under
+#   ouro.event/1. Rationale: additive branch only — a classified path may be
+#   `root_relative` to a named root (an operator grant or a system read-only
+#   root, issue draft 10). The denial rules also admit write-class
+#   EROFS/EBUSY and mediated EACCES/EPERM net.connect results, matching
+#   the producer while retaining prior valid event shapes.
 
 schema = "ouro.jail.frozen-schemas/1"
 milestone = "milestone-1"
@@ -34,21 +50,21 @@ sha256 = "f11a51654753f9db14bede36a33abee5a7fbfbb66901a9175fd7cd3e45296384"
 file = "jail-event.schema.json"
 id = "urn:ouro:schema:jail-event:1"
 identifier = "ouro.event/1"
-sha256 = "08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137"
+sha256 = "491707ab300953f809dc34010f1c564995479247c16680a8043809ca5dc98c46"
 
 # §13.2: the receipt
 [[frozen]]
 file = "jail-receipt.schema.json"
 id = "urn:ouro:schema:jail-receipt:1"
 identifier = "ouro.jail.receipt/1"
-sha256 = "4730590de3a2f16ae98d2fa8db169fc2ee4bd44bafbabd7803b1f206d93cdf7d"
+sha256 = "2bb04b1823574a188fd8fdced61148c3d9a10554a4a7441a06b0e9458c5520b9"
 
 # §6.3, canonicalization.md: the canonical policy snapshot
 [[frozen]]
 file = "policy-snapshot.schema.json"
 id = "urn:ouro:schema:jail-policy-snapshot:1"
 identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "a16062e73454096513e5987b258a8aa0f5537cb1b6aeabe84f287f2e4abaa26f"
+sha256 = "6851d3950208da2c041a45f7d00af15a8e0163a7278a243b8b11b21bb979d752"
 
 # §8.2: the managed gate release frame
 [[frozen]]

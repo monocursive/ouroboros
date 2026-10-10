@@ -32,7 +32,7 @@ fn run_with_rules(argv: &[&str], rules: &str) -> Run {
 
 /// The `command_rule` notes of a run's trace, entry denials and exec kills
 /// alike.
-fn command_rule_notes<'a>(run: &'a Run) -> Vec<&'a serde_json::Value> {
+fn command_rule_notes(run: &Run) -> Vec<&serde_json::Value> {
     run.trace_events()
         .iter()
         .filter(|event| {

@@ -88,7 +88,8 @@ pub enum CoverageClass {
     Exec,
     /// Mutating opens and every directory-entry variant.
     FsWrite,
-    /// EACCES/EPERM results from the closed set, including connect.
+    /// EACCES/EPERM results from the closed set, including connect, and
+    /// write-class EROFS/EBUSY refusals under read-only grants.
     FsDeny,
     /// Audit-source connect results.
     Net,
@@ -145,6 +146,10 @@ pub struct ClassSummary {
     pub observed_count: Option<u64>,
     /// Gaps affecting this class.
     pub gaps: Vec<Gap>,
+    /// `proxy.net` only: how many connections the proxy refused for
+    /// resolver *capacity* (issue draft 04), so a reader can tell them from
+    /// policy denials. Zero elsewhere.
+    pub resolver_refused: u64,
 }
 
 impl ClassSummary {
@@ -155,6 +160,7 @@ impl ClassSummary {
             status: SourceStatus::Unsupported,
             observed_count: None,
             gaps: Vec::new(),
+            resolver_refused: 0,
         }
     }
 }
@@ -245,6 +251,9 @@ impl CoverageSummary {
                 sources,
                 observed_count,
                 gaps: summary.gaps.clone(),
+                resolver_refused: (class == CoverageClass::ProxyNet
+                    && summary.resolver_refused > 0)
+                    .then_some(summary.resolver_refused),
             }
         };
         Coverage {
@@ -312,6 +321,7 @@ mod tests {
                 status: SourceStatus::Degraded,
                 observed_count: Some(7),
                 gaps: Vec::new(),
+                resolver_refused: 0,
             },
         );
         let coverage = summary.to_coverage();

@@ -33,12 +33,20 @@ sh crates/ouro-jail/dist/install.sh \
 Use `--base-url https://...` instead of `--from-dir` for published artifacts.
 Use `--upgrade` to replace an existing installation without a TTY. The
 installer selects the manifest's single archive for the host platform, checks
-the staged binary's reported release version against the installed one, and
+the signed archive release version against the installed release record, and
 refuses a downgrade unless `--allow-downgrade` is given. The signed manifest
 covers `install.sh` itself, and the installer refuses to run when it does not
 match that signed copy. Failure to verify the signed manifest or archive
 checksum preserves the installed binary. The distribution includes the project
 license and the CA-data license notice.
+
+`ouro-jail.release` records the installed release coordinate and binary digest;
+the installer refuses a record that no longer matches the binary. Reinstall
+with `--upgrade --allow-downgrade` to recover from an interrupted replacement
+or a manual binary change, using the authenticated release. The Cargo
+package version alone cannot distinguish RC releases. Older installations
+without this record use the binary's reported version. Prerelease comparison
+follows SemVer identifier ordering, including numeric RC identifiers.
 
 The [2026-09-30 fresh-VM onboarding report](../../../docs/benchmarks/jail/onboarding-2026-09-30.md)
 records signed non-TTY installation, contained `true`, a real OpenCode run and

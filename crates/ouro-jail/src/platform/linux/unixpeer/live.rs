@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use super::{
-    MediationRecord, MediationSink, NON_UNIX_NOTE, PeerAddr, Verdict, base_for, classify,
-    mediation_program, relative_bytes,
+    MediationRecord, MediationSink, NON_UNIX_NOTE, Peer, PeerAddr, Verdict, base_for, classify,
+    mediation_program, peer_of, relative_bytes,
 };
 use crate::platform::linux::identity::pidfd_open;
 use crate::platform::linux::sockdiag::{SockDiag, VfsId};
@@ -477,6 +477,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
             .and_then(|tgid| crate::platform::linux::identity::start_time_ticks(tgid).ok()),
         family: None,
         address_complete: false,
+        peer: None,
     };
     // J3-agent end
     let Ok(child_pidfd) = open_notifying_thread(pid, tgid) else {
@@ -512,7 +513,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
     // J3-agent begin
     facts.family = (sockaddr.len() >= 2).then(|| u16::from_ne_bytes([sockaddr[0], sockaddr[1]]));
     facts.address_complete = ualen <= 256 && sockaddr.len() == ualen;
-    // J3-agent end
+    facts.peer = peer_of(&sockaddr);
 
     let (verdict, reason) = decide(w, &facts, &dup, &sockaddr, ualen);
     let verdict = match verdict {
@@ -578,9 +579,15 @@ fn mediate_pathname(
     let Ok(rel) = path_beneath_child_root(pid, root_fd.as_raw_fd(), path) else {
         return (Err(libc::EACCES), "cwd_unresolved");
     };
-    // Pin the node without escaping the child's view.
+    // Pin the node without escaping the child's view. A path that does not
+    // exist in the child's own view gets the kernel's own answer, ENOENT
+    // (issue draft 13); anything that cannot be resolved at all refuses
+    // closed with EACCES.
     let node = match openat2_in_root(root_fd.as_raw_fd(), &rel) {
         Ok(fd) => fd,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Err(libc::ENOENT), "path_absent");
+        }
         Err(_) => return (Err(libc::EACCES), "path_unresolved"),
     };
     let st = match fstat(node.as_raw_fd()) {
@@ -741,6 +748,7 @@ struct Facts {
     tgid_start: Option<u64>,
     family: Option<u16>,
     address_complete: bool,
+    peer: Option<Peer>,
 }
 
 /// `Tgid:` of a task in `/proc/<tid>/status`, or `None`.
@@ -759,6 +767,7 @@ fn record(sink: &dyn MediationSink, facts: &Facts, reason: &'static str, verdict
         tgid_start: facts.tgid_start,
         family: facts.family,
         address_complete: facts.address_complete,
+        peer: facts.peer.clone(),
         reason,
         verdict,
     });
@@ -1082,6 +1091,7 @@ mod tests {
             tgid_start: None,
             family: Some(libc::AF_UNIX as u16),
             address_complete: true,
+            peer: None,
         };
         respond_and_record(-1, 1, &sink, &facts, "attempt_listener", Verdict::Allowed);
         let records = sink.drain();

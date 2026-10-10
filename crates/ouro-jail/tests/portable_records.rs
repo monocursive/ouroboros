@@ -228,6 +228,63 @@ fn r01_every_example_validates_against_its_schema() {
     }
 }
 
+#[test]
+fn denial_schema_accepts_filesystem_refusals_and_mediated_connects() {
+    let validators = validators();
+    let validator = &validators["jail-event"];
+    let mut denied = read_json(&specs_dir().join("examples/event-deny.json"));
+    for (errno, ret) in [("EROFS", -30), ("EBUSY", -16)] {
+        denied["outcome"]["errno"] = serde_json::json!(errno);
+        denied["outcome"]["return_value"] = serde_json::json!(ret);
+        for operation in ["fs.write", "fs.create", "fs.rename", "fs.unlink"] {
+            denied["fields"]["attempted_operation"] = serde_json::json!(operation);
+            assert!(
+                validator.is_valid(&denied),
+                "{errno}/{operation}: {:?}",
+                errors(validator, &denied)
+            );
+        }
+        for operation in ["proc.exec", "net.connect"] {
+            denied["fields"]["attempted_operation"] = serde_json::json!(operation);
+            assert!(
+                !validator.is_valid(&denied),
+                "{errno} is not a {operation} denial"
+            );
+        }
+    }
+
+    let mut connect = read_json(&specs_dir().join("examples/event-connect-denied.json"));
+    assert!(
+        validator.is_valid(&connect),
+        "the prior event shape stays valid"
+    );
+    connect["operation"] = serde_json::json!("net.connect");
+    connect["fields"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempted_operation");
+    for (errno, ret) in [("EACCES", -13), ("EPERM", -1)] {
+        connect["outcome"]["errno"] = serde_json::json!(errno);
+        connect["outcome"]["return_value"] = serde_json::json!(ret);
+        assert!(
+            validator.is_valid(&connect),
+            "mediated {errno}: {:?}",
+            errors(validator, &connect)
+        );
+    }
+    connect["fields"]["observation"] = serde_json::json!("ptrace");
+    assert!(
+        !validator.is_valid(&connect),
+        "a directly traced denial remains fs.deny"
+    );
+    connect["fields"]["observation"] = serde_json::json!("seccomp_user_notification");
+    connect["fields"]["syscall"] = serde_json::json!("openat");
+    assert!(
+        !validator.is_valid(&connect),
+        "only mediated connects use the exception"
+    );
+}
+
 /// J5-C, R01 and §17 "Before J5": one example per kind of event the jail
 /// writes, so every source-specific rule is exercised on a positive instance.
 /// A kind is (source, operation, completion) for a result, plus the decision
@@ -675,9 +732,8 @@ fn bidi_control_characters_are_escaped_but_other_cf_pass_through() {
                 \u{2066}\u{2067}\u{2068}\u{2069}\
                 \u{200e}\u{200f}\u{061c}";
     let expected = [
-        "<U+202A>", "<U+202B>", "<U+202C>", "<U+202D>", "<U+202E>",
-        "<U+2066>", "<U+2067>", "<U+2068>", "<U+2069>",
-        "<U+200E>", "<U+200F>", "<U+061C>",
+        "<U+202A>", "<U+202B>", "<U+202C>", "<U+202D>", "<U+202E>", "<U+2066>", "<U+2067>",
+        "<U+2068>", "<U+2069>", "<U+200E>", "<U+200F>", "<U+061C>",
     ]
     .concat();
     assert_eq!(escape_control(bidi), expected);
@@ -686,10 +742,7 @@ fn bidi_control_characters_are_escaped_but_other_cf_pass_through() {
     let line = invalid_config("x")
         .with_key_path("jail.launch.name\u{202e}spoof")
         .to_string();
-    assert!(
-        line.contains("jail.launch.name<U+202E>spoof"),
-        "{line}"
-    );
+    assert!(line.contains("jail.launch.name<U+202E>spoof"), "{line}");
     assert!(!line.contains('\u{202e}'), "{line}");
     // Non-bidi Cf characters are ordinary invisible formatting, not
     // reordering controls: they are not rewritten.

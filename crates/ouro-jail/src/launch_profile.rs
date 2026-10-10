@@ -178,7 +178,20 @@ struct CredentialEntry {
     hosts: Vec<String>,
     #[serde(default)]
     allow_plaintext: bool,
+    /// Vault placement: `header = { name = "x-api-key" }` or
+    /// `header = { name = "authorization", prefix = "Bearer " }`.
+    #[serde(default)]
+    header: Option<CredentialHeaderEntry>,
     mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CredentialHeaderEntry {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -533,12 +546,22 @@ pub fn parse(
             let policy = crate::vault::Policy {
                 hosts: entry.hosts.clone(),
                 allow_plaintext: entry.allow_plaintext,
+                header: entry.header.as_ref().map(|header| crate::vault::Header {
+                    name: header
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "authorization".to_owned()),
+                    prefix: header.prefix.clone(),
+                }),
             };
             policy.validate().map_err(|e| invalid(&key, e))?;
             Some(policy)
         } else {
-            if !entry.hosts.is_empty() || entry.allow_plaintext {
-                return Err(invalid(&key, "hosts/allow_plaintext require vault mode"));
+            if !entry.hosts.is_empty() || entry.allow_plaintext || entry.header.is_some() {
+                return Err(invalid(
+                    &key,
+                    "hosts/allow_plaintext/header require vault mode",
+                ));
             }
             None
         };
@@ -1033,7 +1056,8 @@ pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Resu
         if lexical {
             return Err(unsafe_launch(format!(
                 "the launch profile {} lies inside the child-visible grant {}; the contained \
-                 party could rewrite its own authority",
+                 party could rewrite its own authority (the workspace defaults to the \
+                 current directory; run from the project directory or pass --workspace)",
                 launch.file_path.display(),
                 root.display()
             )));
@@ -1087,6 +1111,7 @@ jail = "agent"
 source = "/home/op/token"
 mode = "vault"
 hosts = ["https://api.example.com"]
+header = { name = "x-api-key" }
 "#,
         );
         let credential = profile
@@ -1096,9 +1121,72 @@ hosts = ["https://api.example.com"]
             .expect("the vault credential parses");
         assert_eq!(credential.mode, "vault");
         assert_eq!(credential.dest.as_bytes(), b".vault-api");
-        let vault = credential.vault.as_ref().expect("vault mode carries a policy");
+        let vault = credential
+            .vault
+            .as_ref()
+            .expect("vault mode carries a policy");
         assert_eq!(vault.hosts, vec!["https://api.example.com".to_owned()]);
         assert!(!vault.allow_plaintext);
+        assert_eq!(
+            vault.header.as_ref().map(|header| header.name.as_str()),
+            Some("x-api-key")
+        );
+
+        // A Bearer prefix placement parses with its default header name.
+        let profile = parse_ok(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "vault"
+hosts = ["https://api.example.com"]
+header = { prefix = "Bearer " }
+"#,
+        );
+        let vault = profile
+            .credentials
+            .iter()
+            .find(|credential| credential.id == "api")
+            .and_then(|credential| credential.vault.as_ref())
+            .expect("the vault credential parses");
+        assert_eq!(
+            vault.header.as_ref().map(|h| h.name.as_str()),
+            Some("authorization")
+        );
+        assert_eq!(
+            vault.header.as_ref().and_then(|h| h.prefix.as_deref()),
+            Some("Bearer ")
+        );
+
+        // A header outside vault mode refuses.
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "copy_rw"
+dest = "token"
+header = { name = "x-api-key" }
+"#,
+        );
+        assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api"));
+        assert!(error.message.contains("header"), "{}", error.message);
+
+        // An invalid header name refuses with the validation message.
+        let error = parse_err(
+            r#"
+name = "demo"
+jail = "agent"
+[credentials.api]
+source = "/home/op/token"
+mode = "vault"
+hosts = ["https://api.example.com"]
+header = { name = "bad header" }
+"#,
+        );
+        assert!(error.message.contains("token"), "{}", error.message);
 
         // An unknown mode string refuses.
         let error = parse_err(
@@ -1110,7 +1198,10 @@ source = "/home/op/token"
 mode = "carrier"
 "#,
         );
-        assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api.mode"));
+        assert_eq!(
+            error.key_path.as_deref(),
+            Some("launch.credentials.api.mode")
+        );
 
         // Vault credentials need hosts.
         let error = parse_err(
@@ -1137,7 +1228,11 @@ hosts = ["http://api.example.com"]
 "#,
         );
         assert_eq!(error.key_path.as_deref(), Some("launch.credentials.api"));
-        assert!(error.message.contains("allow_plaintext"), "{}", error.message);
+        assert!(
+            error.message.contains("allow_plaintext"),
+            "{}",
+            error.message
+        );
 
         // Vault credentials take no destination file.
         let error = parse_err(

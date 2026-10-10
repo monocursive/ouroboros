@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -37,6 +38,34 @@ class ReleaseTests(unittest.TestCase):
         with patch('prepare_release.subprocess.check_output', return_value=json.dumps(version(target)).encode()):
             stage(binary, target, REVISION, INPUTS, out, release)
         return out
+
+    def test_cli_valid_assembly_and_argument_validation(self):
+        script = Path(__file__).with_name('prepare_release.py')
+        stages = [self.fixture(target) for target in TARGETS]
+        command = [sys.executable, str(script), 'assemble', '--revision', REVISION,
+                   '--inputs', INPUTS, '--version', '0.1.0-rc.1', '--out', str(self.root / 'cli-out')]
+        for directory in stages:
+            command += ['--stage', str(directory)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)['published'])
+        for field, invalid in [('--revision', 'short'), ('--inputs', 'sha256:bad')]:
+            bad = command.copy(); bad[bad.index(field) + 1] = invalid
+            result = subprocess.run(bad, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('provide a full 40-character git revision', result.stderr)
+        # The stage entry point reaches its binary checks with valid CLI
+        # arguments, and rejects invalid provenance before touching a binary.
+        binary = self.root / 'invalid-elf'; binary.write_bytes(b'not an ELF image')
+        command = [sys.executable, str(script), 'stage', '--binary', str(binary),
+                   '--target', next(iter(TARGETS)), '--revision', REVISION, '--inputs', INPUTS,
+                   '--version', '0.1.0-rc.1', '--out', str(self.root / 'cli-stage')]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('binary ELF architecture does not match', result.stderr)
+        command[command.index('--revision') + 1] = 'short'
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 2, result.stderr)
 
     def test_packaging_is_independent_of_source_mtime_and_location(self):
         binary = self.root / 'binary'

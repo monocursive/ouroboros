@@ -401,16 +401,13 @@ fn walk(
         // nested hooks directory while `.git` itself stays writable. A
         // multi-component name never matches at the root: it is not a root
         // literal and a writable root is never itself protected.
-        let literal = names
-            .iter()
-            .copied()
-            .find(|literal| {
-                if literal.contains('/') {
-                    depth > 1 && literal.as_bytes() == child_relative.as_slice()
-                } else {
-                    name_os == OsStr::new(*literal)
-                }
-            });
+        let literal = names.iter().copied().find(|literal| {
+            if literal.contains('/') {
+                depth > 1 && literal.as_bytes() == child_relative.as_slice()
+            } else {
+                name_os == OsStr::new(*literal)
+            }
+        });
 
         if let Some(literal) = literal {
             if meta.is_symlink {
@@ -473,7 +470,14 @@ fn walk(
                 path: child_path.clone(),
                 errno,
             })?;
-        walk(&child, &child_path, &child_relative, depth + 1, names, state)?;
+        walk(
+            &child,
+            &child_path,
+            &child_relative,
+            depth + 1,
+            names,
+            state,
+        )?;
     }
     Ok(())
 }

@@ -60,7 +60,7 @@ impl Volume {
             if capacity != self.bytes {
                 return Err(io::Error::other("tmpfs capacity changed after admission"));
             }
-            let files = u64::try_from(value.f_files).map_err(io::Error::other)?;
+            let files = value.f_files;
             if files != self.inodes.unwrap_or(0) {
                 return Err(io::Error::other("tmpfs capacity changed after admission"));
             }
@@ -77,6 +77,19 @@ fn stat(file: &File) -> io::Result<libc::statfs> {
     }
     // SAFETY: fstatfs initialized the structure on success.
     Ok(unsafe { value.assume_init() })
+}
+
+/// XFS geometry needs an ioctl-capable descriptor: ioctl rejects O_PATH.
+/// Open it once, before releasing the target, and retain it for every quota
+/// sample so a subsequent chmod cannot invalidate the readback.
+fn sampling_file(file: File, value: &libc::statfs) -> io::Result<File> {
+    if value.f_type != libc::XFS_SUPER_MAGIC {
+        return Ok(file);
+    }
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 
 /// The hard capacities admission counts on one writable filesystem, and the
@@ -135,9 +148,7 @@ fn ceiling(file: &File, value: &libc::statfs) -> Result<Ceiling, CeilingRefusal>
 /// `--limit storage`/`--limit inodes` run would refuse the filesystem.
 pub(super) enum CeilingProbe {
     /// A hard ceiling admission can charge.
-    Bounded {
-        evidence: String,
-    },
+    Bounded { evidence: String },
     /// A filesystem admission would refuse (§6.4).
     Unbounded {
         reason: &'static str,
@@ -161,6 +172,10 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
     };
     let value = match stat(&file) {
         Ok(value) => value,
+        Err(err) => return CeilingProbe::Failed(format!("{}: {err}", path.display())),
+    };
+    let file = match sampling_file(file, &value) {
+        Ok(file) => file,
         Err(err) => return CeilingProbe::Failed(format!("{}: {err}", path.display())),
     };
     let (mechanism, bytes, inodes) = match ceiling(&file, &value) {
@@ -194,7 +209,10 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
     let missing = match (bytes, inodes) {
         (Some(bytes), Some(inodes)) => {
             return CeilingProbe::Bounded {
-                evidence: format!("{mechanism}: {bytes} bytes, {inodes} inodes ({})", path.display()),
+                evidence: format!(
+                    "{mechanism}: {bytes} bytes, {inodes} inodes ({})",
+                    path.display()
+                ),
             };
         }
         (None, None) => "bytes and inodes",
@@ -207,7 +225,10 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
         } else {
             "tmpfs_unbounded"
         },
-        evidence: format!("{mechanism} on {} has no hard bound for {missing}", path.display()),
+        evidence: format!(
+            "{mechanism} on {} has no hard bound for {missing}",
+            path.display()
+        ),
     }
 }
 
@@ -289,6 +310,7 @@ impl Storage {
                 continue;
             }
             let device = metadata.dev();
+            let file = sampling_file(file, &value)?;
             let (uid, capacity_bytes, capacity_inodes) = match ceiling(&file, &value) {
                 Ok(ceiling) => (ceiling.uid, ceiling.bytes, ceiling.inodes),
                 Err(CeilingRefusal::Quota(err)) => {
@@ -467,6 +489,83 @@ impl Storage {
 mod tests {
     use super::*;
 
+    #[test]
+    fn xfs_sampling_descriptor_is_opened_once_and_survives_chmod() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(dir.path())
+            .unwrap();
+        let identity = pinned.metadata().unwrap();
+        let mut value = stat(&pinned).unwrap();
+        // Exercise the descriptor selection on any unit-test filesystem;
+        // a native XFS fixture separately exercises the geometry ioctl.
+        value.f_type = libc::XFS_SUPER_MAGIC;
+        let file = sampling_file(pinned, &value).unwrap();
+        // SAFETY: fcntl F_GETFL only queries the live descriptor.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_PATH, 0);
+        assert_eq!(file.metadata().unwrap().ino(), identity.ino());
+        assert_eq!(file.metadata().unwrap().dev(), identity.dev());
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o0)).unwrap();
+        assert!(stat(&file).is_ok());
+        let mut geometry = [0u64; 32];
+        // SAFETY: the complete XFS geometry output ABI on a live descriptor.
+        let result = unsafe {
+            libc::ioctl(
+                file.as_raw_fd(),
+                0x8100_587e as libc::c_ulong,
+                geometry.as_mut_ptr(),
+            )
+        };
+        if result != 0 {
+            assert_ne!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        }
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a disposable XFS mount with enforced user hard quotas; set OURO_TEST_XFS_DIR"]
+    fn xfs_hard_quota_admission_and_sampling_survive_chmod() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path =
+            PathBuf::from(std::env::var_os("OURO_TEST_XFS_DIR").expect("XFS fixture directory"));
+        assert!(matches!(probe_ceiling(&path), CeilingProbe::Bounded { .. }));
+        let pinned = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+            .open(&path)
+            .unwrap();
+        let value = stat(&pinned).unwrap();
+        assert_eq!(value.f_type, libc::XFS_SUPER_MAGIC);
+        // SAFETY: geteuid has no arguments or memory effects.
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(
+            quota::read(&pinned, uid).err().unwrap().raw_os_error(),
+            Some(libc::EBADF)
+        );
+        let file = sampling_file(pinned, &value).unwrap();
+        let admitted = ceiling(&file, &value).ok().expect("enforced hard quota");
+        assert_eq!(admitted.uid, Some(uid));
+        assert!(admitted.bytes.is_some());
+        assert!(admitted.inodes.is_some());
+        let volume = Volume {
+            file,
+            uid: admitted.uid,
+            bytes: admitted.bytes,
+            inodes: admitted.inodes,
+        };
+        assert_eq!(volume.full().unwrap(), (false, false));
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap();
+        let sample = volume.full();
+        fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(sample.unwrap(), (false, false));
+    }
+
     /// A volume whose admitted tmpfs capacity matches its filesystem, or
     /// `offset_blocks` blocks larger — the stale, larger admission a
     /// host-side remount shrink leaves behind (audit 2026-10-08 L3).
@@ -542,6 +641,9 @@ mod tests {
         assert_eq!(row.mechanism, None);
         assert_eq!(row.scope, None);
         assert_eq!(row.hit, None);
-        assert_eq!(storage.loss(), Some("tmpfs capacity changed after admission"));
+        assert_eq!(
+            storage.loss(),
+            Some("tmpfs capacity changed after admission")
+        );
     }
 }

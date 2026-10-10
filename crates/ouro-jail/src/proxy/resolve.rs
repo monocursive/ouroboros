@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Why resolution produced no answer set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,13 +54,33 @@ pub fn absolute_name(host: &str) -> String {
 ///
 /// `getaddrinfo` cannot be cancelled, so each lookup runs on a worker thread
 /// and the caller stops waiting at the deadline. At most `max_in_flight`
-/// workers exist at once; beyond that a lookup refuses immediately instead of
-/// leaking another thread. A late worker finishes on its own and is counted
-/// until it does.
+/// workers exist at once; a further lookup *waits* for a slot until its
+/// deadline instead of being refused (issue draft 04: a client that opens
+/// many connections at once — `uv` asking for one host 48 times in a
+/// second — must not see allowlisted hosts refused for capacity). Only a
+/// queue past `4 * max_in_flight` waiters refuses with
+/// [`ResolveError::Overloaded`], as a bound on supervisor memory. A late
+/// worker finishes on its own and is counted until it does.
+///
+/// Successful answers are cached per name for [`CACHE_TTL`], so a burst of
+/// connections to one host costs one lookup.
 pub struct SystemResolver {
-    in_flight: Arc<AtomicUsize>,
+    state: Arc<Shared>,
     max_in_flight: usize,
     lookup: Arc<Lookup>,
+}
+
+/// How long one answer set serves later lookups of the same name.
+const CACHE_TTL: Duration = Duration::from_secs(30);
+/// Names kept in the answer cache; a full cache clears itself, which is
+/// bounded and predictable.
+const CACHE_MAX: usize = 512;
+
+struct Shared {
+    in_flight: Mutex<usize>,
+    free: Condvar,
+    waiting: AtomicUsize,
+    cache: Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
 }
 
 fn system_lookup(name: &str) -> io::Result<Vec<IpAddr>> {
@@ -70,7 +90,8 @@ fn system_lookup(name: &str) -> io::Result<Vec<IpAddr>> {
 }
 
 impl SystemResolver {
-    /// A resolver with at most `max_in_flight` concurrent lookups.
+    /// A resolver with at most `max_in_flight` concurrent lookups; further
+    /// lookups queue behind them until their deadline.
     #[must_use]
     pub fn new(max_in_flight: usize) -> Self {
         SystemResolver::with_lookup(max_in_flight, Arc::new(system_lookup))
@@ -81,7 +102,12 @@ impl SystemResolver {
     #[must_use]
     pub fn with_lookup(max_in_flight: usize, lookup: Arc<Lookup>) -> Self {
         SystemResolver {
-            in_flight: Arc::new(AtomicUsize::new(0)),
+            state: Arc::new(Shared {
+                in_flight: Mutex::new(0),
+                free: Condvar::new(),
+                waiting: AtomicUsize::new(0),
+                cache: Mutex::new(HashMap::new()),
+            }),
             max_in_flight,
             lookup,
         }
@@ -90,8 +116,35 @@ impl SystemResolver {
     /// Lookups currently running, including abandoned late ones.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::SeqCst)
+        *self.state.in_flight.lock().unwrap_or_else(poison)
     }
+}
+
+fn poison<T>(error: PoisonError<T>) -> T {
+    error.into_inner()
+}
+
+/// Serves one fresh cached answer set, if there is one.
+fn cached(
+    cache: &Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
+    name: &str,
+) -> Option<Vec<IpAddr>> {
+    let cache = cache.lock().unwrap_or_else(poison);
+    let (at, answers) = cache.get(name)?;
+    (at.elapsed() < CACHE_TTL).then(|| answers.clone())
+}
+
+/// Stores one answer set, keeping the cache bounded.
+fn store(
+    cache: &Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
+    name: String,
+    answers: Vec<IpAddr>,
+) {
+    let mut cache = cache.lock().unwrap_or_else(poison);
+    if cache.len() >= CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(name, (Instant::now(), answers));
 }
 
 impl Default for SystemResolver {
@@ -100,11 +153,14 @@ impl Default for SystemResolver {
     }
 }
 
-struct InFlight(Arc<AtomicUsize>);
+/// Releases one in-flight slot and wakes the next waiter.
+struct InFlight(Arc<Shared>);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        let mut in_flight = self.0.in_flight.lock().unwrap_or_else(poison);
+        *in_flight = in_flight.saturating_sub(1);
+        self.0.free.notify_one();
     }
 }
 
@@ -120,32 +176,60 @@ impl Resolver for SystemResolver {
         {
             return Err(ResolveError::Invalid);
         }
-        let mut current = self.in_flight.load(Ordering::SeqCst);
-        loop {
-            if current >= self.max_in_flight {
-                return Err(ResolveError::Overloaded);
-            }
-            match self.in_flight.compare_exchange(
-                current,
-                current + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
-        let guard = InFlight(Arc::clone(&self.in_flight));
-        let (sender, receiver) = mpsc::sync_channel(1);
         let name = absolute_name(host);
+        if let Some(answers) = cached(&self.state.cache, &name) {
+            return Ok(answers);
+        }
+        if self.max_in_flight == 0 {
+            return Err(ResolveError::Overloaded);
+        }
+        // Queue for a slot, bounded by the deadline and a waiter bound.
+        let waiters = self.state.waiting.fetch_add(1, Ordering::SeqCst) + 1;
+        let queued = if waiters > self.max_in_flight.saturating_mul(4) {
+            Err(ResolveError::Overloaded)
+        } else {
+            let mut in_flight = self.state.in_flight.lock().unwrap_or_else(poison);
+            loop {
+                if Instant::now() >= deadline {
+                    break Err(ResolveError::Timeout);
+                }
+                if *in_flight < self.max_in_flight {
+                    *in_flight += 1;
+                    break Ok(());
+                }
+                let (guard, wait) = self
+                    .state
+                    .free
+                    .wait_timeout(
+                        in_flight,
+                        deadline.saturating_duration_since(Instant::now()),
+                    )
+                    .unwrap_or_else(poison);
+                in_flight = guard;
+                if wait.timed_out() {
+                    continue;
+                }
+            }
+        };
+        self.state.waiting.fetch_sub(1, Ordering::SeqCst);
+        queued?;
+        let state = Arc::clone(&self.state);
+        let guard = InFlight(Arc::clone(&self.state));
+        let (sender, receiver) = mpsc::sync_channel(1);
         let lookup = Arc::clone(&self.lookup);
+        let lookup_name = name.clone();
         let spawned = thread::Builder::new()
             .name("ouro-proxy-resolve".to_owned())
             // `getaddrinfo` and its NSS modules use generous stack.
             .stack_size(1024 * 1024)
             .spawn(move || {
                 let _guard = guard;
-                let answers = lookup(&name).map_err(|_| ());
+                let answers = lookup(&lookup_name).map_err(|_| ());
+                // A late worker still serves the cache: a caller that timed
+                // out and retried finds the answer without a new lookup.
+                if let Ok(answers) = &answers {
+                    store(&state.cache, lookup_name, answers.clone());
+                }
                 let _ = sender.send(answers);
             });
         if spawned.is_err() {

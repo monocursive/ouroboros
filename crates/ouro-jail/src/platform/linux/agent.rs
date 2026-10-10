@@ -127,6 +127,8 @@ struct ProxyTally {
     seq: u64,
     delivered: u64,
     lost: u64,
+    /// Denials that were resolver capacity, not policy (issue draft 04).
+    resolver_refused: u64,
     recent: VecDeque<RecentResult>,
 }
 
@@ -162,6 +164,11 @@ impl ProxySink for ProxyTraceSink {
             tally.delivered += 1;
         } else {
             tally.lost += 1;
+        }
+        if result.decision == ProxyDecision::Deny
+            && result.reason == crate::proxy::Reason::ResolverOverloaded
+        {
+            tally.resolver_refused += 1;
         }
         if tally.recent.len() == RECENT_RESULTS {
             tally.recent.pop_front();
@@ -671,6 +678,7 @@ impl AgentNet {
             tgid_start: record.tgid_start, // J4-O: the birth identity (slice O)
             family: record.family,
             address_complete: record.address_complete,
+            peer: record.peer.clone(),
             ret,
             reason: record.reason,
         });
@@ -755,6 +763,7 @@ impl AgentNet {
         let class = proxy_coverage(&ProxyAccount {
             delivered: tally.delivered,
             lost: tally.lost,
+            resolver_refused: tally.resolver_refused,
             missing: self.proxy_summary.map(|summary| summary.results_missing),
             stopped_at: self.proxy_stopped_at,
             now: crate::platform::elapsed_since_start_ns(),
@@ -896,6 +905,8 @@ pub struct ProxyAccount {
     pub delivered: u64,
     /// Results the trace refused.
     pub lost: u64,
+    /// Denials that were resolver capacity, not policy (issue draft 04).
+    pub resolver_refused: u64,
     /// Accepted connections whose result the drain did not deliver; `None`
     /// when the proxy was never stopped and drained.
     pub missing: Option<u64>,
@@ -949,6 +960,7 @@ pub fn proxy_coverage(account: &ProxyAccount) -> ClassSummary {
         status,
         observed_count: (status == SourceStatus::Active).then_some(account.delivered),
         gaps,
+        resolver_refused: account.resolver_refused,
     }
 }
 
@@ -1187,6 +1199,7 @@ mod tests {
             delivered: 3,
             lost,
             missing,
+            resolver_refused: 0,
             stopped_at,
             now: 9,
         };
@@ -1294,6 +1307,7 @@ mod tests {
         ProxyAccount {
             delivered: tally.delivered,
             lost: tally.lost,
+            resolver_refused: tally.resolver_refused,
             missing: Some(0),
             stopped_at: None,
             now: 1,
@@ -1383,6 +1397,7 @@ mod tests {
             tgid_start: start,
             family: Some(1),
             address_complete: true,
+            peer: None,
             reason: "authorized_proxy",
             verdict: Verdict::Allowed,
         };

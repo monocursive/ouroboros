@@ -68,9 +68,7 @@ fn a_none_run_settles_the_epoch_and_a_trusted_file_it_predates_refuses() {
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("uncontained.") && name.ends_with(".live")
-                    })
+                    .is_some_and(|name| name.starts_with("uncontained.") && name.ends_with(".live"))
             })
             .collect();
         assert!(live.is_empty(), "a live marker outlived the run: {live:?}");

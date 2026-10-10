@@ -94,7 +94,9 @@ pub struct RunArgs {
     /// Policy selection and overrides.
     #[command(flatten)]
     pub policy: PolicyArgs,
-    /// Write an additional atomically replaced receipt copy here.
+    /// Write an additional atomically replaced receipt copy here. An
+    /// existing file is replaced only when it is itself a prior receipt
+    /// copy; any other file, symlink or device refuses.
     #[arg(long, value_name = "PATH")]
     pub receipt: Option<PathBuf>,
     /// Inherited descriptor for the event stream.
@@ -140,9 +142,11 @@ pub struct ExplainArgs {
 
 /// `ouro-jail doctor`.
 ///
-/// §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`: the
-/// policy override flags are not part of this verb's grammar, so they are
-/// simply not defined here and clap refuses them as usage errors (§6.4).
+/// §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`;
+/// `--workspace` and `--scratch` are the same roots `run` accepts, so a
+/// doctor call can check the exact plan a launch script will run instead of
+/// whichever directory it was invoked from (issue: doctor --launch used the
+/// current directory as the workspace).
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
     /// Built-in profile name or a policy file path.
@@ -151,6 +155,13 @@ pub struct DoctorArgs {
     /// Launch profile name.
     #[arg(long, value_name = "NAME")]
     pub launch: Option<String>,
+    /// Workspace root, like `run --workspace`; defaults to the current
+    /// directory.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<std::path::PathBuf>,
+    /// Scratch root, like `run --scratch`; defaults to the managed scratch.
+    #[arg(long, value_name = "PATH")]
+    pub scratch: Option<std::path::PathBuf>,
     /// Print JSON on stdout instead of text.
     #[arg(long)]
     pub json: bool,

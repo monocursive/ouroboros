@@ -2363,6 +2363,12 @@
             "$ref": "#/$defs/gap"
           },
           "maxItems": 128
+        },
+        "resolver_refused": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "proxy.net only: connections the proxy refused for resolver capacity, which are not policy denials. Absent when none were."
         }
       },
       "required": [

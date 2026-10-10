@@ -4,7 +4,7 @@
 //! - Strict evidence stops the attempt: the loss is the stop, and the target
 //!   that would otherwise run on is ended by it.
 //! - Best-effort evidence runs the target to its own end, keeps the degraded
-//!   coverage and the loss in `errors[]`, and the jail exits 1.
+//!   coverage and the loss in `errors[]`, and preserves the child's exit code.
 //! - The first stop cause wins (§6.4): a later loss, or a later deadline, is
 //!   recorded but does not replace it.
 //! - Loss never changes a protection label: `containment` and
@@ -12,11 +12,11 @@
 //!   attempt, before and after the loss, in either evidence mode.
 //! - J4 wave 2, R-1: a loss the platform never reported as an event (queued
 //!   during settlement, or found when the observer stopped) is still an
-//!   `evidence_lost` error and exit 1: any evidence class degraded at
-//!   settlement is, whatever the loss's timing.
+//!   `evidence_lost` error: strict exits 1, while best-effort preserves the
+//!   child's exit, whatever the loss's timing.
 //! - J4 wave 2, R-2: a loss after the target's own end is recorded (errors,
-//!   exit 1) but is not a stop and never replaces the natural end as
-//!   `outcome.cause`.
+//!   strict exit 1 or best-effort child status) but is not a stop and never
+//!   replaces the natural end as `outcome.cause`.
 //!
 //! The platform is simulated and the filesystem is real, so every receipt
 //! revision the supervisor persists can be read back as it is written. The
@@ -295,11 +295,13 @@ fn degraded_coverage() -> CoverageSummary {
         status: SourceStatus::Active,
         observed_count: Some(count),
         gaps: Vec::new(),
+        resolver_refused: 0,
     };
     let degraded = ClassSummary {
         status: SourceStatus::Degraded,
         observed_count: Some(7),
         gaps: vec![gap.clone()],
+        resolver_refused: 0,
     };
     let mut summary = CoverageSummary::unobserved();
     summary.backend = Some("ptrace".into());
@@ -582,9 +584,11 @@ fn j4_r04_strict_stops() {
 
 /// Best-effort: the same loss stops nothing. The target runs to its own end
 /// (exit 0, no cause), the receipt keeps the degraded coverage and the
-/// loss, and the jail itself exits 1.
+/// loss, and — issue draft 03 — the jail exits with the child's own code, so
+/// a wrapper that trusts the exit code sees the child's status while the
+/// stderr diagnostic and the receipt still carry the loss.
 #[test]
-fn j4_r04_best_effort_runs_to_the_end_degraded_exits_1() {
+fn j4_r04_best_effort_runs_to_the_end_degraded_exits_with_the_child() {
     for profile in ["none", "tool"] {
         let fixture = Fixture::new();
         let run = fixture.run(
@@ -606,13 +610,14 @@ fn j4_r04_best_effort_runs_to_the_end_degraded_exits_1() {
         );
         assert_eq!(run.receipt["phase"], "settled");
         assert_eq!(
-            run.report.exit_code, 1,
-            "{profile}: the child exited 0, the jail exits 1 for the loss"
+            run.report.exit_code, 0,
+            "{profile}: the child exited 0 and the loss is evidence-only, so \
+             best-effort exits with the child's code"
         );
         assert_eq!(
             run.report.error.as_ref().map(|error| error.code),
             Some(ErrorCode::EvidenceLost),
-            "{profile}"
+            "{profile}: the loss is still the reported error"
         );
         assert!(
             error_codes(&run.receipt).contains(&"evidence_lost".to_owned()),
@@ -620,6 +625,42 @@ fn j4_r04_best_effort_runs_to_the_end_degraded_exits_1() {
             run.receipt["errors"]
         );
         assert_coverage_is_honest(&run.receipt);
+    }
+}
+
+#[test]
+fn best_effort_preserves_stdio_failure_after_an_evidence_loss() {
+    for profile in ["none", "tool"] {
+        for loss_first in [true, false] {
+            let fixture = Fixture::new();
+            let loss = evidence_lost();
+            let failure = RunEvent::StdioFailed {
+                reason: "output could not drain after the target ended".into(),
+                after_target_end: true,
+            };
+            let failures = if loss_first {
+                vec![loss, failure]
+            } else {
+                vec![failure, loss]
+            };
+            let mut events = vec![RunEvent::ExecConfirmed];
+            events.extend(failures);
+            events.push(RunEvent::TargetExited { code: 0 });
+            let run = fixture.run(events, &["--profile", profile, "--evidence", "best-effort"]);
+            assert_eq!(
+                run.report.exit_code, 1,
+                "{profile}, loss_first={loss_first}"
+            );
+            assert_eq!(run.receipt["outcome"]["code"], 0);
+            assert_eq!(run.receipt["outcome"]["cause"], Value::Null);
+            assert!(
+                run.stops.is_empty(),
+                "a post-exit delivery failure stops nothing"
+            );
+            let errors = error_codes(&run.receipt);
+            assert!(errors.contains(&"evidence_lost".to_owned()), "{errors:?}");
+            assert!(errors.contains(&"stdio_failed".to_owned()), "{errors:?}");
+        }
     }
 }
 
@@ -772,6 +813,7 @@ fn clean_coverage() -> CoverageSummary {
         status: SourceStatus::Active,
         observed_count: Some(count),
         gaps: Vec::new(),
+        resolver_refused: 0,
     };
     summary.sources.audit = SourceStatus::Active;
     summary.gaps.clear();
@@ -792,11 +834,12 @@ fn evidence_lost_count(receipt: &Value) -> usize {
 /// loss event before the target's end — the loss was found while the tree was
 /// torn down — yet the observer's account at settlement degrades `fs.write`
 /// and `fs.deny`. Any evidence class degraded at settlement is an
-/// `evidence_lost` error and exit 1, in both modes and both profiles. Nothing
+/// `evidence_lost` error, in both modes and both profiles. Strict exits 1;
+/// best-effort exits with the child's own code (issue draft 03). Nothing
 /// stopped the target, so there is no stop and no cause: its own end stays
 /// the outcome.
 #[test]
-fn j4_w2s_r1_a_loss_found_at_settlement_is_an_error_and_exit_1() {
+fn j4_w2s_r1_a_loss_found_at_settlement_is_an_error() {
     for profile in ["none", "tool"] {
         for evidence in ["strict", "best-effort"] {
             let label = format!("{profile}/{evidence}");
@@ -812,9 +855,11 @@ fn j4_w2s_r1_a_loss_found_at_settlement_is_an_error_and_exit_1() {
                 "{label}: the loss is one evidence_lost error: {:#}",
                 run.receipt["errors"]
             );
+            let expected = if evidence == "strict" { 1 } else { 0 };
             assert_eq!(
-                run.report.exit_code, 1,
-                "{label}: a degraded class at settlement exits 1"
+                run.report.exit_code, expected,
+                "{label}: strict exits 1 for a degraded class at settlement; \
+                 best-effort exits with the child"
             );
             assert_eq!(
                 run.report.error.as_ref().map(|error| error.code),
@@ -851,7 +896,11 @@ fn j4_w2s_r1_a_reported_loss_is_not_reported_twice_at_settlement() {
             "{evidence}: {:#}",
             run.receipt["errors"]
         );
-        assert_eq!(run.report.exit_code, 1, "{evidence}");
+        assert_eq!(
+            run.report.exit_code,
+            if evidence == "strict" { 1 } else { 0 },
+            "{evidence}: best-effort exits with the child (issue draft 03)"
+        );
     }
 }
 
@@ -876,6 +925,7 @@ fn j4_w2s_r1_a_proxy_loss_found_at_settlement_is_an_error() {
                 reason: "proxy_drain_incomplete".into(),
                 lost_count: Some(1),
             }],
+            resolver_refused: 0,
         },
     );
     let fixture = Fixture::new();
@@ -976,7 +1026,11 @@ fn j4_w2s_r2_a_loss_after_the_target_ended_is_recorded_not_the_cause() {
                 "{label}: {:#}",
                 run.receipt["errors"]
             );
-            assert_eq!(run.report.exit_code, 1, "{label}");
+            assert_eq!(
+                run.report.exit_code,
+                if evidence == "strict" { 1 } else { 0 },
+                "{label}: best-effort exits with the child (issue draft 03)"
+            );
             assert_eq!(
                 run.report.error.as_ref().map(|error| error.code),
                 Some(ErrorCode::EvidenceLost),

@@ -662,6 +662,25 @@ impl LayerOrigin {
         // J3-launch end
     }
 
+    /// Whether this layer may RAISE a resource ceiling above the base
+    /// profile's (issue draft 07).
+    ///
+    /// A ceiling limits the contained party — its runtime, memory, process
+    /// count — so raising one grants the child no authority the operator did
+    /// already have: an operator-owned file has at least the authority of the
+    /// same operator's `--limit` flag. The untrusted project file keeps the
+    /// §6.3 refusal: the contained party must not extend its own runtime.
+    #[must_use]
+    pub fn may_raise_ceilings(&self) -> bool {
+        matches!(
+            self,
+            LayerOrigin::CommandLine
+                | LayerOrigin::OperatorConfig(_)
+                | LayerOrigin::OperatorProfileFile(_)
+                | LayerOrigin::LaunchProfile(_)
+        )
+    }
+
     /// Whether the paths in this layer are written by an untrusted party.
     ///
     /// §2: "The child, its descendants, its workspace and project
@@ -1504,7 +1523,11 @@ fn apply_layer(
             continue;
         };
         let key_path = format!("{prefix}limits.{}", key.as_str());
-        if layer.narrowing
+        // Issue draft 07: a resource ceiling limits the contained party, so
+        // an operator-owned layer may raise it exactly like the same
+        // operator's `--limit` flag. Only the untrusted project file (and
+        // layers that may not grant at all) keep the §6.3 refusal.
+        if !layer.origin.may_raise_ceilings()
             && let Some(existing) = base.limits.get(key)
             && ceiling.value > existing.value
         {
@@ -1512,11 +1535,13 @@ fn apply_layer(
                 ErrorCode::PolicyWidening,
                 &key_path,
                 format!(
-                    "{} raises the `{}` ceiling from {} to {}",
+                    "{} raises the `{}` ceiling from {} to {} (pass --limit {}= on the \
+                     command line, which an operator may always do)",
                     layer.origin.label(),
                     key.as_str(),
                     existing.value,
-                    ceiling.value
+                    ceiling.value,
+                    key.as_str()
                 ),
             ));
         }

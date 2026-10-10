@@ -345,11 +345,15 @@ mod tests {
             }
             let requirements = requirements(&snapshot);
             assert!(
-                requirements.iter().any(|item| *item == format!("limit:{key}")),
+                requirements
+                    .iter()
+                    .any(|item| *item == format!("limit:{key}")),
                 "{key} ceiling is a requirement: {requirements:?}"
             );
             assert!(
-                requirements.iter().any(|item| item == REQ_EXECUTION_BOUNDARY),
+                requirements
+                    .iter()
+                    .any(|item| item == REQ_EXECUTION_BOUNDARY),
                 "{key} requires the execution boundary: {requirements:?}"
             );
         }

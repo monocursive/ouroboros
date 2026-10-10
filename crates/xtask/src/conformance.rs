@@ -3166,7 +3166,7 @@ smoke doctor 0
             .collect();
         for secret in [".env", "staging.env", "server.pem"] {
             assert!(
-                !listed.iter().any(|entry| *entry == secret.as_bytes()),
+                !listed.contains(&secret.as_bytes()),
                 "inventory lists {secret}"
             );
         }

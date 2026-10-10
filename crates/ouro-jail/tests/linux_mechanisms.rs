@@ -272,10 +272,11 @@ fn multi_component_names_protect_nested_paths_only() {
         ]
     );
     // The rest of `.git` is walked, not protected.
-    assert!(scan
-        .directories
-        .iter()
-        .any(|d| d.path == root.join(".git/objects")));
+    assert!(
+        scan.directories
+            .iter()
+            .any(|d| d.path == root.join(".git/objects"))
+    );
     assert!(
         scan.root_literals.is_empty(),
         "a multi-component name is not a root literal"
@@ -294,8 +295,7 @@ fn a_symlink_on_the_path_to_a_deeper_protected_name_degrades_coverage() {
     let dir = temp_dir("symlink-deep");
     let root = dir.path();
     std::os::unix::fs::symlink(outside.path().join(".git"), root.join(".git")).unwrap();
-    let scan =
-        jfs::scan_protected_names(root, &[".git/hooks"], jfs::ScanLimits::DEFAULT).unwrap();
+    let scan = jfs::scan_protected_names(root, &[".git/hooks"], jfs::ScanLimits::DEFAULT).unwrap();
     assert!(scan.segments.is_empty());
     assert_eq!(scan.skipped_symlinks, vec![root.join(".git")]);
 }

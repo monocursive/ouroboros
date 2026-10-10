@@ -464,17 +464,10 @@ impl Citation {
 /// The acceptance rows of one spec section, `(id, row text)`, in order.
 /// `header` names the section (`## 15. `), `path` is the file the errors
 /// cite.
-fn spec_rows_in(
-    spec: &str,
-    header: &str,
-    path: &str,
-) -> Result<Vec<(String, String)>, String> {
+fn spec_rows_in(spec: &str, header: &str, path: &str) -> Result<Vec<(String, String)>, String> {
     let label = format!(
         "§{}",
-        header
-            .trim_start_matches('#')
-            .trim()
-            .trim_end_matches('.')
+        header.trim_start_matches('#').trim().trim_end_matches('.')
     );
     let mut lines = spec.lines();
     if !lines.any(|l| l.starts_with(header)) {
@@ -1618,8 +1611,10 @@ pub fn load_from(
         map: parsed,
         rows: combine_rows(
             spec_rows(&spec_text)?,
-            spec_v2_rows(&std::fs::read_to_string(root.join(SPEC_V2_PATH))
-                .map_err(|e| format!("cannot read {SPEC_V2_PATH}: {e}"))?)?,
+            spec_v2_rows(
+                &std::fs::read_to_string(root.join(SPEC_V2_PATH))
+                    .map_err(|e| format!("cannot read {SPEC_V2_PATH}: {e}"))?,
+            )?,
         )?,
     })
 }
@@ -3690,11 +3685,7 @@ Unrelated prose.
             err.contains("K01") && err.contains("jail-v2.md") && err.contains("jail-v1.md"),
             "{err}"
         );
-        let rows = combine_rows(
-            vec![("P01".to_string(), "v1".to_string())],
-            v2.clone(),
-        )
-        .unwrap();
+        let rows = combine_rows(vec![("P01".to_string(), "v1".to_string())], v2.clone()).unwrap();
         assert_eq!(
             rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
             vec!["P01", "K01", "K02"],

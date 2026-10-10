@@ -516,16 +516,16 @@ fn usage_errors_exit_two() {
     );
 }
 
-/// §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`: the
-/// policy override flags belong to `run` and `explain`, so doctor rejects
-/// them as usage errors instead of silently probing a different plan than the
-/// one the operator meant to name. The flags it does spell still parse.
+/// §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`, and
+/// issue draft 05 adds the same `--workspace`/`--scratch` roots `run`
+/// accepts; the other policy override flags belong to `run` and `explain`,
+/// so doctor rejects them as usage errors instead of silently probing a
+/// different plan than the one the operator meant to name. The flags it
+/// does spell still parse.
 #[test]
 fn doctor_takes_no_policy_override_flags() {
     let harness = Harness::new();
     for override_flag in [
-        vec!["doctor", "--workspace", "/tmp"],
-        vec!["doctor", "--scratch", "/tmp"],
         vec!["doctor", "--rw", "/tmp"],
         vec!["doctor", "--ro", "/tmp"],
         vec!["doctor", "--deny-read", "/tmp"],
@@ -542,9 +542,23 @@ fn doctor_takes_no_policy_override_flags() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    // The spelled grammar including the workspace roots still parses.
+    for spelled in [
+        vec!["doctor", "--json", "--profile", "tool"],
+        vec!["doctor", "--workspace", "/tmp"],
+        vec!["doctor", "--scratch", "/tmp", "--profile", "tool"],
+    ] {
+        let output = harness.run(&spelled);
+        assert_ne!(
+            output.status.code(),
+            Some(2),
+            "{spelled:?} is spelled grammar, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
-    // The spelled grammar still parses: on this platform doctor runs its
-    // probes and reports not-ready (125), never a usage error.
+    // On this platform doctor runs its probes and reports not-ready (125),
+    // never a usage error.
     let output = harness.run(&["doctor", "--json", "--profile", "tool"]);
     assert_eq!(
         output.status.code(),
@@ -777,13 +791,20 @@ fn a_profile_file_narrows_its_base_and_may_not_extend_none() {
         "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n[limits]\nwall = \"10h\"\n",
     )
     .expect("the file is written");
-    let output = harness.run(&["explain", "--profile", profile.to_str().unwrap()]);
+    // Issue draft 07: an operator profile file may RAISE a resource ceiling
+    // exactly like the operator's own --limit flag, so this resolves.
+    let output = harness.run(&["explain", "--json", "--profile", profile.to_str().unwrap()]);
     assert_eq!(
         output.status.code(),
-        Some(125),
-        "a profile file may only narrow"
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("limits.wall"));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        report["policy"]["snapshot"]["limits"]["wall"]["value"],
+        serde_json::json!("36000000")
+    );
 }
 
 /// §6.1: `--profile none` is the only way to select `none`; files cannot
@@ -1435,7 +1456,9 @@ fn h8_the_receipt_copy_path_is_validated() {
         b"someone else's file"
     );
 
-    // And a fresh path outside everything still works.
+    // And a fresh path outside everything still works. Issue 06: running the
+    // same command again with the same receipt path must replace the prior
+    // receipt copy instead of refusing (the help promises atomic replacement).
     let fresh = harness._temp.path().join("fresh.json");
     let output = harness.run(&[
         "run",
@@ -1446,6 +1469,25 @@ fn h8_the_receipt_copy_path_is_validated() {
     ]);
     assert_eq!(output.status.code(), Some(125));
     assert!(fresh.exists(), "a safe copy path is still honoured");
+    let output = harness.run(&[
+        "run",
+        "--receipt",
+        fresh.to_str().expect("a UTF-8 path"),
+        "--",
+        "/usr/bin/true",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replaced: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fresh).expect("readable")).expect("a receipt");
+    assert_eq!(
+        replaced["schema"], "ouro.jail.receipt/1",
+        "the prior receipt copy was replaced"
+    );
 }
 
 /// H9: a signal during the gate wait refuses rather than killing the process.

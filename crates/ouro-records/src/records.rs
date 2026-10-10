@@ -352,6 +352,8 @@ pub enum ErrorCode {
     TreeUnknown,
     /// Persisting state failed or is ambiguous (§7).
     StateWriteFailed,
+    /// A supervisor-owned stdio relay failed after launch.
+    StdioFailed,
     /// A defect in this implementation, reported rather than papered over.
     InternalError,
 }
@@ -385,6 +387,7 @@ impl ErrorCode {
             ErrorCode::EvidenceLost => "evidence_lost",
             ErrorCode::TreeUnknown => "tree_unknown",
             ErrorCode::StateWriteFailed => "state_write_failed",
+            ErrorCode::StdioFailed => "stdio_failed",
             ErrorCode::InternalError => "internal_error",
         }
     }
@@ -695,6 +698,7 @@ pub fn exit_code_for(code: ErrorCode) -> i32 {
         // J5-B1: §6.4
         | ErrorCode::ExecUnconfirmed
         | ErrorCode::StateWriteFailed
+        | ErrorCode::StdioFailed
         | ErrorCode::InternalError => 1,
     }
 }
@@ -993,6 +997,10 @@ pub struct CoverageEntry {
     pub observed_count: Option<u64>,
     /// Gaps affecting this class.
     pub gaps: Vec<Gap>,
+    /// `proxy.net` only: connections refused for resolver capacity, which
+    /// are not policy denials. Absent when none were (issue draft 04).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolver_refused: Option<u64>,
 }
 
 impl CoverageEntry {
@@ -1004,6 +1012,7 @@ impl CoverageEntry {
             sources: Vec::new(),
             observed_count: None,
             gaps: Vec::new(),
+            resolver_refused: None,
         }
     }
 }

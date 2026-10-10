@@ -35,7 +35,7 @@ pub mod agent;
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
 /// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 22] = [
+pub const PROBE_NAMES: [&str; 23] = [
     "bwrap_present",
     "user_namespace",
     "pid_namespace",
@@ -66,6 +66,9 @@ pub const PROBE_NAMES: [&str; 22] = [
     "agent_unix_peer_mediation",
     "agent_inner_sandbox",
     // J3-agent end
+    // Issue draft 15: whether a GPU can be passed through to a contained
+    // profile (informational; no requirement demands it)
+    "gpu_passthrough",
 ];
 
 /// Per-probe deadline (jail-v1 §14.1).
@@ -308,6 +311,7 @@ pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) 
         "agent_unix_peer_mediation" => agent::unix_peer(jail_exe),
         "agent_inner_sandbox" => agent::inner_sandbox(jail_exe),
         // J3-agent end
+        "gpu_passthrough" => probe_gpu_passthrough(),
         _ => ProbeResult::new(
             "unknown",
             ProbeStatus::Skipped,
@@ -408,12 +412,23 @@ fn run_inside_raw(
 
 fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
     match bwrap::bwrap_version(bwrap) {
-        Ok(version) => ProbeResult::new(
+        Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => ProbeResult::new(
             "bwrap_present",
             ProbeStatus::Available,
             "bubblewrap",
             "ok",
             version.raw,
+        ),
+        Ok(version) => ProbeResult::new(
+            "bwrap_present",
+            ProbeStatus::Unavailable,
+            "bubblewrap",
+            "bwrap_too_old",
+            format!(
+                "{} reports {}; fd binds need >= 0.10.0",
+                bwrap.display(),
+                version.raw
+            ),
         ),
         Err(e) => ProbeResult::new(
             "bwrap_present",
@@ -422,6 +437,36 @@ fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
             "backend_unavailable",
             format!("{}: {e}", bwrap.display()),
         ),
+    }
+}
+
+/// Issue draft 15: whether the host has the NVIDIA device nodes a contained
+/// GPU grant binds. Informational — no requirement demands a GPU, so it
+/// never affects readiness; a grant of a missing node still refuses at the
+/// mount itself, naming the node.
+fn probe_gpu_passthrough() -> ProbeResult {
+    let present: Vec<&'static str> = ["/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia0"]
+        .into_iter()
+        .filter(|node| std::path::Path::new(node).exists())
+        .collect();
+    if present.is_empty() {
+        ProbeResult::new(
+            "gpu_passthrough",
+            ProbeStatus::Unavailable,
+            "devices",
+            "no_nvidia_devices",
+            "no NVIDIA device nodes under /dev; a GPU grant (--rw /dev/nvidia*) \
+             needs the driver's nodes"
+                .to_owned(),
+        )
+    } else {
+        ProbeResult::new(
+            "gpu_passthrough",
+            ProbeStatus::Available,
+            "devices",
+            "ok",
+            format!("NVIDIA nodes present: {}", present.join(", ")),
+        )
     }
 }
 

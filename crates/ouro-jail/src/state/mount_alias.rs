@@ -49,11 +49,23 @@ struct Mount {
 #[cfg(target_os = "linux")]
 fn read_mountinfo() -> io::Result<Vec<Mount>> {
     use std::io::Read as _;
-    use std::os::unix::ffi::OsStringExt as _;
     let mut bytes = Vec::new();
     fs::File::open("/proc/self/mountinfo")?
         .take(4 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
+    parse_mountinfo(&bytes)
+}
+
+/// Parses `/proc/self/mountinfo` bytes into visible mounts.
+///
+/// Entries whose root field is not a path — nsfs bind mounts such as snapd's
+/// `/run/snapd/ns/lxd.mnt` carry `mnt:[4026532535]` — name a namespace, not
+/// filesystem coordinates, so they can never be reached through a path grant
+/// and are skipped instead of failing the whole host. A mount point that is
+/// not absolute remains malformed: the kernel always reports absolute ones.
+#[cfg(target_os = "linux")]
+fn parse_mountinfo(bytes: &[u8]) -> io::Result<Vec<Mount>> {
+    use std::os::unix::ffi::OsStringExt as _;
     if bytes.len() > 4 * 1024 * 1024 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -74,11 +86,14 @@ fn read_mountinfo() -> io::Result<Vec<Mount>> {
         }
         let root = PathBuf::from(std::ffi::OsString::from_vec(unescape(fields[3])?));
         let point = PathBuf::from(std::ffi::OsString::from_vec(unescape(fields[4])?));
-        if !root.is_absolute() || !point.is_absolute() {
+        if !point.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "relative mountinfo path",
             ));
+        }
+        if !root.is_absolute() {
+            continue;
         }
         // An overmounted entry may no longer be reachable. Only visible
         // mountpoints can carry a source path or a writable grant.
@@ -437,6 +452,22 @@ mod tests {
                 &mounts
             ),
             None
+        );
+    }
+
+    /// An nsfs bind mount names a namespace in its root field
+    /// (`mnt:[4026532535]`); it must be skipped, not fail the whole host.
+    #[test]
+    fn nsfs_mount_with_non_path_root_is_skipped() {
+        let text = concat!(
+            "530 509 0:4 mnt:[4026532535] /run/snapd/ns/lxd.mnt rw - nsfs nsfs rw\n",
+            "36 35 98:0 / / rw - ext4 /dev/sda1 rw\n",
+        );
+        let mounts = parse_mountinfo(text.as_bytes()).unwrap();
+        assert!(
+            mounts
+                .iter()
+                .all(|mount| mount.point != Path::new("/run/snapd/ns/lxd.mnt"))
         );
     }
 }

@@ -292,7 +292,13 @@ unset `PATH` provides no backend (there is no built-in search path). Every
 probe and every run executes exactly that file, and `doctor` records exactly
 it; with none, the probes that would execute it are `unavailable`
 (`backend_unavailable`) without running, `doctor` is not ready and a contained
-`run` refuses with 125 before exec.
+`run` refuses with 125 before exec. The backend must be bubblewrap
+ **0.10.0 or newer**: every contained run renders `--bind-fd`/`--ro-bind-fd`,
+ which 0.10.0 introduced. `doctor` reports an older backend as
+ `bwrap_present` unavailable with reason `bwrap_too_old` (naming the version
+ it reports and the floor), and a run with one refuses before exec with the
+ same comparison rather than exiting inside bubblewrap on an unknown option
+ behind an empty diagnostic.
 
 Conformance runs on the host as a dedicated operator account,
 `ouro-ci`: no sudo, no capability, lingering enabled (a per-user logind
@@ -687,7 +693,8 @@ ouro-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
   [--attempt-id ID]
   [--label-only] -- PROGRAM [ARG]...
 ouro-jail explain [policy selection and override flags] [--json]
-ouro-jail doctor [--profile NAME|FILE] [--launch NAME] [--json]
+ouro-jail doctor [--profile NAME|FILE] [--launch NAME]
+  [--workspace PATH] [--scratch PATH] [--json]
 ouro-jail gc [--dry-run] [--json]
 ouro-jail version [--json]
 ```
@@ -779,7 +786,10 @@ Apply configuration in this order:
 2. Operator launch profile, if any.
 3. Operator environment settings from a fixed documented allow-list:
    `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
-   `OURO_JAIL_EVIDENCE`. No environment-derived path or host grants.
+   `OURO_JAIL_EVIDENCE` and `OURO_JAIL_TRACE_CAP` (the local trace budget
+   in bytes, 4 KiB to 1 GiB; raising it can only preserve more evidence, and
+   a sink under it names the override in every loss it records). No
+   environment-derived path or host grants.
    Every `OURO_JAIL_TEST_*` variable is a test-only knob: it can only shrink
    a bound, end an attempt early, make the product take a path it takes on
    other hosts or under a real loss, or hold one named point for a bounded
@@ -905,7 +915,8 @@ command fragments and arbitrary environment entries are not policy keys.
 | Add a previously absent finite limit | Allow, and require its enforcement |
 | Change proxy network to none, or shrink its allowed host set | Allow |
 | Enable observation or change best-effort to strict | Allow |
-| Add a host/path grant, increase/remove a limit, weaken coverage/evidence | Refuse with the exact key path |
+| Add a host/path grant, remove a limit, weaken coverage/evidence, or raise a
+  ceiling in the untrusted project `ouro.toml` | Refuse with the exact key path |
 | Add credentials, a launch profile or `none` | Refuse |
 
 No v1 layer has an executable or backend key (the file keys above, §12), so no
@@ -1048,6 +1059,11 @@ signal-terminated child; 1 for a tool failure; 2 for invalid CLI/config syntax;
 125 for refusal before user exec. A post-launch tool error takes code 1 and
 preserves the separately observed child outcome in the receipt. Deadline or
 requested termination preserves the observed code/signal and records its cause.
+Under best-effort evidence a child that ran to its own natural exit keeps that
+exit code even when evidence was lost: the gap stays in `errors[]`, in the
+degraded coverage and on stderr, but a wrapper that trusts the exit code sees
+the child's status (strict still fails loudly, as does any non-evidence error
+or an end that was not the child's own exit).
 `outcome.cause` is the first stop reason the supervisor acted on; a later
 deadline, loss or signal is recorded (its limit's `hit`, `errors[]`) but does
 not replace it. A loss the platform processed after the target's own end is
@@ -1081,7 +1097,7 @@ Initial codes include `invalid_config`, `policy_widening`,
 `credential_unavailable`, `invalid_fd`, `gate_invalid`, `gate_closed`,
 `prepare_timeout`, `attempt_exists`, `exec_failed`,
 `exec_interpreter_missing` (§13.2), `evidence_lost`, `exec_unconfirmed`,
-`tree_unknown`, `state_write_failed`, and `internal_error` (a defect of the
+`tree_unknown`, `state_write_failed`, `stdio_failed`, and `internal_error` (a defect of the
 implementation, reported rather than papered over). An error's stage is one of
 the §8.1 states. Do not include raw credentials, raw argv or environment
 values in an error.
@@ -1287,13 +1303,13 @@ emulation is provided. The command runs in a new session; INT/TERM/HUP received
 by the supervisor request termination. Existing terminal fds are explicit I/O
 authority; the backend must prevent TIOCSTI-style terminal injection.
 
-Reject socket or directory stdio descriptors for contained runs, and reject
+Reject directory stdio descriptors for contained runs, and reject
 regular-file stdio that resolves into protected supervisor state, which is
 the whole runtime state root of §6.2, not only this attempt's directory, or
 into the trusted config directory (`config.toml`, launch profiles); a
 stdio descriptor that cannot be inspected refuses rather than being skipped.
 Pipes, tty devices and `/dev/null` pass through untouched. An ordinary file
-on any of the three streams is *relayed* (audit 2026-10-08 H1): the child
+or socket on any of the three streams is *relayed*: the child
 inherits a supervisor-owned pipe end, and the supervisor copies between the
 pipe and the operator's own descriptor, which keeps its open mode and
 offset. The child therefore never holds a reopenable handle on the file —
@@ -1306,6 +1322,18 @@ descriptor kinds without exposing paths. All other fds close
 before exec, including namespace, directory, BPF, proxy-authority, state,
 receipt, gate, control and trace fds. Any inside bridge gets only its declared
 data-plane socket, never supervisor control authority.
+
+Every relay is serviced on each supervision step. Interrupted operations
+are retried, and backpressure retains the staged bytes.
+Socket reads and writes are nonblocking per call, preserving the inherited
+descriptor's shared flags so a slow peer cannot block supervision. A permanent input
+read or output delivery failure is `stdio_failed` (stage `running`,
+remediation `configuration`, exit 1), recorded in `errors[]` while preserving
+the observed target outcome. It stops a target that is still running with
+cause `stdio_failure`; a failure observed after target end requests no stop
+and does not change the cause. A child closing stdin is an ordinary stream
+end. Undelivered output remaining at the drain deadline is a tool error,
+never silently discarded as successful delivery.
 
 Use a single owner of lifecycle transitions. Signal handlers wake the loop;
 they do not allocate, serialize JSON or perform cleanup. The implementation
@@ -1344,7 +1372,16 @@ refusal; security audit 2026-09-27, B7: `/run` is in the refused set by its
 path as well, so a host whose `/run` is not `tmpfs` refuses too). The
 decision is by the pinned source's filesystem type (`statfs`) and the
 mount topology, never by path spelling, so a symlink onto `/proc` refuses too;
-`--ro /` is refused earlier by the state-isolation rule (§§6.2, 7). The
+`--ro /` is refused earlier by the state-isolation rule (§§6.2, 7). The one
+narrow exception: an explicit read-write grant of an allowlisted NVIDIA
+device node (`/dev/nvidia[0-9]*`, `/dev/nvidiactl`, `/dev/nvidia-uvm`,
+`/dev/nvidia-uvm-tools`, `/dev/nvidia-modeset`, each verified to be a
+character device) binds that single node with `--dev-bind` so a contained
+profile can use a GPU; the child never sees devtmpfs, and any other `/dev`
+path — `/dev/kvm`, `/dev/fuse`, `/dev` itself — keeps the refusal. A
+read-only grant of such a node refuses: bubblewrap has no read-only device
+bind. `doctor` reports a `gpu_passthrough` capability row (available when the
+host has the NVIDIA nodes), informational for readiness. The
 launch directory `--launch` loads profiles from (`<config-dir>/launch`) and
 the config directory itself — whose `config.toml` is a trusted, widening
 layer read on every run (§6.2), so a planted file would rewrite the
@@ -1746,6 +1783,13 @@ For every CONNECT/plain-HTTP request:
 
 1. Parse one unambiguous destination and validate its host/port rule.
 2. Resolve on the host through the proxy's resolver, not inside the jail.
+   Lookups beyond the resolver's concurrency bound queue behind it, bounded
+   by the request deadline — an allowlisted host is never refused merely
+   because a client opened many connections at once — and successful answers
+   are cached per name for a short attempt-scoped interval, so a burst of
+   connections to one host costs one lookup. The rare capacity refusal is its
+   own `resolver_overloaded` reason and is counted separately from policy
+   denials in the receipt (`coverage.proxy.net.resolver_refused`).
 3. Reject destinations in the versioned forbidden-address table (private,
    loopback, link-local, unspecified, multicast, reserved, known translation
    and metadata/service prefixes) unless the operator supplied an explicit address
@@ -1881,17 +1925,20 @@ them whatever ABI created them (security audit 2026-09-27, B2).
 | `fs.rename` | `rename`, `renameat`, `renameat2` | The named rename call succeeded or failed |
 | `fs.unlink` | `unlink`, `unlinkat`, `rmdir` | The named removal call succeeded or failed |
 | `fs.create` | `mkdir`, `mkdirat`, `link`, `linkat`, `symlink`, `symlinkat`, `mknod`, `mknodat` | The named directory-entry creation succeeded or failed |
-| `fs.deny` | One call from this set, including `connect`, returned EACCES or EPERM | That covered call was denied; no inference about unobserved read denials |
+| `fs.deny` | One call from this set returned EACCES or EPERM, or a write-class call returned EROFS or EBUSY | That covered call was denied; no inference about unobserved read denials |
 | `net.connect` | `connect` entry/return | Connect returned the recorded result; EINPROGRESS is not a completed connection |
 
 This spells out native variants of the north star's operation families before
 schema freeze. An O_CREAT open emits one `fs.create`, otherwise a mutation open
 emits one `fs.write`; do not emit both for the same call. A covered EACCES/EPERM
 failure emits one `fs.deny` with `fields.attempted_operation`, not a duplicate
-success-shaped filesystem event. EROFS and other failures remain failed results
-for the original operation and do not inflate the specified denial count.
-For denied `connect`, `attempted_operation` is `net.connect`; count the single
-result under `fs.deny`, not `net`. This classification does not lose the event.
+success-shaped filesystem event. A write-class EROFS or EBUSY result — a
+mutation refused by a read-only grant — is equally a denial of that mutation
+and is counted and reported the same way, so a receipt whose trace shows
+refused writes never reports `fs.deny` as 0. Other failures remain failed
+results for the original operation. For a denied directly-traced `connect`,
+`attempted_operation` is `net.connect`; count the single result under
+`fs.deny`, not `net`. This classification does not lose the event.
 A failed open that requested no mutation is outside the set and produces no
 event: read denials are excluded, not merely uncounted, and a consumer must
 not read the absence of an `fs.deny` as the absence of a read denial.
@@ -1962,10 +2009,18 @@ is stopped and recorded by the observer's.
 ### 11.3 Paths, arguments and identities
 
 Relative pathname arguments are not blindly appended to a host cwd. Account
-for `dirfd`, cwd/root, namespaces and native path bytes. Emit a path relative
-to the workspace (`workspace_relative`) or to the attempt's scratch root
-(`scratch_relative`) only when its relationship to that root is established.
-Otherwise
+for `dirfd`, cwd/root, namespaces and native path bytes. A complete relative
+pathname that the kernel resolves against the caller's own working directory
+is resolved against that directory as observed at the syscall stop
+(`/proc/<tid>/cwd` of the stopped thread), so the common case — a shell or
+tool writing inside the workspace — is named like its absolute spelling; the
+argument snapshot stays the raw bytes and the stability re-read compares
+those. True `dirfd` resolutions keep their distinct `relative_to_dirfd`
+reason. Emit a path relative to the workspace (`workspace_relative`), to the
+attempt's scratch root (`scratch_relative`), or to a named root
+(`root_relative`: an operator grant by its in-jail spelling, or `system` for
+the read-only system roots such as `/usr` and `/etc`) only when its
+relationship to that root is established. Otherwise
 emit a digest or unavailable marker, with a reason. Record `path_basis` as
 `argument_snapshot` or a specifically proven kernel-resolved observation.
 The initial sensor does not claim an argument-memory snapshot is the exact
@@ -2015,8 +2070,16 @@ event coverage, ABI checks and strict gap behavior are unchanged.
 
 For `agent`, `connect` results come from the unix-peer mediator, not a ptrace
 stop (`fields.observation = seccomp_user_notification`), and count under the
-same classes below. A mediation-queue overflow is evidence loss for those
-classes, handled exactly as tracer loss: strict stops the attempt. The mediator
+same classes below. Whatever its verdict, a mediated connect is network
+evidence: a `net.connect` result carrying the address the child named — the
+AF_UNIX socket path in `fields.path`, the internet address and port in
+`fields.address` — and a direct internet connect that failed in the empty
+network namespace (ENETUNREACH, ECONNREFUSED) is marked
+`fields.egress = blocked`. A pathname that does not exist in the child's own
+view returns ENOENT as the kernel itself would; anything that cannot be
+resolved at all refuses closed with EACCES. A mediation-queue overflow is
+evidence loss for those classes, handled exactly as tracer loss: strict stops
+the attempt. The mediator
 records a syscall result only when the kernel accepts its notification reply.
 If the reply fails, no target return is established: emit no result, record a
 `mediation_response_undelivered` gap for both `net` and `fs.deny`, and apply
@@ -2032,7 +2095,7 @@ Each class has exactly the following source and operation assignment:
 |---|---|---|
 | exec | audit | proc.exec and proc.exit |
 | fs.write | audit | fs.create, fs.write, fs.rename, fs.unlink, including all directory-entry variants |
-| fs.deny | audit | EACCES/EPERM results from the closed set, including connect |
+| fs.deny | audit | EACCES/EPERM results from the closed set, and write-class EROFS/EBUSY refusals |
 | net | audit | net.connect results other than those classified as fs.deny |
 | proxy.net | proxy | Proxy net.connect results; never pooled with audit counts |
 | limits | wrapper | Number of distinct applied ceilings with a confirmed hit; no limit.hit event in v1 |
@@ -2222,8 +2285,15 @@ examples below do not establish managed readiness. The owner rejects a launch
 profile that needs broader authority than its effective company policy.
 
 Initial declarative fields are `name`, `jail`, `state_var`, `home_is_state`,
-`state_subdirs`, `environment`, `credentials.<id>.source`, `dest`, `mode`, and
-`network.allow`. `environment` accepts only named string values or managed-state
+`state_subdirs`, `environment`, `credentials.<id>.source`, `dest`, `mode`,
+`credentials.<id>.hosts`, `credentials.<id>.allow_plaintext`,
+`credentials.<id>.header` and `network.allow`. A `vault`-mode credential's
+`header` declares where its placeholder may appear: `header =
+{ name = "x-api-key" }`, or `header = { prefix = "Bearer " }` for the
+credential part of `Authorization: Bearer <placeholder>` (the default
+placement, absent `header`, is the complete `Authorization` value). The
+secret still never leaves for a host outside its `hosts`. `environment`
+accepts only named string values or managed-state
 path references, never commands. Reject every `LD_*` and `DYLD_*` name,
 backend-control names and variables carrying Ouroboros credentials.
 Any runtime-library need belongs in an explicit evaluated launch configuration,
@@ -2332,7 +2402,7 @@ contract validator refuse any byte change under a recorded SHA-256; they cannot
 refuse an edit of the recorded SHA-256 itself, which is visible in review and
 which this rule forbids.
 
-Superseded rule, kept for the historical record: [jail v2 §0](../jail-v2.md)
+Superseded rule, kept for the historical record: [jail v2 §0](jail-v2.md)
 changed it for the pre-release tree. Because this is not live software, a
 frozen schema or artifact may be re-blessed in place under the same
 identifier: its recorded SHA-256 is regenerated together with its fixtures and

@@ -468,11 +468,7 @@ pub fn handler_ucontext(
     // the interrupted `svc` nor the instruction after it, which only the
     // kernel's handler-entry notification can produce.
     Ok(
-        if regs.x[0] == delivered
-            && regs.sp & 15 == 0
-            && regs.pc != site_ip
-            && regs.pc != next_ip
-        {
+        if regs.x[0] == delivered && regs.sp & 15 == 0 && regs.pc != site_ip && regs.pc != next_ip {
             regs.sp.checked_add(128)
         } else {
             None

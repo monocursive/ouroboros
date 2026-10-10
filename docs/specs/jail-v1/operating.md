@@ -41,7 +41,13 @@ install -m 0755 target/release/ouro-jail ~/.local/bin/ouro-jail   # any director
 ```
 
 Install bubblewrap from your distribution (the reference host has 0.11.1 at
-`/usr/bin/bwrap`). `ouro-jail` uses the bubblewrap your `PATH` provides,
+`/usr/bin/bwrap`). **bubblewrap 0.10.0 or newer is required**: every
+contained run renders the `--bind-fd`/`--ro-bind-fd` options 0.10.0
+introduced, so an older backend (Ubuntu 22.04 ships 0.6.1, Ubuntu 24.04
+ships 0.9.0) makes `doctor` report `bwrap_present` unavailable with reason
+`bwrap_too_old` and every run refuse before exec with the version
+comparison. Build 0.11.1 from source when the distribution is older.
+`ouro-jail` uses the bubblewrap your `PATH` provides,
 resolved once per process: the first **absolute** `PATH` entry holding an
 executable file named `bwrap`, canonicalized. Empty and relative entries
 (`::`, `.`, `bin`) are never searched, and an unset `PATH` provides no backend;
@@ -177,7 +183,7 @@ The codes: `invalid_config`, `policy_widening`, `unsafe_state_path`,
 `observer_unavailable`, `nesting_failed`, `credential_unavailable`,
 `invalid_fd`, `gate_invalid`, `gate_closed`, `prepare_timeout`,
 `attempt_exists`, `exec_failed`, `exec_interpreter_missing`, `evidence_lost`,
-`exec_unconfirmed`, `tree_unknown`, `state_write_failed` and `internal_error`.
+`exec_unconfirmed`, `tree_unknown`, `state_write_failed`, `stdio_failed` and `internal_error`.
 Two need explaining:
 
 - **`exec_interpreter_missing`**: the program exists but its `#!` interpreter
@@ -189,6 +195,13 @@ Two need explaining:
   is `unknown` and the jail exits 1. On the reference host `/usr/bin/true`
   under `tool` or `agent` always ends this way. The command did run if its own
   output says so; `--observe on` confirms the exec.
+
+Regular-file and socket stdio use supervisor-owned relays. Socket I/O is
+nonblocking per call and preserves the inherited descriptor's flags.
+A read or delivery failure
+is `stdio_failed` (exit 1), recorded alongside the target's own outcome. It
+stops a target that is still running; buffered output is never silently
+discarded as a successful delivery.
 
 ## Profiles
 

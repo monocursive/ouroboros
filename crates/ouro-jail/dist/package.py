@@ -15,7 +15,12 @@ TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu',
 
 # A semantic release version: the archive name and the installer's downgrade
 # check both key on it.
-VERSION = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?')
+NUMBER = r'(?:0|[1-9][0-9]*)'
+PRERELEASE_ID = r'(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+VERSION = re.compile(
+    rf'{NUMBER}\.{NUMBER}\.{NUMBER}'
+    rf'(?:-{PRERELEASE_ID}(?:\.{PRERELEASE_ID})*)?'
+    r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?')
 
 
 def create_archive(binary, target, out, version):

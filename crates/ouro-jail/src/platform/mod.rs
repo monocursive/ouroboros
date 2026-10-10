@@ -205,6 +205,8 @@ pub enum StopReason {
     WallExpiry,
     /// Evidence was lost under strict mode.
     EvidenceLoss,
+    /// A supervisor-owned stdio relay failed.
+    StdioFailure,
     /// The target exited and descendants remain.
     TargetExit,
 }
@@ -216,6 +218,12 @@ pub enum RunEvent {
     CommandForbidden { pattern: String },
     /// A bounded polling step completed; recheck signals and transport health.
     Poll,
+    /// A supervisor-owned stdio relay could not deliver the stream.
+    StdioFailed {
+        reason: String,
+        /// Whether the target's end was already observed when delivery failed.
+        after_target_end: bool,
+    },
     /// The target `exec` transition was confirmed; the enforced receipt and
     /// the `exec_confirmed` control message follow from it.
     ExecConfirmed,

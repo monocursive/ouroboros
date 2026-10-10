@@ -909,11 +909,11 @@ fn j4_r03_a_consumer_that_resumes_after_its_deadline_reads_the_gap_note() {
 fn j4_r03_the_trace_cap_seam_can_only_shrink() {
     use ouro_jail::trace::{LOCAL_CAP, LOCAL_RESERVE, TRACE_CAP_SEAM, local_bounds};
     assert_eq!(TRACE_CAP_SEAM, "OURO_JAIL_TEST_TRACE_CAP");
-    assert_eq!(local_bounds(None), (LOCAL_CAP, LOCAL_RESERVE));
-    assert_eq!(local_bounds(Some("65536")), (65536, 32768));
-    assert_eq!(local_bounds(Some("4096")), (4096, 2048));
+    assert_eq!(local_bounds(None, None), (LOCAL_CAP, LOCAL_RESERVE));
+    assert_eq!(local_bounds(None, Some("65536")), (65536, 32768));
+    assert_eq!(local_bounds(None, Some("4096")), (4096, 2048));
     assert_eq!(
-        local_bounds(Some(&LOCAL_CAP.to_string())),
+        local_bounds(None, Some(&LOCAL_CAP.to_string())),
         (LOCAL_CAP, LOCAL_RESERVE)
     );
     // Only plain decimal digits: a sign or a leading zero is not the
@@ -930,18 +930,51 @@ fn j4_r03_the_trace_cap_seam_can_only_shrink() {
         &(LOCAL_CAP + 1).to_string(),
     ] {
         assert_eq!(
-            local_bounds(Some(ignored)),
+            local_bounds(None, Some(ignored)),
             (LOCAL_CAP, LOCAL_RESERVE),
             "{ignored:?} must not change the bounds"
         );
     }
 }
 
+/// Issue draft 03: `OURO_JAIL_TRACE_CAP` sets the operator's budget; the
+/// seam still only shrinks, now within that budget.
+#[test]
+fn the_operator_trace_cap_sets_the_budget() {
+    use ouro_jail::trace::{
+        LOCAL_CAP, LOCAL_RESERVE, TRACE_CAP_ENV, TRACE_CAP_MAX, env_cap, local_bounds,
+    };
+    assert_eq!(TRACE_CAP_ENV, "OURO_JAIL_TRACE_CAP");
+    assert_eq!(env_cap(Some("268435456")), 256 * 1024 * 1024);
+    assert_eq!(local_bounds(Some("268435456"), None).0, 256 * 1024 * 1024);
+    // Out of range or malformed values change nothing here; env_settings
+    // refuses them before a run starts.
+    for ignored in [
+        "",
+        "abc",
+        "-1",
+        "0",
+        "4095",
+        &(TRACE_CAP_MAX + 1).to_string(),
+    ] {
+        assert_eq!(
+            local_bounds(Some(ignored), None),
+            (LOCAL_CAP, LOCAL_RESERVE)
+        );
+    }
+    // The seam shrinks within the operator's budget, never above it.
+    assert_eq!(
+        local_bounds(Some("8192"), Some("4096")),
+        (4096, LOCAL_RESERVE.min(4096 / 2))
+    );
+    assert_eq!(local_bounds(Some("8192"), Some("65536")).0, 8192);
+}
+
 #[test]
 fn j4_r03_a_loss_under_the_cap_seam_names_the_seam() {
     use ouro_jail::trace::FileSink;
     let file = tempfile::NamedTempFile::new().expect("a temporary file");
-    let mut shrunk = FileSink::for_attempt(file.reopen().unwrap(), Some("4096"));
+    let mut shrunk = FileSink::for_attempt(file.reopen().unwrap(), None, Some("4096"));
     let error = (0..100)
         .find_map(|index| {
             shrunk
@@ -964,7 +997,7 @@ fn j4_r03_a_loss_under_the_cap_seam_names_the_seam() {
     );
 
     let plain = tempfile::NamedTempFile::new().expect("a temporary file");
-    let mut sink = FileSink::for_attempt(plain.reopen().unwrap(), None);
+    let mut sink = FileSink::for_attempt(plain.reopen().unwrap(), None, None);
     let error = sink
         .write_frame(
             &vec![b'x'; ouro_jail::trace::EVENT_MAX + 1],

@@ -109,11 +109,10 @@ pub fn kernel_exe(tid: pid_t, images: &[Vec<u8>]) -> Option<super::KernelImage> 
 /// root. `None` for a non-absolute spelling (the resolved form of the same
 /// file carries the evidence), a file that cannot be read through the
 /// root, or a first line that is not a shebang. The kernel's own buffer
-/// for this line is 256 bytes, which bounds the read: a longer line
-/// cannot have been executed.
+/// for this line is 256 bytes: the interpreter name must fit, while its
+/// optional argument may be truncated by the kernel.
 #[must_use]
 pub fn shebang_image(tid: pid_t, script: &[u8]) -> Option<super::ShebangImage> {
-    use std::io::Read as _;
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
     if script.first() != Some(&b'/') {
@@ -121,37 +120,8 @@ pub fn shebang_image(tid: pid_t, script: &[u8]) -> Option<super::ShebangImage> {
     }
     let mut path = format!("/proc/{tid}/root").into_bytes();
     path.extend_from_slice(script);
-    let mut file = std::fs::File::open(std::ffi::OsStr::from_bytes(&path)).ok()?;
-    let mut buf = [0u8; 256];
-    let read = file.read(&mut buf).ok()?;
-    let line = buf[..read].split(|byte| *byte == b'\n').next().unwrap_or(&buf[..read]);
-    let rest = line.strip_prefix(b"#!")?;
-    // The kernel skips leading blanks and takes at most one argument.
-    let rest = {
-        let start = rest.iter().position(|byte| *byte != b' ').unwrap_or(rest.len());
-        &rest[start..]
-    };
-    let end = rest
-        .iter()
-        .position(|byte| *byte == b' ')
-        .unwrap_or(rest.len());
-    let interpreter = rest[..end].to_vec();
-    if interpreter.is_empty() {
-        return None;
-    }
-    let argument = rest
-        .get(end + 1..)
-        .map(|tail| {
-            let tail = {
-                let stop = tail
-                    .iter()
-                    .rposition(|byte| *byte != b' ')
-                    .map_or(0, |at| at + 1);
-                &tail[..stop]
-            };
-            (!tail.is_empty()).then(|| tail.to_vec())
-        })
-        .flatten();
+    let head = image_header(std::ffi::OsStr::from_bytes(&path))?;
+    let (interpreter, argument) = parse_shebang(&head)?;
     let identity = (interpreter.first() == Some(&b'/'))
         .then(|| {
             let mut interpreter_path = format!("/proc/{tid}/root").into_bytes();
@@ -166,6 +136,61 @@ pub fn shebang_image(tid: pid_t, script: &[u8]) -> Option<super::ShebangImage> {
         argument,
         identity,
     })
+}
+
+/// Pin and inspect the inode before opening it for data. A candidate may
+/// have been replaced since exec: opening a FIFO for read would otherwise
+/// block the tracer indefinitely. Reopening the pinned regular inode also
+/// closes the type-check/path-replacement race.
+fn image_header(path: &std::ffi::OsStr) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let pinned = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    if !pinned.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
+        .ok()?;
+    let mut head = [0u8; 256];
+    let read = file.read(&mut head).ok()?;
+    Some(head[..read].to_vec())
+}
+
+/// Linux binfmt_script treats spaces and tabs as blanks and passes the
+/// entire remaining (trimmed) argument as one argv element.
+fn parse_shebang(head: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    fn blank(byte: &u8) -> bool {
+        matches!(*byte, b' ' | b'\t')
+    }
+    let rest = head.strip_prefix(b"#!")?;
+    let end = rest.iter().position(|byte| matches!(*byte, b'\n' | 0));
+    // Without a newline/NUL, a full kernel buffer must at least contain
+    // the end of the interpreter name; a truncated name is not executable.
+    if head.len() == 256 && end.is_none() {
+        let start = rest.iter().position(|byte| !blank(byte))?;
+        rest[start..].iter().position(blank)?;
+    }
+    // The kernel reserves the last byte of a full buffer for its terminator.
+    let rest = &rest[..end.unwrap_or(rest.len().min(253))];
+    let start = rest.iter().position(|byte| !blank(byte))?;
+    let stop = rest.iter().rposition(|byte| !blank(byte))? + 1;
+    let rest = &rest[start..stop];
+    let split = rest.iter().position(blank).unwrap_or(rest.len());
+    let interpreter = rest[..split].to_vec();
+    let tail = &rest[split..];
+    let argument = tail
+        .iter()
+        .position(|byte| !blank(byte))
+        .map(|start| tail[start..].to_vec());
+    Some((interpreter, argument))
 }
 
 /// One `/proc/sys/fs/binfmt_misc` registration, parsed.
@@ -236,7 +261,7 @@ fn parse_binfmt_registration(text: &str) -> Option<BinfmtRegistration> {
 /// Hex to bytes; `None` on odd length or non-hex input.
 fn hex_bytes(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();
-    if bytes.len() % 2 != 0 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !bytes.len().is_multiple_of(2) || !text.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     (0..bytes.len() / 2)
@@ -291,15 +316,10 @@ pub fn binfmt_image(tid: pid_t, candidate: &[u8]) -> Option<super::ShebangImage>
     }
     let name = candidate.rsplit(|b| *b == b'/').next().unwrap_or(candidate);
     let head = {
-        use std::io::Read as _;
         use std::os::unix::ffi::OsStrExt as _;
         let mut path = format!("/proc/{tid}/root").into_bytes();
         path.extend_from_slice(candidate);
-        let mut head = [0u8; 256];
-        std::fs::File::open(std::ffi::OsStr::from_bytes(&path))
-            .and_then(|mut file| file.read(&mut head))
-            .ok()
-            .map(|read| head[..read].to_vec())
+        image_header(std::ffi::OsStr::from_bytes(&path))
     };
     for registration in parsed {
         if !binfmt_matches(&registration, name, head.as_deref()) {
@@ -500,6 +520,45 @@ pub fn descendants(pid: pid_t) -> Vec<pid_t> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn script_headers_skip_fifos_and_pin_regular_files() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("script");
+        fs::write(&script, b"#!/bin/sh\n").unwrap();
+        assert_eq!(image_header(script.as_os_str()).unwrap(), b"#!/bin/sh\n");
+        fs::remove_file(&script).unwrap();
+        let name = std::ffi::CString::new(script.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path and no pointers retained by mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let before = std::time::Instant::now();
+        assert!(image_header(script.as_os_str()).is_none());
+        assert!(before.elapsed() < std::time::Duration::from_secs(1));
+        assert!(image_header(dir.path().as_os_str()).is_none());
+    }
+
+    #[test]
+    fn shebang_blanks_follow_kernel_argument_rules() {
+        for header in [
+            b"#!/bin/sh\n".as_slice(),
+            b"#!\t /bin/sh\t \n",
+            b"#!/bin/sh\t\n",
+        ] {
+            assert_eq!(parse_shebang(header), Some((b"/bin/sh".to_vec(), None)));
+        }
+        assert_eq!(
+            parse_shebang(b"#! \t/bin/sh \t -e -u\t \n"),
+            Some((b"/bin/sh".to_vec(), Some(b"-e -u".to_vec())))
+        );
+        assert_eq!(parse_shebang(b"#!\t \n"), None);
+        let mut truncated = b"#!/".to_vec();
+        truncated.resize(256, b'x');
+        assert_eq!(parse_shebang(&truncated), None);
+        let mut long_argument = b"#!/bin/sh ".to_vec();
+        long_argument.resize(256, b'x');
+        assert_eq!(parse_shebang(&long_argument).unwrap().1.unwrap().len(), 245);
+    }
+
     use super::*;
 
     #[test]

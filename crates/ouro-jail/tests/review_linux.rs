@@ -856,8 +856,8 @@ fn r3_stdio_kinds_are_validated() {
     );
     assert_eq!(
         out.status.code(),
-        Some(125),
-        "a socket as stdin should refuse; stderr={}",
+        Some(0),
+        "socket stdin is relayed through a pipe; stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -1099,8 +1099,14 @@ fn r3_a_shebang_target_confirms_and_runs_under_strict_evidence() {
         Some(&serde_json::Value::Bool(true)),
         "the interpreter rewrite must still confirm the target exec"
     );
-    assert_eq!(receipt.pointer("/outcome/kind"), Some(&serde_json::json!("exited")));
-    assert_eq!(receipt.pointer("/outcome/code"), Some(&serde_json::json!(0)));
+    assert_eq!(
+        receipt.pointer("/outcome/kind"),
+        Some(&serde_json::json!("exited"))
+    );
+    assert_eq!(
+        receipt.pointer("/outcome/code"),
+        Some(&serde_json::json!(0))
+    );
     let mismatches = audit_events(&run)
         .into_iter()
         .filter(|event| {
@@ -1112,6 +1118,106 @@ fn r3_a_shebang_target_confirms_and_runs_under_strict_evidence() {
         })
         .count();
     assert_eq!(mismatches, 0, "a #! target is not an image mismatch");
+}
+
+#[test]
+fn r3_tabbed_shebangs_confirm_under_strict_evidence() {
+    if !live() {
+        return;
+    }
+    for header in ["#!\t/bin/sh", "#!/bin/sh\t", "#!/bin/sh\t-e\t "] {
+        let case = case();
+        let script = case.workspace.join("tabbed.sh");
+        std::fs::write(
+            &script,
+            format!("{header}\nexec {} exit 0\n", case.fixture.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = case.jail.target([script.to_str().unwrap()]).run().unwrap();
+        assert_eq!(run.code(), Some(0), "{header:?}: {}", run.stderr_text());
+        assert_eq!(settled(&run)["exec_observed"], true);
+    }
+}
+
+#[test]
+fn r3_script_replaced_by_fifo_does_not_block_the_next_exec() {
+    if !live() {
+        return;
+    }
+    let case = case();
+    let script = case.workspace.join("fifo.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nmv \"$0\" \"$0.real\"; mkfifo \"$0\"; exec /bin/true\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = case
+        .jail
+        .timeout(std::time::Duration::from_secs(10))
+        .target([script.to_str().unwrap()])
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+    assert_eq!(settled(&run)["exec_observed"], true);
+}
+
+#[test]
+fn r3_failed_regular_file_output_is_a_tool_error() {
+    if !live() {
+        return;
+    }
+    let jail = Jail::new().unwrap();
+    let (workspace, _) = workspace_with_fixture(jail.root());
+    let sink = jail.root().join("read-only-stdout");
+    let receipt_path = jail.root().join("receipt.json");
+    std::fs::write(&sink, b"original").unwrap();
+    let mut child = Command::new(harness::jail_path())
+        .args(["run", "--profile", "tool", "--workspace"])
+        .arg(&workspace)
+        .arg("--receipt")
+        .arg(&receipt_path)
+        .args(["--", "/bin/sh", "-c", "printf lost-output; sleep 30"])
+        .env("OURO_DATA_DIR", jail.data_dir())
+        .env("OURO_CONFIG_DIR", jail.config_dir())
+        .stdout(std::process::Stdio::from(
+            std::fs::File::open(&sink).unwrap(),
+        ))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("a failed relay must stop the live target within its stop budget");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stdio_failed"));
+    assert_eq!(std::fs::read(&sink).unwrap(), b"original");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+    common::check_receipt(&receipt).unwrap();
+    assert!(
+        receipt["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "stdio_failed"),
+        "the relay failure must be persisted in the receipt"
+    );
 }
 
 // ===========================================================================
@@ -1569,8 +1675,9 @@ fn r5_malformed_gate_frames_refuse_without_running_the_target() {
 // 6. Audit mapping
 // ===========================================================================
 
-/// §11.2: EROFS stays the original operation; EACCES becomes one fs.deny;
-/// write/mmap produce nothing; workspace paths are workspace-relative.
+/// §11.2: EROFS write-class and EACCES results are denials naming the
+/// attempted operation (issue draft 09); write/mmap produce nothing;
+/// workspace paths are workspace-relative.
 #[test]
 fn r6_audit_mapping_matches_the_spec_table() {
     if !live() {
@@ -1645,7 +1752,8 @@ fn r6_audit_mapping_matches_the_spec_table() {
         .collect();
     eprintln!("operations: {ops_seen:?}");
 
-    // The EROFS open stays fs.write/fs.create, never fs.deny.
+    // The EROFS write on the read-only grant is a denied mutation, exactly
+    // like EACCES (issue draft 09): fs.deny naming the attempted operation.
     let all = audit_events(&run);
     let rofs: Vec<&&Value> = all
         .iter()
@@ -1653,25 +1761,39 @@ fn r6_audit_mapping_matches_the_spec_table() {
         .collect();
     assert!(!rofs.is_empty(), "no EROFS result was recorded at all");
     for event in &rofs {
-        assert_ne!(
+        assert_eq!(
             event.get("operation").and_then(Value::as_str),
             Some("fs.deny"),
-            "an EROFS result was classified as a denial: {event}"
+            "an EROFS mutation must count as a denial: {event}"
+        );
+        assert_eq!(
+            event
+                .pointer("/fields/attempted_operation")
+                .and_then(Value::as_str),
+            Some("fs.write"),
+            "{event}"
         );
     }
 
-    // The EACCES open is exactly one fs.deny naming the attempted operation.
+    // The EACCES open and the EROFS write are each exactly one fs.deny
+    // naming the attempted operation.
     let denies: Vec<&&Value> = all
         .iter()
         .filter(|e| e.get("operation").and_then(Value::as_str) == Some("fs.deny"))
         .collect();
     eprintln!("denials: {}", denies.len());
-    assert_eq!(denies.len(), 1, "expected exactly one fs.deny: {denies:?}");
-    assert!(
-        denies[0].pointer("/fields/attempted_operation").is_some(),
-        "the denial does not name the operation it would have been: {}",
-        denies[0]
+    assert_eq!(
+        denies.len(),
+        2,
+        "expected one EACCES and one EROFS denial: {denies:?}"
     );
+    for denial in &denies {
+        assert!(
+            denial.pointer("/fields/attempted_operation").is_some(),
+            "the denial does not name the operation it would have been: {}",
+            denial
+        );
+    }
 
     // No event asserts a `write` or an `mmap`.
     for event in audit_events(&run) {
@@ -1702,6 +1824,7 @@ fn r6_audit_mapping_matches_the_spec_table() {
             "a raw host path leaked into an event: {event}"
         );
     }
+    common::assert_run_records(&run);
 }
 
 /// O05: `--observe off` marks all audit classes unsupported with null counts.
@@ -2277,9 +2400,7 @@ fn r1_a_placeholder_the_run_filled_is_kept_not_removed() {
         // A bare eprintln is captured by libtest and never reaches the
         // driver's skip scan, so an unmet precondition would look like a
         // pass. Decide the way [`common::live`] does.
-        ouro_fixture::harness::skip_or_fail(
-            "the placeholder could not be filled from outside",
-        );
+        ouro_fixture::harness::skip_or_fail("the placeholder could not be filled from outside");
     }
 }
 
@@ -2472,16 +2593,17 @@ fn r6_path_reporting_by_class() {
         .iter()
         .map(|e| e.pointer("/fields/path").cloned().unwrap_or(Value::Null))
         .collect();
-    let digest = crate_digest(b"/etc/ld.so.cache");
     assert_eq!(
         paths,
         vec![
             serde_json::json!({"kind": "workspace_relative", "value": "abs.txt"}),
-            serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"}),
+            serde_json::json!({"kind": "workspace_relative", "value": "rel.txt"}),
             serde_json::json!({"kind": "scratch_relative", "value": "scr.txt"}),
-            serde_json::json!({"kind": "digest", "digest": digest, "reason": "outside_known_roots"}),
+            serde_json::json!({"kind": "root_relative", "root": "system", "value": "ld.so.cache"}),
         ],
-        "one result per open, each path in its class"
+        "one result per open, each path in its class: the relative open names \
+         its file (issue draft 12) and the /etc open names its system root \
+         (issue draft 10)"
     );
     for event in &opens {
         assert_eq!(
@@ -2490,11 +2612,6 @@ fn r6_path_reporting_by_class() {
             "{event}"
         );
     }
-}
-
-/// The digest §11.3 emits for a path outside every known root.
-fn crate_digest(bytes: &[u8]) -> String {
-    ouro_jail::canonical::sha256_prefixed(bytes)
 }
 
 /// §11.2/§11.4: a denied `connect` is counted once, under `fs.deny`.
@@ -2567,7 +2684,7 @@ fn r6_a_foreign_dirfd_is_not_resolved_against_a_cwd() {
         &ops,
         serde_json::to_vec(&serde_json::json!([
             ["open", "sub", "--expect", "ok"],
-            // A relative name against AT_FDCWD: the cwd is not observed.
+            // A relative name against AT_FDCWD uses the observed cwd.
             ["mkdir", "sub/made", "--via", "mkdirat"],
             // J4 N9: a relative name against a real directory descriptor,
             // which the fixture opens (read-only, so outside the set) and
@@ -2617,7 +2734,7 @@ fn r6_a_foreign_dirfd_is_not_resolved_against_a_cwd() {
     assert_eq!(mkdirs.len(), 2, "{mkdirs:?}");
     assert_eq!(
         mkdirs[0].pointer("/fields/path"),
-        Some(&serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"})),
+        Some(&serde_json::json!({"kind": "workspace_relative", "value": "sub/made"})),
         "{}",
         mkdirs[0]
     );

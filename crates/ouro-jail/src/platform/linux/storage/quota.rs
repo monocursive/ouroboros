@@ -42,24 +42,15 @@ pub(super) fn read(file: &File, uid: u32) -> io::Result<Quota> {
     if super::stat(file)?.f_type == libc::XFS_SUPER_MAGIC {
         // XFS realtime space has a separate quota, not Q_GETQUOTA's block
         // hard limit. Refuse that filesystem layout rather than overlook it.
-        // Audit 2026-10-08 L2: the geometry ioctl runs on the admission-time
-        // descriptor itself, like the quotactl_fd calls below — a per-sample
-        // reopen through `/proc/self/fd` would fail once the child could
-        // chmod its own writable mount root, and that failure is not an
-        // enforcement loss. O_PATH grants serve ioctls that need only the
-        // pinned inode.
+        // Storage retains an ioctl-capable descriptor opened at admission.
+        // O_PATH descriptors cannot serve ioctl, and a per-sample reopen
+        // would fail once the child chmods its own writable mount root.
         // xfs_fsop_geom: 256 bytes, rtblocks at byte 40. Aligned storage
         // avoids binding unused fields to a particular kernel revision.
         let mut geometry = [0u64; 32];
         const XFS_IOC_FSGEOMETRY: libc::c_ulong = 0x8100_587e;
         // SAFETY: a live descriptor and the full initialized ioctl output ABI.
-        if unsafe {
-            libc::ioctl(
-                file.as_raw_fd(),
-                XFS_IOC_FSGEOMETRY,
-                geometry.as_mut_ptr(),
-            )
-        } != 0
+        if unsafe { libc::ioctl(file.as_raw_fd(), XFS_IOC_FSGEOMETRY, geometry.as_mut_ptr()) } != 0
         {
             return Err(io::Error::last_os_error());
         }

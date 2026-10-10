@@ -184,6 +184,53 @@ pub fn classify(sockaddr: &[u8]) -> PeerAddr {
     }
 }
 
+/// What the mediator read out of the address, for the audit event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Peer {
+    /// A pathname socket's path bytes.
+    UnixPath(Vec<u8>),
+    /// An abstract socket's name bytes.
+    Abstract(Vec<u8>),
+    /// An internet address the child named (issue drafts 13/14).
+    Internet {
+        port: u16,
+        address: std::net::IpAddr,
+    },
+}
+
+/// The address fact of a `sockaddr` copied from the child's memory: the
+/// AF_UNIX path, the abstract name, or the parsed internet address.
+#[must_use]
+pub fn peer_of(sockaddr: &[u8]) -> Option<Peer> {
+    match classify(sockaddr) {
+        PeerAddr::Pathname(path) => Some(Peer::UnixPath(path)),
+        PeerAddr::Abstract(name) => Some(Peer::Abstract(name)),
+        PeerAddr::Unnamed | PeerAddr::NonUnix(_) => {
+            if sockaddr.len() < 4 {
+                return None;
+            }
+            let family = u16::from_ne_bytes([sockaddr[0], sockaddr[1]]);
+            let port = u16::from_be_bytes([sockaddr[2], sockaddr[3]]);
+            let address = if u32::from(family) == libc::AF_INET as u32 {
+                if sockaddr.len() < 8 {
+                    return None;
+                }
+                std::net::IpAddr::from([sockaddr[4], sockaddr[5], sockaddr[6], sockaddr[7]])
+            } else if u32::from(family) == libc::AF_INET6 as u32 {
+                if sockaddr.len() < 24 {
+                    return None;
+                }
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&sockaddr[8..24]);
+                std::net::IpAddr::from(bytes)
+            } else {
+                return None;
+            };
+            Some(Peer::Internet { port, address })
+        }
+    }
+}
+
 /// The child's root, which is the root for both absolute and relative lookups.
 /// A relative lookup first adds a verified cwd prefix beneath this root.
 #[must_use]
@@ -234,6 +281,9 @@ pub struct MediationRecord {
     pub family: Option<u16>,
     /// Whether the whole `sockaddr` the child passed was read.
     pub address_complete: bool,
+    /// The address fact read from the `sockaddr` (issue drafts 13/14): the
+    /// AF_UNIX path, the abstract name, or the internet address.
+    pub peer: Option<Peer>,
     // J3-agent end
     /// A short, safe reason code (never a path or payload).
     pub reason: &'static str,

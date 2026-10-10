@@ -20,7 +20,7 @@ use jsonschema::{Registry, Resource, Validator};
 use ouro_jail::network::Rules;
 use ouro_jail::observer::CoverageClass;
 use ouro_jail::proxy::{
-    self, Budgets, EndReason, FixtureAnswer, FixtureResolver, ProxyConfig, ProxyDecision,
+    self, Budgets, EndReason, FixtureAnswer, FixtureResolver, Lookup, ProxyConfig, ProxyDecision,
     ProxyHandle, ProxyResult, ProxySink, ProxySummary, Reason, RequestKind, ResolveError, Resolver,
     SystemResolver,
 };
@@ -815,21 +815,17 @@ fn n03_plaintext_http_requires_a_grant_that_named_its_port() {
     harness.stop(WAIT);
     // An explicit non-80 grant serves a plaintext origin on that port: the
     // omitted-port expansion is the only shape the rule refuses.
-    let harness = start(
-        &allow(&[&format!("127.0.0.1:{closed_port}")]),
-        &resolver,
-    );
+    let harness = start(&allow(&[&format!("127.0.0.1:{closed_port}")]), &resolver);
     let (status, reason) = refused(
         &harness,
-        &format!("GET http://127.0.0.1:{closed_port}/ HTTP/1.1\r\nHost: 127.0.0.1:{closed_port}\r\n\r\n"),
+        &format!(
+            "GET http://127.0.0.1:{closed_port}/ HTTP/1.1\r\nHost: 127.0.0.1:{closed_port}\r\n\r\n"
+        ),
     );
     assert_eq!((status, reason.as_str()), (502, "connect_failed"));
     harness.stop(WAIT);
     // CONNECT to a non-80 port is unaffected by the rule.
-    let harness = start(
-        &allow(&[&format!("127.0.0.1:{closed_port}")]),
-        &resolver,
-    );
+    let harness = start(&allow(&[&format!("127.0.0.1:{closed_port}")]), &resolver);
     let (status, reason) = refused(
         &harness,
         &connect_request(&format!("127.0.0.1:{closed_port}")),
@@ -1496,19 +1492,47 @@ fn n04_system_resolver_looks_up_the_absolute_name_and_keeps_its_deadline() {
     assert_eq!(proxy::absolute_name("a.test"), "a.test.");
     // The abandoned lookup still counts against the cap until it ends ...
     assert_eq!(resolver.in_flight(), 1);
-    assert_eq!(
-        resolver.resolve("other.test", Instant::now() + WAIT),
-        Err(ResolveError::Overloaded)
-    );
-    // ... and releases its slot when it does.
-    held.release();
-    wait_until("the late lookup ends", || resolver.in_flight() == 0);
+    // ... and a second lookup now WAITS for the slot (issue draft 04:
+    // queueing bounded by the deadline) instead of being refused ...
+    let waiter = {
+        let resolver = Arc::clone(&resolver);
+        thread::spawn(move || {
+            resolver.resolve("other.test", Instant::now() + Duration::from_secs(30))
+        })
+    };
+    thread::sleep(Duration::from_millis(200));
     assert!(
-        resolver
-            .resolve("other.test", Instant::now() + WAIT)
-            .is_ok()
+        !waiter.is_finished(),
+        "the second lookup is queued behind the held slot"
     );
+    // ... and proceeds once the held lookup releases its slot.
+    held.release();
+    assert!(waiter.join().unwrap().is_ok(), "the queued lookup resolves");
     wait_until("the second lookup ends", || resolver.in_flight() == 0);
+}
+
+/// Issue draft 04: one successful answer set serves a burst of lookups for
+/// the same name; the lookup itself runs once.
+#[test]
+fn n04_system_resolver_caches_answers_per_name() {
+    let counted = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&counted);
+    let lookup: Arc<Lookup> = Arc::new(move |name: &str| {
+        seen.lock().unwrap().push(name.to_owned());
+        Ok(vec!["127.0.0.1".parse().unwrap()])
+    });
+    let resolver = SystemResolver::with_lookup(2, lookup);
+    for _ in 0..8 {
+        let answers = resolver
+            .resolve("burst.test", Instant::now() + WAIT)
+            .expect("resolves");
+        assert_eq!(answers, vec!["127.0.0.1".parse::<IpAddr>().unwrap()]);
+    }
+    assert_eq!(
+        *counted.lock().unwrap(),
+        vec!["burst.test.".to_owned()],
+        "eight lookups for one name cost one getaddrinfo"
+    );
 }
 
 #[test]

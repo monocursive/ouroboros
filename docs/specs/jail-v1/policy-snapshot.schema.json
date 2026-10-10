@@ -750,6 +750,24 @@
                       },
                       "allow_plaintext": {
                         "type": "boolean"
+                      },
+                      "header": {
+                        "type": "object",
+                        "description": "Where the placeholder may appear: the header name and the prefix (such as 'Bearer ') that must precede it. Absent means only the complete Authorization value is eligible.",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "pattern": "^[!#$%&'*+\\-.^_`|~0-9A-Za-z]{1,64}$"
+                          },
+                          "prefix": {
+                            "type": "string",
+                            "pattern": "^[ -~]{1,64}$"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [

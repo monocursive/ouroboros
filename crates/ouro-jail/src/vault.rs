@@ -4,12 +4,32 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub allow_plaintext: bool,
+    /// Where the placeholder may appear: a named header with an optional
+    /// prefix before the placeholder, such as `authorization` with
+    /// `Bearer `. Without one, only the complete `Authorization` value
+    /// is eligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Header>,
+}
+
+/// A declared placement for a vault placeholder: the header name and the
+/// credential prefix (`Bearer `) that must precede it. The secret never
+/// leaves for a host outside `Policy::hosts`.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Header {
+    /// The header the credential belongs in, case-insensitive.
+    pub name: String,
+    /// Text that must precede the placeholder in the value, without the
+    /// secret itself (for example `Bearer `).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 impl Policy {
     pub fn validate(&self) -> Result<(), String> {
@@ -22,12 +42,39 @@ impl Policy {
                 return Err("plaintext vault origins require allow_plaintext = true".into());
             }
         }
+        if let Some(header) = &self.header {
+            header.validate()?;
+        }
         Ok(())
     }
     fn permits(&self, scheme: &str, destination: &Destination) -> bool {
         self.hosts
             .iter()
             .any(|h| origin(h).is_ok_and(|(s, d)| s == scheme && d == *destination))
+    }
+}
+impl Header {
+    /// An RFC 9110 token name and a printable, line-ending-free prefix.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.is_empty()
+            || self.name.len() > 64
+            || !self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        {
+            return Err("vault header name must be 1..64 ASCII token characters".into());
+        }
+        if let Some(prefix) = &self.prefix
+            && (prefix.is_empty()
+                || prefix.len() > 64
+                || !prefix.bytes().all(|b| (0x20..=0x7e).contains(&b)))
+        {
+            return Err(
+                "vault header prefix must be 1..64 printable ASCII without line endings".into(),
+            );
+        }
+        Ok(())
     }
 }
 fn origin(value: &str) -> Result<(&str, Destination), String> {
@@ -133,8 +180,12 @@ impl Vault {
     fn placeholder(&self, secret: &Secret) -> String {
         format!("vault:{}:{}", self.attempt, secret.id)
     }
-    /// Only the complete Authorization value is eligible. Other placements of
-    /// the marker are refused, never rewritten and never logged.
+    /// A placeholder is eligible exactly where its secret declares: the
+    /// header name matches (case-insensitively) and the value is the
+    /// declared prefix followed by the placeholder and nothing else. The
+    /// default declaration is the complete `Authorization` value. Other
+    /// placements of the marker are refused, never rewritten and never
+    /// logged.
     pub fn inject(
         &self,
         scheme: &str,
@@ -151,19 +202,49 @@ impl Vault {
                 .iter()
                 .position(|b| *b == b':')
                 .ok_or(Reason::OriginUnverified)?;
-            if !line[..colon].eq_ignore_ascii_case(b"authorization") {
-                return Err(Reason::OriginUnverified);
-            }
+            let name = &line[..colon];
             let value = line[colon + 1..].trim_ascii();
-            let secret = self
-                .secrets
-                .iter()
-                .find(|s| self.placeholder(s).as_bytes() == value)
-                .ok_or(Reason::OriginUnverified)?;
+            let mut matched: Option<(&std::sync::Arc<Secret>, Vec<u8>)> = None;
+            for secret in &self.secrets {
+                let header = secret.policy.header.as_ref();
+                let expected_name =
+                    header.map_or(b"authorization".as_slice(), |h| h.name.as_bytes());
+                if !name.eq_ignore_ascii_case(expected_name) {
+                    continue;
+                }
+                let prefix = header
+                    .and_then(|header| header.prefix.as_deref())
+                    .unwrap_or("");
+                let mut expected = Vec::with_capacity(prefix.len() + 64);
+                expected.extend_from_slice(prefix.as_bytes());
+                expected.extend_from_slice(self.placeholder(secret).as_bytes());
+                if value == expected.as_slice() {
+                    // The emitted name is the operator's spelling; the
+                    // default keeps today's canonical `Authorization`.
+                    let emitted = match header {
+                        Some(header) => header.name.as_bytes().to_vec(),
+                        None => b"Authorization".to_vec(),
+                    };
+                    matched = Some((secret, emitted));
+                    break;
+                }
+            }
+            let Some((secret, emitted_name)) = matched else {
+                return Err(Reason::OriginUnverified);
+            };
             if !secret.policy.permits(scheme, &request.destination) {
                 return Err(Reason::OriginMismatch);
             }
-            out.extend_from_slice(b"Authorization: ");
+            out.extend_from_slice(&emitted_name);
+            out.extend_from_slice(b": ");
+            if let Some(prefix) = secret
+                .policy
+                .header
+                .as_ref()
+                .and_then(|header| header.prefix.as_deref())
+            {
+                out.extend_from_slice(prefix.as_bytes());
+            }
             out.extend_from_slice(&secret.value);
             out.extend_from_slice(b"\r\n");
         }
@@ -310,6 +391,7 @@ mod tests {
                     }
                 )],
                 allow_plaintext: false,
+                header: None,
             },
             b"Bearer fixture-secret".to_vec(),
         )
@@ -390,7 +472,8 @@ mod tests {
     }
     #[test]
     fn tls_vault_substitutes_only_after_both_authorities_and_the_certificate_pass() {
-        let (event, upstream, response) = run_tls(true, true, true, authorized_get(true), b"", true);
+        let (event, upstream, response) =
+            run_tls(true, true, true, authorized_get(true), b"", true);
         assert_eq!(event.reason, Reason::Relayed);
         assert_eq!(event.origin_verification.as_deref(), Some("mitm_http_host"));
         assert!(
@@ -436,6 +519,7 @@ mod tests {
                 Policy {
                     hosts: vec!["https://fixture.test".into()],
                     allow_plaintext: false,
+                    header: None,
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -469,6 +553,7 @@ mod tests {
                 Policy {
                     hosts: vec!["http://fixture.test".into()],
                     allow_plaintext: true,
+                    header: None,
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -491,6 +576,7 @@ mod tests {
                 Policy {
                     hosts: vec!["http://fixture.test".into()],
                     allow_plaintext: true,
+                    header: None,
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -611,7 +697,8 @@ mod tests {
         assert!(
             Policy {
                 hosts: vec!["http://fixture.test".into()],
-                allow_plaintext: false
+                allow_plaintext: false,
+                header: None
             }
             .validate()
             .is_err()
@@ -622,6 +709,7 @@ mod tests {
                 Policy {
                     hosts: vec!["http://fixture.test".into()],
                     allow_plaintext: true,
+                    header: None,
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -644,10 +732,132 @@ mod tests {
                 "api".into(),
                 Policy {
                     hosts: vec!["https://fixture.test".into()],
-                    allow_plaintext: false
+                    allow_plaintext: false,
+                    header: None
                 },
                 b"secret\n".to_vec()
             )
+            .is_err()
+        );
+    }
+
+    /// Issue 8: a declared header placement substitutes an operator-named
+    /// header (`x-api-key`) and the credential part of
+    /// `Authorization: Bearer <placeholder>`, still host-restricted.
+    #[test]
+    fn a_declared_header_placement_substitutes_named_headers_and_bearer_prefixes() {
+        let substitute = |header: Option<Header>, text: &str| -> Option<Vec<u8>> {
+            let secret = Arc::new(
+                Secret::new(
+                    "api".into(),
+                    Policy {
+                        hosts: vec!["https://fixture.test".into()],
+                        allow_plaintext: false,
+                        header,
+                    },
+                    b"fixture-secret".to_vec(),
+                )
+                .unwrap(),
+            );
+            let vault = Vault::new("test-attempt", vec![secret]).unwrap();
+            let mut request =
+                proxy::http::parse_request(text.as_bytes()).expect("a parseable request");
+            vault.inject("https", &mut request).ok()?;
+            Some(request.forward_head.clone())
+        };
+        let key = "GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\nx-api-key: vault:test-attempt:api\r\n\r\n";
+        let head = substitute(
+            Some(Header {
+                name: "x-api-key".into(),
+                prefix: None,
+            }),
+            key,
+        )
+        .expect("a declared x-api-key placement substitutes");
+        assert!(
+            head.windows(b"x-api-key: fixture-secret".len())
+                .any(|s| s == b"x-api-key: fixture-secret")
+        );
+        assert!(!head.windows(6).any(|s| s == b"vault:"));
+
+        let bearer = "GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\nAuthorization: Bearer vault:test-attempt:api\r\n\r\n";
+        let head = substitute(
+            Some(Header {
+                name: "authorization".into(),
+                prefix: Some("Bearer ".into()),
+            }),
+            bearer,
+        )
+        .expect("a declared Bearer prefix substitutes");
+        assert!(
+            head.windows(b"authorization: Bearer fixture-secret".len())
+                .any(|s| s == b"authorization: Bearer fixture-secret")
+        );
+
+        // Without the declaration neither placement is eligible.
+        assert!(substitute(None, key).is_none());
+        assert!(substitute(None, bearer).is_none());
+        // A declared name does not accept another header.
+        assert!(
+            substitute(
+                Some(Header {
+                    name: "x-api-key".into(),
+                    prefix: None,
+                }),
+                bearer
+            )
+            .is_none()
+        );
+        // A declared prefix must match exactly.
+        assert!(
+            substitute(
+                Some(Header {
+                    name: "authorization".into(),
+                    prefix: Some("Basic ".into()),
+                }),
+                bearer
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn header_declarations_are_validated() {
+        let policy = |header: Header| Policy {
+            hosts: vec!["https://fixture.test".into()],
+            allow_plaintext: false,
+            header: Some(header),
+        };
+        assert!(
+            policy(Header {
+                name: "X-Api-Key".into(),
+                prefix: Some("Bearer ".into()),
+            })
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            policy(Header {
+                name: "bad header".into(),
+                prefix: None,
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            policy(Header {
+                name: "x-api-key".into(),
+                prefix: Some("line\nbreak".into()),
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            policy(Header {
+                name: "x-api-key".into(),
+                prefix: Some(String::new()),
+            })
+            .validate()
             .is_err()
         );
     }

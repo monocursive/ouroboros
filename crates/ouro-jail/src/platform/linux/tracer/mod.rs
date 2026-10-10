@@ -150,6 +150,7 @@ fn event_bytes(event: &TracerEvent) -> usize {
         TracerEvent::Syscall { args, .. } => {
             args.path.as_ref().map_or(0, |p| p.bytes.capacity())
                 + args.path2.as_ref().map_or(0, |p| p.bytes.capacity())
+                + args.cwd.as_ref().map_or(0, |cwd| cwd.len())
                 + args.command.as_ref().map_or(0, |hit| {
                     size_of::<crate::commands::Hit>()
                         + hit.pattern.capacity()
@@ -306,6 +307,12 @@ pub struct Args {
     /// The directory fd `path` is resolved against, for an `*at` call.
     pub dirfd: Option<i32>,
     pub dirfd2: Option<i32>,
+    /// The stopped thread's own working directory, read from
+    /// `/proc/<tid>/cwd` at the syscall stop (issue draft 12). The argument
+    /// snapshot stays the raw bytes; classification resolves a relative path
+    /// against this, and the exit-side stability check keeps comparing the
+    /// raw bytes.
+    pub cwd: Option<Box<[u8]>>,
     /// The flags word, where the call has one. For `creat` it is the
     /// `O_CREAT|O_WRONLY|O_TRUNC` the syscall is defined as; for `openat2`
     /// it is `open_how.flags` and is `None` when that could not be decoded.

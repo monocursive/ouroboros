@@ -1101,7 +1101,7 @@ fn n04_proxy_death_fails_closed_and_best_effort_continues_degraded() {
     kill_proxy_listener(spawned.pid());
     release(&mut spawned, &message, &receipt);
     let run = spawned.wait().unwrap();
-    assert_eq!(run.code(), Some(1), "stderr: {}", run.stderr_text());
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
     let lines = run.fixture_lines();
     assert!(
         ops(&lines, "connect")
@@ -1805,19 +1805,26 @@ fn n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable() {
     let receipt = settled(&run);
     let denials: Vec<&Value> = mediated(&run)
         .into_iter()
-        .filter(|event| event["operation"] == "fs.deny")
+        .filter(|event| {
+            event["operation"] == "net.connect" && event["outcome"]["errno"] == "EACCES"
+        })
         .collect();
     assert_eq!(
         denials.len(),
         14,
-        "one audit fs.deny per refused pathname, the proxy socket included: {denials:#?}"
+        "one refused net.connect per pathname, the proxy socket included \
+         (issue draft 13: network evidence, not fs.deny): {denials:#?}"
     );
     for denial in denials {
-        assert_eq!(denial["fields"]["attempted_operation"], "net.connect");
         assert_eq!(denial["fields"]["address_family"], 1);
-        assert_eq!(denial["outcome"]["errno"], "EACCES");
+        assert!(
+            denial["fields"]["path"].is_object(),
+            "the socket path is named: {}",
+            denial["fields"]["path"]
+        );
     }
     assert_eq!(receipt["phase"], "settled");
+    common::assert_run_records(&run);
 }
 
 /// N05, same-attempt IPC. Attempted: a listener the child binds in scratch
@@ -2106,7 +2113,8 @@ fn n05_a_proxy_replaced_before_the_first_connect_is_never_reached() {
         .into_iter()
         .find(|event| event["fields"]["address_family"] == 1)
         .expect("the direct connect is an audit result");
-    assert_eq!(denial["operation"], "fs.deny");
+    assert_eq!(denial["operation"], "net.connect");
+    assert_eq!(denial["outcome"]["errno"], "EACCES");
 }
 
 /// Reads one line from a FIFO the target writes, bounded.
@@ -2395,10 +2403,9 @@ print(json.dumps(out))
         .map(|entry| entry.unwrap().path())
         .collect();
     assert_eq!(attempts.len(), 1, "{attempts:?}");
-    let state: Value = serde_json::from_slice(
-        &std::fs::read(attempts[0].join("jail-state.json")).unwrap(),
-    )
-    .unwrap();
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(attempts[0].join("jail-state.json")).unwrap())
+            .unwrap();
     let staged = state["vendor_state"]["credentials"]
         .as_array()
         .expect("the private credential record")
@@ -2418,7 +2425,8 @@ print(json.dumps(out))
         .map(|byte| format!("{byte:02x}"))
         .collect();
     assert_eq!(
-        row("auth")["mode"], "copy_rw",
+        row("auth")["mode"],
+        "copy_rw",
         "the private record names the mode"
     );
     assert_eq!(
@@ -3097,7 +3105,7 @@ fn review_settlement_itself_produces_no_helper_note() {
 /// (`outcome.cause = evidence_loss`, exit 1) long before 8 s, `net` is
 /// degraded with a `queue_full` gap and a `coverage_gap` note is in the
 /// trace. Under best-effort: the same record, but the target runs to its
-/// end (exit status 0, no cause) and the jail exits 1 for the loss.
+/// end (exit status 0, no cause), which the jail preserves despite the loss.
 #[test]
 fn review_a_mediation_queue_overflow_is_evidence_loss() {
     if !common::live() {
@@ -3135,7 +3143,12 @@ print(json.dumps({"finished": True, "connects": sum(counts)}))
             .run()
             .unwrap();
         let elapsed = started.elapsed();
-        assert_eq!(run.code(), Some(1), "{evidence}: {}", run.stderr_text());
+        assert_eq!(
+            run.code(),
+            Some(if evidence == "strict" { 1 } else { 0 }),
+            "{evidence}: {}",
+            run.stderr_text()
+        );
         let receipt = settled(&run);
         assert_eq!(
             details(&receipt)["agent"]["mediation_record_queue"],

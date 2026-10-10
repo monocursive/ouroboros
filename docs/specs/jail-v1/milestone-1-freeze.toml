@@ -1103,17 +1103,17 @@ sha256 = "f11a51654753f9db14bede36a33abee5a7fbfbb66901a9175fd7cd3e45296384"
 file = "jail-event.schema.json"
 id = "urn:ouro:schema:jail-event:1"
 identifier = "ouro.event/1"
-sha256 = "08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137"
+sha256 = "491707ab300953f809dc34010f1c564995479247c16680a8043809ca5dc98c46"
 [[frozen_schemas.entry]]
 file = "jail-receipt.schema.json"
 id = "urn:ouro:schema:jail-receipt:1"
 identifier = "ouro.jail.receipt/1"
-sha256 = "4730590de3a2f16ae98d2fa8db169fc2ee4bd44bafbabd7803b1f206d93cdf7d"
+sha256 = "2bb04b1823574a188fd8fdced61148c3d9a10554a4a7441a06b0e9458c5520b9"
 [[frozen_schemas.entry]]
 file = "policy-snapshot.schema.json"
 id = "urn:ouro:schema:jail-policy-snapshot:1"
 identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "a16062e73454096513e5987b258a8aa0f5537cb1b6aeabe84f287f2e4abaa26f"
+sha256 = "6851d3950208da2c041a45f7d00af15a8e0163a7278a243b8b11b21bb979d752"
 [[frozen_schemas.entry]]
 file = "jail-gate.schema.json"
 id = "urn:ouro:schema:jail-gate:1"
@@ -1135,65 +1135,6 @@ id = "urn:ouro:schema:learned-policy:1"
 identifier = "ouro.jail.learned-policy/1"
 sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 
-# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---
-[tested]
-debug_assertions = false
-dirty = false
-inputs = "sha256:e391b0d0ac00d2b46321841c2341a988f8d6bbf4d160862f46fff5c545f1fe14"
-opt_level = "3"
-ouro_jail_sha256 = "a42aaa9a6f8a63ba08448316595e8e14349474a82089179cab3f81f88979b5d9"
-platform_arch = "x86_64"
-platform_kernel = "Linux 7.0.0-31-generic"
-platform_os = "linux"
-ready = true
-revision = "bfaaceba82607bc3a9df55df2c03b6766a0074b2"
-rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
-target = "x86_64-unknown-linux-gnu"
-unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code"]
-verification = ["inputs_match_tree", "revision_is_ancestor_of_head", "inputs_match_revision", "frozen_inputs_unchanged_since_revision"]
-
-[tested.backend]
-path = "/usr/bin/bwrap"
-sha256 = "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6"
-version = "bubblewrap 0.11.1"
-
-[tested.host]
-apparmor_enabled = true
-cpus_online = 4
-distribution = "Ubuntu 26.04.1 LTS"
-kernel_release = "7.0.0-31-generic"
-kernel_version = "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026"
-linger = true
-operator_identity = "unprivileged"
-privileged_groups = []
-systemd_version = "systemd 259 (259.5-0ubuntu3.4)"
-virtualization = "kvm"
-
-[tested.host.apparmor_userns_restriction]
-local_files = ["README"]
-profile_files = ["bwrap-userns-restrict", "glycin.bwrap", "lxc-usernsexec", "unprivileged_userns"]
-state = "on"
-unpackaged_files = []
-
-[tested.host.cgroup]
-controllers = ["cpu", "memory", "pids"]
-delegated_root = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service"
-root_controllers = ["cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem"]
-subtree_control = ["cpu", "memory", "pids"]
-
-[tested.host.memory]
-mem_total_kib = 3905584
-swap_total_kib = 8388604
-
-[tested.host.sysctls]
-"kernel.apparmor_restrict_unprivileged_userns" = "1"
-"kernel.io_uring_disabled" = "0"
-"kernel.perf_event_paranoid" = "4"
-"kernel.unprivileged_bpf_disabled" = "2"
-"kernel.yama.ptrace_scope" = "1"
-"user.max_user_namespaces" = "11829"
-
-[tested.supervisor_scope]
-cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-3059571-44b6438da9bc45c6.scope"
-state = "entered"
-unit = "ouro-jail-3059571-44b6438da9bc45c6.scope"
+# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
+# records the milestone conformance run, and `cargo xtask freeze --check`
+# fails until it is.

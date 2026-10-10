@@ -347,7 +347,13 @@ fn p02_an_object_that_does_not_exist_is_an_unknown_subset() {
 /// rendering a mask over the jail's machinery.
 #[test]
 fn project_deny_read_over_boundary_plumbing_refuses() {
-    for spelling in ["/", "/run", "/run/ouro", "/run/ouro/jail", "/run/ouro/staging/x"] {
+    for spelling in [
+        "/",
+        "/run",
+        "/run/ouro",
+        "/run/ouro/jail",
+        "/run/ouro/staging/x",
+    ] {
         let workspace = Workspace::new();
         let error = workspace
             .resolve_project(
@@ -567,6 +573,49 @@ fn p02_raising_a_ceiling_refuses_with_that_limit_key() {
         ),
         "jail.limits.pids",
     );
+}
+
+/// Issue draft 07: an operator-owned profile file may raise a resource
+/// ceiling — the same authority the operator's `--limit` flag has — while
+/// the untrusted project file still may not (the tests above).
+#[test]
+fn an_operator_profile_file_may_raise_a_ceiling_like_the_cli() {
+    let workspace = Workspace::new();
+    let mut baseline = profiles::baseline(ProfileName::Tool, Os::Linux, &|_| None);
+    baseline.read_only = Vec::new();
+    baseline.read_write = vec![workspace.reference("")];
+    baseline.deny_read = vec![workspace.reference("secrets")];
+    let inputs = ResolveInputs {
+        platform: Os::Linux,
+        base_profile: ProfileName::Tool,
+        policy_name: "p".to_owned(),
+        baseline,
+        workspace: workspace.bytes(),
+        scratch: ScratchRoot::Managed,
+        vendor_state: None,
+        operator_home: None,
+        translation_prefixes: Vec::new(),
+        layers: vec![Layer {
+            origin: LayerOrigin::OperatorProfileFile("p".to_owned()),
+            base_dir: None,
+            key_prefix: String::new(),
+            narrowing: true,
+            delta: PolicyDelta {
+                limits: Ceilings {
+                    wall: ceiling(32_400_000, "9h"),
+                    ..Ceilings::default()
+                },
+                ..PolicyDelta::default()
+            },
+        }],
+    };
+    let resolved = ouro_jail::policy::resolve(&inputs).expect("an operator file may raise wall");
+    let wall = resolved
+        .snapshot
+        .limits
+        .wall
+        .expect("the raised ceiling is applied");
+    assert_eq!(wall.value.as_str(), "32400000");
 }
 
 // J5-B1 begin: P02 — mem/cpu ceilings and launch/executable/backend keys

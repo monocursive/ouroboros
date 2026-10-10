@@ -1357,7 +1357,12 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
     let lines = run.fixture_lines();
     let connects = ops(&lines, "connect");
     assert_eq!(connects.len(), 4, "{lines:#?}");
-    for (index, why) in [(0, "the late socket"), (1, "the late hard link"), (2, "the late symlink"), (3, "the proxy socket")] {
+    for (index, why) in [
+        (0, "the late socket"),
+        (1, "the late hard link"),
+        (2, "the late symlink"),
+        (3, "the proxy socket"),
+    ] {
         assert_eq!(
             connects[index]["errno"], "EACCES",
             "{why} was reachable: {}",

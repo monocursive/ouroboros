@@ -138,14 +138,10 @@ fn resolve_fixture(options: &FixtureOptions) -> Resolved {
     .expect("the fixture's sections parse");
     if options.multi_sets {
         for path in ["/usr/share", "/usr/local", "/usr/lib"] {
-            delta
-                .read_only
-                .push(path.as_bytes().to_vec());
+            delta.read_only.push(path.as_bytes().to_vec());
         }
         for path in ["/usr/share/man", "/usr/share/doc", "/usr/local/etc"] {
-            delta
-                .deny_read
-                .push(path.as_bytes().to_vec());
+            delta.deny_read.push(path.as_bytes().to_vec());
         }
     }
     if options.reorder_profile_sets {
@@ -307,12 +303,21 @@ fn p01_reordering_sets_and_changing_provenance_preserve_the_hash() {
             .clone()
     };
     assert!(
-        sets_of(&multi)["read_only"].as_array().expect("read_only").len() >= 4
-            && sets_of(&multi)["deny_read"].as_array().expect("deny_read").len() >= 3,
+        sets_of(&multi)["read_only"]
+            .as_array()
+            .expect("read_only")
+            .len()
+            >= 4
+            && sets_of(&multi)["deny_read"]
+                .as_array()
+                .expect("deny_read")
+                .len()
+                >= 3,
         "the multi-set legs really extend the sets"
     );
     assert_eq!(
-        sets_of(&multi), sets_of(&multi_reordered),
+        sets_of(&multi),
+        sets_of(&multi_reordered),
         "a reversed multi-element set canonicalizes to the same sets"
     );
     assert_eq!(
