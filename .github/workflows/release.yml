@@ -60,6 +60,9 @@ jobs:
       PREVIEW_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # The tested freeze verifies ancestry and unchanged frozen inputs.
+          fetch-depth: 0
       - name: Bind provenance to the checked-out commit
         run: printf 'OURO_BUILD_REVISION=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Install build and signature tools
