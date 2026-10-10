@@ -3834,6 +3834,10 @@ reason = "writes the pinned seccomp evidence tables; run deliberately"
 test = "ouro-jail/tests/security_alias_linux.rs::private_mount_alias_fixture"
 reason = "private mount namespace helper invoked by guarded_aliases_are_detected_across_devices_and_below_mountpoints"
 
+[[ignored]]
+test = "ouro-jail/src/lib.rs::platform::linux::storage::tests::xfs_hard_quota_admission_and_sampling_survive_chmod"
+reason = "requires a disposable XFS mount with enforced user hard quotas and OURO_TEST_XFS_DIR; independently passed as ouro-ci on a temporary loopback XFS volume on 2026-10-10, recorded in docs/benchmarks/jail/results/release-preview-2026-10-10/xfs; the non-sudo conformance lane does not provision mounts"
+
 # ---------------------------------------- the pinned ignored set, macos lane
 
 [[ignored]]

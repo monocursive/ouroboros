@@ -28,6 +28,29 @@ and [preview_gates.py](preview_gates.py). The byte-preservation fixture is in
 [acceptance map](../../specs/jail-v1/acceptance-map.toml) names the exact tests;
 untested Linux clauses and failed macOS refusal tests still block publication.
 
+## Optimized reference suite and XFS fixture
+
+The clean optimized suite at `5441e6c96be6fca9d60384d87383ab17a251c74d`
+passed 2,089 tests with zero failures. Its first
+[conformance workflow](https://github.com/monocursive/ouroboros/actions/runs/38065597642)
+failed the acceptance check because an existing privileged XFS test was missing
+from the map's reviewed ignored set. This was not a test failure. The corrected
+map pins that fixture requirement; replay over the original Linux and
+[macOS refusal logs](https://github.com/monocursive/ouroboros/actions/runs/38065597671)
+passes every noncredential gate in the Linux release scope. Final publication
+still requires passing CI and actual reference conformance on the release commit.
+
+The [XFS test log](results/release-preview-2026-10-10/xfs/test.log) independently
+records the ignored test passing as `ouro-ci`, using the same clean optimized
+test executable. A disposable 512 MiB loopback XFS volume enforced a 32 MiB user
+block ceiling and 128-inode ceiling. The test checks hard-quota admission,
+sampling and descriptor survival after directory permissions become mode 000.
+[Mount](results/release-preview-2026-10-10/xfs/mount.txt),
+[quota](results/release-preview-2026-10-10/xfs/quota.txt) and
+[executable digest](results/release-preview-2026-10-10/xfs/binary.sha256)
+records retain the fixture facts. The volume was unmounted and removed after
+the test; the non-sudo conformance account does not provision mounts itself.
+
 ## Fresh VM record
 
 [VM metadata](results/release-preview-2026-10-10/vm.json) and

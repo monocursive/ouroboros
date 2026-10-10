@@ -1,0 +1,37 @@
+User quota state on /home/ouro-ci/ouro-xfs-preview-20261010/mount (/dev/loop0)
+  Accounting: ON
+  Enforcement: ON
+  Inode: #131 (2 blocks, 2 extents)
+Blocks grace time: [7 days]
+Blocks max warnings: 0
+Inodes grace time: [7 days]
+Inodes max warnings: 0
+Realtime Blocks grace time: [7 days]
+Realtime Blocks max warnings: 0
+Group quota state on /home/ouro-ci/ouro-xfs-preview-20261010/mount (/dev/loop0)
+  Accounting: OFF
+  Enforcement: OFF
+  Inode: N/A
+Blocks grace time: [--------]
+Blocks max warnings: 0
+Inodes grace time: [--------]
+Inodes max warnings: 0
+Realtime Blocks grace time: [--------]
+Realtime Blocks max warnings: 0
+Project quota state on /home/ouro-ci/ouro-xfs-preview-20261010/mount (/dev/loop0)
+  Accounting: OFF
+  Enforcement: OFF
+  Inode: N/A
+Blocks grace time: [--------]
+Blocks max warnings: 0
+Inodes grace time: [--------]
+Inodes max warnings: 0
+Realtime Blocks grace time: [--------]
+Realtime Blocks max warnings: 0
+User quota on /home/ouro-ci/ouro-xfs-preview-20261010/mount (/dev/loop0)
+                        Blocks              
+User ID      Used   Soft   Hard Warn/Grace   
+---------- --------------------------------- 
+root            0      0      0  00 [------]
+ouro-ci         0      0    32M  00 [------]
+
