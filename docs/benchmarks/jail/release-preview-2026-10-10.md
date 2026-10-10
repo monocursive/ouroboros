@@ -51,7 +51,41 @@ sampling and descriptor survival after directory permissions become mode 000.
 records retain the fixture facts. The volume was unmounted and removed after
 the test; the non-sudo conformance account does not provision mounts itself.
 
-## Fresh VM record
+## Published release verification
+
+The [public Linux preview](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+is built from `06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d`.
+[Rust](https://github.com/monocursive/ouroboros/actions/runs/38068176764),
+[contracts](https://github.com/monocursive/ouroboros/actions/runs/38068176775),
+[reference conformance](https://github.com/monocursive/ouroboros/actions/runs/38068176785)
+and [native packaging](https://github.com/monocursive/ouroboros/actions/runs/38068189013)
+passed at that exact commit. Reference conformance passed 2,089 tests with zero
+failures and no acceptance-map problems. The dedicated release key signed both
+native packages; all eight public assets matched the reviewed candidate after
+unauthenticated download.
+
+The signed candidate installed on the Ubuntu reference host and Debian 13 Pi.
+Both ran the guide's file-writing command and settled with enforced containment,
+verified empty trees and exact raw journal replay. The downloaded GitHub draft
+assets matched every candidate byte, and a second draft installation passed on
+x86_64. The Pi became unreachable before a second draft check; no second ARM64
+draft or public-network run is claimed.
+
+A new [public-install VM](results/release-preview-2026-10-10/public-install/vm.json)
+then downloaded the published Bash bootstrap anonymously, checked its expected
+digest, installed the signed x86_64 package, and ran the guide's first command.
+The [result](results/release-preview-2026-10-10/public-install/result.json) and
+[settled receipt](results/release-preview-2026-10-10/public-install/jail.json)
+bind the actual public executable SHA256
+`feab1ead8951955f8aa79f0cc7a48de323672e7bac176fae563ec693dc9ca819`
+to the release revision and inputs.
+[Before](results/release-preview-2026-10-10/public-install/rust-absence-before.txt)
+and [after](results/release-preview-2026-10-10/public-install/rust-absence-after.txt)
+checks found no cargo, rustc or rustup. No production key entered the guest; the
+VM and temporary SSH key were destroyed. Dependency setup and waiting for
+publication are recorded separately, with no timing or performance claim.
+
+## Fresh VM learning record
 
 [VM metadata](results/release-preview-2026-10-10/vm.json) and
 [workflow result](results/release-preview-2026-10-10/guest/result.json) record a

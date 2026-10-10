@@ -9,11 +9,41 @@ how long it can run. A receipt tells you which controls were applied and how
 the run ended.
 
 **You'll need a Linux x86_64 or aarch64 machine to execute commands.** This is
-pre-release software, currently installed from source. On a Mac, you can
+developer-preview software. Signed Linux x86_64 and ARM64 packages are available. On a Mac, you can
 build the CLI and inspect policies; sandboxed execution is still unavailable.
 
 Already have the binary? Jump to [your first command](#run-your-first-command).
 Writing an integration? Start with [agents and scripts](#for-agents-and-scripts).
+
+## Install the developer preview
+
+[Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+ships signed Linux x86_64 and ARM64 packages. Install your distribution's
+`minisign` and `bubblewrap` packages first. The binaries require glibc 2.39 or
+newer; Alpine/musl and macOS execution are unavailable in this preview.
+No Rust compiler is needed.
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://ouroboros.monocursive.com/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+ouro-jail version --json
+ouro-jail doctor --profile tool --json
+```
+
+The installer pins this preview and the [release public key](https://ouroboros.monocursive.com/release.pub).
+It checks the manifest signature and executable/installer digests, then installs
+outside your project in `~/.local/bin`. Repeat to upgrade; pass `--version`
+through `bash -s -- --version VERSION` to select another signed Jail release.
+Downgrades require `--allow-downgrade`. Replacing a source-built `0.1.0` without
+a release record also needs this explicit flag to install an RC version.
+
+The supported-host notes remain in the release: Ubuntu 26.04 is the x86_64
+reference host; stock Ubuntu 24 containment is refused. The tested Pi lacks
+memory cgroups and Landlock, so its default `build` profile remains unavailable.
+Run `doctor` before relying on a profile. Archived runtime releases are separate;
+use `ouro-jail-v...` tags for this distribution. The ledger and fleet are not
+included in these packages.
 
 ## Build and check your host
 
@@ -46,14 +76,13 @@ explains that setup and its effect on process cleanup.
 
 On macOS, `version` and `explain` work; `doctor` reports why execution is
 unavailable. Other Linux architectures are not yet supported for execution.
-Public jail packages and a Homebrew tap are still being prepared. Older
-Ouroboros releases belong to the archived agent runtime.
+Signed Jail packages are linked above; a Homebrew tap remains unconfigured.
+Older `v0.1.x` releases belong to the archived agent runtime.
 
 ## Verify a supplied package
 
-Public release coordinates are not configured yet. If an operator supplies a
-Jail artifact directory and a trusted minisign public key through independent
-channels, the checked-in installer verifies the signed checksum manifest before
+For offline installation, obtain a signed Jail artifact directory and a trusted
+minisign public key through independent channels. Then the checked-in installer verifies the signed checksum manifest before
 installing the binary. This path needs `minisign` and the host prerequisites above,
 but no Rust compiler:
 

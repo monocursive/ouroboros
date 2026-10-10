@@ -113,7 +113,16 @@ def verify_remote_assets(plan, directory, names, release):
 
 
 def release_info(plan):
-    return gh_json('api', f'repos/{REPOSITORY}/releases/tags/{plan["tag"]}')
+    # The REST tag endpoint excludes drafts. gh resolves the authenticated
+    # draft or public release first; fetch its stable numeric REST identity.
+    identity = gh_json('release', 'view', plan['tag'], '--repo', REPOSITORY,
+                       '--json', 'apiUrl,tagName')
+    prefix = f'https://api.github.com/repos/{REPOSITORY}/releases/'
+    if (identity['tagName'] != plan['tag']
+            or not identity['apiUrl'].startswith(prefix)
+            or not identity['apiUrl'].removeprefix(prefix).isdigit()):
+        raise ValueError('release lookup returned a different tag or repository')
+    return gh_json('api', identity['apiUrl'])
 
 
 def main():

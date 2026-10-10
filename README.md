@@ -15,17 +15,17 @@ agent keeps its own models and workflow.
 [Website](https://ouroboros.monocursive.com/) · [User guide](docs/guide.md) ·
 [Roadmap](docs/roadmap.md) · [Operator reference](docs/specs/jail-v1/operating.md)
 
-**Pre-release.** Linux execution supports x86_64 and aarch64, with a reference
-x86_64 conformance host and native Raspberry Pi checks. Available profiles
-depend on the host's kernel capabilities; see the [platform requirements](docs/specs/jail-v1.md#32-initial-support-matrix).
-macOS builds provide inspection commands and currently refuse sandboxed
-execution; other Linux architectures also refuse execution. Installation is from source. Public jail
-release artifacts and a Homebrew tap are not configured yet.
+**Developer preview 0.1.0-rc.1.** [Signed Linux x86_64 and ARM64 packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+are available. The reference x86_64 conformance host and native Raspberry Pi
+checks are recorded; available profiles depend on the host's kernel capabilities.
+macOS builds provide inspection commands and currently refuse sandboxed execution.
+See the [platform requirements](docs/specs/jail-v1.md#32-initial-support-matrix)
+and [Linux acceptance record](docs/benchmarks/jail/release-preview-2026-10-10.md).
 
-The [developer-preview release procedure](docs/RELEASING.md) includes a Bash
-installer and native Linux packaging workflow. The dedicated
-[release public key](crates/ouro-jail/dist/release.pub) is pinned in the installer.
-Public availability awaits the exact release revision's validation and signed packages.
+The Bash installer pins this preview and its dedicated
+[release public key](crates/ouro-jail/dist/release.pub). It verifies the signed
+manifest and installer/executable checksums before installation. The
+[release procedure](docs/RELEASING.md) documents provenance and key custody.
 
 ## What you can do
 
@@ -36,7 +36,21 @@ Public availability awaits the exact release revision's validation and signed pa
 - Build from read-only source with separate writable output and scratch paths,
   a memory limit, and no network access.
 
-## Build and run
+## Install and run
+
+Install your distribution's `minisign` and `bubblewrap` packages first.
+The binaries require glibc 2.39 or newer; no Rust compiler or sudo is needed
+for the installer. Host enforcement still requires a successful `doctor` report.
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://ouroboros.monocursive.com/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+ouro-jail version --json
+ouro-jail doctor --profile tool --json
+```
+
+See the [guide](docs/guide.md#install-the-developer-preview) for supported hosts,
+upgrades and explicit downgrade handling. To build from source:
 
 Install Rust 1.98.1 and your distribution's bubblewrap package. Run as your
 normal user. The reference host uses Ubuntu 26.04.1 and bubblewrap 0.11.1.
@@ -173,8 +187,11 @@ they do not predict agent speed or establish performance for the current
 checkout.
 
 The same record passes full reference conformance (1,993 tests) and prepares
-signed native Linux x86_64 and ARM64 packages locally; repeated real-agent
-qualification, production signing and publication remain pending.
+signed native Linux x86_64 and ARM64 packages locally. The
+[10 October preview record](docs/benchmarks/jail/release-preview-2026-10-10.md)
+adds current-input clean-VM onboarding, a real OpenCode learning fixture and
+Linux acceptance tests. The signed public preview is linked above; repeated
+real-agent qualification remains experimental.
 
 The earlier records are kept for provenance: the
 [8 October validation](docs/benchmarks/jail/validation-2026-10-08.md) and the
@@ -215,8 +232,8 @@ early.
 
 ## Planned work
 
-- **Next:** signed public distribution and broader agent/version compatibility
-  records. Current-input clean-VM onboarding and benchmark results are linked above.
+- **Next:** broader host and agent/version compatibility records. Current-input
+  clean-VM onboarding and benchmark results are linked above.
 - **Research:** native macOS execution, including process-tree cleanup when the
   supervising helper dies. Apple entitlement approval is also pending; approval
   alone does not resolve the cleanup blocker.

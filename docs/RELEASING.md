@@ -1,5 +1,12 @@
 # Publish an Ouroboros Jail developer preview
 
+[Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+was published on 10 October 2026 from
+`06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d`. All eight signed assets were
+downloaded anonymously and matched the reviewed candidate. The
+[acceptance and public-install record](benchmarks/jail/release-preview-2026-10-10.md)
+retains CI, native host checks and a fresh VM installation without Rust.
+
 The first distribution is `ouro-jail` for Linux x86_64 and ARM64 in
 `monocursive/ouroboros`. Tags use `ouro-jail-vVERSION`, starting with the proposed
 `ouro-jail-v0.1.0-rc.1`. This keeps the archived runtime's `v0.1.x` releases
@@ -12,7 +19,7 @@ the downloaded installer. A downgrade requires `--allow-downgrade`.
 
 Public availability has not been established yet. Never direct Jail users to
 `releases/latest/download/install.sh`: that currently installs the archived
-runtime. After publishing the preview, its command is:
+runtime. The published preview's command is:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \

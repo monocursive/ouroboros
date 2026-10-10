@@ -2,7 +2,9 @@
 
 The first developer preview targets `monocursive/ouroboros`, with
 `ouro-jail-vVERSION` tags and Linux x86_64/ARM64 packages. The dedicated production
-identity is [release.pub](release.pub); no public Jail release is claimed yet.
+identity is [release.pub](release.pub).
+[Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+is the first public signed developer preview.
 See the [publication procedure](../../../docs/RELEASING.md) for the Bash entry
 point, native `release-candidate` workflow, and draft/publish verification helper.
 The standalone packager below remains useful for local inspection packages.
@@ -102,7 +104,7 @@ python3 crates/ouro-jail/dist/prepare_release.py assemble \
   --version 0.1.0-rc.1 --out /private/release-candidate
 ```
 
-`0.1.0-rc.1` is an example candidate version, not a published tag. The resulting
+`0.1.0-rc.1` is the first published preview coordinate. For a new candidate, the resulting
 `release-plan.json` records the repository, proposed tag, commit, hashes and
 remaining publication blockers. `RELEASE_NOTES.md` preserves the current host
 and agent-compatibility limits. Native artifact records are builder attestations;

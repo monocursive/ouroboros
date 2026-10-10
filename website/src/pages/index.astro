@@ -1,6 +1,8 @@
 ---
 import Site from '../layouts/Site.astro';
-const command = 'ouro-jail run --profile tool --workspace "$PWD" --limit wall=30s -- /usr/bin/true';
+const command = `curl --proto '=https' --tlsv1.2 -fsSL https://ouroboros.monocursive.com/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+ouro-jail doctor --profile tool`;
 const capabilities = [
   { title: 'File access', text: 'Give the process a workspace and specific read-only or writable paths. Your home directory is not exposed by default. System runtime files remain available so programs can execute.' },
   { title: 'Network access', text: 'Local tools and builds run without a network. Agents connect through a proxy that checks destinations against your allowlist. You choose which services they can reach.' },
@@ -13,7 +15,7 @@ const useCases = [
   { profile: 'build', title: 'Build from read-only source', text: 'Give a build command read-only inputs, a writable output directory, and scratch space. Set a memory limit and keep the network closed.' },
 ];
 const upcoming = [
-  { status: 'Next', title: 'Simpler installation', text: 'Finish the clean-VM onboarding test and configure signed public releases. For now, installation is from source.' },
+  { status: 'Next', title: 'Broader host compatibility', text: 'Extend clean-machine installation and enforcement records beyond the reference Linux hosts.' },
   { status: 'Next', title: 'More tested agents', text: 'Run each agent and version against a current jail build, then publish the compatibility results and updated benchmarks.' },
   { status: 'Research', title: 'Native macOS execution', text: 'Resolve process cleanup when the supervising helper dies. Apple entitlement approval is also pending; approval alone will not make execution ready.' },
 ];
@@ -22,7 +24,7 @@ const benchmark = 'https://github.com/monocursive/ouroboros/blob/dev/docs/benchm
 <Site title="Ouroboros Jail — A Linux sandbox for AI agents" description="Give your AI agent only the access it needs. Restrict files, network destinations, and runtime, with receipts and recorded Linux benchmarks.">
   <section class="hero container" aria-labelledby="hero-heading">
     <div class="hero-copy">
-      <p class="eyebrow status"><span class="status-dot" aria-hidden="true"></span> Pre-release · Linux x86_64</p>
+      <p class="eyebrow status"><span class="status-dot" aria-hidden="true"></span> Developer preview 0.1.0-rc.1 · Linux x86_64 + ARM64</p>
       <h1 id="hero-heading">Give your agent only the access it needs.</h1>
       <p class="introduction">Ouroboros Jail is a Linux sandbox for AI agents and command-line tools. Limit which files they can change, which services they can contact, and how long they can run.</p>
       <div class="hero-actions"><a class="button" href="/guide/">Get started <span aria-hidden="true">↗</span></a><a class="text-link" href="#security">How it works <span aria-hidden="true">↓</span></a></div>
@@ -37,10 +39,10 @@ const benchmark = 'https://github.com/monocursive/ouroboros/blob/dev/docs/benchm
 
   <section class="container example" aria-labelledby="example-heading">
     <div class="terminal">
-      <div class="terminal-heading"><h2 class="eyebrow" id="example-heading">Start with a small command</h2><span class="eyebrow">After building from source</span></div>
+      <div class="terminal-heading"><h2 class="eyebrow" id="example-heading">Install the developer preview</h2><span class="eyebrow">Signed Linux packages</span></div>
       <pre tabindex="0"><code>{command}</code></pre>
     </div>
-    <div class="example-notes"><p>This grants a writable workspace, blocks network access, and sets a 30-second deadline.</p><a href="/guide/#build-and-check-your-host">Build &amp; host requirements ↗</a></div>
+    <div class="example-notes"><p>Requires glibc 2.39+, minisign and bubblewrap. Installs to ~/.local/bin without a Rust compiler. Use doctor to check your host.</p><a href="/guide/#install-the-developer-preview">Install &amp; host requirements ↗</a></div>
   </section>
 
   <section class="section" id="security" aria-labelledby="security-heading">
@@ -92,7 +94,7 @@ const benchmark = 'https://github.com/monocursive/ouroboros/blob/dev/docs/benchm
     <div class="container status-grid">
       <div><p class="eyebrow section-eyebrow">Availability</p><h2 id="status-heading">Start on Linux.</h2></div>
       <div class="status-copy">
-        <p><strong>Execution is validated on Linux x86_64.</strong> Build from source and use <code>doctor</code> to check your host. macOS builds can inspect policy, but currently refuse sandboxed execution.</p>
+        <p><strong>Signed developer packages are available for Linux x86_64 and ARM64.</strong> Read the <a href="https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1">release notes</a> and use <code>doctor</code> to check your host. macOS builds can inspect policy, but currently refuse sandboxed execution.</p>
         <p>Fourteen starter launch profiles are included. OpenCode has recorded live runs; other agent and version combinations still need testing.</p>
         <p>When a command needs more access, <code>learn</code> can propose missing read and network permissions from an observed run. You review the proposal before applying it.</p>
         <a class="text-link" href="/guide/#run-an-existing-agent">Run an existing agent <span aria-hidden="true">↗</span></a>

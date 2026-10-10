@@ -36,8 +36,8 @@ name the tested combinations. macOS supports inspection commands and refuses
 sandboxed execution.
 
 You can [build the jail and try a small command](https://github.com/monocursive/ouroboros/blob/dev/docs/guide.md#build-and-check-your-host)
-today. The project remains pre-release; public jail packages and a Homebrew
-tap are not yet available.
+today. [Signed Linux developer-preview packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+are also available; a Homebrew tap remains unconfigured.
 
 ## Next: make the first run easier
 
@@ -59,9 +59,11 @@ The newer [October 8 follow-up](benchmarks/jail/followup-2026-10-08.md)
 prepares signed native x86_64 and ARM64 packages and passes full reference
 conformance; production signing and publication remain pending.
 
-Before public distribution, we also need to choose the release repository,
-Homebrew tap, and production signing identity. Until those are configured,
-the guide uses a source build and makes the host requirements explicit.
+The first signed developer preview is `ouro-jail-v0.1.0-rc.1` in
+`monocursive/ouroboros`, with Linux x86_64 and ARM64 packages and a dedicated
+release identity. The [guide](guide.md#install-the-developer-preview) provides
+the verified Bash installer and current host requirements. Wider host and agent
+compatibility remain ongoing work; a Homebrew tap is still unconfigured.
 
 ## Next: test the workflows people will use
 

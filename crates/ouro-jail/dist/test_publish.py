@@ -8,8 +8,31 @@ import unittest
 from unittest.mock import patch
 
 from prepare_release import TARGETS, assemble, stage
-from publish_release import ROOT, check, publication_gates, verify_remote_assets
+from publish_release import ROOT, check, publication_gates, release_info, verify_remote_assets
 from test_release import INPUTS, REVISION, version
+
+
+class ReleaseLookupTests(unittest.TestCase):
+    def test_draft_and_public_lookup_use_authenticated_numeric_identity(self):
+        url = 'https://api.github.com/repos/monocursive/ouroboros/releases/123'
+        for draft in [True, False]:
+            with self.subTest(draft=draft):
+                record = {'tag_name': 'ouro-jail-v0.1.0-rc.1', 'draft': draft}
+                with patch('publish_release.gh_json', side_effect=[
+                        {'apiUrl': url, 'tagName': record['tag_name']}, record]) as call:
+                    self.assertEqual(release_info({'tag': record['tag_name']}), record)
+                    self.assertEqual(call.call_args.args, ('api', url))
+
+    def test_a_different_tag_repository_or_non_numeric_identity_refuses(self):
+        for identity in [
+            {'apiUrl': 'https://api.github.com/repos/monocursive/ouroboros/releases/123', 'tagName': 'other'},
+            {'apiUrl': 'https://api.github.com/repos/other/repo/releases/123', 'tagName': 'wanted'},
+            {'apiUrl': 'https://api.github.com/repos/monocursive/ouroboros/releases/123?x=y', 'tagName': 'wanted'},
+        ]:
+            with self.subTest(identity=identity), patch('publish_release.gh_json', return_value=identity) as call:
+                with self.assertRaises(ValueError):
+                    release_info({'tag': 'wanted'})
+                self.assertEqual(call.call_count, 1)
 
 
 @unittest.skipUnless(shutil.which('minisign'), 'minisign is required')
