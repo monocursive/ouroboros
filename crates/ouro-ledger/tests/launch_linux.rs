@@ -739,10 +739,14 @@ fn invalid_inherited_stdout_is_denied_before_admission_and_never_executes() {
     let fixture = Fixture::new(&jail);
     let mut command = fixture.command("invalid-inherited-output", false);
     command.args(["--", "/bin/sh", "-c", "touch must-not-execute"]);
-    let (_reader, writer) = UnixStream::pair().unwrap();
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: wrap the newly created eventfd once; the child owns it as stdout.
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+    assert!(fd >= 0);
+    let invalid = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
     command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(std::os::fd::OwnedFd::from(writer)))
+        .stdout(Stdio::from(invalid))
         .stderr(Stdio::piped());
     let first = Process::from_child(command.spawn().unwrap(), false).finish();
     assert_eq!(first.status.code(), Some(125));
@@ -2011,8 +2015,8 @@ fn real_target_diff_distinguishes_created_paths_and_preserves_producer_reference
         );
         assert_eq!(record["provenance"], reference["provenance"]);
     }
-    // The observer cannot turn a relative argument into a workspace identity
-    // without cwd observation. Target comparison must retain that limitation.
+    // The entry-time cwd snapshot gives this relative write its workspace
+    // identity, which target comparison must preserve with its provenance.
     let mut relative = fixture.command("target-relative", true);
     relative.args(["--", "/bin/sh", "-c", "printf x > relative-target"]);
     let (output, relative) = fixture.run(&mut relative);
@@ -2026,18 +2030,27 @@ fn real_target_diff_distinguishes_created_paths_and_preserves_producer_reference
         ouro_ledger::comparison::ComparisonMode::TargetCounts,
     )
     .unwrap();
-    assert_eq!(
-        report["classes"]["fs.write"]["right_reason"],
-        "target_identity_unavailable"
+    assert_eq!(report["classes"]["fs.write"]["status"], "comparable");
+    assert!(
+        report["right"]["unavailable_targets"]
+            .get("fs.write")
+            .is_none(),
+        "{report}"
     );
-    let missing = &report["right"]["unavailable_targets"]["fs.write"];
-    assert!(missing["count"].as_u64().unwrap() > 0);
     let events = fixture.events(&relative);
-    let record = &events[missing["first_record"]["seq"].as_u64().unwrap() as usize - 1];
+    let change = report["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["observation"]["target"]["path"]["value"] == "relative-target")
+        .expect("relative target must appear in comparison");
+    let reference = &change["right_first_record"];
+    let record = &events[reference["seq"].as_u64().unwrap() as usize - 1];
     assert_eq!(
-        record["fields"]["path"]["reason"],
-        "relative_to_unobserved_cwd"
+        record["fields"]["path"],
+        serde_json::json!({"kind":"workspace_relative", "value":"relative-target"})
     );
+    assert_eq!(record["provenance"], reference["provenance"]);
     assert!(
         fixture
             .client()

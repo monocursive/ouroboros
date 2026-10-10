@@ -3212,8 +3212,11 @@ note = "Library-level, the guard driven directly: arming refuses the run, an uns
 id = "K03.4"
 gate = "K03"
 clause = "A `--profile none` run with a `config.toml` or any launch profile present refuses `unsafe_config_path` naming the files, and runs without them"
-tag = "untested"
-note = "Implemented in check_config_isolation (supervisor.rs) but no test drives a `none` run against a present trusted file."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/release_preview_linux.rs::k03_none_refuses_each_trusted_file_and_runs_without_them",
+]
+note = "Real CLI refusals name both config.toml and a launch profile; removing them permits an observed none run, with unprotected receipt."
 
 # ------------------------------------------------------------------ K04
 
@@ -3347,8 +3350,11 @@ row = "`learn --adopt` writes the marked fragment atomically after a TTY confirm
 id = "K10.1"
 gate = "K10"
 clause = "`learn --adopt` writes the marked fragment atomically after a TTY confirmation, refuses without one, and the next run applies the grants as ordinary operator config"
-tag = "untested"
-note = "Implemented (learn.rs adopt: TTY requirement, confirmation word, atomic re-read write) but no test drives it."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/release_preview_linux.rs::k10_adoption_requires_a_tty_and_consent_rechecks_then_replaces_atomically",
+]
+note = "Real PTY: non-TTY and cancellation refuse, concurrent edits survive, consent atomically replaces the inode, and the next run reads the exact adopted grant."
 
 # ------------------------------------------------------------------ K11
 
@@ -3360,8 +3366,11 @@ row = "`learn` of opencode proposes only the observed, justified subset, with in
 id = "K11.1"
 gate = "K11"
 clause = "`learn` of opencode proposes only the observed, justified subset, with incomplete coverage stated"
-tag = "untested"
-note = "No learn-of-opencode test exists."
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_release_evidence.rs::k11_recorded_real_opencode_learning_proposes_only_evidence_supported_grants",
+]
+note = "Replay of the recorded real OpenCode 1.18.32 learning run in the October 10 fresh VM. Current Jail build inputs, receipt bytes, coverage and every grant citation are checked. Live provider reliability and complete program needs remain experimental."
 
 # ------------------------------------------------------------------ K12
 
@@ -3441,8 +3450,11 @@ row = "Credential rows record `never_staged: true`, no digest, and launch valida
 id = "K16.1"
 gate = "K16"
 clause = "Credential rows record `never_staged: true` with no digest, and launch validation refuses a vaulted credential with no HTTP(S) hosts"
-tag = "untested"
-note = "The row is written by credentials.rs/supervisor.rs and the 1..64-origins rule lives in Policy::validate; neither has a test."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/release_preview_linux.rs::k16_vault_requires_origins_and_records_no_staged_secret_or_digest",
+]
+note = "Real loopback HTTP vault with fixture credentials: empty origins refuse before exec; successful substitution leaves no secret in stdout, receipt, trace or vendor state and records never_staged with no digest."
 
 # ------------------------------------------------------------------ K17
 
@@ -3497,8 +3509,11 @@ row = "`tail` on a settled attempt replays exactly the journal; `--follow` on a 
 id = "K19.1"
 gate = "K19"
 clause = "`tail` on a settled attempt replays exactly the journal, `--follow` shows events with bounded lag, and its output equals the journal at settlement"
-tag = "untested"
-note = "Only `--since` filtering is unit-tested (journal.rs); replay, follow lag and settlement equality have no test."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/release_preview_linux.rs::k19_k20_live_follow_is_prompt_and_replay_is_byte_identical",
+]
+note = "Real live contained run: follow emits before settlement within 1.5 seconds, exits after settlement, and both live follow and settled replay equal the journal bytes."
 
 # ------------------------------------------------------------------ K20
 
@@ -3510,8 +3525,12 @@ row = "`tail --json` emits the recorded envelopes byte-identically (tail never r
 id = "K20.1"
 gate = "K20"
 clause = "`tail --json` emits the recorded envelopes byte-identically"
-tag = "untested"
-note = "No test compares tail's output bytes to the journal's."
+tag = "live-cli"
+tests = [
+  "ouro-jail/tests/release_preview_linux.rs::k19_k20_live_follow_is_prompt_and_replay_is_byte_identical",
+  "ouro-jail/tests/portable_tail.rs::k20_tail_keeps_whitespace_and_unicode_escape_spellings_byte_identically",
+]
+note = "Both live follow and settled JSON tail equal the original journal bytes; the journal remains unchanged."
 
 # ------------------------------------------------------------------ K21
 
@@ -3626,8 +3645,21 @@ row = "Install: a clean VM reaches sandboxed `true` and the opencode A01 run in 
 id = "K27.1"
 gate = "K27"
 clause = "Install: corrupted artifacts fail verification and install nothing, and the installer never requires a TTY"
-tag = "untested"
-note = "Proved only by the dist harness (crates/ouro-jail/dist/test_install.py, not a cargo test); the clean-VM time bound has no test."
+tag = "portable"
+tests = [
+  "ouro-jail/tests/release_preview_linux.rs::k27_signed_installer_rejects_corruption_without_a_terminal",
+]
+note = "Native executable packaging and real Minisign verification, driven without a terminal through dist/test_install.py. Corrupted signatures, installer and archives refuse while preserving the previous install. The separate clean-VM timing proof remains a distribution milestone requirement."
+
+[[clause]]
+id = "K27.2"
+gate = "K27"
+clause = "A clean VM without Rust reaches contained true and real opencode A01 within ten minutes"
+tag = "portable"
+tests = [
+  "ouro-jail/tests/portable_release_evidence.rs::k27_clean_vm_install_true_and_real_opencode_finish_within_ten_minutes",
+]
+note = "Recorded real fresh Ubuntu 26.04 VM under QEMU TCG: 62.2 seconds including signed installation and agent download. Replay checks current Jail inputs, clean native build, fresh overlay, no Rust, true and opencode settlement, and corrupted archive/signature refusal. This is recorded onboarding evidence, not a new live VM in each cargo test."
 
 # ------------------------------------------------------------------ K28
 

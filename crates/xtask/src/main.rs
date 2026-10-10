@@ -61,6 +61,9 @@ enum Task {
         /// Keep the remote run directory even when the run passes.
         #[arg(long)]
         keep_remote: bool,
+        /// Gate the Linux developer release; native macOS execution remains unsupported.
+        #[arg(long)]
+        linux_release: bool,
     },
     // J5-D begin
     /// Write the milestone-1 freeze file (jail-v1 §16) from this tree.
@@ -152,6 +155,7 @@ fn main() -> ExitCode {
             evidence,
             jobs,
             keep_remote,
+            linux_release,
         } => {
             let worktree = conformance::worktree_root();
             let opts = conformance::Options {
@@ -167,6 +171,7 @@ fn main() -> ExitCode {
                 worktree,
                 jobs,
                 keep_remote,
+                linux_release,
             };
             match conformance::drive(&opts) {
                 Ok(report) if report.failures.is_empty() => {

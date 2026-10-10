@@ -343,8 +343,8 @@ fn path_keys(op: &str) -> (Option<&'static str>, Option<&'static str>) {
 }
 
 /// What §11.3 lets an event say about a pathname the fixture passed with
-/// `AT_FDCWD`: relative to the workspace or the scratch below either,
-/// unavailable when relative, a digest anywhere else.
+/// `AT_FDCWD`: relative to the workspace or scratch, using the real entry-time
+/// cwd for these fixtures' relative arguments; a digest elsewhere.
 fn expected_path(arg: &str, roots: &Roots) -> Value {
     for (root, kind) in [
         (Some(roots.workspace.as_str()), "workspace_relative"),
@@ -361,7 +361,9 @@ fn expected_path(arg: &str, roots: &Roots) -> Value {
         }
     }
     if !arg.starts_with('/') {
-        return serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"});
+        // These fixed fixtures start in the workspace; the tracer snapshots
+        // the actual cwd at entry instead of reusing an earlier chdir event.
+        return serde_json::json!({"kind": "workspace_relative", "value": arg});
     }
     serde_json::json!({"kind": "digest"})
 }
@@ -387,7 +389,9 @@ fn matches(line: &Value, event: &Value, roots: &Roots) -> bool {
     };
     let op = line["op"].as_str().unwrap_or_default();
     let errno = line["errno"].as_str();
-    let denied = matches!(errno, Some("EACCES" | "EPERM"));
+    let denied = (matches!(errno, Some("EACCES" | "EPERM"))
+        || (base.starts_with("fs.") && matches!(errno, Some("EROFS" | "EBUSY"))))
+        && event["fields"]["observation"] != "seccomp_user_notification";
     let operation = if denied { "fs.deny" } else { base };
     if event["operation"] != operation || event["fields"]["syscall"] != op {
         return false;
@@ -1156,9 +1160,8 @@ fn event_for<'a>(events: &[&'a Value], syscall: &str, n: usize) -> &'a Value {
         .unwrap_or_else(|| panic!("no {n}th {syscall} result"))
 }
 
-/// A relative name resolved against a working directory that was renamed
-/// after the `chdir`. A sensor that joined the name to the cwd it last knew
-/// would name a directory that no longer exists.
+/// A renamed cwd is read at the syscall entry. Joining to the earlier
+/// `chdir` spelling would name a directory that no longer exists.
 #[test]
 fn j4_o06_renamed_cwd() {
     if !Profile::Tool.available() {
@@ -1182,24 +1185,26 @@ fn j4_o06_renamed_cwd() {
     let rename = event_for(&events, "rename", 0);
     assert_eq!(rename["fields"]["path"]["value"], "cwd-a", "{context}");
     assert_eq!(rename["fields"]["path2"]["value"], "cwd-b", "{context}");
-    let unavailable =
-        serde_json::json!({"kind": "unavailable", "reason": "relative_to_unobserved_cwd"});
-    // `cwd-a` itself was made with `mkdirat`; the relative one with `mkdir`.
+    // Entry-time /proc cwd snapshots reflect the renamed directory, rather
+    // than the obsolete name from the earlier chdir.
     let made = event_for(&events, "mkdir", 0);
-    assert_eq!(made["fields"]["path"], unavailable, "{context}");
+    assert_eq!(
+        made["fields"]["path"],
+        serde_json::json!({"kind":"workspace_relative", "value":"cwd-b/made"}),
+        "{context}"
+    );
     let file = events
         .iter()
         .find(|e| e["fields"]["syscall"] == "openat" && e["operation"] == "fs.create")
         .unwrap();
-    assert_eq!(file["fields"]["path"], unavailable, "{context}");
+    assert_eq!(
+        file["fields"]["path"],
+        serde_json::json!({"kind":"workspace_relative", "value":"cwd-b/file.txt"}),
+        "{context}"
+    );
     for event in &events {
         let text = event["fields"].to_string();
-        for guess in [
-            "cwd-a/made",
-            "cwd-b/made",
-            "cwd-a/file.txt",
-            "cwd-b/file.txt",
-        ] {
+        for guess in ["cwd-a/made", "cwd-a/file.txt"] {
             assert!(!text.contains(guess), "a resolved guess {guess}: {event}");
         }
     }

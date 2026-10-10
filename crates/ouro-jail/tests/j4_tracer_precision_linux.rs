@@ -1562,8 +1562,8 @@ fn inflight_through_the_product(profile: &str) {
     );
     assert_eq!(
         run.code(),
-        Some(1),
-        "{profile}: best-effort exits 1 for the loss"
+        Some(0),
+        "{profile}: best-effort preserves the child's natural exit despite recorded loss"
     );
 }
 
@@ -1706,8 +1706,8 @@ fn leader_exec_through_the_product(profile: &str) {
     assert_active(&settled, "net", 0);
     assert_eq!(
         run.code(),
-        Some(1),
-        "{profile}: best-effort exits 1 for the loss: {}",
+        Some(0),
+        "{profile}: best-effort preserves the child's natural exit despite recorded loss: {}",
         run.stderr_text()
     );
 }

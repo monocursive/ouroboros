@@ -43,6 +43,8 @@ def check(directory, public_key):
     version = plan['tag'].removeprefix('ouro-jail-v')
     if (plan.get('schema') != 'ouro.jail.release-candidate/1'
             or plan.get('repository') != REPOSITORY
+            or plan.get('publication_scope') != 'linux-preview'
+            or plan.get('unsupported_clauses') != ['K22.2', 'K23.1', 'K24.1', 'K26.1', 'K29.1']
             or not re.fullmatch('[0-9a-f]{40}', revision)
             or not re.fullmatch('sha256:[0-9a-f]{64}', inputs)
             or not VERSION.fullmatch(version) or plan['tag'] != 'ouro-jail-v' + version

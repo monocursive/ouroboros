@@ -24,6 +24,7 @@ jobs:
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_performance.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_agent_matrix.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_observer_pair.py
+      - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_preview_evidence.py
       - name: Signed distribution regressions
         run: |
           sudo apt-get update

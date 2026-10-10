@@ -339,17 +339,18 @@ fn s11_protected_access_fails() {
     assert_eq!(field(&report, "/errno"), "EROFS");
     assert!(!denied.exists(), "the protected write left a file behind");
 
-    // §11.2: EROFS stays a failed result of the original operation. It is not
-    // a `fs.deny`, which is reserved for EACCES and EPERM.
+    // §11.2: read-only filesystem refusals count as denied mutations, with
+    // the original operation and errno retained in the one result.
     let ops = operations(&run);
     assert!(
-        !ops.iter().any(|op| op == "fs.deny"),
-        "EROFS must not be reported as a denial: {ops:?}"
+        ops.iter().any(|op| op == "fs.deny"),
+        "EROFS must be reported as a denied mutation: {ops:?}"
     );
     let create = audit_events(&run)
         .into_iter()
-        .find(|event| event.get("operation").and_then(Value::as_str) == Some("fs.create"))
-        .unwrap_or_else(|| panic!("no fs.create for the refused open: {ops:?}"));
+        .find(|event| event.get("operation").and_then(Value::as_str) == Some("fs.deny"))
+        .unwrap_or_else(|| panic!("no fs.deny for the refused open: {ops:?}"));
+    assert_eq!(field(create, "/fields/attempted_operation"), "fs.create");
     assert_eq!(field(create, "/outcome/ok"), false);
     assert_eq!(field(create, "/outcome/errno"), "EROFS");
     assert_eq!(field(create, "/fields/path/kind"), "workspace_relative");

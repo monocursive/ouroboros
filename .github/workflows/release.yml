@@ -55,12 +55,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      OURO_BUILD_REVISION: ${{ github.sha }}
       OURO_BUILD_DIRTY: 'false'
       PREVIEW_VERSION: ${{ needs.coordinate.outputs.version }}
       PREVIEW_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Bind provenance to the checked-out commit
+        run: printf 'OURO_BUILD_REVISION=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Install build and signature tools
         run: |
           rustup toolchain install && rustup show
@@ -104,7 +105,7 @@ jobs:
           python3 crates/ouro-jail/dist/prepare_release.py assemble \
             --stage stages/native-x86_64-unknown-linux-gnu \
             --stage stages/native-aarch64-unknown-linux-gnu \
-            --revision "$GITHUB_SHA" --inputs "$inputs" \
+            --revision "$(git rev-parse HEAD)" --inputs "$inputs" \
             --version "$PREVIEW_VERSION" --out candidate
           echo 'Unsigned candidate; publication requires production signing and exact-commit CI/conformance.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

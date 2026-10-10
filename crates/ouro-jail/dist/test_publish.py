@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -38,6 +39,8 @@ class PublicationTests(unittest.TestCase):
     def test_signed_candidate_and_pinned_bootstrap(self):
         plan, names = check(self.candidate, self.key)
         self.assertEqual(plan['target_commit'], REVISION)
+        self.assertEqual(plan['publication_scope'], 'linux-preview')
+        self.assertEqual(plan['unsupported_clauses'], ['K22.2', 'K23.1', 'K24.1', 'K26.1', 'K29.1'])
         self.assertEqual(len(names), 8)
         bootstrap = (self.candidate / 'bootstrap.sh').read_text()
         self.assertIn(f"public_key='{self.key}'", bootstrap)
@@ -53,6 +56,26 @@ class PublicationTests(unittest.TestCase):
                 with self.assertRaises((ValueError, subprocess.CalledProcessError)):
                     check(self.candidate, self.key)
                 file.write_bytes(original)
+
+    def test_a_valid_signature_cannot_claim_a_broader_release_scope(self):
+        # Signing authorizes bytes, not a macOS support claim. Re-sign the
+        # modified metadata correctly, so failure is the scope check itself.
+        plan_path = self.candidate / 'release-plan.json'
+        plan = json.loads(plan_path.read_text())
+        plan['publication_scope'] = 'all-platforms'
+        plan_path.write_text(json.dumps(plan) + '\n')
+        manifest = self.candidate / 'SHA256SUMS'
+        lines = manifest.read_text().splitlines()
+        manifest.write_text('\n'.join(
+            (hashlib.sha256(plan_path.read_bytes()).hexdigest() + '  release-plan.json')
+            if line.endswith('  release-plan.json') else line for line in lines
+        ) + '\n')
+        signature = self.candidate / 'SHA256SUMS.minisig'
+        signature.unlink()
+        subprocess.run(['minisign', '-Sm', str(manifest), '-s', str(self.root / 'key'),
+                        '-x', str(signature)], check=True, capture_output=True)
+        with self.assertRaisesRegex(ValueError, 'invalid signed release plan'):
+            check(self.candidate, self.key)
 
     def test_worktree_revision_and_required_ci_gates_refuse(self):
         trusted = (ROOT / 'crates/ouro-jail/dist/release.pub').read_text().splitlines()[1]

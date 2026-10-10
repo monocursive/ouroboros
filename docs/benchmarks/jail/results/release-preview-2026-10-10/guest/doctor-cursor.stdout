@@ -1,0 +1,389 @@
+{
+  "binaries": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6",
+      "version": "bubblewrap 0.11.1"
+    },
+    "ouro-jail": {
+      "path": "/home/ubuntu/.local/bin/ouro-jail",
+      "sha256": "8be3cd792877b2225b4021620714c4c852011ea08f007402cbb908be793dcd5e"
+    }
+  },
+  "build": {
+    "debug_assertions": false,
+    "dirty": false,
+    "inputs": "sha256:2989fb4983dedf8e8c4ea75744cce9eb8ac64c5dacf5985e366ce13a5279c225",
+    "opt_level": "3",
+    "revision": "16ee37fe174757c3671b6e616657e8ad10a0ad1a",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "target": "x86_64-unknown-linux-gnu"
+  },
+  "capabilities": [
+    {
+      "evidence_ref": "bwrap_present,pid_namespace",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "pid-namespace",
+      "name": "tree_termination",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "ptrace_seize_descendant,observer_closed_set",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "ptrace",
+      "name": "closed_set_observation",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "filesystem_containment",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "seccomp_filter_load",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "seccomp-bpf",
+      "name": "syscall_filter",
+      "reason_code": "ok",
+      "scope": "process",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,network_namespace,seccomp_user_notification,unix_socket_diagnostics",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
+      "name": "network_proxy",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bwrap_present,user_namespace,mount_readonly_bind",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "protected_coverage:existing_and_root",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "supervisor",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "boottime-deadline",
+      "name": "limit:wall",
+      "reason_code": "ok",
+      "scope": "tree",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "bubblewrap 0.11.1",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "bubblewrap",
+      "name": "bwrap_present",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531837, inside 4026532338",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "user-namespace",
+      "name": "user_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "outside 4026531836, inside 4026532227; NSpid 2; /proc shows 1,2",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "pid-namespace",
+      "name": "pid_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "interfaces inside: lo",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "network-namespace",
+      "name": "network_namespace",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "write into a read-only bind failed EROFS",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "bubblewrap-binds",
+      "name": "mount_readonly_bind",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "Seccomp mode 2, AF_UNIX socket EPERM, allowed write ok, filter sha256:6be154d0d902309f8918b03bddd6a3dae656926dbf827ccbbe551e5f73ffb2ec",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "seccomp-bpf",
+      "name": "seccomp_filter_load",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "seized pid 4082, stopped with signal 5, detached",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "ptrace",
+      "name": "ptrace_seize_descendant",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "attached blocked launcher; one successful create matched the fixture, final exit observed, zero loss",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "ptrace-seccomp",
+      "name": "observer_closed_set",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "unavailable cgroup=/user.slice/user-1000.slice/session-29.scope: lingering is off for this user, so the user manager stops when the last session ends and would take a moved supervisor with it; the supervisor stays in its session (`loginctl enable-linger` lets it enter a delegated scope)",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "systemd-user-transient-scope",
+      "name": "supervisor_scope",
+      "reason_code": "no_linger",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "supervisor is outside the delegated subtree; launch it in a delegated user scope",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_delegated_leaf",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "supervisor is outside the delegated subtree; launch it in a delegated user scope",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_pids",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "supervisor is outside the delegated subtree; launch it in a delegated user scope",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_memory",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "supervisor is outside the delegated subtree; launch it in a delegated user scope",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_swap",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "supervisor is outside the delegated subtree; launch it in a delegated user scope",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "cgroup-v2-delegated",
+      "name": "cgroup_cpu",
+      "reason_code": "cgroup_unavailable",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "bounded-tmpfs-capacity: 1555296256 bytes, 1048576 inodes (/tmp/ouro-storage-ceiling-probe-4065-248546059179)",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "bounded-tmpfs-or-user-quota",
+      "name": "storage_ceiling",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "/proc/sys/kernel/apparmor_restrict_unprivileged_userns = 1",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "apparmor",
+      "name": "apparmor_userns_restriction",
+      "reason_code": "restriction_on",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "a nested bubblewrap exited Some(1): bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces. See <https://deb.li/bubblewrap> or <file:///usr/share/doc/bubblewrap/README.Debian.gz>.; bare unshare(CLONE_NEWUSER) inside: ok",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "nested-bubblewrap",
+      "name": "nested_user_namespace",
+      "reason_code": "nested_sandbox_denied",
+      "scope": "host",
+      "status": "unavailable"
+    },
+    {
+      "evidence_ref": "an unprivileged child installed the mediation filter (sha256:28c98e72b91a22c212d5dfdddfcc1f1ca153c5a8e89c15833c26724b263ebeff) with a listener, and pidfd_getfd took it",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "seccomp-user-notification",
+      "name": "seccomp_user_notification",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "an AF_UNIX sock_diag dump with UDIAG_SHOW_VFS completed",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "netlink-sock-diag",
+      "name": "unix_socket_diagnostics",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "through 127.0.0.1:3128: allowed destination 200 (1 origin connection(s)), denied destination 403 (0 connection(s) reached it); direct TCP egress ENETUNREACH; proxy results allow/relayed true, deny/host_not_allowed true",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "outside-http-proxy+loopback-bridge",
+      "name": "agent_proxy_bridge",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "a host socket in the workspace: connect EACCES (0 connection(s) reached it); an attempt-bound socket: connect ok",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "seccomp-user-notification",
+      "name": "agent_unix_peer_mediation",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "landlock:ok,seccomp:ok,write:EACCES,read:EACCES,mkdir:EPERM,remount:EPERM,umount:EPERM,setns:EPERM,unshare:EPERM,egress:ENETUNREACH; nested user namespace unavailable",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "landlock+seccomp",
+      "name": "agent_inner_sandbox",
+      "reason_code": "ok",
+      "scope": "host",
+      "status": "available"
+    },
+    {
+      "evidence_ref": "no NVIDIA device nodes under /dev; a GPU grant (--rw /dev/nvidia*) needs the driver's nodes",
+      "measured_at": "2026-10-10T15:36:41Z",
+      "mechanism": "devices",
+      "name": "gpu_passthrough",
+      "reason_code": "no_nvidia_devices",
+      "scope": "host",
+      "status": "unavailable"
+    }
+  ],
+  "component": "ouro-jail",
+  "host": {
+    "apparmor_enabled": true,
+    "apparmor_userns_restriction": {
+      "local_files": [
+        "README"
+      ],
+      "profile_files": [
+        "bwrap-userns-restrict",
+        "glycin.bwrap",
+        "lxc-usernsexec",
+        "unprivileged_userns"
+      ],
+      "state": "on",
+      "unpackaged_files": []
+    },
+    "cgroup": {
+      "controllers": [
+        "cpu",
+        "memory",
+        "pids"
+      ],
+      "delegated_root": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service",
+      "root_controllers": [
+        "cpuset",
+        "cpu",
+        "io",
+        "memory",
+        "hugetlb",
+        "pids",
+        "rdma",
+        "misc",
+        "dmem"
+      ],
+      "subtree_control": [
+        "cpu",
+        "memory",
+        "pids"
+      ]
+    },
+    "cpus_online": 2,
+    "distribution": "Ubuntu 26.04.1 LTS",
+    "kernel_release": "7.0.0-34-generic",
+    "kernel_version": "#34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:29:37 UTC 2026",
+    "linger": false,
+    "memory": {
+      "mem_total_kib": 3037688,
+      "swap_total_kib": 0
+    },
+    "operator_identity": "privileged_group",
+    "privileged_groups": [
+      "sudo"
+    ],
+    "sysctls": {
+      "kernel.apparmor_restrict_unprivileged_userns": "1",
+      "kernel.io_uring_disabled": "0",
+      "kernel.perf_event_paranoid": "4",
+      "kernel.unprivileged_bpf_disabled": "2",
+      "kernel.yama.ptrace_scope": "1",
+      "user.max_user_namespaces": "8683"
+    },
+    "systemd_version": "systemd 259 (259.5-0ubuntu3.4)",
+    "virtualization": "qemu"
+  },
+  "launch": {
+    "credentials": [],
+    "name": "cursor",
+    "resolution": "bundled",
+    "support": "experimental",
+    "support_reason": "no_recorded_run"
+  },
+  "platform": {
+    "arch": "x86_64",
+    "kernel": "Linux 7.0.0-34-generic",
+    "os": "linux"
+  },
+  "ready": true,
+  "requirements": [
+    "tree_termination",
+    "closed_set_observation",
+    "filesystem_containment",
+    "syscall_filter",
+    "network_proxy",
+    "protected_coverage:existing_and_root",
+    "limit:wall"
+  ],
+  "schema": "ouro.jail.doctor/1",
+  "supervisor_scope": {
+    "cgroup": "/user.slice/user-1000.slice/session-29.scope",
+    "reason": "lingering is off for this user, so the user manager stops when the last session ends and would take a moved supervisor with it; the supervisor stays in its session (`loginctl enable-linger` lets it enter a delegated scope)",
+    "reason_code": "no_linger",
+    "state": "unavailable",
+    "unit": null
+  },
+  "version": "0.1.0"
+}

@@ -92,6 +92,7 @@ jobs:
         # failure it was meant to avoid (§16).
         run: |
           cargo run -p xtask -- conformance \
+            --linux-release \
             --host "$CI_HOST" --user "$CI_USER" \
             --key ~/.ssh/ouro_ci --known-hosts ~/.ssh/known_hosts \
             --evidence evidence/

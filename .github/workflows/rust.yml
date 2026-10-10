@@ -35,7 +35,7 @@ jobs:
       # ring builds native C/assembly even during cargo check.
       - name: Install Linux cross compiler
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu minisign
       # J5 platform compilation (jail-v1 §3.2): compile-only evidence for a
       # triple no runner executes, one per leg. Intel macOS is "additional
       # evidence, not an execution support claim"; Linux aarch64 execution
@@ -88,7 +88,7 @@ jobs:
       # judges them on the reference host.
       - name: Acceptance verdict (macOS lane)
         if: matrix.os == 'macos-latest'
-        run: cargo run -p xtask -- gates --log macos=test-output.txt
+        run: cargo run -p xtask -- gates --linux-release --log macos=test-output.txt
       # `tee` would otherwise mask the test step's own status.
       - name: Report what was not exercised
         if: always()

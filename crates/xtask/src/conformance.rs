@@ -923,6 +923,7 @@ pub struct Options {
     pub host_manifest_script: PathBuf,
     pub jobs: u32,
     pub keep_remote: bool,
+    pub linux_release: bool,
 }
 
 fn run(
@@ -991,6 +992,7 @@ impl CommandResult {
 /// earlier one failed; that is not itself a failure.
 #[derive(Debug, Default)]
 pub struct RunOutcomes {
+    pub linux_release: bool,
     pub remote_created: bool,
     pub mkdir: Option<CommandResult>,
     pub rsync: Option<CommandResult>,
@@ -1080,7 +1082,16 @@ pub fn gate_verdict(
         Some(Err(e)) => Err(e.clone()),
         Some(Ok(a)) => {
             let logs = BTreeMap::from([(gates::Lane::Linux, gates::parse_log(log))]);
-            let mut v = gates::evaluate(&a.map, &a.rows, &logs, &driver_checks(outcomes, manifest));
+            let mut v = if outcomes.linux_release {
+                gates::evaluate_linux_release(
+                    &a.map,
+                    &a.rows,
+                    &logs,
+                    &driver_checks(outcomes, manifest),
+                )
+            } else {
+                gates::evaluate(&a.map, &a.rows, &logs, &driver_checks(outcomes, manifest))
+            };
             // The log must be this run's: the revision the driver ran, in
             // conformance mode.
             let expected = outcomes.revision.as_deref().unwrap_or("unknown");
@@ -1354,7 +1365,10 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
         "run directory name `{run_dir}` is not shell safe"
     );
 
-    let mut outcomes = RunOutcomes::default();
+    let mut outcomes = RunOutcomes {
+        linux_release: opts.linux_release,
+        ..RunOutcomes::default()
+    };
     // The revision the suite prints and the verdict binds its log to.
     // Without one (no git), the run cannot be tied to anything and fails.
     let revision = gates::repository_revision(&opts.worktree).unwrap_or_else(|| {
@@ -2677,6 +2691,7 @@ smoke doctor 0
 
     fn a_clean_run() -> RunOutcomes {
         RunOutcomes {
+            linux_release: false,
             remote_created: true,
             mkdir: Some(okc()),
             rsync: Some(okc()),

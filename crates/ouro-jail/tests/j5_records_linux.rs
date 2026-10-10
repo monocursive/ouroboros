@@ -402,7 +402,7 @@ fn j5_agent_records_pass_the_frozen_contract() {
         &[
             "proxy net.connect proxy_close allow",
             "proxy net.connect proxy_close deny",
-            "audit fs.deny syscall_return net.connect",
+            "audit net.connect syscall_return -",
         ],
     );
     assert_eq!(
@@ -513,8 +513,8 @@ fn j5_a_trace_loss_note_and_its_receipt_agree() {
     let run = c.run(&Value::from(steps), &Release::Valid);
     assert_eq!(
         run.code(),
-        Some(1),
-        "evidence loss is a tool error: {}",
+        Some(0),
+        "best-effort preserves the child's exit with recorded evidence loss: {}",
         explain(&run)
     );
     common::assert_run_records(&run);

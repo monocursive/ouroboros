@@ -30,6 +30,7 @@ def main():
     parser.add_argument('--binary', type=pathlib.Path, required=True)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--inputs', help='Expected Jail build-input SHA256 passed to the guest.')
+    parser.add_argument('--release-version', default='0.1.0-rc.1')
     parser.add_argument('--out', type=pathlib.Path, required=True)
     parser.add_argument('--accelerator', choices=['tcg', 'kvm'], default='tcg')
     parser.add_argument('--cpus', type=int, default=2)
@@ -43,6 +44,7 @@ def main():
                 'image_url': args.image_url, 'expected_image_sha256': args.image_sha256,
                 'revision': args.revision, 'accelerator': args.accelerator,
                 'expected_inputs': args.inputs,
+                'release_version': args.release_version,
                 'cpus': args.cpus, 'memory_mib': args.memory_mib,
                 'guest_disk_gib': 12, 'fresh_overlay': True,
                 'host_policy_changes': [], 'host_uname': list(os.uname()),
@@ -115,7 +117,7 @@ def main():
             repo = script_dir.parents[2]
             execute(['python3', repo / 'crates/ouro-jail/dist/package.py', '--binary',
                      args.binary.resolve(), '--target', 'x86_64-unknown-linux-gnu', '--out',
-                     artifacts, '--signing-key', signing_key], stdout=setup, stderr=subprocess.STDOUT)
+                     artifacts, '--version', args.release_version, '--signing-key', signing_key], stdout=setup, stderr=subprocess.STDOUT)
         (out / 'artifacts').mkdir()
         for filename in ['SHA256SUMS', 'SHA256SUMS.minisig']:
             shutil.copyfile(artifacts / filename, out / 'artifacts' / filename)

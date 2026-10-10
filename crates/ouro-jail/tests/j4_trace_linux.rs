@@ -194,8 +194,8 @@ fn assert_best_effort_continued(run: &Run, what: &str) {
     );
     assert_eq!(
         run.code(),
-        Some(1),
-        "{what}: evidence loss is still a tool error"
+        Some(0),
+        "{what}: best-effort preserves the child's natural exit; loss stays in evidence"
     );
     let fixture_ok = run
         .fixture_lines()

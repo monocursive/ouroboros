@@ -888,26 +888,27 @@ fn c02_a_refusal_before_any_boundary_cleans_vendor_state() {
     if !common::live() {
         return;
     }
-    // §8.3: a socket on stdout refuses in preparation, before any boundary
-    // exists and after vendor state was created and registered.
+    // §8.3: an anonymous kernel handle on stdout refuses in preparation,
+    // after vendor state was created. Stream sockets are relayed safely.
     let jail = Jail::new().unwrap();
     write_profile(&jail, "fixture", PLAIN_PROFILE);
     let workspace = jail.root().join("workspace");
     private_dir(&workspace);
-    let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: eventfd creates a new owned descriptor; wrap it exactly once.
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+    assert!(fd >= 0);
+    let invalid = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
     let output = Command::new(harness::jail_path())
         .args(["run", "--launch", "fixture", "--workspace"])
         .arg(&workspace)
         .args(["--", "/usr/bin/true"])
         .env("OURO_DATA_DIR", jail.data_dir())
         .env("OURO_CONFIG_DIR", jail.config_dir())
-        .stdout(std::process::Stdio::from(std::os::fd::OwnedFd::from(
-            theirs,
-        )))
+        .stdout(std::process::Stdio::from(invalid))
         .stderr(std::process::Stdio::piped())
         .output()
         .unwrap();
-    drop(ours);
     assert_eq!(
         output.status.code(),
         Some(125),

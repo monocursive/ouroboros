@@ -366,8 +366,8 @@ ouro-jail learn [--launch NAME] [--profile NAME] [--workspace PATH]
   successful reads and memory-sourced `openat2` flags are not learning inputs.
 - **Writes**: denied writes outside the workspace are **reported as a
   denied-writes list and never proposed as grants**. Include read-only
-  filesystem refusals (`EROFS`), which the audit contract records under the
-  original filesystem operation rather than `fs.deny`. Preserve that evidence
+  filesystem refusals (`EROFS`), which the audit contract records as `fs.deny`
+  with the original mutation in `attempted_operation`. Preserve that evidence
   meaning; a failed lookup (`ENOENT`) alone is not proof of a policy denial.
   The dangerous direction is never auto-widened.
 
@@ -843,6 +843,16 @@ A unit parser test is not a live containment test; a macOS refusal is not
 a macOS execution result. Report medians and p95 with raw timing samples
 on this Mac and `ubuntu@37.59.114.70`. Keep startup and observed workload
 cost separate, and compare identical observation/profile settings.
+
+For the Linux-only developer preview, `xtask gates --linux-release` and
+`xtask conformance --linux-release` evaluate all shared and Linux requirements,
+including the macOS build's portable and execution-refusal tests. The native
+macOS execution clauses K22.2, K23.1, K24.1, K26.1 and K29.1 are explicitly
+reported **unsupported**, never passed; no macOS executable is distributed.
+The full verdict without this flag still fails these untested requirements.
+The exclusion is a fixed list restricted to the macOS lane, not a mechanism
+for waiving a failing Linux test. Native macOS publication requires the full
+verdict and the J11 evidence above.
 
 Signing and publishing require real release keys and repository ownership.
 Never invent a public key, support row, CI result or clean-VM install

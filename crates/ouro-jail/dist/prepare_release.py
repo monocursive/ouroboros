@@ -125,6 +125,8 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
     entries.append(('bootstrap.sh', digest(out / 'bootstrap.sh')))
     plan = {'schema': 'ouro.jail.release-candidate/1', 'repository': REPOSITORY,
             'tag': 'ouro-jail-v' + version, 'target_commit': revision, 'inputs': inputs,
+            'publication_scope': 'linux-preview',
+            'unsupported_clauses': ['K22.2', 'K23.1', 'K24.1', 'K26.1', 'K29.1'],
             'draft': True, 'published': False, 'signature_verified': bool(signing_key),
             'publication_blockers': ([] if signing_key else ['production_signing_identity_not_configured'])
                 + ['operator_review_of_host_support_and_validation_required'],

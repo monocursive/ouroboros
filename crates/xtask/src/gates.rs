@@ -1093,6 +1093,7 @@ pub enum ClauseStatus {
     Limit,
     Credential,
     Elsewhere,
+    Unsupported,
     Fail,
 }
 
@@ -1104,6 +1105,7 @@ impl ClauseStatus {
             ClauseStatus::Limit => "limit",
             ClauseStatus::Credential => "credential",
             ClauseStatus::Elsewhere => "elsewhere",
+            ClauseStatus::Unsupported => "unsupported",
             ClauseStatus::Fail => "FAIL",
         }
     }
@@ -1124,6 +1126,8 @@ pub enum GateStatus {
     PassWithLimits,
     Elsewhere,
     Credential,
+    Unsupported,
+    PassWithUnsupported,
     Fail,
 }
 
@@ -1135,6 +1139,8 @@ impl GateStatus {
             GateStatus::PassWithLimits => "pass+limits",
             GateStatus::Elsewhere => "elsewhere",
             GateStatus::Credential => "credential",
+            GateStatus::Unsupported => "unsupported",
+            GateStatus::PassWithUnsupported => "pass+unsupported",
             GateStatus::Fail => "FAIL",
         }
     }
@@ -1151,6 +1157,8 @@ pub struct GateVerdict {
 
 #[derive(Debug, Clone, Default)]
 pub struct Verdict {
+    /// Explicit publication scope; absent means the complete specification.
+    pub linux_release: bool,
     /// The map the verdict read, as its header names it.
     pub map_label: String,
     /// Which lanes were combined, at which revision.
@@ -1380,6 +1388,60 @@ pub fn evaluate(
     v
 }
 
+/// Linux-only developer distribution. These five macOS execution requirements
+/// remain untested in the full verdict; this scope never calls them passes.
+/// Shared tests, macOS refusal checks and every Linux requirement still gate.
+pub const LINUX_RELEASE_UNSUPPORTED: &[&str] = &["K22.2", "K23.1", "K24.1", "K26.1", "K29.1"];
+
+pub fn evaluate_linux_release(
+    map: &Map,
+    rows: &[(String, String)],
+    logs: &BTreeMap<Lane, TestLog>,
+    checks: &BTreeMap<String, bool>,
+) -> Verdict {
+    let mut verdict = evaluate(map, rows, logs, checks);
+    verdict.linux_release = true;
+    for gate in &mut verdict.gates {
+        for clause in &mut gate.clauses {
+            if LINUX_RELEASE_UNSUPPORTED.contains(&clause.id.as_str()) {
+                if clause.lane != Lane::Macos {
+                    verdict.problems.push(format!(
+                        "{} cannot be excluded from Linux: its lane is not macos",
+                        clause.id
+                    ));
+                    continue;
+                }
+                clause.status = ClauseStatus::Unsupported;
+                clause.reasons = vec![
+                    "macOS execution is unsupported by the Linux developer release; the full specification requirement remains open".into(),
+                ];
+            }
+        }
+        if !gate
+            .clauses
+            .iter()
+            .any(|c| c.status == ClauseStatus::Unsupported)
+        {
+            continue;
+        }
+        let any = |status| gate.clauses.iter().any(|c| c.status == status);
+        gate.status = if !gate.reasons.is_empty() || any(ClauseStatus::Fail) {
+            GateStatus::Fail
+        } else if any(ClauseStatus::Elsewhere) {
+            GateStatus::Elsewhere
+        } else if gate
+            .clauses
+            .iter()
+            .all(|c| c.status == ClauseStatus::Unsupported)
+        {
+            GateStatus::Unsupported
+        } else {
+            GateStatus::PassWithUnsupported
+        };
+    }
+    verdict
+}
+
 impl Verdict {
     /// One line per failing gate plus every problem. Empty means every gate
     /// in the evaluated lanes passed (with recorded limits at most).
@@ -1419,7 +1481,11 @@ impl Verdict {
                 matches!(
                     g.status,
                     GateStatus::Pass | GateStatus::PassWithLimits | GateStatus::Credential
-                )
+                ) || (self.linux_release
+                    && matches!(
+                        g.status,
+                        GateStatus::Unsupported | GateStatus::PassWithUnsupported
+                    ))
             })
     }
 
@@ -1441,6 +1507,12 @@ impl Verdict {
         );
         if !self.lanes_label.is_empty() {
             let _ = writeln!(s, "lanes combined: {}", self.lanes_label);
+        }
+        if self.linux_release {
+            let _ = writeln!(
+                s,
+                "publication scope: linux-preview; macOS execution requirements remain unsupported, never passed"
+            );
         }
         let _ = writeln!(
             s,
@@ -1484,6 +1556,9 @@ impl Verdict {
                         detail.push(format!("{} in the {} lane", c.id, c.lane.as_str()));
                     }
                     ClauseStatus::Credential => detail.push(format!("{} needs a real agent", c.id)),
+                    ClauseStatus::Unsupported => {
+                        detail.push(format!("{} unsupported: {}", c.id, c.reasons.join("; ")))
+                    }
                     ClauseStatus::Pass => {}
                 }
             }
@@ -1516,7 +1591,7 @@ impl Verdict {
         }
         let _ = writeln!(
             s,
-            "every noncredential gate passes in these lanes: {}",
+            "every required noncredential gate passes in these lanes: {}",
             if self.all_noncredential_gates_pass() {
                 "yes"
             } else {
@@ -1563,6 +1638,7 @@ impl Verdict {
         serde_json::json!({
             "schema": VERDICT_SCHEMA,
             "map_schema": map.schema,
+            "publication_scope": if self.linux_release { "linux-preview" } else { "full" },
             "lanes": self.lanes.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
             "all_noncredential_gates_pass": self.all_noncredential_gates_pass(),
             "counts": self.counts(),
@@ -1663,6 +1739,10 @@ pub struct GatesArgs {
     /// Also write the verdict as JSON here.
     #[arg(long, value_name = "PATH")]
     pub json: Option<std::path::PathBuf>,
+    /// Evaluate the Linux developer release; explicitly report native macOS
+    /// execution requirements unsupported instead of claiming they passed.
+    #[arg(long)]
+    pub linux_release: bool,
     /// The revision the logs must be at; defaults to this repository's
     /// (`git rev-parse HEAD`, `+dirty` with uncommitted changes), because the
     /// map and spec are read from it.
@@ -1729,7 +1809,11 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
         Ok(c) => c,
         Err(e) => return fail(e),
     };
-    let mut verdict = evaluate(&acceptance.map, &acceptance.rows, &logs, &checks);
+    let mut verdict = if args.linux_release {
+        evaluate_linux_release(&acceptance.map, &acceptance.rows, &logs, &checks)
+    } else {
+        evaluate(&acceptance.map, &acceptance.rows, &logs, &checks)
+    };
     verdict
         .problems
         .extend(binding_problems(&logs, Some(&expected)));
@@ -2284,6 +2368,84 @@ pub fn run_merge(args: &MergeArgs, root: &std::path::Path) -> std::process::Exit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_release_reports_only_the_named_macos_requirements_unsupported() {
+        let map = Map::parse(MAP).unwrap();
+        let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
+        let logs = BTreeMap::new();
+        let full = evaluate(&map, &rows, &logs, &BTreeMap::new());
+        let linux = evaluate_linux_release(&map, &rows, &logs, &BTreeMap::new());
+        for id in LINUX_RELEASE_UNSUPPORTED {
+            let find = |v: &Verdict| {
+                v.gates
+                    .iter()
+                    .flat_map(|g| &g.clauses)
+                    .find(|c| c.id == *id)
+                    .unwrap()
+                    .status
+            };
+            assert_eq!(find(&full), ClauseStatus::Fail);
+            assert_eq!(find(&linux), ClauseStatus::Unsupported);
+        }
+        for clause in map
+            .clause
+            .iter()
+            .filter(|c| c.tag == Tag::Untested && c.lane == Lane::Linux)
+        {
+            let actual = linux
+                .gates
+                .iter()
+                .flat_map(|g| &g.clauses)
+                .find(|c| c.id == clause.id)
+                .unwrap();
+            assert_eq!(
+                actual.status,
+                ClauseStatus::Fail,
+                "{} must still block Linux",
+                clause.id
+            );
+        }
+        assert_eq!(linux.to_json(&map)["publication_scope"], "linux-preview");
+        assert!(
+            linux
+                .render()
+                .contains("macOS execution requirements remain unsupported, never passed")
+        );
+    }
+
+    #[test]
+    fn linux_release_cannot_exclude_a_linux_clause_or_macos_refusal_proof() {
+        let mut map = Map::parse(MAP).unwrap();
+        let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
+        map.clause
+            .iter_mut()
+            .find(|c| c.id == "K23.1")
+            .unwrap()
+            .lane = Lane::Linux;
+        let unproved_linux = map.clause.iter_mut().find(|c| c.id == "K03.4").unwrap();
+        unproved_linux.tag = Tag::Untested;
+        unproved_linux.tests.clear();
+        let logs = BTreeMap::from([(Lane::Macos, TestLog::default())]);
+        let verdict = evaluate_linux_release(&map, &rows, &logs, &BTreeMap::new());
+        assert!(
+            verdict
+                .problems
+                .iter()
+                .any(|p| p.contains("K23.1 cannot be excluded from Linux"))
+        );
+        assert_eq!(gate(&verdict, "K23").status, GateStatus::Fail);
+        assert_eq!(
+            gate(&verdict, "K03").status,
+            GateStatus::Fail,
+            "untested Linux clauses still block publication"
+        );
+        assert_eq!(
+            gate(&verdict, "K25").status,
+            GateStatus::Fail,
+            "the macOS refusal tests are still required"
+        );
+    }
 
     /// The J4 evidence run (`8baec7d6`, 1299 passed, 0 failed, 13 ignored).
     const J4_LOG: &str =
@@ -3199,7 +3361,7 @@ reason = "an `ignore` doc example"
         );
         assert!(
             v.render()
-                .contains("every noncredential gate passes in these lanes: no")
+                .contains("every required noncredential gate passes in these lanes: no")
         );
     }
 

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import tomllib
 
 
 PROFILES = ['codex', 'claude', 'opencode', 'cursor', 'aider', 'goose', 'gemini',
@@ -95,19 +96,45 @@ def main():
         assert data['state_cleanup'] == 'complete'
         return data
 
+    def vendor(name, argv, outputs):
+        # One bounded retry for an observed provider Bad Request, retaining
+        # the failed row and artifacts. Jail errors never qualify. The
+        # onboarding clock includes both attempts; this is no reliability claim.
+        for attempt in range(2):
+            done = run(name, argv, check=False, timeout=330)
+            if done.returncode == 0:
+                return done
+            if attempt or b'Bad Request:' not in done.stderr or b'ouro-jail: error' in done.stderr:
+                raise RuntimeError(f'{name} failed with exit {done.returncode}; see {name}.stderr')
+            label = name + '-provider-failure'
+            result['rows'][-1]['name'] = label
+            for suffix in ['stdout', 'stderr']:
+                (out / f'{name}.{suffix}').rename(out / f'{label}.{suffix}')
+            current = max((home / 'ouro-data/attempts').iterdir(), key=lambda p: p.stat().st_mtime_ns)
+            for filename in ['jail.json', 'trace.ndjson', 'policy.json']:
+                shutil.copyfile(current / filename, out / f'{label}-{filename}')
+            for path in outputs:
+                if path.exists():
+                    shutil.copyfile(path, out / f'{label}-{path.name}')
+                    path.unlink()
+            result.setdefault('provider_retries', []).append(label)
+            save()
+
     def distribution_checks():
         result['distribution_checks'] = 'started'
         original = result['binary_sha256']
         bad = home / 'corrupt-artifacts'
         shutil.copytree(args.artifacts, bad)
-        with (bad / 'ouro-jail-x86_64-unknown-linux-gnu.tar.gz').open('ab') as file:
+        archives = list(args.artifacts.glob('ouro-jail-*-x86_64-unknown-linux-gnu.tar.gz'))
+        assert len(archives) == 1, 'expected exactly one versioned native archive'
+        archive_name = archives[0].name
+        with (bad / archive_name).open('ab') as file:
             file.write(b'CORRUPT-TEST-FIXTURE')
         corrupt = run('corrupt-archive', ['sh', args.installer, '--from-dir', bad,
                        '--public-key', args.public_key, '--upgrade'], check=False)
         assert corrupt.returncode != 0 and b'Checksum verification failed' in corrupt.stderr
         assert hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest() == original
-        shutil.copyfile(args.artifacts / 'ouro-jail-x86_64-unknown-linux-gnu.tar.gz',
-                        bad / 'ouro-jail-x86_64-unknown-linux-gnu.tar.gz')
+        shutil.copyfile(args.artifacts / archive_name, bad / archive_name)
         (bad / 'SHA256SUMS.minisig').write_text('invalid signature fixture\n')
         signature = run('corrupt-signature', ['sh', args.installer, '--from-dir', bad,
                          '--public-key', args.public_key, '--upgrade'], check=False)
@@ -173,11 +200,11 @@ def main():
         # Force the agent's file-search path as well as its write tool. Without
         # rg, OpenCode downloads it from GitHub, outside the starter allowlist.
         (workspace / 'task.txt').write_text('hello\n')
-        run('opencode', [binary, 'run', '--launch', 'opencode', '--workspace', workspace,
+        vendor('opencode', [binary, 'run', '--launch', 'opencode', '--workspace', workspace,
                          '--ro', agent_dir, '--limit', 'wall=300s', '--', agent, 'run',
                          '--model', 'opencode/big-pickle',
                          'Use your glob tool to find task.txt, read it, then create greeting.txt '
-                         'with exactly the same contents. Do not use the network yourself.'], timeout=330)
+                         'with exactly the same contents. Do not use the network yourself.'], [workspace / 'greeting.txt'])
         data = receipt('opencode')
         assert (workspace / 'greeting.txt').read_bytes() == b'hello\n'
         shutil.copyfile(workspace / 'greeting.txt', out / 'greeting.txt')
@@ -187,6 +214,36 @@ def main():
         result['workflow_seconds'] = time.monotonic() - workflow_start
         assert result['workflow_seconds'] < 600, 'The user workflow exceeded ten minutes.'
         result['main_workflow'] = 'passed'
+        # K11: run the real vendor under learning, with a deliberate exact
+        # denied-read fixture. The candidate must cite this run's evidence,
+        # retain coverage and propose no parent tree or write grant.
+        needed = home / 'learning-needed.txt'
+        needed.write_text('learning fixture\n')
+        # Only this disposable guest's fixture directory. Vendor consent lets
+        # the call reach the jail, whose mount policy still denies the read.
+        (workspace / 'opencode.json').write_text(json.dumps({'permission': {
+            'bash': 'allow', 'edit': 'allow', 'read': 'allow',
+            'external_directory': {str(home) + '/**': 'allow'},
+        }}))
+        proposal = out / 'opencode-learned.toml'
+        vendor('opencode-learn', [binary, 'learn', '--launch', 'opencode', '--workspace', workspace,
+                              '--ro', agent_dir, '--limit', 'wall=300s', '--out', proposal,
+                              '--', agent, 'run', '--model', 'opencode/big-pickle',
+                              f'Use the bash tool once to run exactly `cat {needed}; '
+                              'cp task.txt learned-greeting.txt`. The cat is expected to fail; still '
+                              'run cp after it. Do not retry, change permissions, or use the network '
+                              'yourself. Reply done only after the command completed.'], [proposal, workspace / 'learned-greeting.txt'])
+        learning = receipt('opencode-learn')
+        assert (workspace / 'learned-greeting.txt').read_bytes() == b'hello\n'
+        learned = tomllib.loads(proposal.read_text())
+        assert learned['read_only'], 'expected an evidence-supported exact-read subset'
+        assert str(home) not in learned['read_only'] and not learned['network_allow']
+        assert learned['provenance']['receipt_digest'] == 'sha256:' + hashlib.sha256((out / 'opencode-learn-jail.json').read_bytes()).hexdigest()
+        assert json.loads(learned['provenance']['coverage_json']) == learning['coverage']
+        assert all(row['status'] == 'active' and not row['gaps'] for row in learning['coverage'].values())
+        result['learning_workflow'] = 'passed'
+        result['learning_fixture'] = str(needed)
+        result['learning_fixture_proposed'] = str(needed) in learned['read_only']
         for profile in PROFILES:
             run(f'doctor-{profile}', [binary, 'doctor', '--launch', profile, '--json'])
         distribution_checks()

@@ -1787,12 +1787,12 @@ fn o03_run(env_var: &str) -> Option<Value> {
         .run()
         .expect("the jail runs");
     validate(&run);
-    // A recorded gap under best-effort is an evidence loss, so the run is a
-    // tool error (exit 1), not a clean settle.
+    // Best-effort preserves a natural child exit, while the gap still
+    // degrades the coverage and remains in the receipt's errors.
     assert_eq!(
         run.code(),
-        Some(1),
-        "{env_var}: a run with a recorded gap is a tool error: stderr {}",
+        Some(0),
+        "{env_var}: best-effort preserves the child's exit with a recorded gap: stderr {}",
         run.stderr_text()
     );
     let receipt = last_pressure_receipt(&run);

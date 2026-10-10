@@ -1109,7 +1109,7 @@ fn mutation_pathname_guards_each_produce_their_distinct_denial() {
     std::os::unix::fs::symlink(&abs_host, rig.attempt_host("absroot")).unwrap();
     assert_eq!(
         rig.run('p', "/attempt/absroot"),
-        libc::EACCES.to_string(),
+        libc::ENOENT.to_string(),
         "M2: an absolute symlink must resolve inside the child's root"
     );
 }
