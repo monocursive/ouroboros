@@ -24,6 +24,13 @@ done
 [ -z "$base" ] || [ -z "$source_dir" ] || { echo 'Choose one release location.' >&2; exit 2; }
 case "$base" in ''|https://*) ;; *) echo 'Release URL must use HTTPS.' >&2; exit 2 ;; esac
 command -v minisign >/dev/null || { echo 'minisign is required for signature verification.' >&2; exit 2; }
+if command -v sha256sum >/dev/null 2>&1; then
+    file_digest() { sha256sum "$1" | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+    file_digest() { shasum -a 256 "$1" | awk '{print $1}'; }
+else
+    echo 'sha256sum or shasum is required for checksum verification.' >&2; exit 2
+fi
 case "$(uname -s):$(uname -m)" in
     Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
     Linux:aarch64|Linux:arm64) target=aarch64-unknown-linux-gnu ;;
@@ -81,7 +88,7 @@ valid_version "$staged_version" || { echo 'Invalid semantic release version in t
 fetch "$artifact"
 expected=$(awk -v name="$artifact" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$work/SHA256SUMS")
 [ "${#expected}" -eq 64 ] || { echo "Invalid checksum for $artifact" >&2; exit 1; }
-actual=$(shasum -a 256 "$work/$artifact" | awk '{print $1}')
+actual=$(file_digest "$work/$artifact")
 [ "$actual" = "$expected" ] || { echo "Checksum verification failed: $artifact" >&2; exit 1; }
 # The signed manifest covers the installer itself; the copy beside the
 # artifacts must match the script being run, so an old or doctored installer
@@ -89,7 +96,7 @@ actual=$(shasum -a 256 "$work/$artifact" | awk '{print $1}')
 if awk '$2 == "install.sh" { found = 1 } END { exit !found }' "$work/SHA256SUMS"; then
     fetch install.sh
     expected=$(awk '$2 == "install.sh" { print $1; count++ } END { if (count != 1) exit 1 }' "$work/SHA256SUMS")
-    actual=$(shasum -a 256 "$work/install.sh" | awk '{print $1}')
+    actual=$(file_digest "$work/install.sh")
     [ "$actual" = "$expected" ] || { echo 'Checksum verification failed: install.sh' >&2; exit 1; }
     cmp -s "$work/install.sh" "$0" || { echo 'This installer does not match the release it installs.' >&2; exit 1; }
 fi
@@ -141,6 +148,10 @@ version_relation() {
         }'
 }
 mkdir -p "$prefix"
+for name in ouro-jail ouro-jail.release ouro-jail.LICENSES.txt; do
+    [ ! -L "$prefix/$name" ] || { echo "Refusing a symlinked installation file: $name" >&2; exit 1; }
+    [ ! -e "$prefix/$name" ] || [ -f "$prefix/$name" ] || { echo "Installation destination must be a regular file: $name" >&2; exit 1; }
+done
 [ ! -L "$prefix/ouro-jail" ] || { echo 'Refusing to replace a symlink.' >&2; exit 1; }
 [ ! -L "$prefix/ouro-jail.release" ] || { echo 'Refusing a symlinked release record.' >&2; exit 1; }
 if [ -e "$prefix/ouro-jail" ]; then
@@ -148,7 +159,7 @@ if [ -e "$prefix/ouro-jail" ]; then
     if [ -e "$prefix/ouro-jail.release" ]; then
         installed_version=$(sed -n '1p' "$prefix/ouro-jail.release")
         installed_digest=$(sed -n '2p' "$prefix/ouro-jail.release")
-        actual=$(shasum -a 256 "$prefix/ouro-jail" | awk '{print $1}')
+        actual=$(file_digest "$prefix/ouro-jail")
         if [ "$installed_digest" != "$actual" ]; then
             # A crash between the two renames, or a manual binary replacement,
             # must fail closed. The explicit downgrade override also permits
@@ -176,7 +187,7 @@ chmod 755 "$staged"
 [ ! -L "$prefix/ouro-jail.LICENSES.txt" ] || { echo 'Refusing a symlinked license notice.' >&2; exit 1; }
 cat "$work/ouro-jail.LICENSES.txt" > "$notice"
 chmod 644 "$notice"
-digest=$(shasum -a 256 "$staged" | awk '{print $1}')
+digest=$(file_digest "$staged")
 printf '%s\n%s\n' "$staged_version" "$digest" > "$record"
 chmod 644 "$record"
 mv -f "$notice" "$prefix/ouro-jail.LICENSES.txt"

@@ -24,8 +24,12 @@ jobs:
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_performance.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_agent_matrix.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_observer_pair.py
-      - name: Signed package preparation regressions
+      - name: Signed distribution regressions
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign
+          sudo apt-get install -y --no-install-recommends minisign shellcheck
+          shellcheck install.sh crates/ouro-jail/dist/install.sh
           python3 -m unittest discover -s crates/ouro-jail/dist -p test_release.py
+          python3 -m unittest discover -s crates/ouro-jail/dist -p test_versions.py
+          python3 -m unittest discover -s crates/ouro-jail/dist -p test_bootstrap.py
+          python3 -m unittest discover -s crates/ouro-jail/dist -p test_publish.py

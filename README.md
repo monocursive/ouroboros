@@ -22,6 +22,11 @@ macOS builds provide inspection commands and currently refuse sandboxed
 execution; other Linux architectures also refuse execution. Installation is from source. Public jail
 release artifacts and a Homebrew tap are not configured yet.
 
+The [developer-preview release procedure](docs/RELEASING.md) includes a Bash
+installer and native Linux packaging workflow. The dedicated
+[release public key](crates/ouro-jail/dist/release.pub) is pinned in the installer.
+Public availability awaits the exact release revision's validation and signed packages.
+
 ## What you can do
 
 - Let a coding agent edit a checkout while keeping unrelated projects and

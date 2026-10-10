@@ -1,8 +1,11 @@
-# Local release tooling
+# Signed release tooling
 
-Publication coordinates and the production signing identity are not configured.
-These tools package an existing binary and verify installation locally; they do
-not claim a published release or build the four target binaries.
+The first developer preview targets `monocursive/ouroboros`, with
+`ouro-jail-vVERSION` tags and Linux x86_64/ARM64 packages. The dedicated production
+identity is [release.pub](release.pub); no public Jail release is claimed yet.
+See the [publication procedure](../../../docs/RELEASING.md) for the Bash entry
+point, native `release-candidate` workflow, and draft/publish verification helper.
+The standalone packager below remains useful for local inspection packages.
 
 Build with explicit provenance, then package with an operator-selected key:
 
@@ -20,7 +23,7 @@ invocation signs exactly its own outputs: the manifest covers the archive it
 created and the `install.sh` copy it stages beside it, never archives an
 earlier run left in the same directory.
 
-Installation requires `minisign`, `tar`, `shasum`, and `curl` for HTTPS downloads.
+Installation requires `minisign`, `tar`, `sha256sum` or `shasum`, and `curl` for HTTPS downloads.
 It installs no backend or system packages. Obtain the public key through a trusted
 channel; downloading a key beside an archive does not authenticate that archive.
 
@@ -89,8 +92,8 @@ Copy the two staged directories to the release operator's machine. Archive
 bytes are deterministic across source-file timestamps and locations. Assembly
 requires exactly one artifact per architecture, staged for the release version
 being assembled, and verifies archive contents, native build records, source
-inputs and binary hashes before preparing a draft. The manifest it signs lists
-both archives and the `install.sh` copy it stages beside them:
+inputs and binary hashes before preparing a draft. The signed manifest covers
+both archives, `install.sh`, the public `bootstrap.sh`, release notes and plan:
 
 ```sh
 python3 crates/ouro-jail/dist/prepare_release.py assemble \
@@ -113,9 +116,10 @@ backup and trusted public-key distribution must be chosen by the operator.
 
 Before publication, review the exact candidate, its validation record and host
 support notes. Then create a draft release in the selected repository using the
-plan's exact commit and proposed tag, upload the two archives and signed manifest,
-and verify installation from those draft assets. Public publication is a separate
-operator action. GitHub's [release procedure](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+plan's exact commit and proposed tag with `publish_release.py draft`, and verify
+installation from its checked assets. `publish_release.py publish` rechecks CI,
+the tested freeze, tag and every remote asset before public publication, then
+checks unauthenticated downloads. GitHub's [release procedure](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
 describes the distinction between saving a draft and publishing it.
 
 ```sh

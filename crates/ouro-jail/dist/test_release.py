@@ -148,7 +148,8 @@ class ReleaseTests(unittest.TestCase):
         manifest = (self.root / 'out' / 'SHA256SUMS').read_text().splitlines()
         names = sorted(line.split('  ')[1] for line in manifest)
         self.assertEqual(names, sorted(
-            [f'ouro-jail-0.1.0-rc.1-{target}.tar.gz' for target in TARGETS] + ['install.sh']))
+            [f'ouro-jail-0.1.0-rc.1-{target}.tar.gz' for target in TARGETS]
+            + ['install.sh', 'bootstrap.sh', 'release-plan.json', 'RELEASE_NOTES.md']))
 
     @unittest.skipUnless(shutil.which('minisign'), 'minisign is required for actual signature checks')
     def test_real_signature_and_wrong_key_rejection(self):

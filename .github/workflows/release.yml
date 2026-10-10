@@ -1,0 +1,115 @@
+# Native preview packages; production signing and publication stay local.
+name: release-candidate
+on:
+  push:
+    tags: ['ouro-jail-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Preview version without the ouro-jail-v prefix'
+        required: true
+        default: '0.1.0-rc.1'
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  coordinate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'crates/ouro-jail/dist')
+          from package import VERSION
+          version = (os.environ['GITHUB_REF_NAME'].removeprefix('ouro-jail-v')
+                     if os.environ['GITHUB_REF_TYPE'] == 'tag'
+                     else os.environ['REQUESTED_VERSION'])
+          if not VERSION.fullmatch(version):
+              raise SystemExit('expected a semantic preview version')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('version=' + version + '\n')
+          PY
+  native:
+    needs: coordinate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      OURO_BUILD_REVISION: ${{ github.sha }}
+      OURO_BUILD_DIRTY: 'false'
+      PREVIEW_VERSION: ${{ needs.coordinate.outputs.version }}
+      PREVIEW_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install build and signature tools
+        run: |
+          rustup toolchain install && rustup show
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+      - name: Require a recorded tested freeze
+        run: cargo run -q -p xtask -- freeze --check
+      - name: Build the native Jail executable
+        run: cargo build --locked --release -p ouro-jail
+      - name: Exercise native signed installation
+        # Temporary test key; package checks do not prove live containment.
+        run: python3 crates/ouro-jail/dist/test_install.py target/release/ouro-jail
+      - name: Stage the native package and build record
+        run: |
+          inputs=$(target/release/ouro-jail version --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["inputs"])')
+          python3 crates/ouro-jail/dist/prepare_release.py stage \
+            --binary target/release/ouro-jail --target "$PREVIEW_TARGET" \
+            --revision "$OURO_BUILD_REVISION" --inputs "$inputs" \
+            --version "$PREVIEW_VERSION" --out stage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-${{ matrix.target }}
+          path: stage/
+          if-no-files-found: error
+          retention-days: 14
+  assemble:
+    needs: [coordinate, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PREVIEW_VERSION: ${{ needs.coordinate.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: native-*
+          path: stages/
+      - name: Assemble the unsigned candidate
+        run: |
+          inputs=$(python3 -c 'import json; print(json.load(open("stages/native-x86_64-unknown-linux-gnu/artifact.json"))["version"]["build"]["inputs"])')
+          python3 crates/ouro-jail/dist/prepare_release.py assemble \
+            --stage stages/native-x86_64-unknown-linux-gnu \
+            --stage stages/native-aarch64-unknown-linux-gnu \
+            --revision "$GITHUB_SHA" --inputs "$inputs" \
+            --version "$PREVIEW_VERSION" --out candidate
+          echo 'Unsigned candidate; publication requires production signing and exact-commit CI/conformance.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ouro-jail-${{ needs.coordinate.outputs.version }}-candidate
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 14

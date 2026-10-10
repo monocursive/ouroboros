@@ -57,8 +57,9 @@ def stage(binary, target, revision, inputs, out, release_version):
     return record
 
 
-def verify_stage(directory, revision, inputs):
-    record = json.loads((directory / 'artifact.json').read_text())
+def verify_stage(directory, revision, inputs, record=None):
+    if record is None:
+        record = json.loads((directory / 'artifact.json').read_text())
     if record.get('schema') != 'ouro.jail.release-artifact/1':
         raise ValueError('unsupported native artifact record')
     target = record['target']
@@ -98,6 +99,8 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
         raise ValueError('staged artifacts do not all carry this release version')
     if bool(signing_key) != bool(public_key):
         raise ValueError('provide both the signing key and its independently trusted public key')
+    if public_key and not re.fullmatch(r'[A-Za-z0-9+/]{56}', public_key):
+        raise ValueError('expected a Minisign public key, not a path or shell expression')
     out.mkdir(parents=True, exist_ok=False)
     for directory, record in zip(stages, records):
         shutil.copyfile(directory / record['archive'], out / record['archive'])
@@ -107,13 +110,19 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
     # signature, so what installs a release is part of that release.
     install_sh = out / 'install.sh'
     shutil.copyfile(Path(__file__).with_name('install.sh'), install_sh)
+    # The public Bash entry point pins this release and its independently
+    # selected key. Keep the low-level installer usable for offline packages.
+    bootstrap = (Path(__file__).resolve().parents[3] / 'install.sh').read_text()
+    bootstrap = re.sub(r'^    version=.*$', lambda _: '    version=' + version,
+                       bootstrap, count=1, flags=re.MULTILINE)
+    if public_key:
+        bootstrap = re.sub(r"^    public_key='[^']*'$",
+                           lambda _: "    public_key='" + public_key + "'",
+                           bootstrap, count=1, flags=re.MULTILINE)
+    (out / 'bootstrap.sh').write_text(bootstrap)
     entries = [(record['archive'], record['archive_sha256']) for record in records]
     entries.append(('install.sh', digest(install_sh)))
-    manifest = out / 'SHA256SUMS'
-    manifest.write_text(''.join(f'{sha256}  {name}\n' for name, sha256 in sorted(entries)))
-    if signing_key:
-        subprocess.run(['minisign', '-Sm', manifest, '-s', signing_key], check=True)
-        subprocess.run(['minisign', '-Vm', manifest, '-P', public_key], check=True)
+    entries.append(('bootstrap.sh', digest(out / 'bootstrap.sh')))
     plan = {'schema': 'ouro.jail.release-candidate/1', 'repository': REPOSITORY,
             'tag': 'ouro-jail-v' + version, 'target_commit': revision, 'inputs': inputs,
             'draft': True, 'published': False, 'signature_verified': bool(signing_key),
@@ -125,12 +134,33 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
             'native_records_are_attestations': 'Review the native builder and validation evidence before signing.'}
     (out / 'release-plan.json').write_text(json.dumps(plan, indent=2) + '\n')
     (out / 'RELEASE_NOTES.md').write_text(
-        '# Ouro Jail ' + version + ' — release candidate\n\n'
-        'Prepared for monocursive/ouroboros. Not published.\n\n'
+        '# Ouroboros Jail ' + version + ' — developer preview\n\n'
+        'Linux x86_64 and ARM64. This preview installs `ouro-jail`; '
+        'the fleet and ledger are not part of this package.\n\n'
+        'After this release is published, install with:\n\n```sh\n'
+        'curl --proto "=https" --tlsv1.2 -fsSL '
+        'https://github.com/monocursive/ouroboros/releases/download/ouro-jail-v' + version +
+        '/bootstrap.sh | bash\n```\n\n'
+        'Requires Bash, curl, minisign, tar, and sha256sum or shasum. '
+        'The GNU/Linux binaries require glibc 2.39 or newer; Alpine/musl is unsupported. '
+        'Installs to `~/.local/bin`; no sudo or Rust compiler. '
+        'Install bubblewrap separately before running contained commands.\n\n'
         'Linux x86_64 and ARM64 packages; host enforcement depends on `ouro-jail doctor`.\n'
         'Ubuntu 24 stock execution remains refused. Pi memory ceilings and Landlock remain unavailable; the default build profile refuses.\n'
         'Real-agent reliability remains experimental: attach the completed compatibility record before changing that claim.\n'
         'Verify SHA256SUMS with a public key obtained through an independent trusted channel.\n')
+    # Bind provenance and support notes to the signature as well as executable
+    # bytes: the publisher must not trust a subsequently edited release plan.
+    entries.extend((name, digest(out / name)) for name in ['release-plan.json', 'RELEASE_NOTES.md'])
+    manifest = out / 'SHA256SUMS'
+    manifest.write_text(''.join(f'{sha256}  {name}\n' for name, sha256 in sorted(entries)))
+    if signing_key:
+        try:
+            subprocess.run(['minisign', '-Sm', manifest, '-s', signing_key], check=True)
+            subprocess.run(['minisign', '-Vm', manifest, '-P', public_key], check=True)
+        except subprocess.CalledProcessError:
+            (out / 'release-plan.json').unlink()
+            raise
     return plan
 
 
