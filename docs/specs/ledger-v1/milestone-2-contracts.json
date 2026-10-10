@@ -66,7 +66,7 @@
     "segments.schema.json": "16d976277bccce61cbd47da180c187e145ae55f683489ce1b4151461f0ed4e99",
     "show.schema.json": "07e6f7bda3b04131df5c88a115d94b30a5b9c77712f416fb05e0508a3e3e36f9",
     "signer.schema.json": "e3a0b002878c19d674e4679edab32fa7ff241b840ffd4f507412bf5b9137bb33",
-    "source.schema.json": "e60b67a7e95a87cebe762b30d285fa44776725017f41d68c6bf34ed917f868b9",
+    "source.schema.json": "43cb1c6ec9232e49402b9d4242d4ba000c49a95533080203d34a9b58f3bf0a5c",
     "tail-request.schema.json": "6a17545e9113233c9fbe841f1c4eb3037405b3885c5ef4d1d4bf31d3bc11d10d",
     "tail.schema.json": "a9f48cf895ce0bfce96c8137329a76ca0168f494807618b39380ce1786ae6a1d"
   }

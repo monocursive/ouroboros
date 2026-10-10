@@ -2470,7 +2470,7 @@ gate = "R04"
 clause = "Best-effort continues degraded"
 tag = "live-cli"
 tests = [
-  "ouro-jail/tests/portable_loss.rs::j4_r04_best_effort_runs_to_the_end_degraded_exits_1",
+  "ouro-jail/tests/portable_loss.rs::j4_r04_best_effort_runs_to_the_end_degraded_exits_with_the_child",
   "ouro-jail/tests/j4_loss_linux.rs::j4_r04_ptrace_loss_best_effort_tool",
   "ouro-jail/tests/j4_loss_linux.rs::j4_r04_ptrace_loss_best_effort_none",
 ]
@@ -2833,7 +2833,7 @@ tests = [
   "ouro-jail/tests/portable_j4_records.rs::d3::j4_d3_a_pre_created_attempt_root_stays_claimable_after_gc",
   "ouro-jail/tests/portable_launch.rs::a_launch_file_must_be_private_single_linked_regular_and_outside_writable_grants",
   "ouro-jail/tests/portable_lifetime.rs::l05_unknown_tree_retains_scratch_and_never_settles",
-  "ouro-jail/tests/portable_loss.rs::j4_r04_best_effort_runs_to_the_end_degraded_exits_1",
+  "ouro-jail/tests/portable_loss.rs::j4_r04_best_effort_runs_to_the_end_degraded_exits_with_the_child",
   "ouro-jail/tests/portable_mutations.rs::a_control_frame_over_sixty_four_kibibytes_is_refused_not_emitted",
   "ouro-jail/tests/portable_network_rules.rs::n03_a_long_a_label_refuses_before_quadratic_decoding",
   "ouro-jail/tests/portable_persistence.rs::j4_d5_a_later_persistence_failure_does_not_replace_the_reported_error",

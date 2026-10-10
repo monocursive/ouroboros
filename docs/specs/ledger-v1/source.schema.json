@@ -1321,7 +1321,7 @@
       }
     },
     {
-      "$comment": "jail-v1.md:1427 and :1432-1435 (§11.2): in linux-closed-v1 a covered EACCES/EPERM result is one fs.deny, never a success-shaped or failed result of the original operation.",
+      "$comment": "jail-v1 §11.2: a covered EACCES/EPERM result is fs.deny, except a connect witnessed by the unix-peer mediator, which is net.connect whatever its verdict.",
       "if": {
         "properties": {
           "source": {
@@ -1348,15 +1348,43 @@
         ]
       },
       "then": {
-        "properties": {
-          "operation": {
-            "const": "fs.deny"
+        "anyOf": [
+          {
+            "properties": {
+              "operation": {
+                "const": "fs.deny"
+              }
+            }
+          },
+          {
+            "properties": {
+              "operation": {
+                "const": "net.connect"
+              },
+              "fields": {
+                "properties": {
+                  "syscall": {
+                    "const": "connect"
+                  },
+                  "observation": {
+                    "const": "seccomp_user_notification"
+                  }
+                },
+                "required": [
+                  "syscall",
+                  "observation"
+                ]
+              }
+            },
+            "required": [
+              "fields"
+            ]
           }
-        }
+        ]
       }
     },
     {
-      "$comment": "jail-v1.md:1427 (§11.2): an fs.deny of linux-closed-v1 is a call that returned EACCES or EPERM.",
+      "$comment": "jail-v1 §11.2: fs.deny carries EACCES/EPERM, or EROFS/EBUSY for a write-class operation.",
       "if": {
         "properties": {
           "operation": {
@@ -1378,12 +1406,57 @@
               "errno": {
                 "enum": [
                   "EACCES",
-                  "EPERM"
+                  "EPERM",
+                  "EROFS",
+                  "EBUSY"
                 ]
               }
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "outcome": {
+                  "properties": {
+                    "errno": {
+                      "enum": [
+                        "EROFS",
+                        "EBUSY"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "errno"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "fields": {
+                  "properties": {
+                    "attempted_operation": {
+                      "enum": [
+                        "fs.write",
+                        "fs.create",
+                        "fs.rename",
+                        "fs.unlink"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "attempted_operation"
+                  ]
+                }
+              },
+              "required": [
+                "fields"
+              ]
+            }
+          }
+        ]
       }
     }
   ],
@@ -1506,6 +1579,28 @@
           },
           "required": [
             "kind",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "root_relative"
+            },
+            "root": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The named root the path is relative to: an operator grant by its in-jail spelling, or 'system' for the read-only system roots."
+            },
+            "value": {
+              "$ref": "#/$defs/native_string"
+            }
+          },
+          "required": [
+            "kind",
+            "root",
             "value"
           ],
           "additionalProperties": false
