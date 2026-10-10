@@ -10,6 +10,7 @@ import tempfile
 
 from package import VERSION
 from prepare_release import REPOSITORY, TARGETS, digest, verify_stage
+from bootstrap import archive_pins
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -64,9 +65,18 @@ def check(directory, public_key):
     if set(hashes) != expected:
         raise ValueError('unexpected assets in the signed manifest')
     bootstrap = (directory / 'bootstrap.sh').read_text()
-    if (f'    version={version}\n' not in bootstrap
-            or f"    public_key='{public_key}'\n" not in bootstrap):
-        raise ValueError('bootstrap must pin the release version and trusted public key')
+    if '    # BEGIN SHA256 PINS\n' in bootstrap:
+        pins = archive_pins(bootstrap)
+        verified_bootstrap = all(pins.get((version, r['target'])) == r['archive_sha256']
+                                 for r in records)
+    else:
+        # The initial immutable preview predates embedded hashes. Keep its
+        # verification available without permitting new unpinned candidates.
+        verified_bootstrap = (plan['tag'] == 'ouro-jail-v0.1.0-rc.1'
+                              and revision == '06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d'
+                              and f"    public_key='{public_key}'\n" in bootstrap)
+    if f'    version={version}\n' not in bootstrap or not verified_bootstrap:
+        raise ValueError('bootstrap must pin the release version and both archive SHA-256 hashes')
     return plan, sorted(expected | {'SHA256SUMS', 'SHA256SUMS.minisig'})
 
 
@@ -77,7 +87,7 @@ def publication_gates(plan, public_key):
     if run('git', '-C', str(ROOT), 'status', '--porcelain', '--untracked-files=all'):
         raise ValueError('commit and review the working tree before publication')
     trusted = (ROOT / 'crates/ouro-jail/dist/release.pub').read_text().splitlines()[1]
-    if public_key != trusted or f"    public_key='{trusted}'\n" not in (ROOT / 'install.sh').read_text():
+    if public_key != trusted:
         raise ValueError('publication must use the production key pinned in the reviewed repository')
     subprocess.run(['cargo', '+1.98.1', 'run', '-q', '-p', 'xtask', '--', 'freeze', '--check'],
                    cwd=ROOT, check=True, timeout=120)

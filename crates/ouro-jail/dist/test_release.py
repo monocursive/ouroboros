@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from package import create_archive
 from prepare_release import assemble, stage, verify_build, verify_stage, TARGETS
+from bootstrap import archive_pins
 
 REVISION = 'a' * 40
 INPUTS = 'sha256:' + 'b' * 64
@@ -144,6 +145,12 @@ class ReleaseTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('The default version is 0.1.0-rc.2;', result.stdout)
+        pins = archive_pins((out / 'bootstrap.sh').read_text())
+        for directory in stages:
+            record = json.loads((directory / 'artifact.json').read_text())
+            self.assertEqual(pins['0.1.0-rc.2', record['target']], record['archive_sha256'])
+        # The current public version remains installable with its original pins.
+        self.assertEqual({target for release, target in pins if release == '0.1.0-rc.1'}, set(TARGETS))
 
     def test_unsigned_preparation_remains_unpublished_and_names_signing_blocker(self):
         stages = [self.fixture(t) for t in TARGETS]

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from prepare_release import TARGETS, assemble, stage
 from publish_release import ROOT, check, publication_gates, release_info, verify_remote_assets
 from test_release import INPUTS, REVISION, version
+from bootstrap import archive_pins, BLOCK
 
 
 class ReleaseLookupTests(unittest.TestCase):
@@ -66,8 +67,31 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(plan['unsupported_clauses'], ['K22.2', 'K23.1', 'K24.1', 'K26.1', 'K29.1'])
         self.assertEqual(len(names), 8)
         bootstrap = (self.candidate / 'bootstrap.sh').read_text()
-        self.assertIn(f"public_key='{self.key}'", bootstrap)
+        pins = archive_pins(bootstrap)
+        for record in self.plan['artifacts']:
+            self.assertEqual(pins['0.1.0-rc.1', record['target']], record['archive_sha256'])
+        self.assertNotIn('minisign', bootstrap)
         self.assertIn('version=0.1.0-rc.1', bootstrap)
+
+    def test_a_correct_signature_does_not_authorize_wrong_bootstrap_pins(self):
+        bootstrap = self.candidate / 'bootstrap.sh'
+        old_hash = self.plan['artifacts'][0]['archive_sha256']
+        script = bootstrap.read_text()
+        legacy = BLOCK.sub('', script).replace('    version=0.1.0-rc.1\n',
+                                               f"    version=0.1.0-rc.1\n    public_key='{self.key}'\n")
+        for bad_script in [script.replace(old_hash, '0' * 64), legacy]:
+            bootstrap.write_text(bad_script)
+            manifest = self.candidate / 'SHA256SUMS'
+            manifest.write_text('\n'.join(
+                (hashlib.sha256(bootstrap.read_bytes()).hexdigest() + '  bootstrap.sh')
+                if line.endswith('  bootstrap.sh') else line
+                for line in manifest.read_text().splitlines()) + '\n')
+            signature = self.candidate / 'SHA256SUMS.minisig'
+            signature.unlink()
+            subprocess.run(['minisign', '-Sm', str(manifest), '-s', str(self.root / 'key'),
+                            '-x', str(signature)], check=True, capture_output=True)
+            with self.assertRaisesRegex(ValueError, 'both archive SHA-256 hashes'):
+                check(self.candidate, self.key)
 
     def test_metadata_scripts_archive_and_signature_tampering_refuse(self):
         for name in ['release-plan.json', 'RELEASE_NOTES.md', 'bootstrap.sh', 'install.sh',

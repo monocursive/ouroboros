@@ -1,0 +1,22 @@
+[
+  {
+    "path": "install.sh",
+    "sha256": "4acfb0b4580c71f6016fcac25ad4517d6aa73ec3a562d5664d858957bee6db2a",
+    "verified": true
+  },
+  {
+    "path": "guide.md",
+    "sha256": "d955251796b636f9c03bf707f3094271c4c710a8903dde0473dc553dd6f7501a",
+    "verified": true
+  },
+  {
+    "path": "guide/",
+    "sha256": "bb161c231d3a589e229bfae36002076baa0b719fdb90b478e1c366b82dcb60c7",
+    "verified": true
+  },
+  {
+    "path": "/",
+    "sha256": "2434f89a60798002889cca1d9340ec4f109382d10a254d7350afd67b65c3b636",
+    "verified": true
+  }
+]

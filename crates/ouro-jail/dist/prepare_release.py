@@ -12,6 +12,7 @@ import tarfile
 
 from package import VERSION as RELEASE_VERSION
 from package import create_archive
+from bootstrap import render_bootstrap
 
 TARGETS = {'x86_64-unknown-linux-gnu': 62, 'aarch64-unknown-linux-gnu': 183}
 REPOSITORY = 'monocursive/ouroboros'
@@ -110,15 +111,11 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
     # signature, so what installs a release is part of that release.
     install_sh = out / 'install.sh'
     shutil.copyfile(Path(__file__).with_name('install.sh'), install_sh)
-    # The public Bash entry point pins this release and its independently
-    # selected key. Keep the low-level installer usable for offline packages.
+    # Users verify embedded archive hashes without a signature-tool dependency.
+    # Maintainer signatures still bind the candidate and publication evidence.
     bootstrap = (Path(__file__).resolve().parents[3] / 'install.sh').read_text()
-    bootstrap = re.sub(r'^    version=.*$', lambda _: '    version=' + version,
-                       bootstrap, count=1, flags=re.MULTILINE)
-    if public_key:
-        bootstrap = re.sub(r"^    public_key='[^']*'$",
-                           lambda _: "    public_key='" + public_key + "'",
-                           bootstrap, count=1, flags=re.MULTILINE)
+    bootstrap = render_bootstrap(bootstrap, version,
+                                {r['target']: r['archive_sha256'] for r in records})
     (out / 'bootstrap.sh').write_text(bootstrap)
     entries = [(record['archive'], record['archive_sha256']) for record in records]
     entries.append(('install.sh', digest(install_sh)))
@@ -143,14 +140,15 @@ def assemble(stages, revision, inputs, version, out, signing_key=None, public_ke
         'curl --proto "=https" --tlsv1.2 -fsSL '
         'https://github.com/monocursive/ouroboros/releases/download/ouro-jail-v' + version +
         '/bootstrap.sh | bash\n```\n\n'
-        'Requires Bash, curl, minisign, tar, and sha256sum or shasum. '
+        'Requires Bash, curl, tar, and sha256sum or shasum. '
+        'The installer checks embedded SHA-256 hashes before extracting or executing the archive. '
         'The GNU/Linux binaries require glibc 2.39 or newer; Alpine/musl is unsupported. '
         'Installs to `~/.local/bin`; no sudo or Rust compiler. '
         'Install bubblewrap separately before running contained commands.\n\n'
         'Linux x86_64 and ARM64 packages; host enforcement depends on `ouro-jail doctor`.\n'
         'Ubuntu 24 stock execution remains refused. Pi memory ceilings and Landlock remain unavailable; the default build profile refuses.\n'
         'Real-agent reliability remains experimental: attach the completed compatibility record before changing that claim.\n'
-        'Verify SHA256SUMS with a public key obtained through an independent trusted channel.\n')
+        'Maintainers can also verify the signed SHA256SUMS with an independently trusted public key.\n')
     # Bind provenance and support notes to the signature as well as executable
     # bytes: the publisher must not trust a subsequently edited release plan.
     entries.extend((name, digest(out / name)) for name in ['release-plan.json', 'RELEASE_NOTES.md'])

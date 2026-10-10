@@ -154,3 +154,42 @@ The [release procedure](../../RELEASING.md) requires reference-host conformance,
 a tested freeze, both native packages and production-key signing before public
 availability is claimed. ARM64 installation and host limits are evaluated
 separately; the x86_64 VM record is not ARM64 conformance evidence.
+
+## SHA-256-pinned public installer
+
+Later on 10 October 2026, the live [Bash installer](https://ouroboros.monocursive.com/install.sh)
+was changed to embed the SHA-256 hashes of both existing RC1 Linux archives and
+install directly. It needs no Minisign and executes no downloaded installer.
+Anonymous downloads of both archives matched the embedded pins:
+
+- x86_64: `9413e8fd0cea1417c1ba47e5e0fad07edf3a26b8615e68a5aa642662f1209da8`.
+- ARM64: `100d0e8e78d27c08372b18352de987da447f157ef75c8ebeac0cf5e24dd0400a`.
+
+The updated website installer SHA-256 is
+`4acfb0b4580c71f6016fcac25ad4517d6aa73ec3a562d5664d858957bee6db2a`.
+A second fresh Ubuntu 26.04.1 QEMU VM downloaded that exact live website script,
+installed the public x86_64 archive, passed `doctor --profile tool`, and ran the
+guide's first contained command. Minisign, Cargo, rustc and rustup were absent
+before and after the workflow. The installed binary SHA-256 remained
+`feab1ead8951955f8aa79f0cc7a48de323672e7bac176fae563ec693dc9ca819`, with
+release source `06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d` and the same build-input
+digest as the original published package. The receipt was settled and enforced,
+with an empty verified process tree; `tail --json` matched the raw journal.
+The VM and temporary SSH key were destroyed.
+
+The [VM record](results/release-preview-2026-10-10/sha256-install/vm.json),
+[dependency absence before](results/release-preview-2026-10-10/sha256-install/dependency-absence-before.txt)
+and [after](results/release-preview-2026-10-10/sha256-install/dependency-absence-after.txt),
+[workflow result](results/release-preview-2026-10-10/sha256-install/result.json),
+[receipt](results/release-preview-2026-10-10/sha256-install/jail.json), and
+[live site checks](results/release-preview-2026-10-10/sha256-install/live-site.json)
+retain the proof. ARM64 selection and offline checksum rejection passed local
+installer tests. The Pi was offline during this follow-up, so no new native ARM64
+installation is claimed. Its original candidate installation remains recorded above.
+
+The 28 distribution tests passed, including a changed archive with a matching
+remote checksum manifest, offline installation, HTTPS mirrors, unsupported and
+unpinned versions, downgrade handling, interrupted input, and preserved existing
+files. ShellCheck and the documentation link checker passed. The release tag,
+binaries and original eight signed assets remain unchanged; the GitHub release
+page points users to the current website installer.

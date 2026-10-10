@@ -18,10 +18,11 @@ Writing an integration? Start with [agents and scripts](#for-agents-and-scripts)
 ## Install the developer preview
 
 [Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
-ships signed Linux x86_64 and ARM64 packages. Install your distribution's
-`minisign` and `bubblewrap` packages first. The binaries require glibc 2.39 or
+ships Linux x86_64 and ARM64 packages. Install your distribution's
+`bubblewrap` package first. The binaries require glibc 2.39 or
 newer; Alpine/musl and macOS execution are unavailable in this preview.
-No Rust compiler is needed.
+The installer needs Bash, curl, tar, and sha256sum or shasum; no Minisign,
+Rust compiler or sudo is needed.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
@@ -31,10 +32,13 @@ ouro-jail version --json
 ouro-jail doctor --profile tool --json
 ```
 
-The installer pins this preview and the [release public key](https://ouroboros.monocursive.com/release.pub).
-It checks the manifest signature and executable/installer digests, then installs
-outside your project in `~/.local/bin`. Repeat to upgrade; pass `--version`
-through `bash -s -- --version VERSION` to select another signed Jail release.
+The installer embeds this preview's SHA-256 hashes for both architectures. It
+checks the downloaded archive before extracting or executing it, then installs
+outside your project in `~/.local/bin`. The HTTPS-served installer is the source
+of the trusted hashes; a downloaded checksum manifest cannot override them.
+Repeat to upgrade after a new installer is published. Pass `--version` through
+`bash -s -- --version VERSION` to select a release already pinned in the script;
+an unpinned version refuses before any download.
 Downgrades require `--allow-downgrade`. Replacing a source-built `0.1.0` without
 a release record also needs this explicit flag to install an RC version.
 
@@ -81,23 +85,23 @@ Older `v0.1.x` releases belong to the archived agent runtime.
 
 ## Verify a supplied package
 
-For offline installation, obtain a signed Jail artifact directory and a trusted
-minisign public key through independent channels. Then the checked-in installer verifies the signed checksum manifest before
-installing the binary. This path needs `minisign` and the host prerequisites above,
-but no Rust compiler:
+For offline installation, save the [Bash installer](https://ouroboros.monocursive.com/install.sh)
+and the archive for your architecture from the [release](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1).
+The installer verifies its embedded SHA-256 pin even when the archive comes from
+a local directory. No checksum manifest or signature tool is needed:
 
 ```sh
-sh crates/ouro-jail/dist/install.sh --from-dir /path/to/artifacts \
-  --public-key "$OURO_JAIL_TRUSTED_PUBLIC_KEY"
+bash /path/to/install.sh --from-dir /path/to/artifacts
 ouro-jail version --json
 ouro-jail doctor --profile tool --json
 ```
 
-Use `--upgrade` explicitly to replace an existing installation. A failed
-signature or archive checksum leaves the installed binary unchanged. A valid
-signature proves the artifact's signer; `doctor` still decides whether this
-host can enforce the requested policy. The [fresh-VM validation](benchmarks/jail/results/validation-2026-10-08/onboarding-ubuntu26/guest/result.json)
-uses an ephemeral test key and is not a public release or production signing claim.
+Use `--bin-dir /absolute/path` for a different destination, or
+`--base-url https://mirror.example/release` for an HTTPS mirror. Both paths must
+provide exactly the archive pinned in the installer. Re-running replaces an
+existing installation; downgrades require `--allow-downgrade`. A failed checksum
+leaves the installed binary, license notices and release record unchanged.
+`doctor` still decides whether the host can enforce the requested policy.
 
 ## Run your first command
 

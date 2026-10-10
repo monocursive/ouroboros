@@ -22,10 +22,10 @@ macOS builds provide inspection commands and currently refuse sandboxed executio
 See the [platform requirements](docs/specs/jail-v1.md#32-initial-support-matrix)
 and [Linux acceptance record](docs/benchmarks/jail/release-preview-2026-10-10.md).
 
-The Bash installer pins this preview and its dedicated
-[release public key](crates/ouro-jail/dist/release.pub). It verifies the signed
-manifest and installer/executable checksums before installation. The
-[release procedure](docs/RELEASING.md) documents provenance and key custody.
+The Bash installer embeds SHA-256 hashes for both Linux archives and checks the
+selected download before extracting or executing it. No signature tool is needed.
+The [release procedure](docs/RELEASING.md) documents hash updates, provenance and
+maintainer signing.
 
 ## What you can do
 
@@ -38,7 +38,7 @@ manifest and installer/executable checksums before installation. The
 
 ## Install and run
 
-Install your distribution's `minisign` and `bubblewrap` packages first.
+Install your distribution's `bubblewrap` package first.
 The binaries require glibc 2.39 or newer; no Rust compiler or sudo is needed
 for the installer. Host enforcement still requires a successful `doctor` report.
 

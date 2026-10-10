@@ -8,31 +8,47 @@ downloaded anonymously and matched the reviewed candidate. The
 retains CI, native host checks and a fresh VM installation without Rust.
 
 The first distribution is `ouro-jail` for Linux x86_64 and ARM64 in
-`monocursive/ouroboros`. Tags use `ouro-jail-vVERSION`, starting with the proposed
+`monocursive/ouroboros`. Tags use `ouro-jail-vVERSION`, starting with
 `ouro-jail-v0.1.0-rc.1`. This keeps the archived runtime's `v0.1.x` releases
 separate. The fleet, ledger, Homebrew and macOS execution are outside this package.
 
 The Bash entry point adapts `legacy:install.sh`: explicit versions, HTTPS,
 architecture detection, no sudo or compiler, and installation to `~/.local/bin`.
-It verifies a Minisign signature and installer/archive checksums before executing
-the downloaded installer. A downgrade requires `--allow-downgrade`.
+It embeds the SHA-256 hash for each Linux archive, verifies the selected archive
+before extracting or executing it, and installs it directly. Users need Bash,
+curl, tar, and sha256sum or shasum; Minisign is not an installation dependency.
+A downgrade requires `--allow-downgrade`.
 
-Public availability has not been established yet. Never direct Jail users to
-`releases/latest/download/install.sh`: that currently installs the archived
-runtime. The published preview's command is:
+Never direct Jail users to `releases/latest/download/install.sh`: that installs
+the archived runtime. The current public preview command is:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/monocursive/ouroboros/releases/download/ouro-jail-v0.1.0-rc.1/bootstrap.sh | bash
+  https://ouroboros.monocursive.com/install.sh | bash
 ```
 
-The release's `bootstrap.sh` pins its version and production public key. It
-requires glibc 2.39 or newer and rejects Alpine/musl before downloading packages. It
-accepts `--version` and `--bin-dir` through `bash -s -- ...`. Installing another
-version uses the same trusted key; key rotation requires a newly trusted
-bootstrap or explicit `--public-key`. The checked-in root `install.sh` pins the
+The HTTPS-served script is the trust anchor for the embedded hashes. A mirror
+or a downloaded checksum manifest cannot replace those pins. `--from-dir DIR`
+also checks the same pinned archive offline. `--version` and `--bin-dir` are
+accepted through `bash -s -- ...`; versions without embedded pins refuse before
+any download.
+
+To publish a new installer, assemble the reviewed native archives below. Assembly
+sets the default release and embeds both archive hashes in `bootstrap.sh`, while
+retaining previously pinned releases. After publication, copy that reviewed
+bootstrap to root `install.sh` and `website/public/install.sh`, update the docs,
+and deploy the website. Verify the website script's bytes and an actual public
+installation. Never discover a trusted hash from a mutable remote manifest at
+install time.
+
+The original immutable RC1 GitHub `bootstrap.sh` and low-level `install.sh`
+remain signed historical assets and still require Minisign. The live website
+and current repository installer provide the dependency-free SHA-256 path.
+The release binaries and their tag are unchanged.
+
+Maintainer candidate signing and publication checks still use the
 [dedicated release public key](../crates/ouro-jail/dist/release.pub), created on
-10 October 2026. This is the trusted key for the first preview.
+10 October 2026. Users of the current installer do not need this key.
 Its private half is stored outside the repository at
 `~/.config/ouroboros/release-keys/ouro-jail-2026-10-10.key`, in a mode-0700 directory
 with file mode 0600. It is unencrypted for local noninteractive signing; maintain
@@ -43,8 +59,8 @@ a private backup for future releases. Private key material is never sent to CI.
 On 10 October 2026, the Linux evidence gaps were closed by live CLI tests,
 native signed-install tests and a recorded fresh-VM OpenCode workflow. The
 [acceptance record](benchmarks/jail/release-preview-2026-10-10.md) gives each
-clause's disposition and raw evidence. Public availability still requires the
-exact-commit validation and publication steps below.
+clause's disposition and raw evidence. Future releases require the exact-commit
+validation and publication steps below.
 
 Use `cargo xtask gates --linux-release` and
 `cargo xtask conformance --linux-release` for this developer preview. This fixed
@@ -126,8 +142,8 @@ python3 crates/ouro-jail/dist/publish_release.py check \
 ```
 
 Review the plan, support notes and validation evidence. Native records are
-builder attestations; signatures do not replace conformance. Test the signed
-bootstrap on both native hosts:
+builder attestations; signatures do not replace conformance. Test the SHA-256-pinned
+bootstrap on both native hosts without Minisign available to the user:
 
 ```sh
 bash /private/release-candidate/bootstrap.sh \
@@ -176,7 +192,7 @@ python3 crates/ouro-jail/dist/publish_release.py verify \
 
 Verify the public installer and first command on a clean supported Linux host.
 Then update the README, guide and website with the real release link, trusted
-key and host requirements. GitHub's [release procedure](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+archive hashes and host requirements. GitHub's [release procedure](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
 documents draft and prerelease behavior.
 
 ## Local checks
@@ -190,6 +206,8 @@ python3 -m unittest discover -s crates/ouro-jail/dist -p test_versions.py
 python3 crates/ouro-jail/dist/test_install.py target/release/ouro-jail
 ```
 
-Tests use temporary keys and local download adapters. They cover installation,
+Bootstrap tests use pinned fixture archives and local download adapters, with
+Minisign calls forced to fail. Maintainer tests use temporary signing keys.
+They cover installation,
 upgrade/downgrade, truncated pipes, tampering, signed provenance and publication
 gates; they do not establish public availability.
