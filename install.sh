@@ -20,7 +20,7 @@ main() (
     record=
     mounted=
     allow_downgrade=false
-    # shellcheck disable=SC2329 # Invoked by the EXIT trap.
+    # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
     cleanup() {
         if [ -n "$mounted" ]; then
             hdiutil detach "$mounted" >/dev/null || {
@@ -109,7 +109,9 @@ EOF
             command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
         done
         macos_major=$(sw_vers -productVersion | awk -F. '{print $1}')
-        [[ "$macos_major" =~ ^[0-9]+$ ]] && [ "$macos_major" -ge 27 ] || fail 'macOS 27 or newer is required'
+        if ! [[ "$macos_major" =~ ^[0-9]+$ ]] || [ "$macos_major" -lt 27 ]; then
+            fail 'macOS 27 or newer is required'
+        fi
         case "$version:$target" in
             0.1.0-preview.1:macos-arm64) expected='f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0' ;;
             *) fail "no pinned SHA-256 for $version ($target); download the current installer" ;;
