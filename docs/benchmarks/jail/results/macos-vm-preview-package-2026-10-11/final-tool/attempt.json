@@ -1,0 +1,54 @@
+{
+  "schema": "ouro.vm.attempt/1",
+  "status": "completed",
+  "host": [
+    "Darwin",
+    "monocursives-macbook-pro.home",
+    "27.0.0",
+    "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "arm64"
+  ],
+  "guest_os": "linux",
+  "native_macos_execution": false,
+  "network": false,
+  "shared_directories": [],
+  "workspace": "/Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/functional-input",
+  "profile": "tool",
+  "argv_base64": [
+    "L2Jpbi9zaA==",
+    "LWM=",
+    "dGVzdCAtciBjaGVjay5weSB8fCBleGl0IDk4OyBpZiB0b3VjaCAvZXRjL291cm8tZGVuaWVkIDI+L2Rldi9udWxsOyB0aGVuIGV4aXQgOTk7IGZpOyBwcmludGYgImd1ZXN0IGNvcHkgb25seVxuIiA+IHRvb2wtb3V0cHV0LnR4dDsgcHJpbnRmICJQUk9URUNURURfUk9PVF9WRVJJRklFRFxuIjsgZXhpdCAyMw=="
+  ],
+  "wall_seconds": 30,
+  "image_sha256": "56379cfaf19716abbfba5a764e34cdfeb5ee5a60dd4ef24ed3b75431a77d8c4b",
+  "input_files": 1,
+  "excluded_names": [
+    ".DS_Store",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target"
+  ],
+  "launcher_pid": 19256,
+  "custodian_pid": 19270,
+  "helper_pid": 19271,
+  "owner_audit_token": [
+    501,
+    501,
+    20,
+    501,
+    20,
+    19271,
+    100015,
+    4816252
+  ],
+  "guest_kernel": "7.0.0-38-generic",
+  "boot_seconds": 22.200134165934287,
+  "supervisor_pid": 636,
+  "guest_exit_code": 23,
+  "helper_exit_code": 0,
+  "vm_stop_acknowledged": true,
+  "guest_receipt_sha256": "174f5e4e055ce4e6df63f4ee7c3e96c1e9e46bda5cf4885e6ccd4e8417f364b6",
+  "elapsed_seconds": 22.523771125008352
+}

@@ -1,0 +1,4 @@
+{"role":"service","pid":3186,"ppid":1,"pgid":3186,"sid":3186,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3186,"pidversion":6947,"coalitions":[1054,1055],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3186,100002,6947]}
+{"kind":"request_received","host_pid":3185}
+{"kind":"spawn","rc":0,"pid":3187}
+{"kind":"service_connection_error","description":"Connection invalid"}

@@ -1,0 +1,15 @@
+{
+  "schema": "ouro.vm.image-build/1",
+  "status": "prepared",
+  "image_url": "https://cloud-images.ubuntu.com/minimal/releases/resolute/release-20261009/ubuntu-26.04-minimal-cloudimg-arm64.img",
+  "image_sha256": "4e86a7819b4cc7b4a9c2e719dec3e0a723c4a2788dc3f23f17641cba7f5ca216",
+  "jail_url": "https://github.com/monocursive/ouroboros/releases/download/ouro-jail-v0.1.0-rc.1/ouro-jail-0.1.0-rc.1-aarch64-unknown-linux-gnu.tar.gz",
+  "jail_archive_sha256": "100d0e8e78d27c08372b18352de987da447f157ef75c8ebeac0cf5e24dd0400a",
+  "source_sha256": {
+    "guest.py": "f210dc355f64bf16b14b72c6eb7cbf5562a84e11082f663cbda8b678a7fdf9a9",
+    "vz.swift": "1cf3583a9bfbcba24aa7a8d1f5eb9cd3e7579891abd33b3971410783f4a08666",
+    "prepare.py": "6682617455a86cc4d8c95812d29df47b04570fc5dd96355ce6c6e82a0ddf5db3"
+  },
+  "disk_sha256": "0b41040116e429bf2e13b17c8037f9c27e0747dbe617184211e6cd4cfa05c9fb",
+  "helper_sha256": "ededa472abb873e878b90babade02570380c6ee18054e4504efe915e02dc2375"
+}

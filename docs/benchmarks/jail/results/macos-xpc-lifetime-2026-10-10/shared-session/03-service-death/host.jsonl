@@ -1,0 +1,3 @@
+{"role":"host","pid":3126,"ppid":1,"pgid":3126,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3126,"pidversion":6828,"coalitions":[1052,1053],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3126,100002,6828]}
+{"kind":"host_reply","started":true}
+{"kind":"host_connection_error","description":"Connection interrupted"}

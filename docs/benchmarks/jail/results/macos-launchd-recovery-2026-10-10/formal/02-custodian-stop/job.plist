@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AbandonProcessGroup</key>
+	<false/>
+	<key>ExitTimeOut</key>
+	<integer>1</integer>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>com.monocursive.ouro.recoveryresearch.966e38505e6841ab85be5f9a9da0fca8</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>-u</string>
+		<string>/private/tmp/ouro-launchd-recovery-20261010/tested-source/macos_launchd_recovery.py</string>
+		<string>--worker</string>
+		<string>/private/tmp/ouro-launchd-recovery-20261010/02-custodian-stop</string>
+		<string>--fixture</string>
+		<string>/private/tmp/ouro-launchd-recovery-20261010/native-fixture</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>SessionCreate</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/private/tmp/ouro-launchd-recovery-20261010/02-custodian-stop/stderr.txt</string>
+	<key>StandardOutPath</key>
+	<string>/private/tmp/ouro-launchd-recovery-20261010/02-custodian-stop/custodian.jsonl</string>
+	<key>ThrottleInterval</key>
+	<integer>1</integer>
+</dict>
+</plist>

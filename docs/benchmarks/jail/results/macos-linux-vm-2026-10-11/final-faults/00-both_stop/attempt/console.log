@@ -1,0 +1,4 @@
+OURO_VM {"event": "ready", "kernel": "7.0.0-38-generic"}
+OURO_VM {"event": "running", "supervisor_pid": 622}
+OURO_VM {"event": "workload_tree_empty", "boundary": "user.slice", "events_inode": 271}
+OURO_VM {"event": "poweroff", "reason": "lease_expired"}

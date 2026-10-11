@@ -8,14 +8,18 @@ You choose the files it can read or change, the services it can contact, and
 how long it can run. A receipt tells you which controls were applied and how
 the run ended.
 
-**You'll need a Linux x86_64 or aarch64 machine to execute commands.** This is
-developer-preview software. Signed Linux x86_64 and ARM64 packages are available. On a Mac, you can
-build the CLI and inspect policies; sandboxed execution is still unavailable.
+**Choose your host:** Linux x86_64/ARM64 runs `ouro-jail` directly. Apple Silicon
+Macs can use the separate [macOS VM preview](#macos-vm-preview), which runs
+offline Linux commands in disposable VMs. Both are developer-preview software;
+native macOS programs and online agents are outside the Mac preview.
 
 Already have the binary? Jump to [your first command](#run-your-first-command).
 Writing an integration? Start with [agents and scripts](#for-agents-and-scripts).
 
 ## Install the developer preview
+
+The same installer detects your platform. The following commands are for Linux;
+Mac users should follow the [Mac quickstart](#macos-vm-preview).
 
 [Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
 ships Linux x86_64 and ARM64 packages. Install your distribution's
@@ -49,6 +53,76 @@ Run `doctor` before relying on a profile. Archived runtime releases are separate
 use `ouro-jail-v...` tags for this distribution. The ledger and fleet are not
 included in these packages.
 
+## macOS VM preview
+
+[Ouro VM 0.1.0-preview.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-vm-v0.1.0-preview.1)
+is a signed, notarized download for **Apple Silicon and macOS 27+**. Execution
+was tested on macOS 27.0.1; installation and CLI launch were also checked in a
+fresh macOS VM. Allow 8 GiB free APFS storage, two virtual CPUs and 2 GiB RAM per
+running attempt. Intel Macs and nested VM execution are unsupported.
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://ouroboros.monocursive.com/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+ouro-vm version
+ouro-vm doctor
+```
+
+The installer checks an embedded SHA-256 pin before mounting the 512 MiB DMG.
+It installs the bundled runtime and guest image under
+`~/.local/share/ouro-vm/0.1.0-preview.1`, with a command in `~/.local/bin`.
+Python, Rust, Swift, Homebrew, sudo and Endpoint Security approval are not needed.
+Use `bash -s -- --vm-prefix /absolute/path` to change the root containing `bin`
+and `share`. An already installed version is preserved and repeat installation
+refuses; use a fresh prefix to evaluate another copy. `--bin-dir`, its Linux
+alias `--prefix`, and `--allow-downgrade` apply only to Linux.
+
+Run a small offline Linux command:
+
+```sh
+vm_demo="$(mktemp -d "$HOME/ouro-vm-demo.XXXXXX")"
+mkdir "$vm_demo/input"
+printf 'hello\n' > "$vm_demo/input/input.txt"
+ouro-vm run --workspace "$vm_demo/input" --out "$vm_demo/result" \
+  --profile build --wall 30 -- \
+  /bin/sh -c 'cat input.txt; printf "created in Linux\n" > output.txt'
+cat "$vm_demo/result/workspace/output.txt"
+```
+
+Use a new output directory for every attempt. Inputs are copied into a private
+guest disk; review the returned files before adopting them. Both `tool` and
+`build` allow writes to that disposable workspace copy. Protected system paths
+remain read-only. The guest includes a shell and Python, rather than a full
+build SDK. Each attempt boots a VM; measured startup was about 22 seconds.
+
+This preview has no network adapter, host directory shares, credential
+forwarding, interactive stdin, background/resumable VM or agent/provider
+integration. It runs Linux ARM64 commands, not macOS binaries, Xcode or Apple
+SDKs. Input/output limits are 5,000 regular files, 512 KiB per file and 32 MiB
+total. Symlinks, devices and FIFOs are refused; `.git`, `target`, `node_modules`,
+`.venv`, `__pycache__` and `.DS_Store` are excluded. Empty directories are not
+preserved. Commands have 512 MiB memory, zero swap, 64 processes and a 1–300
+second wall limit.
+
+A completed attempt requires a verified Linux Jail receipt and acknowledged
+VM stop. Incomplete evidence returns 125. Files and Linux receipts remain in
+`<out>/workspace/` and `<out>/evidence/`; `attempt.json` records Mac supervision.
+The [package qualification](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+passed all 14 measured teardown cases. Simultaneous suspension of all three
+host controllers, host sleep/wake, kernel failure and arbitrary guest compromise
+are outside qualified coverage. The native macOS cleanup blocker remains open.
+
+For offline installation, save this installer and the DMG from the release,
+then run `bash install.sh --from-dir /path/to/artifacts`. The same embedded hash
+is required. The DMG also contains a standalone installer and build-time notes;
+its notes describe the candidate before publication. The public release notes
+record publication of those exact tested bytes.
+
+To uninstall the default installation, remove `~/.local/bin/ouro-vm` and
+`~/.local/share/ouro-vm/0.1.0-preview.1`. Keep or delete attempt directories as
+needed. A crashed launcher can leave a disk there; never boot or reuse it.
+
 ## Build and check your host
 
 You need Git, Rust 1.98.1, and your distribution's bubblewrap package. The
@@ -78,10 +152,14 @@ CPU limits require a delegated cgroup v2 scope. The
 [host setup reference](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
 explains that setup and its effect on process cleanup.
 
-On macOS, `version` and `explain` work; `doctor` reports why execution is
+For a source-built native `ouro-jail` on macOS, `version` and `explain` work; `doctor` reports why execution is
 unavailable. Other Linux architectures are not yet supported for execution.
 Signed Jail packages are linked above; a Homebrew tap remains unconfigured.
 Older `v0.1.x` releases belong to the archived agent runtime.
+
+The separate [VM preview source](https://github.com/monocursive/ouroboros/tree/dev/crates/ouro-jail/vm)
+documents its build process and lifetime design. Use the Mac quickstart above
+for the packaged release.
 
 ## Verify a supplied package
 

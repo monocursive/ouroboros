@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>host</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.monocursive.ouro.xpcresearch.15b68944020e4f97afb254068f82eb09</string>
+	<key>CFBundleName</key>
+	<string>Ouro XPC Research</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSBackgroundOnly</key>
+	<true/>
+</dict>
+</plist>

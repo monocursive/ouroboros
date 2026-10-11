@@ -1,0 +1,4 @@
+{"kind":"handler_construct","rc":0,"port":2563,"flags":32784}
+{"kind":"handler_register","rc":0}
+{"role":"custodian","pid":864,"pidversion":2292,"uniqueid":864,"pgid":849,"sid":1,"bsd_flags":4210704,"audit_token":[501,0,0,0,0,864,100002,2292]}
+{"kind":"custodian_ready"}

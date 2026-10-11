@@ -1,0 +1,3 @@
+{"role":"host","pid":833,"ppid":756,"pgid":756,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":833,"pidversion":2177,"coalitions":[496,497],"custody_fds_open":false,"audit_token":[501,501,20,501,20,833,100002,2177]}
+{"kind":"host_reply","started":true}
+{"kind":"host_connection_error","description":"Connection interrupted"}

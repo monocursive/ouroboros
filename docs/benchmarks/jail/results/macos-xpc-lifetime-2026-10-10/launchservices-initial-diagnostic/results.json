@@ -1,0 +1,51 @@
+{
+  "schema": "ouro.jail.macos-xpc-lifetime/1",
+  "status": "experiment_failed",
+  "settings": {
+    "virtualized": true,
+    "sip": "System Integrity Protection status: disabled.",
+    "approved_entitlement": false,
+    "authenticated_root": "Authenticated Root status: enabled",
+    "boot_args": "boot-args"
+  },
+  "actor_uid": 501,
+  "actor_euid": 501,
+  "cases": [],
+  "source_sha256": {
+    "macos_xpc_lifetime.c": "b1b98af8535aa78f6978535ca9e2d1f59fb027cd4c83f5e828aa4de0d995721a",
+    "macos_xpc_lifetime.py": "af674659978b4473eb45710f9c0a9885892a989c77764217d610423766dcec2f",
+    "macos_native.c": "adc081414284414824be45471fd13e805093d9f00c99307d22f14be86b1777d1",
+    "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+    "macos_ptrace_lifetime.py": "2e7eedc8dc2a3b271532e6e32976fec4ba8f0e0b39690d615d911f0bfc6fafe6",
+    "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0"
+  },
+  "native_execution_ready": false,
+  "lifetime_contract_verified": false,
+  "join_existing_session": false,
+  "launch_services": true,
+  "observation_seconds": 2,
+  "requested_cases": [
+    "host-death",
+    "service-death",
+    "both-death",
+    "host-stop",
+    "service-stop"
+  ],
+  "binary_sha256": {
+    "host": "2ef1c7f82eba9b90d4d447afbd46e2c019e5b87daf241c752cded9bfbf67653d",
+    "worker": "4ce060667bab717ed19e7c2faecbbd40f33375e4094f8c820710084560aaa874",
+    "native-fixture": "908e5d64a0994439f19dbdffeeed5769ae85a139d929b4ba2b53ae9a7682bfd6"
+  },
+  "service_name": "com.monocursive.ouro.xpcresearch.c888fc6a8e9f4312976828952252caaa.worker",
+  "signing": {
+    "identity": "-",
+    "approved_profile": false,
+    "signature_verified": true
+  },
+  "environment": {
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428",
+    "kernel": "Darwin Manageds-Virtual-Machine.local 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:00:07 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_VMAPPLE arm64",
+    "sdk": "27.0"
+  },
+  "error": "fixture condition did not become true"
+}

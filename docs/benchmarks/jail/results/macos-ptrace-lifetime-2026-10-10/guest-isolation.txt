@@ -1,0 +1,14 @@
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A428
+1
+System Integrity Protection status: disabled.
+Disabled
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+127                127.0.0.1          UCS                   lo0       
+127.0.0.1          127.0.0.1          UH                    lo0       
+224.0.0            link#1             UmCS                  lo0       
+224.0.0.251        link#1             UHmW3I                lo0   3414

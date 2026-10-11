@@ -181,6 +181,76 @@ cp "$BOOTSTRAP_ARTIFACTS/${url##*/}" "$output"
         self.assertNotIn('minisign', script)
         self.assertNotIn('SHA256SUMS', script)
 
+    def mac_fixture(self):
+        self.env.update(BOOTSTRAP_OS='Darwin', BOOTSTRAP_ARCH='arm64')
+        self.shim('sw_vers', '#!/bin/sh\necho "${BOOTSTRAP_MACOS:-27.0.1}"\n')
+        self.mac_log = self.root / 'mount.log'
+        self.env['BOOTSTRAP_MOUNT_LOG'] = str(self.mac_log)
+        self.shim('hdiutil', '''#!/bin/sh
+printf '%s\\n' "$@" >> "$BOOTSTRAP_MOUNT_LOG"
+if [ "$1" = attach ]; then
+    while [ "$1" != -mountpoint ]; do shift; done
+    cat > "$2/install.sh" <<'INSTALL'
+#!/bin/sh
+printf '%s\\n' "$@" >> "$BOOTSTRAP_MOUNT_LOG"
+exit "${BOOTSTRAP_INSTALL_STATUS:-0}"
+INSTALL
+fi
+''')
+        dmg = self.artifacts / 'ouro-vm-0.1.0-preview.1-macos-arm64.dmg'
+        dmg.write_bytes(b'checksum-verified test disk image')
+        self.installer.write_text(self.installer.read_text().replace(
+            'f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0',
+            hashlib.sha256(dmg.read_bytes()).hexdigest()))
+        return dmg
+
+    def run_mac(self, *args):
+        return subprocess.run(['bash', '-s', '--', '--vm-prefix', str(self.root / 'Mac prefix'), *args],
+                              input=self.installer.read_bytes(), env=self.env,
+                              capture_output=True, timeout=20)
+
+    def test_mac_pinned_download_mount_install_and_eject(self):
+        dmg = self.mac_fixture()
+        result = self.run_mac()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn('/releases/download/ouro-vm-v0.1.0-preview.1/' + dmg.name, self.log.read_text())
+        mount = self.mac_log.read_text()
+        self.assertIn('-readonly\n', mount)
+        self.assertIn('--prefix\n' + str(self.root / 'Mac prefix'), mount)
+        self.assertIn('detach\n', mount)
+        self.log.unlink()
+        result = self.run_mac('--version', 'ouro-vm-v0.1.0-preview.1', '--from-dir', str(self.artifacts))
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertFalse(self.log.exists())
+
+    def test_mac_tampering_fails_before_mount_or_install(self):
+        dmg = self.mac_fixture()
+        dmg.write_bytes(b'tampered')
+        result = self.run_mac()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'checksum verification failed', result.stderr)
+        self.assertFalse(self.mac_log.exists())
+
+    def test_mac_install_failure_still_ejects(self):
+        self.mac_fixture()
+        self.env['BOOTSTRAP_INSTALL_STATUS'] = '2'
+        self.assertEqual(self.run_mac().returncode, 2)
+        self.assertIn('detach\n', self.mac_log.read_text())
+
+    def test_mac_unsupported_hosts_and_options_refuse_before_download(self):
+        self.mac_fixture()
+        for args in [('--version', '0.1.0-preview.2'), ('--vm-prefix', 'relative'),
+                     ('--bin-dir', str(self.prefix)), ('--allow-downgrade',)]:
+            self.assertNotEqual(self.run_mac(*args).returncode, 0)
+            self.assertFalse(self.log.exists())
+        self.env['BOOTSTRAP_MACOS'] = '26.1'
+        self.assertNotEqual(self.run_mac().returncode, 0)
+        self.env['BOOTSTRAP_MACOS'] = '27.0'
+        self.env['BOOTSTRAP_ARCH'] = 'x86_64'
+        self.assertNotEqual(self.run_mac().returncode, 0)
+        self.assertFalse(self.log.exists())
+        self.assertFalse(self.mac_log.exists())
+
 
 if __name__ == '__main__':
     unittest.main()

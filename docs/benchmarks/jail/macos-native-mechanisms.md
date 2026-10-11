@@ -6,6 +6,15 @@ Follow-up: [reciprocal ES custody, 2026-09-30](macos-reciprocal-custody.md)
 cleans up the known fixture after either custodian fails, but both-client loss
 still permits ongoing execution. The production lifetime gate remains open.
 
+[Kernel lifetime investigation, 2026-10-10](macos-kernel-lifetime-2026-10-10.md)
+confirms debugger-death cleanup for attached targets, but late fork/spawn
+children survive in all tested variants. The native cleanup blocker remains open.
+
+[Native service follow-up, 2026-10-10](macos-native-services-2026-10-10.md)
+tests LaunchServices/XPC lifetime and root launchd crash recovery. XPC leaves
+descendants running; root recovery handles seven recorded members after a crash
+but fails when the custodian is stopped.
+
 There are stronger native primitives than process groups. The most promising
 supported direction is **Seatbelt plus macOS 27's descendant-scoped Endpoint
 Security client and audit-token signalling**. It still needs an entitled binary

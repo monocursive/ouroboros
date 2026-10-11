@@ -1,0 +1,3 @@
+{"role":"service","pid":1596,"ppid":1,"pgid":1596,"sid":1596,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1596,"pidversion":3781,"coalitions":[990,991],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,1596,100088,3781]}
+{"kind":"request_received","host_pid":1595}
+{"kind":"spawn","rc":0,"pid":1597}

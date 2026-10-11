@@ -1,0 +1,2 @@
+{"role":"host","pid":1532,"ppid":1,"pgid":1532,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1532,"pidversion":3650,"coalitions":[988,989],"custody_fds_open":false,"audit_token":[501,501,20,501,20,1532,100002,3650]}
+{"kind":"host_reply","started":true}

@@ -1,0 +1,3 @@
+{"role":"service","pid":2190,"ppid":1,"pgid":2190,"sid":2190,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2190,"pidversion":4951,"coalitions":[1010,1011],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,2190,100098,4951]}
+{"kind":"request_received","host_pid":2189}
+{"kind":"spawn","rc":0,"pid":2191}

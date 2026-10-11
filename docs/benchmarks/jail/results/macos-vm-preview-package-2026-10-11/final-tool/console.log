@@ -1,0 +1,3 @@
+OURO_VM {"event": "ready", "kernel": "7.0.0-38-generic"}
+OURO_VM {"event": "running", "supervisor_pid": 636}
+OURO_VM {"event": "done", "exit_code": 23}

@@ -1,0 +1,91 @@
+{
+  "case": "wall",
+  "status": "passed",
+  "launcher_pid": 8313,
+  "helper_pid": 8330,
+  "service_pid": 8331,
+  "identities": {
+    "8313": "Sun Oct 11 10:27:37 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+    "8330": "Sun Oct 11 10:27:40 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/vz",
+    "8331": "Sun Oct 11 10:27:40 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+  },
+  "detached_children": 6,
+  "service_gone_before_cleanup": true,
+  "service_gone_seconds": 3.0184533749707043,
+  "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 638}\nOURO_VM {\"event\": \"done\", \"exit_code\": 143}\n",
+  "stdout_before_cleanup": "DETACHED 3\nDETACHED 5\nDETACHED 6\nDETACHED 4\nREADY\nTICK 19807016134\nDETACHED 8\nDETACHED 7\nTICK 19907049259\nTICK 20007314175\nTICK 20107678384\nTICK 20207759800\nTICK 20309310259\nTICK 20410608884\nTICK 20510986676\nTICK 20612193259\nTICK 20712324051\nTICK 20812962092\nTICK 20914093759\nTICK 21014495051\nTICK 21116240676\nTICK 21216624009\nTICK 21316804426\nTICK 21418190301\nTICK 21519720301\nTICK 21620794509\nTICK 21721308176\nTICK 21821706051\nTICK 21921800051\nTICK 22022064926\nTICK 22123737135\nTICK 22225794551\nTICK 22328116093\nTICK 22428761218\nTICK 22529174718\nTICK 22629305885\nTICK 22729381927\n",
+  "guest_lifetime": {
+    "boundary": "pid_namespace",
+    "native": {
+      "os": "linux",
+      "details": {
+        "backend_exec_by": "descriptor",
+        "bwrap_pid": 666,
+        "cgroup_namespace": 4026532255,
+        "command_rules": {
+          "deny": 0,
+          "forbid": 0
+        },
+        "execution_cgroup": {
+          "charged_helpers": [
+            {
+              "pid": 666,
+              "role": "bubblewrap"
+            },
+            {
+              "pid": 668,
+              "role": "namespace_init"
+            }
+          ],
+          "device": 31,
+          "inode": 3886,
+          "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_64c4753c-c85b-4926-92bb-d6ba30f22b4b.leaf",
+          "scope": "target_descendants_and_listed_helpers"
+        },
+        "filtered_readonly_opens": 0,
+        "launcher_pid": 669,
+        "mnt_namespace": 4026532251,
+        "namespace_init_pid": 668,
+        "narrowing_filter_digest": "sha256:f5353e3a8e29beeca5edb0e19952196e8c1b8b575c4d5aab1698a7017fefb56e",
+        "narrowing_filter_digest_installed": "sha256:7b2d61413fca7d041b2a0d6b6ea1236d90db14e78ccc643cba4839ee38d6443d",
+        "net_namespace": 4026532256,
+        "observer_plan": {
+          "backend": "ptrace",
+          "event_bytes_max": 65536,
+          "in_flight_max": 16384,
+          "kernel_ring_bytes": null,
+          "path_snapshot_max": 4096,
+          "queue_bytes_max": 4194304,
+          "queue_events_max": 16384,
+          "queue_lifecycle_reserve_bytes": 65536,
+          "queue_result_bytes_max": 4128768,
+          "test_seams": {}
+        },
+        "path_claims_unverified": 0,
+        "pid_namespace": 4026532254,
+        "readonly_open_fast_path": true,
+        "requested_by_other_filters": 0,
+        "resolv_sanitization": "nameservers_only",
+        "seccomp_filters": {
+          "expected": 2,
+          "observed": 2
+        },
+        "supervisor_scope": {
+          "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-638-ce693a3ef29b48ff.scope",
+          "reason": null,
+          "reason_code": null,
+          "state": "entered",
+          "unit": "ouro-jail-638-ce693a3ef29b48ff.scope"
+        },
+        "user_namespace": 4026532310,
+        "watcher_pid": 667
+      }
+    },
+    "tree_empty": true,
+    "verified_at": "2026-10-11T08:28:03Z",
+    "verification_scope": "attempt_tree",
+    "integrity": "verified"
+  },
+  "emergency_cleanup_used": false,
+  "service_absent_after_cleanup": true
+}

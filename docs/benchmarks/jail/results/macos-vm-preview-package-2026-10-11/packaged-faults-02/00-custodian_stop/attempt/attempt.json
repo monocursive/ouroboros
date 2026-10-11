@@ -1,0 +1,50 @@
+{
+  "schema": "ouro.vm.attempt/1",
+  "status": "failed",
+  "host": [
+    "Darwin",
+    "monocursives-macbook-pro.home",
+    "27.0.0",
+    "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "arm64"
+  ],
+  "guest_os": "linux",
+  "native_macos_execution": false,
+  "network": false,
+  "shared_directories": [],
+  "workspace": "/Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/packaged-faults-02/00-custodian_stop/input",
+  "profile": "tool",
+  "argv_base64": [
+    "L3Vzci9iaW4vcHl0aG9uMw==",
+    "Zml4dHVyZS5weQ=="
+  ],
+  "wall_seconds": 30,
+  "image_sha256": "56379cfaf19716abbfba5a764e34cdfeb5ee5a60dd4ef24ed3b75431a77d8c4b",
+  "input_files": 1,
+  "excluded_names": [
+    ".DS_Store",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target"
+  ],
+  "launcher_pid": 20017,
+  "custodian_pid": 20027,
+  "helper_pid": 20028,
+  "owner_audit_token": [
+    501,
+    501,
+    20,
+    501,
+    20,
+    20028,
+    100015,
+    4817840
+  ],
+  "guest_kernel": "7.0.0-38-generic",
+  "boot_seconds": 21.153898374992423,
+  "supervisor_pid": 608,
+  "error": "native custodian stopped acknowledging its lease",
+  "elapsed_seconds": 23.102780290995724
+}

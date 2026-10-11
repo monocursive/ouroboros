@@ -1,0 +1,4 @@
+{"role":"custodian","pid":1623,"pidversion":3833,"uniqueid":1623,"pgid":1415,"sid":1,"bsd_flags":4210704,"audit_token":[501,501,20,501,20,1623,100002,3833]}
+{"kind":"handler_construct","rc":0,"port":7427,"flags":32784}
+{"kind":"exception_installed","rc":0,"mask":448,"behavior":2147483652}
+{"kind":"custodian_ready"}

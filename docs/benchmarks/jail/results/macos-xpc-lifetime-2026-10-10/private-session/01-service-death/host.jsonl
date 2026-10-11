@@ -1,0 +1,3 @@
+{"role":"host","pid":1595,"ppid":1,"pgid":1595,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1595,"pidversion":3778,"coalitions":[990,991],"custody_fds_open":false,"audit_token":[501,501,20,501,20,1595,100002,3778]}
+{"kind":"host_reply","started":true}
+{"kind":"host_connection_error","description":"Connection interrupted"}

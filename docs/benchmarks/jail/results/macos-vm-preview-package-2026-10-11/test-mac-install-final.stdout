@@ -1,0 +1,40 @@
+System Integrity Protection status: enabled.
+assessments enabled
+Checksumming Protective Master Boot Record (MBR : 0)…
+Protective Master Boot Record (MBR :: verified   CRC32 $02E285E1
+Checksumming GPT Header (Primary GPT Header : 1)…
+ GPT Header (Primary GPT Header : 1): verified   CRC32 $4E1D60D0
+Checksumming GPT Partition Data (Primary GPT Table : 2)…
+GPT Partition Data (Primary GPT Tabl: verified   CRC32 $FE9368CC
+Checksumming  (Apple_Free : 3)…
+                    (Apple_Free : 3): verified   CRC32 $00000000
+Checksumming disk image (Apple_APFS : 4)…
+         disk image (Apple_APFS : 4): verified   CRC32 $51DCDA47
+Checksumming  (Apple_Free : 5)…
+                    (Apple_Free : 5): verified   CRC32 $00000000
+Checksumming GPT Partition Data (Backup GPT Table : 6)…
+GPT Partition Data (Backup GPT Table: verified   CRC32 $FE9368CC
+Checksumming GPT Header (Backup GPT Header : 7)…
+  GPT Header (Backup GPT Header : 7): verified   CRC32 $45B71A31
+verified   CRC32 $D158DD26
+/dev/disk6          	GUID_partition_scheme          	
+/dev/disk6s1        	Apple_APFS                     	
+/dev/disk7          	EF57347C-0000-11AA-AA11-0030654	
+/dev/disk7s1        	41504653-0000-11AA-AA11-0030654	/Volumes/Ouro-VM-Test
+Ouro VM 0.1.0-preview.1 (offline Linux on Apple Silicon)
+{
+  "schema": "ouro.vm.install-check/1",
+  "ready": false,
+  "checks": {
+    "virtualization_supported": false,
+    "base.raw": true,
+    "seed.iso": true,
+    "vz": true,
+    "custodian": true
+  },
+  "scope": "package and host prerequisites; a real run still verifies the guest jail"
+}
+
+Installed /Users/admin/ouro-preview-test/bin/ouro-vm
+Add /Users/admin/ouro-preview-test/bin to PATH, then run ouro-vm doctor.
+{"component": "ouro-vm", "version": "0.1.0-preview.1", "execution": "linux-vm", "native_macos_execution": false}

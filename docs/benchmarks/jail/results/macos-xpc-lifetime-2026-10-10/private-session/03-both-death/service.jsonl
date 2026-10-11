@@ -1,0 +1,4 @@
+{"role":"service","pid":2249,"ppid":1,"pgid":2249,"sid":2249,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2249,"pidversion":5067,"coalitions":[1012,1013],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,2249,100099,5067]}
+{"kind":"request_received","host_pid":2248}
+{"kind":"spawn","rc":0,"pid":2250}
+{"kind":"service_connection_error","description":"Connection invalid"}

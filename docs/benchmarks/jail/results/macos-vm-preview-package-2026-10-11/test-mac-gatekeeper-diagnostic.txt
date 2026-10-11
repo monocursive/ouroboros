@@ -1,0 +1,114 @@
+Sun Oct 11 09:17:03 UTC 2026
+/Users/admin/ouro-vm-preview.dmg: rejected
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>assessment:authority</key>
+	<dict>
+		<key>assessment:authority:flags</key>
+		<integer>0</integer>
+		<key>assessment:authority:row</key>
+		<integer>16</integer>
+		<key>assessment:authority:source</key>
+		<string>Notarized Developer ID</string>
+	</dict>
+	<key>assessment:remote</key>
+	<true/>
+	<key>assessment:verdict</key>
+	<false/>
+</dict>
+</plist>
+/Users/admin/ouro-vm-preview.dmg: valid on disk
+/Users/admin/ouro-vm-preview.dmg: satisfies its Designated Requirement
+com.apple.quarantine: 0083;00000000;OuroPreviewQualification;
+2026-10-11 09:17:03.527 Df syspolicyd[208:315a] [com.apple.network:quic] quic_migration_evaluate [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] current path is usable, no strong fallback or we are probing
+2026-10-11 09:17:03.527 Df syspolicyd[208:315a] [com.apple.CFNetwork:Default] Connection 7: connected successfully
+2026-10-11 09:17:03.527 Df syspolicyd[208:315a] [com.apple.CFNetwork:Default] Connection 7: TLS handshake complete
+2026-10-11 09:17:03.527 Df syspolicyd[208:315a] [com.apple.CFNetwork:Default] Connection 7: ready C(N) E(N)
+2026-10-11 09:17:03.528 Df syspolicyd[208:315a] [com.apple.network:connection] [C7] event: client:connection_reused @0.080s
+2026-10-11 09:17:03.528 Df syspolicyd[208:315a] [com.apple.CFNetwork:Default] Task <2B56D4BD-737E-4E6A-A040-1AC9B8CE7E5F>.<8> now using Connection 7
+2026-10-11 09:17:03.528 Df syspolicyd[208:315a] [com.apple.CFNetwork:Default] Connection 7: received viability advisory(Y)
+2026-10-11 09:17:03.528 Df syspolicyd[208:3159] [com.apple.cfnetwork:h3stream] 0x7858b81198 ID=0 Task <2B56D4BD-737E-4E6A-A040-1AC9B8CE7E5F>.<8> sent request, body S 77
+2026-10-11 09:17:03.551 A  syspolicyd[208:315a] (Security) SecKeyCopyPublicBytes
+2026-10-11 09:17:03.551 A  syspolicyd[208:315a] (Security) SecKeyCopyAttributes
+2026-10-11 09:17:03.551 A  syspolicyd[208:315a] (Security) SecKeyCopyPublicBytes
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:boringssl] boringssl_context_new_session_handler(1830) [C8:1][0x7858b382e0] Asyncing for session update block
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:boringssl] nw_protocol_boringssl_signal_connected(907) [C8:1][0x7858b382e0] TLS connected [server(0) version(0x0304) ciphersuite(TLS_AES_256_GCM_SHA384) group(0x11ec) signature_alg(0x0403) alpn(h3) resumed(0) offered_ticket(0) in_early_data(0) early_data_accepted(0) false_started(0) ocsp_received(0) sct_received(0) connect_time(79ms) flight_time(75ms) rtt(75ms) write_stalls(0) read_stalls(8) pake(0x0000)]
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:connection] nw_flow_connected [C8 IPv4#88327d84:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] Output protocol connected (tls)
+2026-10-11 09:17:03.551 A  syspolicyd[208:315a] (Security) SecKeyCopyPublicBytes
+2026-10-11 09:17:03.551 A  syspolicyd[208:315a] (Security) SecKeyCopyAttributes
+2026-10-11 09:17:03.551 A  syspolicyd[208:315a] (Security) SecKeyCopyPublicBytes
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:boringssl] boringssl_context_new_session_handler(1830) [C8:1][0x7858b382e0] Asyncing for session update block
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:boringssl] nw_protocol_boringssl_signal_connected(907) [C8:1][0x7858b382e0] TLS connected [server(0) version(0x0304) ciphersuite(TLS_AES_256_GCM_SHA384) group(0x11ec) signature_alg(0x0403) alpn(h3) resumed(0) offered_ticket(0) in_early_data(0) early_data_accepted(0) false_started(0) ocsp_received(0) sct_received(0) connect_time(79ms) flight_time(75ms) rtt(75ms) write_stalls(0) read_stalls(8) pake(0x0000)]
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:connection] nw_flow_connected [C8 IPv4#88327d84:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] Output protocol connected (tls)
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:quic] quic_stream_create_inbound [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] creating inbound stream 3
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:quic] quic_stream_create_inbound [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] creating inbound stream 7
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:boringssl] boringssl_context_new_session_handler_block_invoke(1833) [C8:1][0x7858b382e0] Returning from session update block
+2026-10-11 09:17:03.551 Df syspolicyd[208:315a] [com.apple.network:boringssl] boringssl_context_new_session_handler_block_invoke(1833) [C8:1][0x7858b382e0] Returning from session update block
+2026-10-11 09:17:03.553 Df syspolicyd[208:315a] [com.apple.cfnetwork:h3stream] 0x7858b81198 ID=0 Task <2B56D4BD-737E-4E6A-A040-1AC9B8CE7E5F>.<8> received response, status 200 content K
+2026-10-11 09:17:03.553 A  syspolicyd[208:315a] (Security) SecTrustEvaluateIfNecessary
+2026-10-11 09:17:03.556 Df syspolicyd[208:315a] [com.apple.CFNetwork:Default] Task <2B56D4BD-737E-4E6A-A040-1AC9B8CE7E5F>.<8> response ended
+2026-10-11 09:17:03.556 Df syspolicyd[208:315a] [com.apple.network:connection] [C7] event: client:connection_idle @0.109s
+2026-10-11 09:17:03.556 Df syspolicyd[208:315a] [com.apple.CFNetwork:Default] Task <2B56D4BD-737E-4E6A-A040-1AC9B8CE7E5F>.<8> done using Connection 7
+2026-10-11 09:17:03.556 Df syspolicyd[208:315d] [com.apple.CFNetwork:Summary] Task <2B56D4BD-737E-4E6A-A040-1AC9B8CE7E5F>.<8> summary for task success {transaction_duration_ms=109, response_status=200, connection=7, protocol="h3", domain_lookup_duration_ms=0, connect_duration_ms=79, secure_connection_duration_ms=79, private_relay=false, request_start_ms=81, request_duration_ms=0, response_start_ms=106, response_duration_ms=2, request_bytes=293, request_throughput_kbps=11600, response_bytes=2424, response_throughput_kbps=6474, cache_hit=false}
+2026-10-11 09:17:03.556 Df syspolicyd[208:315d] [com.apple.CFNetwork:Default] Task <2B56D4BD-737E-4E6A-A040-1AC9B8CE7E5F>.<8> finished successfully
+2026-10-11 09:17:03.556 A  syspolicyd[208:3129] (Security) SecTrustEvaluateIfNecessary
+2026-10-11 09:17:03.558 A  syspolicyd[208:3129] (Security) SecKeyVerifySignature
+2026-10-11 09:17:03.561 A  syspolicyd[208:3129] (Security) SecKeyVerifySignature
+2026-10-11 09:17:03.561 A  syspolicyd[208:3129] (Security) SecKeyVerifySignature
+2026-10-11 09:17:03.561 A  syspolicyd[208:3129] (Security) SecTrustEvaluateIfNecessary
+2026-10-11 09:17:03.561 A  syspolicyd[208:3129] (Security) SecKeyVerifySignature
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustEvaluateIfNecessary
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.562 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.579 Df syspolicyd[208:315d] [com.apple.CFNetwork:Default] Connection 7: encountered bidirectional stream limit updated event
+2026-10-11 09:17:03.787 Df syspolicyd[208:315d] [com.apple.network:quic] quic_migration_probe_path [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] probing path on en0 (challenges sent 1)
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_migration_received_response [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] received PATH_RESPONSE, RTT 23 ms
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_migration_received_response [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] path over en0 is validated
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_migration_evaluate [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] evaluating path migration
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_migration_evaluate_block_invoke [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] path ba901bb047529e6f state validated (0), ifname en0, primary? 0, initial? 0, fallback? 0, preferred? 1 lossy? 0
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_migration_evaluate_block_invoke [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] path e285e4c347ff2601 state validated (0), ifname en0, primary? 1, initial? 1, fallback? 0, preferred? 0 lossy? 0
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_migration_migrate [C7.1.1.1:2] [-00109ab0f2e6637db19eafbd7a123c7a4e9078a3] migrating to path over en0
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_pmtud_restart [C7.1.1.1:2] [-001072c02ce9a513083c168912b11f4e8eb3b7cd] PMTUD enabled, max PMTU: 1500, header size: 28, current PMTU 1280
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:quic] quic_conn_migrate_to_path [C7.1.1.1:2] [-001072c02ce9a513083c168912b11f4e8eb3b7cd] migrated to preferred address over en0 (ba901bb047529e6f)
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:] nw_protocol_instance_set_current_path [C7.1.1.1:2] Calling notify nw_protocol_notification_type_migration <private> for flow registration <private>
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1.1 IPv4#a52a42ce:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 786C771F-1D6D-47B9-B118-3379E35B4011
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1 Hostname#9cdac6c0:443 ready resolver (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 8E5332EC-8FE9-43EF-A4E4-572390957B6B
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1 Hostname#9cdac6c0:443 ready transform (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7 IPv4#a52a42ce:443 ready parent-flow (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1.1 IPv4#a52a42ce:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 786C771F-1D6D-47B9-B118-3379E35B4011
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1 Hostname#9cdac6c0:443 ready resolver (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 8E5332EC-8FE9-43EF-A4E4-572390957B6B
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1 Hostname#9cdac6c0:443 ready transform (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7 IPv4#a52a42ce:443 ready parent-flow (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1.1 IPv4#a52a42ce:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 786C771F-1D6D-47B9-B118-3379E35B4011
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1 Hostname#9cdac6c0:443 ready resolver (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 8E5332EC-8FE9-43EF-A4E4-572390957B6B
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1 Hostname#9cdac6c0:443 ready transform (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7 IPv4#a52a42ce:443 ready parent-flow (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1.1 IPv4#a52a42ce:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 786C771F-1D6D-47B9-B118-3379E35B4011
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1 Hostname#9cdac6c0:443 ready resolver (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 8E5332EC-8FE9-43EF-A4E4-572390957B6B
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1 Hostname#9cdac6c0:443 ready transform (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7 IPv4#a52a42ce:443 ready parent-flow (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1.1 IPv4#a52a42ce:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 786C771F-1D6D-47B9-B118-3379E35B4011
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1.1 Hostname#9cdac6c0:443 ready resolver (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: 8E5332EC-8FE9-43EF-A4E4-572390957B6B
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7.1 Hostname#9cdac6c0:443 ready transform (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C7 IPv4#a52a42ce:443 ready parent-flow (satisfied (Path is satisfied), interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.363s, uuid: F8B1BEF3-AC25-4CF2-ABEA-CE5F19182491
+2026-10-11 09:17:03.810 Df syspolicyd[208:315d] [com.apple.network:connection] [C8 IPv4#a52a42ce:443 ready channel-flow (satisfied (Path is satisfied), viable, interface: en0, ipv4, ipv6, dns)] event: path:migrated @0.362s, uuid: 786C771F-1D6D-47B9-B118-3379E35B4011
+2026-10-11 09:17:03.994 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.994 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.994 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:03.994 Df syspolicyd[208:3129] [com.apple.securityd:legacy_list] meetsDeveloperIDLegacyAllowedPolicy = 0
+2026-10-11 09:17:03.994 A  syspolicyd[208:3129] (Security) SecTrustCopyAppleTrustAnchors
+2026-10-11 09:17:04.047 Df syspolicyd[208:3129] [com.apple.securityd:gk] rejecting due to lack of matching active rule
+2026-10-11 09:17:04.048 Df syspolicyd[208:3129] [com.apple.securityd:security_exception] MacOS error: -67018
+2026-10-11 09:17:04.049 Df syspolicyd[208:2f7f] [com.apple.xpc:connection] [0x7859073840] invalidated because the client process (pid 1204) either cancelled the connection or exited
+2026-10-11 09:17:04.092 Df syspolicyd[208:2f7f] [com.apple.xpc:connection] [0x7859073840] activating connection: mach=false listener=false peer=true name=com.apple.security.syspolicy.peer[1205].0x7859073840
+2026-10-11 09:17:04.092 A  syspolicyd[208:2f7f] (Security) SecTrustEvaluateIfNecessary
+2026-10-11 09:17:04.093 A  syspolicyd[208:2f7f] (Security) SecKeyVerifySignature
+2026-10-11 09:17:04.524 Df syspolicyd[208:2f7f] [com.apple.xpc:connection] [0x7859073840] invalidated because the client process (pid 1205) either cancelled the connection or exited

@@ -1,0 +1,4 @@
+{"role":"service","pid":1296,"ppid":1,"pgid":1296,"sid":1296,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1296,"pidversion":3137,"coalitions":[964,965],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,1296,100078,3137]}
+{"kind":"request_received","host_pid":1295}
+{"kind":"spawn","rc":0,"pid":1297}
+{"kind":"service_connection_error","description":"Connection invalid"}

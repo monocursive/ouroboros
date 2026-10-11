@@ -1,0 +1,26 @@
+*** Terminating app due to uncaught exception 'NSFileHandleOperationException', reason: '*** -[_NSStdIOFileHandle writeData:]: Broken pipe'
+*** First throw call stack:
+(
+	0   CoreFoundation                      0x0000000191bfa8c0 __exceptionPreprocess + 176
+	1   libobjc.A.dylib                     0x000000019165860c objc_exception_throw + 88
+	2   Foundation                          0x0000000193394e34 -[NSConcreteFileHandle readDataUpToLength:error:] + 0
+	3   Foundation                          0x000000019327f694 -[NSConcreteFileHandle writeData:] + 292
+	4   vz                                  0x0000000104fa73bc $s2vz6RunnerC4stop_4codeySS_s5Int32VtF + 544
+	5   vz                                  0x0000000104fa9014 $s2vz6RunnerC5startyyFyycfU0_TA + 220
+	6   vz                                  0x0000000104fa7598 $sIeg_IeyB_TR + 28
+	7   libdispatch.dylib                   0x00000001919225a0 _dispatch_client_callout + 16
+	8   libdispatch.dylib                   0x000000019190d1b4 _dispatch_continuation_pop + 596
+	9   libdispatch.dylib                   0x00000001919202a8 _dispatch_source_latch_and_call + 392
+	10  libdispatch.dylib                   0x000000019191ef7c _dispatch_source_invoke + 848
+	11  libdispatch.dylib                   0x00000001919408bc _dispatch_main_queue_drain.cold.6 + 612
+	12  libdispatch.dylib                   0x0000000191917b0c _dispatch_main_queue_drain + 176
+	13  libdispatch.dylib                   0x0000000191917a4c _dispatch_main_queue_callback_4CF + 44
+	14  CoreFoundation                      0x0000000191bc79cc __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__ + 16
+	15  CoreFoundation                      0x0000000191b8965c __CFRunLoopRun + 1980
+	16  CoreFoundation                      0x0000000191c6382c _CFRunLoopRunSpecificWithOptions + 536
+	17  Foundation                          0x000000019328cd5c -[NSRunLoop(NSRunLoop) runMode:beforeDate:] + 212
+	18  Foundation                          0x0000000193305bcc -[NSRunLoop(NSRunLoop) run] + 64
+	19  vz                                  0x0000000104fa5314 main + 132
+	20  dyld                                0x00000001916f3e80 start + 6688
+)
+libc++abi: terminating due to uncaught exception of type NSException

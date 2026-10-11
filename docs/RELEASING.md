@@ -12,6 +12,17 @@ The first distribution is `ouro-jail` for Linux x86_64 and ARM64 in
 `ouro-jail-v0.1.0-rc.1`. This keeps the archived runtime's `v0.1.x` releases
 separate. The fleet, ledger, Homebrew and macOS execution are outside this package.
 
+The separate [macOS Linux VM preview](../crates/ouro-jail/vm/README.md) has its
+own offline DMG and Bash installer. It does not add Darwin artifacts to the
+Linux release or satisfy the native macOS clauses. Its [package qualification](benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+records signing, notarization, installation and VM fault checks separately.
+The dedicated prerelease is `ouro-vm-v0.1.0-preview.1`. The public installer
+selects it on Apple Silicon and pins the final stapled DMG SHA-256:
+`f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0`.
+Use the [Mac quickstart](guide.md#macos-vm-preview) for installation and limits.
+The DMG's build-time notes and original qualification metadata retain their
+unpublished state; publication does not modify the tested artifact.
+
 The Bash entry point adapts `legacy:install.sh`: explicit versions, HTTPS,
 architecture detection, no sudo or compiler, and installation to `~/.local/bin`.
 It embeds the SHA-256 hash for each Linux archive, verifies the selected archive
@@ -54,7 +65,7 @@ Its private half is stored outside the repository at
 with file mode 0600. It is unencrypted for local noninteractive signing; maintain
 a private backup for future releases. Private key material is never sent to CI.
 
-## Linux-only release scope
+## Linux-only Jail release scope
 
 On 10 October 2026, the Linux evidence gaps were closed by live CLI tests,
 native signed-install tests and a recorded fresh-VM OpenCode workflow. The

@@ -1,0 +1,2 @@
+{"role": "custodian", "pid": 3787, "ppid": 1, "pgid": 3787, "sid": 3787, "status": 2, "bsd_bytes": 136, "unique_bytes": 56, "coalition_bytes": 40, "uniqueid": 3787, "pidversion": 8182, "coalitions": [1071, 1072], "audit_token": [4294967295, 0, 0, 0, 0, 3787, 100110, 8182], "uid": 0, "euid": 0}
+{"kind": "custodian_ready", "child_pid": 3793}

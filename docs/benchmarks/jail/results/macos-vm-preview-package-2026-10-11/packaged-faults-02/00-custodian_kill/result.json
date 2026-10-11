@@ -1,0 +1,23 @@
+{
+  "case": "custodian_kill",
+  "status": "passed",
+  "launcher_pid": 19982,
+  "helper_pid": 19986,
+  "custodian_pid": 19985,
+  "service_pid": 19987,
+  "identities": {
+    "19982": "Sun Oct 11 11:16:41 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/install-check-02/prefix with spaces/share/ouro-vm/0.1.0-preview.1/bin/ouro-vm",
+    "19986": "Sun Oct 11 11:16:44 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/install-check-02/prefix with spaces/share/ouro-vm/0.1.0-preview.1/image/vz",
+    "19985": "Sun Oct 11 11:16:44 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/install-check-02/prefix with spaces/share/ouro-vm/0.1.0-preview.1/image/custodian",
+    "19987": "Sun Oct 11 11:16:44 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+  },
+  "detached_children": 6,
+  "service_gone_before_cleanup": true,
+  "service_gone_seconds": 0.012426584027707577,
+  "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 640}\n",
+  "guest_tree_empty_before_cleanup": false,
+  "stdout_before_cleanup": "DETACHED 4\nDETACHED 3\nREADY\nTICK 21370703134\nDETACHED 7\nDETACHED 5\nDETACHED 8\nDETACHED 6\nTICK 21471442634\nTICK 21571900301\n",
+  "emergency_killed_pids": [],
+  "emergency_cleanup_used": false,
+  "service_absent_after_cleanup": true
+}

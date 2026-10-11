@@ -1,0 +1,4 @@
+{"role":"service","pid":775,"ppid":1,"pgid":775,"sid":775,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":775,"pidversion":2064,"coalitions":[496,497],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,775,100068,2064]}
+{"kind":"request_received"}
+{"kind":"spawn","rc":0,"pid":776}
+{"kind":"service_connection_error","description":"Connection invalid"}

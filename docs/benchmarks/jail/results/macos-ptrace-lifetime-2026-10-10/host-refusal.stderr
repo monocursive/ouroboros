@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_ptrace_lifetime.py", line 179, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_ptrace_lifetime.py", line 132, in main
+    settings = development_settings()  # Must refuse on the protected host before mutation.
+  File "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_es.py", line 33, in development_settings
+    raise ValueError("Development testing requires a disposable macOS VM with SIP disabled")
+ValueError: Development testing requires a disposable macOS VM with SIP disabled

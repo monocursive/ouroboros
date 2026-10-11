@@ -1,0 +1,3 @@
+{"kind":"attach","pid":2171,"pidversion":5029,"rc":0,"errno":0}
+{"role":"tracer","pid":2173,"pidversion":5033,"uniqueid":2173,"pgid":1307,"sid":1,"bsd_flags":4210704,"audit_token":[501,0,0,0,0,2173,100002,5033]}
+{"kind":"tracer_ready","attached_count":1}

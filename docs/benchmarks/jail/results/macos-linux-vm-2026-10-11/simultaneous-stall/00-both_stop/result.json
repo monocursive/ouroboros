@@ -1,0 +1,20 @@
+{
+  "case": "both_stop",
+  "status": "failed",
+  "launcher_pid": 9430,
+  "helper_pid": 9466,
+  "service_pid": 9467,
+  "identities": {
+    "9430": "Sun Oct 11 10:30:59 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+    "9466": "Sun Oct 11 10:31:01 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/vz",
+    "9467": "Sun Oct 11 10:31:01 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+  },
+  "detached_children": 6,
+  "service_gone_before_cleanup": false,
+  "service_gone_seconds": null,
+  "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 641}\nOURO_VM {\"event\": \"poweroff\", \"reason\": \"lease_expired\"}\n",
+  "stdout_before_cleanup": "DETACHED 3\nDETACHED 4\nDETACHED 5\nDETACHED 6\nDETACHED 7\nREADY\nTICK 27070974220\nDETACHED 8\nTICK 27171467887\nTICK 27271661387\n",
+  "error": "VM service survived the fault deadline",
+  "emergency_cleanup_used": true,
+  "service_absent_after_cleanup": true
+}

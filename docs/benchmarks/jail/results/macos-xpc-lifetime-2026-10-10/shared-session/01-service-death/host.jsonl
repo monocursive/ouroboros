@@ -1,0 +1,3 @@
+{"role":"host","pid":2514,"ppid":1,"pgid":2514,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2514,"pidversion":5603,"coalitions":[1024,1025],"custody_fds_open":false,"audit_token":[501,501,20,501,20,2514,100002,5603]}
+{"kind":"host_reply","started":true}
+{"kind":"host_connection_error","description":"Connection interrupted"}

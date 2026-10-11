@@ -32,12 +32,20 @@ bundle features natively, including the installed CLI commands.
 Fourteen starter launch profiles are embedded. OpenCode has recorded live
 runs, but a bundled profile is not a promise that every version of that agent
 works. The [compatibility records](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
-name the tested combinations. macOS supports inspection commands and refuses
-sandboxed execution.
+name the tested combinations. Native macOS `ouro-jail` supports inspection
+commands and refuses execution.
 
 You can [build the jail and try a small command](https://github.com/monocursive/ouroboros/blob/dev/docs/guide.md#build-and-check-your-host)
 today. [Signed Linux developer-preview packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
 are also available; a Homebrew tap remains unconfigured.
+
+The separate [Ouro VM preview for Apple Silicon](guide.md#macos-vm-preview)
+is now available as a signed, notarized DMG through the same Bash installer.
+It runs offline Linux ARM64 `tool` and `build` commands in a disposable VM on
+macOS 27+. Inputs are copied and outputs returned for review. Native Mac
+programs, online agents and host directory sharing are outside this preview.
+The [qualification record](benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+documents the 14 measured teardown cases and the remaining fault-model limits.
 
 ## Next: make the first run easier
 
@@ -120,8 +128,8 @@ approval is also pending; approval alone will not fix that lifetime gap.
 
 Native execution will stay disabled until cleanup works under normal macOS
 security settings and passes the failure tests. Inspection commands remain
-useful in the meantime. A future Mac client that submits work to Linux is a
-separate feature from running a sandbox locally on the Mac.
+useful in the meantime. The released VM preview provides a local Linux guest
+while this native lifetime question remains open with Apple.
 
 ## Available in source: durable records across runs
 

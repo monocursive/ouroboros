@@ -1,0 +1,4 @@
+{"role":"service","pid":1952,"ppid":1,"pgid":1952,"sid":1952,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1952,"pidversion":4482,"coalitions":[1002,1003],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,1952,100094,4482]}
+{"kind":"request_received","host_pid":1951}
+{"kind":"spawn","rc":0,"pid":1953}
+{"kind":"service_connection_error","description":"Connection invalid"}

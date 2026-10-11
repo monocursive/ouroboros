@@ -1,0 +1,4 @@
+{"role":"service","pid":2948,"ppid":1,"pgid":2948,"sid":2948,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2948,"pidversion":6477,"coalitions":[1045,1046],"custody_fds_open":false,"audit_token":[501,501,20,501,20,2948,100002,6477]}
+{"kind":"request_received","host_pid":2947}
+{"kind":"spawn","rc":0,"pid":2949}
+{"kind":"service_connection_error","description":"Connection invalid"}

@@ -1,0 +1,6 @@
+{"role":"root","pid":2875,"ppid":1308,"pgid":1307,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2875,"pidversion":6381,"coalitions":[498,499],"custody_fds_open":false,"audit_token":[501,0,0,0,0,2875,100002,6381]}
+{"role":"plain","pid":2876,"ppid":2875,"pgid":1307,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2876,"pidversion":6382,"coalitions":[498,499],"custody_fds_open":false,"audit_token":[501,0,0,0,0,2876,100002,6382]}
+{"role":"setsid","pid":2877,"ppid":2875,"pgid":2877,"sid":2877,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2877,"pidversion":6383,"coalitions":[498,499],"custody_fds_open":false,"audit_token":[501,0,0,0,0,2877,100002,6383]}
+{"role":"double-fork","pid":2879,"ppid":1,"pgid":2878,"sid":2878,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2879,"pidversion":6385,"coalitions":[498,499],"custody_fds_open":false,"audit_token":[501,0,0,0,0,2879,100002,6385]}
+{"role":"stubborn","pid":2880,"ppid":2875,"pgid":1307,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2880,"pidversion":6386,"coalitions":[498,499],"custody_fds_open":false,"audit_token":[501,0,0,0,0,2880,100002,6386]}
+{"ready":true}

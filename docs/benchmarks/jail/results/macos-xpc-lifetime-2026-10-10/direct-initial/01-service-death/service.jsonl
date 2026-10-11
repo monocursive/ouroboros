@@ -1,0 +1,3 @@
+{"role":"service","pid":834,"ppid":1,"pgid":834,"sid":834,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":834,"pidversion":2180,"coalitions":[496,497],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,834,100070,2180]}
+{"kind":"request_received"}
+{"kind":"spawn","rc":0,"pid":835}

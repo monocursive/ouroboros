@@ -1,0 +1,82 @@
+{
+  "schema": "ouro.vm.fault-check/1",
+  "results": [
+    {
+      "case": "both_stop",
+      "status": "passed",
+      "launcher_pid": 15147,
+      "helper_pid": 15173,
+      "custodian_pid": 15172,
+      "service_pid": 15174,
+      "identities": {
+        "15147": "Sun Oct 11 10:53:57 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "15173": "Sun Oct 11 10:54:00 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/image/vz",
+        "15172": "Sun Oct 11 10:54:00 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/image/custodian",
+        "15174": "Sun Oct 11 10:54:00 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 2.9534680420765653,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 635}\nOURO_VM {\"event\": \"workload_tree_empty\", \"boundary\": \"user.slice\", \"events_inode\": 271}\nOURO_VM {\"event\": \"poweroff\", \"reason\": \"lease_expired\"}\n",
+      "guest_tree_empty_before_cleanup": true,
+      "stdout_before_cleanup": "DETACHED 3\nDETACHED 5\nDETACHED 4\nREADY\nTICK 19764592050\nDETACHED 8\nDETACHED 6\nDETACHED 7\nTICK 19864707384\n",
+      "emergency_killed_pids": [
+        15147
+      ],
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "custodian_kill",
+      "status": "passed",
+      "launcher_pid": 15297,
+      "helper_pid": 15303,
+      "custodian_pid": 15302,
+      "service_pid": 15304,
+      "identities": {
+        "15297": "Sun Oct 11 10:54:24 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "15303": "Sun Oct 11 10:54:26 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/image/vz",
+        "15302": "Sun Oct 11 10:54:26 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/image/custodian",
+        "15304": "Sun Oct 11 10:54:26 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 0.010998542071320117,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 637}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 3\nDETACHED 4\nREADY\nTICK 19815500300\nDETACHED 7\nDETACHED 6\nDETACHED 8\nDETACHED 5\nTICK 19916227217\n",
+      "emergency_killed_pids": [],
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "custodian_stop",
+      "status": "failed",
+      "launcher_pid": 15332,
+      "helper_pid": 15369,
+      "custodian_pid": 15368,
+      "service_pid": 15370,
+      "identities": {
+        "15332": "Sun Oct 11 10:54:46 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "15369": "Sun Oct 11 10:54:49 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/image/vz",
+        "15368": "Sun Oct 11 10:54:49 2026     /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/image/custodian",
+        "15370": "Sun Oct 11 10:54:49 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": false,
+      "service_gone_seconds": null,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 632}\n\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J\u001b[6n\u001b[32766;32766H\u001b[6n\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J\u001b[6n\u001b[32766;32766H\u001b[6n\u001b]3008;start=ba8f91ab4e174249b5e5157f716a2291;user=root;hostname=ouro-linux-preview;machineid=ab49ab7eb2124b15a9dac1c7dee23c41;bootid=5dced494f9754e408a0188dbfe7a28cb;pid=487;pidfdid=323;comm=(agetty);servicename=serial-getty@hvc0.service;invocationid=f27a8e752ea9488f8ecd58c6b6acf39a;type=service\u001b\\\u001bP+q6E616D65\u001b\\\n\nUbuntu 26.04.1 LTS ouro-linux-preview hvc0\n\nTry contacting this VM's SSH server via 'ssh vsock%3' from host.\n\nouro-linux-preview login: ",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 5\nDETACHED 7\nDETACHED 6\nDETACHED 3\nDETACHED 4\nREADY\nTICK 19869120759\nDETACHED 8\nTICK 19969213384\nTICK 20069370259\nTICK 20169483717\nTICK 20269800550\nTICK 20370236217\nTICK 20471981384\nTICK 20573180717\nTICK 20673594759\nTICK 20774026259\nTICK 20874650842\nTICK 20975406676\nTICK 21075829843\nTICK 21175992093\nTICK 21278879259\nTICK 21380680801\nTICK 21482237593\nTICK 21583369593\nTICK 21684825593\nTICK 21788708426\nTICK 21891349343\nTICK 21991514801\nTICK 22091717468\nTICK 22193392635\nTICK 22294908926\nTICK 22395455718\nTICK 22496094260\nTICK 22596856052\nTICK 22698751968\nTICK 22799816510\nTICK 22900965968\nTICK 23001574385\nTICK 23101794843\nTICK 23203494177\nTICK 23307078302\nTICK 23408306427\nTICK 23509836510\nTICK 23610033510\nTICK 23712197010\nTICK 23815328719\nTICK 23916105594\nTICK 24016408761\nTICK 24117547136\nTICK 24218024969\nTICK 24320883344\nTICK 24423418761\nTICK 24524162844\nTICK 24624762511\nTICK 24725602928\nTICK 24825862761\nTICK 24926440969\nTICK 25027599261\nTICK 25127727886\nTICK 25232719803\nTICK 25333617095\nTICK 25434575011\nTICK 25535722845\nTICK 25638632720\nTICK 25742317678\nTICK 25842553095\nTICK 25943810345\nTICK 26045845928\nTICK 26146583845\nTICK 26248186720\nTICK 26350453428\nTICK 26451833137\nTICK 26553549928\nTICK 26654591637\nTICK 26754822304\nTICK 26859249220\nTICK 26959468179\nTICK 27060346637\nTICK 27162095845\nTICK 27265099679\nTICK 27367033304\nTICK 27469548387\nTICK 27574235554\nTICK 27674751721\nTICK 27774809637\nTICK 27876432179\nTICK 27978237179\nTICK 28079645388\n",
+      "error": "VM service survived the fault deadline",
+      "emergency_killed_pids": [
+        15369,
+        15368,
+        15332
+      ],
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    }
+  ],
+  "passed": false
+}

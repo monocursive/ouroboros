@@ -1,0 +1,39 @@
+{
+  "schema": "ouro.vm.attempt/1",
+  "status": "failed",
+  "host": [
+    "Darwin",
+    "monocursives-macbook-pro.home",
+    "27.0.0",
+    "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "arm64"
+  ],
+  "guest_os": "linux",
+  "native_macos_execution": false,
+  "network": false,
+  "shared_directories": [],
+  "workspace": "/Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/faults-02/00-service_stop/input",
+  "profile": "tool",
+  "argv_base64": [
+    "L3Vzci9iaW4vcHl0aG9uMw==",
+    "Zml4dHVyZS5weQ=="
+  ],
+  "wall_seconds": 30,
+  "image_sha256": "e2b1b71eecfb37e92896dec6a02910635ec7bfe54e739ea1f2c2300e20cd433a",
+  "input_files": 1,
+  "excluded_names": [
+    ".DS_Store",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target"
+  ],
+  "launcher_pid": 9456,
+  "helper_pid": 9485,
+  "guest_kernel": "7.0.0-38-generic",
+  "boot_seconds": 22.279997124918737,
+  "supervisor_pid": 642,
+  "error": "guest lease acknowledgement lost",
+  "elapsed_seconds": 26.657293624943122
+}

@@ -1,0 +1,7 @@
+/Users/admin/ouro-preview-test/bin/ouro-vm: valid on disk
+/Users/admin/ouro-preview-test/bin/ouro-vm: satisfies its Designated Requirement
+/Users/admin/ouro-preview-test/share/ouro-vm/0.1.0-preview.1/image/vz: valid on disk
+/Users/admin/ouro-preview-test/share/ouro-vm/0.1.0-preview.1/image/vz: satisfies its Designated Requirement
+/Users/admin/ouro-preview-test/share/ouro-vm/0.1.0-preview.1/image/custodian: valid on disk
+/Users/admin/ouro-preview-test/share/ouro-vm/0.1.0-preview.1/image/custodian: satisfies its Designated Requirement
+hdiutil: WARNING: 'hdiutil detach ...' is deprecated. Please use 'diskutil eject ...' instead.

@@ -1,0 +1,12 @@
+{
+  "trials": 15,
+  "samples_per_case": 3,
+  "join_existing_session": true,
+  "observation_seconds": 2,
+  "known_workload_survivors": 105,
+  "post_fault_exec_controls": 15,
+  "native_execution_ready": false,
+  "lifetime_contract_verified": false,
+  "scope": "LaunchServices app, ad-hoc signature, ordinary user in SIP-disabled development VM",
+  "results_sha256": "3030155822339296cacebea88920b616ac123147c94464caee46b678cc509052"
+}

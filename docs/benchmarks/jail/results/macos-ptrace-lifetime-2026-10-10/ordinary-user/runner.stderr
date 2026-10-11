@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/tmp/ouro-lifetime-20261010/macos_ptrace_lifetime.py", line 179, in <module>
+    raise SystemExit(main())
+  File "/tmp/ouro-lifetime-20261010/macos_ptrace_lifetime.py", line 161, in main
+    row = trial(exe, fixture, out / f'{sample:02}-{case}', case)
+  File "/tmp/ouro-lifetime-20261010/macos_ptrace_lifetime.py", line 65, in trial
+    wait_until(trace_ready)
+  File "/private/tmp/ouro-lifetime-20261010/macos_native.py", line 60, in wait_until
+    if value := check():
+  File "/tmp/ouro-lifetime-20261010/macos_ptrace_lifetime.py", line 63, in trace_ready
+    require(tracer.poll() is None, 'Tracer refused or exited before attach readiness')
+  File "/tmp/ouro-lifetime-20261010/macos_ptrace_lifetime.py", line 29, in require
+    raise RuntimeError(message)
+RuntimeError: Tracer refused or exited before attach readiness

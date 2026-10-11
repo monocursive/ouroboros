@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_xpc_lifetime.py", line 173, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_xpc_lifetime.py", line 105, in main
+    settings = development_settings()
+  File "/Users/monocursive/code/ouroboros/docs/benchmarks/jail/macos_es.py", line 33, in development_settings
+    raise ValueError("Development testing requires a disposable macOS VM with SIP disabled")
+ValueError: Development testing requires a disposable macOS VM with SIP disabled

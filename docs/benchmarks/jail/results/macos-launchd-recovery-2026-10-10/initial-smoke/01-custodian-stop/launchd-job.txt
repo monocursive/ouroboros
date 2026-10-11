@@ -1,0 +1,76 @@
+system/com.monocursive.ouro.recoveryresearch.19de1628694648dd8320684c64c6a2c0 = {
+	active count = 1
+	path = /private/tmp/ouro-launchd-initial-20261010/01-custodian-stop/job.plist
+	type = LaunchDaemon
+	state = running
+
+	program = /usr/bin/python3
+	arguments = {
+		/usr/bin/python3
+		-u
+		/private/tmp/ouro-launchd-initial-20261010/tested-source/macos_launchd_recovery.py
+		--worker
+		/private/tmp/ouro-launchd-initial-20261010/01-custodian-stop
+		--fixture
+		/private/tmp/ouro-launchd-initial-20261010/native-fixture
+	}
+
+	stdout path = /private/tmp/ouro-launchd-initial-20261010/01-custodian-stop/custodian.jsonl
+	stderr path = /private/tmp/ouro-launchd-initial-20261010/01-custodian-stop/stderr.txt
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.monocursive.ouro.recoveryresearch.19de1628694648dd8320684c64c6a2c0
+	}
+
+	domain = system
+	minimum runtime = 1
+	exit timeout = 1
+	runs = 1
+	pid = 3624
+	immediate reason = speculative
+	forks = 6
+	execs = 3
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	semaphores = {
+		successful exit => 0
+	}
+
+	resource coalition = {
+		ID = 1067
+		type = resource
+		state = active
+		active count = 1
+		name = com.monocursive.ouro.recoveryresearch.19de1628694648dd8320684c64c6a2c0
+	}
+
+	jetsam coalition = {
+		ID = 1068
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.monocursive.ouro.recoveryresearch.19de1628694648dd8320684c64c6a2c0
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	sanitizer flags = 0x0
+
+	properties = runatload | creates session | inferred program | system service | tle system
+}

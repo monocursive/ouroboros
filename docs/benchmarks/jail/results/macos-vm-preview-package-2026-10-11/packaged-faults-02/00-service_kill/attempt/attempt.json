@@ -1,0 +1,50 @@
+{
+  "schema": "ouro.vm.attempt/1",
+  "status": "failed",
+  "host": [
+    "Darwin",
+    "monocursives-macbook-pro.home",
+    "27.0.0",
+    "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "arm64"
+  ],
+  "guest_os": "linux",
+  "native_macos_execution": false,
+  "network": false,
+  "shared_directories": [],
+  "workspace": "/Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/packaged-faults-02/00-service_kill/input",
+  "profile": "tool",
+  "argv_base64": [
+    "L3Vzci9iaW4vcHl0aG9uMw==",
+    "Zml4dHVyZS5weQ=="
+  ],
+  "wall_seconds": 30,
+  "image_sha256": "56379cfaf19716abbfba5a764e34cdfeb5ee5a60dd4ef24ed3b75431a77d8c4b",
+  "input_files": 1,
+  "excluded_names": [
+    ".DS_Store",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target"
+  ],
+  "launcher_pid": 19809,
+  "custodian_pid": 19814,
+  "helper_pid": 19815,
+  "owner_audit_token": [
+    501,
+    501,
+    20,
+    501,
+    20,
+    19815,
+    100015,
+    4817362
+  ],
+  "guest_kernel": "7.0.0-38-generic",
+  "boot_seconds": 22.722444166895002,
+  "supervisor_pid": 640,
+  "error": "Error Domain=VZErrorDomain Code=1 \"The virtual machine stopped unexpectedly.\" UserInfo={NSLocalizedFailure=Internal Virtualization error., NSLocalizedFailureReason=The virtual machine stopped unexpectedly.}",
+  "elapsed_seconds": 23.122299791895784
+}

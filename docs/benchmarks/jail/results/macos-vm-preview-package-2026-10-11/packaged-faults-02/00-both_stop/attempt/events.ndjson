@@ -1,0 +1,13 @@
+{"audit_token":[501,501,20,501,20,19892,100015,4817536],"event":"owner","pid":19892}
+{"event":"booted","network":false,"pid":19892}
+{"event":"connected"}
+{"data":"eyJldmVudCI6InJlYWR5Iiwia2VybmVsIjoiNy4wLjAtMzgtZ2VuZXJpYyIsImxlYXNlX3NlY29uZHMiOjIuMH0K","event":"data"}
+{"data":"eyJldmVudCI6InBvbmciLCJzZXF1ZW5jZSI6MH0K","event":"data"}
+{"data":"eyJldmVudCI6InB1dCIsInBhdGgiOiJmaXh0dXJlLnB5In0K","event":"data"}
+{"data":"eyJldmVudCI6InJ1bm5pbmciLCJzdXBlcnZpc29yX3BpZCI6NjM5fQo=","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdNd289In0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdOQW89In0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdOUXBFUlZSQlEwaEZSQ0EyQ2tSRlZFRkRTRVZFSURjS1JFVlVRVU5JUlVRZ09BcFNSVUZFV1FwVVNVTkxJREl4T0RrME5UZzBORFk0Q2c9PSJ9Cg==","event":"data"}
+{"data":"eyJldmVudCI6InBvbmciLCJzZXF1ZW5jZSI6MX0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJWRWxEU3lBeU1UazVORFl5T0RVNU13bz0ifQo=","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJWRWxEU3lBeU1qQTVORGs0TkRnd01Rbz0ifQo=","event":"data"}

@@ -1,0 +1,3 @@
+{"role":"service","pid":2820,"ppid":1,"pgid":2820,"sid":2820,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2820,"pidversion":6215,"coalitions":[1041,1042],"custody_fds_open":false,"audit_token":[501,501,20,501,20,2820,100002,6215]}
+{"kind":"request_received","host_pid":2819}
+{"kind":"spawn","rc":0,"pid":2821}

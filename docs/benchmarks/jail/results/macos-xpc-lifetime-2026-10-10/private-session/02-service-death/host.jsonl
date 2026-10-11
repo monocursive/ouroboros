@@ -1,0 +1,3 @@
+{"role":"host","pid":1892,"ppid":1,"pgid":1892,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1892,"pidversion":4363,"coalitions":[1000,1001],"custody_fds_open":false,"audit_token":[501,501,20,501,20,1892,100002,4363]}
+{"kind":"host_reply","started":true}
+{"kind":"host_connection_error","description":"Connection interrupted"}

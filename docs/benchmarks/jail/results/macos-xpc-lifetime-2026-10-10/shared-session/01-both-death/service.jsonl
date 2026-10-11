@@ -1,0 +1,4 @@
+{"role":"service","pid":2574,"ppid":1,"pgid":2574,"sid":2574,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2574,"pidversion":5722,"coalitions":[1026,1027],"custody_fds_open":false,"audit_token":[501,501,20,501,20,2574,100002,5722]}
+{"kind":"request_received","host_pid":2573}
+{"kind":"spawn","rc":0,"pid":2575}
+{"kind":"service_connection_error","description":"Connection invalid"}

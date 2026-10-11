@@ -1,0 +1,4 @@
+{"role":"service","pid":951,"ppid":1,"pgid":951,"sid":951,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":951,"pidversion":2408,"coalitions":[496,497],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,951,100072,2408]}
+{"kind":"request_received"}
+{"kind":"spawn","rc":0,"pid":952}
+{"kind":"service_connection_error","description":"Connection invalid"}

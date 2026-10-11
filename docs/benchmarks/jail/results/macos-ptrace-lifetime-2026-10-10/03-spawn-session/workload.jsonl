@@ -1,0 +1,3 @@
+{"role":"root","pid":1813,"pidversion":4342,"uniqueid":1813,"pgid":1307,"sid":1,"bsd_flags":4210704,"audit_token":[501,0,0,0,0,1813,100002,4342]}
+{"kind":"before_fork"}
+{"role":"late-child","pid":1816,"pidversion":4348,"uniqueid":1816,"pgid":1816,"sid":1816,"bsd_flags":4210736,"audit_token":[501,0,0,0,0,1816,100002,4348]}

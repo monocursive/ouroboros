@@ -1,5 +1,11 @@
 # Jail implementation and execution evidence — 2026-09-28–29
 
+Newer, separate work: the [11 October macOS Linux VM prototype](macos-linux-vm-2026-10-11.md)
+records the original offline execution and VM cleanup limitation. The later
+[preview package qualification](macos-vm-preview-package-2026-10-11.md) covers the
+custodian fix and installable candidate. Neither changes the historical native
+Jail evidence or Linux release scope.
+
 This is an uncommitted implementation against `dev` at
 `2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa`. The binaries' build-input digests
 identify the tested source. This report does not claim a published release,
@@ -101,6 +107,14 @@ signature, without a profile, as UID 501. In the corrected 40-case run, all
 custodian-death trials left all five processes alive. The runner independently
 removed those survivors afterward. This is a demonstrated lifetime failure,
 not an entitlement blocker.
+
+The [reciprocal-custody follow-up](macos-reciprocal-custody.md) still fails when
+both ES custodians disappear. The 2026-10-10 [kernel](macos-kernel-lifetime-2026-10-10.md),
+[inherited Mach](macos-mach-lifetime-2026-10-10.md), and
+[native-service investigations](macos-native-services-2026-10-10.md) preserve
+further live counterexamples. A temporary root launchd service recovers seven
+recorded processes after a crash, but cannot recover a stopped custodian;
+LaunchServices/XPC lifetime leaves the workload descendants running.
 
 Contained execution continues to refuse on macOS. The original Mac benchmark
 measures refusal latency, not sandbox launch performance. The new launchd

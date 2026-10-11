@@ -1,0 +1,3 @@
+{"role":"service","pid":3007,"ppid":1,"pgid":3007,"sid":3007,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3007,"pidversion":6593,"coalitions":[1047,1048],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3007,100002,6593]}
+{"kind":"request_received","host_pid":3006}
+{"kind":"spawn","rc":0,"pid":3008}

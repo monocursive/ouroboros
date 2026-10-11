@@ -1,0 +1,15 @@
+{
+  "source_sha256": {
+    "macos_ptrace_lifetime.c": "9ba32e12f81c21474c43669e9b2f190347c887038d5da9d4075e189946a241c9",
+    "macos_mach_lifetime.py": "01060ce790a6c0f0cbe7eed98f4a29d088606caaec669b60fbf4c811d2b5afb6",
+    "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+    "macos_mach_lifetime.c": "ca45cb8fce975687aee340ec53bb29f006c387c54bac968799ad655db663d032",
+    "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0",
+    "macos_ptrace_lifetime.py": "2e7eedc8dc2a3b271532e6e32976fec4ba8f0e0b39690d615d911f0bfc6fafe6",
+    "macos_native.c": "adc081414284414824be45471fd13e805093d9f00c99307d22f14be86b1777d1"
+  },
+  "binary_sha256": {
+    "mach-research": "b410bbed0ed0305377f5228841928e04135fec97be0ef8696e3738acd8bde474",
+    "native-fixture": "908e5d64a0994439f19dbdffeeed5769ae85a139d929b4ba2b53ae9a7682bfd6"
+  }
+}

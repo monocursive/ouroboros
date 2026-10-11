@@ -1,0 +1,3 @@
+{"role":"service","pid":2694,"ppid":1,"pgid":2694,"sid":2694,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2694,"pidversion":5959,"coalitions":[1030,1031],"custody_fds_open":false,"audit_token":[501,501,20,501,20,2694,100002,5959]}
+{"kind":"request_received","host_pid":2693}
+{"kind":"spawn","rc":0,"pid":2695}

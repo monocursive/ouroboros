@@ -1,0 +1,4 @@
+{"role":"root","pid":948,"pidversion":2511,"uniqueid":948,"pgid":933,"sid":1,"bsd_flags":4194320,"audit_token":[501,501,20,501,20,948,100002,2511]}
+{"kind":"exception_state","role":"root","phase":"before_owner_loss","rc":0,"live_mask":448,"dead_mask":0}
+{"kind":"before_fork"}
+{"kind":"exception_state","role":"root","phase":"after_owner_loss","rc":0,"live_mask":0,"dead_mask":448}

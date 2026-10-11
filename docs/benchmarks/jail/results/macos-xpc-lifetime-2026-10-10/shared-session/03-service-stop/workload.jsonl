@@ -1,0 +1,12 @@
+{"role":"root","pid":3306,"ppid":3305,"pgid":3305,"sid":3305,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3306,"pidversion":7184,"coalitions":[1058,1059],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3306,100002,7184]}
+{"probe":"custodian_signal","target":3304,"signal":15,"rc":-1,"errno":1}
+{"probe":"custodian_signal","target":3304,"signal":9,"rc":-1,"errno":1}
+{"probe":"custodian_signal","target":3305,"signal":15,"rc":-1,"errno":1}
+{"probe":"custodian_signal","target":3305,"signal":9,"rc":-1,"errno":1}
+{"role":"plain","pid":3307,"ppid":3306,"pgid":3305,"sid":3305,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3307,"pidversion":7185,"coalitions":[1058,1059],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3307,100002,7185]}
+{"role":"setsid","pid":3308,"ppid":3306,"pgid":3308,"sid":3308,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3308,"pidversion":7186,"coalitions":[1058,1059],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3308,100002,7186]}
+{"role":"double-fork","pid":3310,"ppid":1,"pgid":3309,"sid":3309,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3310,"pidversion":7188,"coalitions":[1058,1059],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3310,100002,7188]}
+{"role":"stubborn","pid":3311,"ppid":3306,"pgid":3305,"sid":3305,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3311,"pidversion":7189,"coalitions":[1058,1059],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3311,100002,7189]}
+{"role":"spawn-group","pid":3312,"ppid":3306,"pgid":3312,"sid":3305,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3312,"pidversion":7191,"coalitions":[1058,1059],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3312,100002,7191]}
+{"role":"spawn-session","pid":3313,"ppid":3306,"pgid":3313,"sid":3313,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3313,"pidversion":7193,"coalitions":[1058,1059],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3313,100002,7193]}
+{"ready":true}

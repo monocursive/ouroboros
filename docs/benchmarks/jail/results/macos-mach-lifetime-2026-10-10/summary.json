@@ -1,0 +1,59 @@
+{
+  "trials": 24,
+  "samples_per_case": 3,
+  "scope": "ordinary user in SIP-disabled macOS VM; known fixture identities",
+  "native_execution_ready": false,
+  "lifetime_contract_verified": false,
+  "owner_death_trials": 21,
+  "owner_death_known_process_survivors": 39,
+  "breakpoint_delivery_controls": 3,
+  "cases": {
+    "root": {
+      "trials": 3,
+      "purpose": "owner death",
+      "known_fixture_empty": 0
+    },
+    "fork": {
+      "trials": 3,
+      "purpose": "owner death",
+      "known_fixture_empty": 0
+    },
+    "setsid": {
+      "trials": 3,
+      "purpose": "owner death",
+      "known_fixture_empty": 0
+    },
+    "double-fork": {
+      "trials": 3,
+      "purpose": "owner death",
+      "known_fixture_empty": 0
+    },
+    "spawn-group": {
+      "trials": 3,
+      "purpose": "owner death",
+      "known_fixture_empty": 0
+    },
+    "spawn-session": {
+      "trials": 3,
+      "purpose": "owner death",
+      "known_fixture_empty": 0
+    },
+    "clear-exception": {
+      "trials": 3,
+      "purpose": "owner death",
+      "known_fixture_empty": 0
+    },
+    "breakpoint-control": {
+      "trials": 3,
+      "purpose": "exception delivery",
+      "known_fixture_empty": 3
+    }
+  },
+  "remaining_gates": [
+    "handler death does not stop normal execution",
+    "workload can clear inherited handler",
+    "fatal-port sysctl absent on tested release kernel",
+    "normal SIP, signing and full native qualification"
+  ],
+  "results_sha256": "49b84370654d0e3cfad397b28f0fd256cdac3f85d586d179f363a017e2e47633"
+}

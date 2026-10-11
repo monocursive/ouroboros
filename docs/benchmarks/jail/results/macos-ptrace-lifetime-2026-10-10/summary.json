@@ -1,0 +1,49 @@
+{
+  "trials": 80,
+  "samples_per_case": 10,
+  "scope": "known fixture processes in a SIP-disabled macOS VM, root control",
+  "native_execution_ready": false,
+  "lifetime_contract_verified": false,
+  "cases": {
+    "registered_death": {
+      "trials": 10,
+      "known_fixture_empty": 10
+    },
+    "registered_stop": {
+      "trials": 10,
+      "known_fixture_empty": 0
+    },
+    "fork": {
+      "trials": 10,
+      "known_fixture_empty": 0
+    },
+    "setsid": {
+      "trials": 10,
+      "known_fixture_empty": 0
+    },
+    "double-fork": {
+      "trials": 10,
+      "known_fixture_empty": 0
+    },
+    "spawn-group": {
+      "trials": 10,
+      "known_fixture_empty": 0
+    },
+    "spawn-session": {
+      "trials": 10,
+      "known_fixture_empty": 0
+    },
+    "deny-attach": {
+      "trials": 10,
+      "known_fixture_empty": 0
+    }
+  },
+  "remaining_gates": [
+    "kernel protection is not inherited across fork/spawn",
+    "stopped debugger leaves workloads running",
+    "ordinary guest user attachment was denied",
+    "normal SIP and signing/authorization qualification",
+    "full containment, evidence and real-agent compatibility"
+  ],
+  "results_sha256": "d0664e3f6da3da4f97bd7a2363b5e66228d398aba0777af485543eb0a1617c71"
+}

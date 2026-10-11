@@ -1,0 +1,53 @@
+{
+  "schema": "ouro.vm.package/1",
+  "version": "0.1.0-preview.1",
+  "dmg": "ouro-vm-0.1.0-preview.1-macos-arm64.dmg",
+  "dmg_sha256_before_notarization": "856c8fc7755de3b79b2009489a2f24e6fcf2508a16c08f00a46a7d276676cdf8",
+  "manifest_sha256": "42b2da8ec509b9d7bc761aa559935767bdb786786697755b632bbebfc778e071",
+  "installer_sha256": "bc5604c6ae875859d938b0a7e6f8431ef19784defc48ddd17b6555bbaca4c72c",
+  "image": {
+    "schema": "ouro.vm.image-build/1",
+    "status": "prepared",
+    "image_url": "https://cloud-images.ubuntu.com/minimal/releases/resolute/release-20261009/ubuntu-26.04-minimal-cloudimg-arm64.img",
+    "image_sha256": "4e86a7819b4cc7b4a9c2e719dec3e0a723c4a2788dc3f23f17641cba7f5ca216",
+    "jail_url": "https://github.com/monocursive/ouroboros/releases/download/ouro-jail-v0.1.0-rc.1/ouro-jail-0.1.0-rc.1-aarch64-unknown-linux-gnu.tar.gz",
+    "jail_archive_sha256": "100d0e8e78d27c08372b18352de987da447f157ef75c8ebeac0cf5e24dd0400a",
+    "source_sha256": {
+      "package.py": "80d0830ee32d887ad71c8ba7bad9635ae83dbd2cda8f17b8a611e5cdf9ca1541",
+      "run.py": "633a6f746df7d87eac42d401ff554016dc1dbcadc4de0d13963fd1bca0fd4614",
+      "check.py": "068b9cdff18ea091d1b4cadf707357cbca34cc427c5c71d1f6f62fabfe85c82b",
+      "entitlements.plist": "915e2b39357ecf8d211dc7fac43195c9cdcf55a0a1ecdbf931c116a4eac421f3",
+      "PREVIEW.txt": "9196f345785b281cf117dc3b0f928f415aa67da9365703daaa8f26c28996a970",
+      "test_vm.py": "ffccc2f9e7a1cc335049ca27497654a981a8cdbb7724e6cf5fc71f96a36458c3",
+      "README.md": "f45bce737b6682705648c23199628bd9a7ac29d3a79a340f84ae6ac75fbe02be",
+      "install.sh.in": "5c5e55db8a91dac638c78b38b773352a6ce976a2aa663cc07b4043fd2cb90694",
+      "requirements-build.txt": "5e6594e0cf697f15297ca43abd5a310234ea9afbd0ba5e3da02edd554b8dc802",
+      "cli.py": "47d3af51cbf36da94ff5a78a46431d1332e148bcd4ae5ce0d077ec5637588145",
+      "guest.py": "d4311ae398794e3045839f76d1382f0de59d3210df7b0ae92166a9331f07396f",
+      "vz.swift": "b43e0f798d39c01246a232341785df670215457371e793617aed6d343a4c06d8",
+      "requirements-build.in": "4439c693c19271e4b0bdc56c641c36b3b06010b1b22eae6733cd244d752e85d5",
+      "custodian.c": "1b8f86102fb7a76e44ec7a8d771b5c02eaae0e9644b7bfa788e6ada5733a65f5",
+      "prepare.py": "051b297c83690d88845d82a523af3651e9a552c5aeafdfad5cd5d5c9ade2a1a4"
+    },
+    "disk_sha256": "56379cfaf19716abbfba5a764e34cdfeb5ee5a60dd4ef24ed3b75431a77d8c4b",
+    "helper_sha256": "42d396220ca4715cc60e5d97e9a296b8e034dcf5f19a69d48bc6defb5ed240c7",
+    "parent_image_metadata": "evidence/macos-linux-vm-2026-10-11/image-v3/image.json",
+    "custodian_sha256": "fa44dc07083af97827f274a976380fcfeb4ed475dca967ca92ea8abdf7e21510",
+    "seed_sha256": "10ab2d3108b150b7e92cf919fc57e2d306b47f3f207aa904eb503811562bf7ac",
+    "preview_version": "0.1.0-preview.1",
+    "host_minimum": "macOS 27; Apple Silicon",
+    "compressed_disk_sha256": "beb492803383751a87e8975f70b899ba8070b35fb67f035de7943a2079593e37",
+    "guest_source_sha256": "d4311ae398794e3045839f76d1382f0de59d3210df7b0ae92166a9331f07396f"
+  },
+  "python_version": "3.13.13 (main, Jun  2 2026, 22:33:40) [Clang 22.1.3 ]",
+  "pyinstaller_version": "6.22.3",
+  "notarization": {
+    "message": "Processing complete",
+    "id": "e922f3a3-ce4e-41ed-8fee-549183180ce7",
+    "status": "Accepted"
+  },
+  "published": false,
+  "stapled": true,
+  "dmg_sha256": "f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0",
+  "dmg_bytes": 536341282
+}

@@ -1,0 +1,16 @@
+{
+  "case": "cancel",
+  "status": "failed",
+  "launcher_pid": 8112,
+  "helper_pid": 8118,
+  "service_pid": 8119,
+  "identities": {
+    "8112": "Sun Oct 11 10:25:56 2026     /opt/homebrew/opt/python@3.14/bin/python3.14",
+    "8118": "Sun Oct 11 10:25:59 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/vz",
+    "8119": "Sun Oct 11 10:25:59 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+  },
+  "detached_children": 6,
+  "error": "process identity changed before fault injection",
+  "emergency_cleanup_used": true,
+  "service_absent_after_cleanup": true
+}

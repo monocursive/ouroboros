@@ -1,0 +1,7 @@
+{"kind":"attach","pid":2749,"pidversion":6139,"rc":0,"errno":0}
+{"kind":"attach","pid":2750,"pidversion":6140,"rc":0,"errno":0}
+{"kind":"attach","pid":2751,"pidversion":6141,"rc":0,"errno":0}
+{"kind":"attach","pid":2753,"pidversion":6143,"rc":0,"errno":0}
+{"kind":"attach","pid":2754,"pidversion":6144,"rc":0,"errno":0}
+{"role":"tracer","pid":2760,"pidversion":6156,"uniqueid":2760,"pgid":1307,"sid":1,"bsd_flags":4210704,"audit_token":[501,0,0,0,0,2760,100002,6156]}
+{"kind":"tracer_ready","attached_count":5}

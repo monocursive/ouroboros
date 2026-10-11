@@ -1,0 +1,7 @@
+{"role":"root","pid":1141,"pidversion":2896,"uniqueid":1141,"pgid":1065,"sid":1,"bsd_flags":4194320,"audit_token":[501,501,20,501,20,1141,100002,2896]}
+{"kind":"exception_state","role":"root","phase":"before_owner_loss","rc":0,"live_mask":448,"dead_mask":0}
+{"kind":"before_fork"}
+{"role":"late-child","pid":1142,"pidversion":2898,"uniqueid":1142,"pgid":1142,"sid":1,"bsd_flags":4210704,"audit_token":[501,501,20,501,20,1142,100002,2898]}
+{"kind":"exception_state","role":"late-child","phase":"before_owner_loss","rc":0,"live_mask":448,"dead_mask":0}
+{"kind":"exception_state","role":"late-child","phase":"after_owner_loss","rc":0,"live_mask":0,"dead_mask":448}
+{"kind":"exception_state","role":"root","phase":"after_owner_loss","rc":0,"live_mask":0,"dead_mask":448}

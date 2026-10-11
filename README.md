@@ -18,11 +18,16 @@ agent keeps its own models and workflow.
 **Developer preview 0.1.0-rc.1.** [Signed Linux x86_64 and ARM64 packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
 are available. The reference x86_64 conformance host and native Raspberry Pi
 checks are recorded; available profiles depend on the host's kernel capabilities.
-macOS builds provide inspection commands and currently refuse sandboxed execution.
+Native macOS `ouro-jail` builds provide inspection commands and refuse execution.
 See the [platform requirements](docs/specs/jail-v1.md#32-initial-support-matrix)
 and [Linux acceptance record](docs/benchmarks/jail/release-preview-2026-10-10.md).
 
-The Bash installer embeds SHA-256 hashes for both Linux archives and checks the
+**macOS VM preview 0.1.0-preview.1.** [Signed and notarized Apple Silicon DMG](https://github.com/monocursive/ouroboros/releases/tag/ouro-vm-v0.1.0-preview.1)
+is available for macOS 27+. `ouro-vm` runs offline Linux ARM64 commands in a
+disposable VM. See the [Mac quickstart](docs/guide.md#macos-vm-preview) for limits
+and examples; native Mac programs and online agents are outside this preview.
+
+The Bash installer embeds SHA-256 hashes for both Linux archives and the Mac DMG, and checks the
 selected download before extracting or executing it. No signature tool is needed.
 The [release procedure](docs/RELEASING.md) documents hash updates, provenance and
 maintainer signing.
@@ -38,7 +43,8 @@ maintainer signing.
 
 ## Install and run
 
-Install your distribution's `bubblewrap` package first.
+The installer selects `ouro-jail` on Linux and `ouro-vm` on Apple Silicon.
+On Linux, install your distribution's `bubblewrap` package first.
 The binaries require glibc 2.39 or newer; no Rust compiler or sudo is needed
 for the installer. Host enforcement still requires a successful `doctor` report.
 
@@ -48,6 +54,9 @@ export PATH="$HOME/.local/bin:$PATH"
 ouro-jail version --json
 ouro-jail doctor --profile tool --json
 ```
+
+On macOS the command is `ouro-vm`: run `ouro-vm version` and `ouro-vm doctor`
+after installing, then follow the [Mac example](docs/guide.md#macos-vm-preview).
 
 See the [guide](docs/guide.md#install-the-developer-preview) for supported hosts,
 upgrades and explicit downgrade handling. To build from source:

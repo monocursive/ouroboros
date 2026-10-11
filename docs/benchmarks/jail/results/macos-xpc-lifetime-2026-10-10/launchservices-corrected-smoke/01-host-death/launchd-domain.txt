@@ -1,0 +1,115 @@
+pid/1173 = {
+	type = pid
+	handle = 1173
+	active count = 2
+	on-demand count = 1
+	service count = 1
+	active service count = 1
+	originator = /private/tmp/ouro-xpc-ls-corrected-20261010/OuroXPCResearch.app
+	creator = host[1173]
+	creator euid = 501
+	uniqueid = 1173
+	security context = {
+		uid = 501
+		asid = 100002
+	}
+
+	bringup time = 0 ms
+	death port = 0xd653f
+
+	environment = {
+		PATH => /bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.Vj0VomiIeU/Listeners
+		HOME => /Users/admin
+		__CF_USER_TEXT_ENCODING => 0x1F5:0x0:0x0
+		TMPDIR => /var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/
+	}
+
+	services = {
+		    1174      - 	com.monocursive.ouro.xpcresearch.15b68944020e4f97afb254068f82eb09.worker
+	}
+
+	service stubs = {
+		com.apple.audio.DriverHelper
+		com.apple.StreamingUnzipService.privileged
+		com.apple.OSLogService
+		com.apple.foundation.UserScriptService
+		com.apple.coremedia.videodecoder.zonto
+		com.apple.security.XPCAcmeService
+		com.apple.CMExtensionBroker
+		com.apple.audio.SandboxHelper
+		com.apple.MessageSecurity.MSTimestampXPCService
+		com.apple.audio.AudioConverterService.Hardened
+		com.apple.CoreDisplay.XPCService
+		com.apple.CoreGraphics.CGPDFService
+		com.apple.audio.AudioConverterService
+		com.apple.audio.ComponentTagHelper
+		com.apple.MTLCompilerService
+		com.apple.CMValidateMovieDataReferenceService
+		com.apple.filesystems.netfs.PlugInLibraryService
+		com.apple.SetStoreUpdateService
+		com.apple.BiomeWriteService
+		com.apple.StreamingUnzipService
+		com.apple.coremedia.videoencoder
+		com.apple.ColorSyncXPCAgent
+		com.apple.AppleDeviceQueryService
+		com.apple.ImageIOXPCService
+		com.apple.extensionkitservice
+		com.apple.audio.InfoHelper
+		com.apple.audio.Core-Audio-Driver-Service
+		com.apple.coremedia.videodecoder
+		com.apple.coremedia.videoencoder.zonto
+		com.apple.audio.AUHostingService.x86-64
+		com.apple.backboard.BKSEndpointProviderService
+		com.apple.audio.AudioConverterService.HighCapacity
+		com.apple.audio.AUCrashHandlerService
+		com.apple.audio.AUHostingService.arm64e
+		com.apple.audio.CarbonComponentScanner.x86-64
+		com.apple.audio.Core-Audio-Driver-Service.helper
+	}
+
+	unmanaged processes = {
+	}
+
+	endpoints = {
+		 0xa8d3f    A   A   com.apple.PerfPowerTelemetryClientRegistrationService
+		 0x1a527    A   A   com.apple.CodeSigningHelper
+		       0    A   D   com.apple.security.XPCTimeStampingService
+		       0    A   D   com.apple.iokit.IOServiceAuthorizeAgent
+		       0    A   D   com.apple.DictionaryServiceHelper
+		 0xff8cf    M   A   com.monocursive.ouro.xpcresearch.15b68944020e4f97afb254068f82eb09.worker
+		       0    A   D   com.apple.iokit.ioserviceauthorized
+		 0x3126b    A   D   com.apple.TrustedPeersHelper
+		       0    A   D   com.apple.internal.aupbregistrarservice
+		 0x18903    A   A   com.apple.authd
+		       0    A   D   com.apple.security.XPCKeychainSandboxCheck
+		 0x5521f    A   A   com.apple.carboncore.csnameddata
+		       0    A   D   com.apple.MobileAsset.ManifestStorageService
+	}
+
+	task-special ports = {
+			 0x1ad03 4       bootstrap  (unknown)
+			  0x2c03 9          access  (unknown)
+	}
+
+	resource coalition = {
+		ID = 960
+		type = resource
+		state = active
+		active count = 2
+		name = application.com.monocursive.ouro.xpcresearch.15b68944020e4f97afb254068f82eb09.528399.528424.89F22350-F52A-4F6A-9EFE-4AC2F6886D6B
+		bundle ID = com.monocursive.ouro.xpcresearch.15b68944020e4f97afb254068f82eb09
+	}
+
+	jetsam coalition = {
+		ID = 961
+		type = jetsam
+		state = active
+		active count = 1
+		name = application.com.monocursive.ouro.xpcresearch.15b68944020e4f97afb254068f82eb09.528399.528424.89F22350-F52A-4F6A-9EFE-4AC2F6886D6B
+		bundle ID = com.monocursive.ouro.xpcresearch.15b68944020e4f97afb254068f82eb09
+	}
+
+
+	properties = uncorked
+}

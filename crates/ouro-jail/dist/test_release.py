@@ -144,7 +144,7 @@ class ReleaseTests(unittest.TestCase):
         result = subprocess.run(['bash', str(out / 'bootstrap.sh'), '--help'],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('The default version is 0.1.0-rc.2;', result.stdout)
+        self.assertIn('Linux: installs ouro-jail 0.1.0-rc.2 ', result.stdout)
         pins = archive_pins((out / 'bootstrap.sh').read_text())
         for directory in stages:
             record = json.loads((directory / 'artifact.json').read_text())

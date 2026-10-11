@@ -1,0 +1,76 @@
+system/com.monocursive.ouro.recoveryresearch.c5fd3c52ed854fba91b6d23ad857c535 = {
+	active count = 1
+	path = /private/tmp/ouro-launchd-recovery-20261010/03-custodian-death/job.plist
+	type = LaunchDaemon
+	state = running
+
+	program = /usr/bin/python3
+	arguments = {
+		/usr/bin/python3
+		-u
+		/private/tmp/ouro-launchd-recovery-20261010/tested-source/macos_launchd_recovery.py
+		--worker
+		/private/tmp/ouro-launchd-recovery-20261010/03-custodian-death
+		--fixture
+		/private/tmp/ouro-launchd-recovery-20261010/native-fixture
+	}
+
+	stdout path = /private/tmp/ouro-launchd-recovery-20261010/03-custodian-death/custodian.jsonl
+	stderr path = /private/tmp/ouro-launchd-recovery-20261010/03-custodian-death/stderr.txt
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.monocursive.ouro.recoveryresearch.c5fd3c52ed854fba91b6d23ad857c535
+	}
+
+	domain = system
+	minimum runtime = 1
+	exit timeout = 1
+	runs = 1
+	pid = 3994
+	immediate reason = speculative
+	forks = 6
+	execs = 3
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	semaphores = {
+		successful exit => 0
+	}
+
+	resource coalition = {
+		ID = 1077
+		type = resource
+		state = active
+		active count = 1
+		name = com.monocursive.ouro.recoveryresearch.c5fd3c52ed854fba91b6d23ad857c535
+	}
+
+	jetsam coalition = {
+		ID = 1078
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.monocursive.ouro.recoveryresearch.c5fd3c52ed854fba91b6d23ad857c535
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	sanitizer flags = 0x0
+
+	properties = runatload | creates session | inferred program | system service | tle system
+}

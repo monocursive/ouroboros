@@ -1,0 +1,42 @@
+{
+  "schema": "ouro.vm.attempt/1",
+  "status": "completed",
+  "host": [
+    "Darwin",
+    "monocursives-macbook-pro.home",
+    "27.0.0",
+    "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "arm64"
+  ],
+  "guest_os": "linux",
+  "native_macos_execution": false,
+  "network": false,
+  "shared_directories": [],
+  "workspace": "/Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/faults-02/02-wall/input",
+  "profile": "tool",
+  "argv_base64": [
+    "L3Vzci9iaW4vcHl0aG9uMw==",
+    "Zml4dHVyZS5weQ=="
+  ],
+  "wall_seconds": 3,
+  "image_sha256": "e2b1b71eecfb37e92896dec6a02910635ec7bfe54e739ea1f2c2300e20cd433a",
+  "input_files": 1,
+  "excluded_names": [
+    ".DS_Store",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target"
+  ],
+  "launcher_pid": 11314,
+  "helper_pid": 11320,
+  "guest_kernel": "7.0.0-38-generic",
+  "boot_seconds": 22.177819082979113,
+  "supervisor_pid": 643,
+  "guest_exit_code": 143,
+  "helper_exit_code": 0,
+  "vm_stop_acknowledged": true,
+  "guest_receipt_sha256": "9ca06188b4d459765e1e531b818f83e46dfc1d8983b63004fb40035d759e8080",
+  "elapsed_seconds": 25.505182082997635
+}

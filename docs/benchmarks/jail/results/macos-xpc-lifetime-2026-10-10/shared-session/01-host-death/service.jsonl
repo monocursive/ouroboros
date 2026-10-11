@@ -1,0 +1,4 @@
+{"role":"service","pid":2453,"ppid":1,"pgid":2453,"sid":2453,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2453,"pidversion":5481,"coalitions":[1022,1023],"custody_fds_open":false,"audit_token":[501,501,20,501,20,2453,100002,5481]}
+{"kind":"request_received","host_pid":2452}
+{"kind":"spawn","rc":0,"pid":2454}
+{"kind":"service_connection_error","description":"Connection invalid"}

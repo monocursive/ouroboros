@@ -1,0 +1,32 @@
+{
+  "schema": "ouro.vm.preview-qualification/1",
+  "version": "0.1.0-preview.1",
+  "artifact": "ouro-vm-0.1.0-preview.1-macos-arm64.dmg",
+  "sha256": "f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0",
+  "fault_cases_passed": 14,
+  "fault_cases_total": 14,
+  "emergency_vm_service_cleanup": false,
+  "installer_cases_passed": 5,
+  "unit_tests_passed": 12,
+  "functional_profiles": [
+    "tool",
+    "build"
+  ],
+  "fresh_mac_vm_installation": "passed",
+  "fresh_mac_vm_sip": "enabled",
+  "fresh_mac_vm_gatekeeper": "App Store & Known Developers",
+  "fresh_mac_vm_cli_notarization_requirement": "passed for launcher, Python runtime, VZ client and custodian",
+  "nested_vm_execution": "unsupported; refused with exit 125",
+  "physical_host_execution": "passed on macOS 27.0.1 arm64",
+  "notarization": "Accepted",
+  "stapled": true,
+  "published": false,
+  "native_macos_qualified": false,
+  "limitations": [
+    "simultaneous suspension of all three host controllers",
+    "whole-host sleep/wake",
+    "kernel failure",
+    "arbitrary guest compromise",
+    "no second physical Mac qualified"
+  ]
+}

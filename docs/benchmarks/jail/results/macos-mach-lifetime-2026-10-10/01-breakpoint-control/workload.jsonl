@@ -1,0 +1,4 @@
+{"role":"root","pid":1538,"pidversion":3669,"uniqueid":1538,"pgid":1415,"sid":1,"bsd_flags":4194320,"audit_token":[501,501,20,501,20,1538,100002,3669]}
+{"kind":"exception_state","role":"root","phase":"before_owner_loss","rc":0,"live_mask":448,"dead_mask":0}
+{"kind":"before_fork"}
+{"kind":"breakpoint_requested"}

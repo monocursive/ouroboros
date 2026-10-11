@@ -1,0 +1,4 @@
+System Integrity Protection status: enabled.
+assessments enabled
+arm64
+0

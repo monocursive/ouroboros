@@ -1,0 +1,19 @@
+{
+  "source_sha256": {
+    "macos_xpc_lifetime.py": "1d6d298785fd9d84a0d16c48580b4d4142dfabdc77a4f11187a473b70cc20f3b",
+    "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+    "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0",
+    "macos_ptrace_lifetime.py": "2e7eedc8dc2a3b271532e6e32976fec4ba8f0e0b39690d615d911f0bfc6fafe6",
+    "macos_native.c": "adc081414284414824be45471fd13e805093d9f00c99307d22f14be86b1777d1",
+    "macos_xpc_lifetime.c": "fcf6ed06b531b7c93b70ceba2aab04460fd6f1e2083f26091e6b98aa7487553f"
+  },
+  "binary_sha256": {
+    "native-fixture": "908e5d64a0994439f19dbdffeeed5769ae85a139d929b4ba2b53ae9a7682bfd6",
+    "host": "675300cfcbe14fd22788d5d63c9fabab815fcc219d2f7b85e38d9bc1d8c31748",
+    "worker": "8578a4cfae66eec15e067faa8dcf6d347674d5fe596fe3b6325658184f1e36f6"
+  },
+  "signature_verify_after": {
+    "OuroXPCResearch.app": 0,
+    "OuroXPCResearch.app/Contents/XPCServices/Worker.xpc": 0
+  }
+}

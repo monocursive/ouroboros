@@ -1,0 +1,17 @@
+{
+  "staple": {
+    "exit_code": 0,
+    "stdout": "Processing: /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/candidate-02/ouro-vm-0.1.0-preview.1-macos-arm64.dmg\nProcessing: /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/candidate-02/ouro-vm-0.1.0-preview.1-macos-arm64.dmg\nThe staple and validate action worked!\n",
+    "stderr": ""
+  },
+  "staple-validate": {
+    "exit_code": 0,
+    "stdout": "Processing: /Users/monocursive/code/ouroboros/evidence/macos-vm-package-2026-10-11/candidate-02/ouro-vm-0.1.0-preview.1-macos-arm64.dmg\nThe validate action worked!\n",
+    "stderr": ""
+  },
+  "gatekeeper": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "evidence/macos-vm-package-2026-10-11/candidate-02/ouro-vm-0.1.0-preview.1-macos-arm64.dmg: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Monocursive (64SGQ348QJ)\n"
+  }
+}

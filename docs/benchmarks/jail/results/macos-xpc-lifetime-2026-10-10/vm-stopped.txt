@@ -1,0 +1,4 @@
+Source Name                                                                                                              Disk  Size  Accessed      State  
+local  ouro-jail-es-dev                                                                                                  50 GB 39 GB 2 minutes ago stopped
+OCI    ghcr.io/cirruslabs/macos-golden-gate-base:latest                                                                  50 GB 40 GB 1 week ago    stopped
+OCI    ghcr.io/cirruslabs/macos-golden-gate-base@sha256:9a2f20d179d6418a128dcb76c593588ea85a263dbfa286e757db63f3d949af7c 50 GB 40 GB 1 week ago    stopped

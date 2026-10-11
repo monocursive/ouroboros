@@ -1,0 +1,16 @@
+{
+  "trials": 6,
+  "samples_per_case": 3,
+  "known_crash_recovery_controls": 3,
+  "paused_custodian_survivors": 21,
+  "native_execution_ready": false,
+  "lifetime_contract_verified": false,
+  "scope": "temporary system launchd jobs; root recovery of seven recorded guest UID-501 identities",
+  "remaining_gates": [
+    "stopped custodian is not restarted",
+    "late unregistered descendants are not covered",
+    "no atomic immutable tree drain",
+    "normal SIP and full native qualification"
+  ],
+  "results_sha256": "bfaa76e5fa83001e89a5bdad33bcf7ee1b4dffd3756063904c4a46844523a6da"
+}

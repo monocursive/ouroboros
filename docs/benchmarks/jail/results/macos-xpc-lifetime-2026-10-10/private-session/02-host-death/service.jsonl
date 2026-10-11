@@ -1,0 +1,4 @@
+{"role":"service","pid":1834,"ppid":1,"pgid":1834,"sid":1834,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1834,"pidversion":4250,"coalitions":[998,999],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,1834,100092,4250]}
+{"kind":"request_received","host_pid":1833}
+{"kind":"spawn","rc":0,"pid":1835}
+{"kind":"service_connection_error","description":"Connection invalid"}

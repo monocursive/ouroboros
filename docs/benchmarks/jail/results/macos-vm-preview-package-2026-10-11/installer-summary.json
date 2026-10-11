@@ -1,0 +1,31 @@
+{
+  "schema": "ouro.vm.installer-check/1",
+  "results": [
+    {
+      "case": "install",
+      "exit_code": 0,
+      "passed": true
+    },
+    {
+      "case": "repeat-refused",
+      "exit_code": 2,
+      "passed": true
+    },
+    {
+      "case": "unrelated-refused",
+      "exit_code": 2,
+      "passed": true
+    },
+    {
+      "case": "manifest-tamper",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "case": "payload-tamper",
+      "exit_code": 1,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

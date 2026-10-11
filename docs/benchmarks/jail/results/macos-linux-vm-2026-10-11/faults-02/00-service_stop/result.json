@@ -1,0 +1,21 @@
+{
+  "case": "service_stop",
+  "status": "passed",
+  "launcher_pid": 9456,
+  "helper_pid": 9485,
+  "service_pid": 9486,
+  "identities": {
+    "9456": "Sun Oct 11 10:31:00 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+    "9485": "Sun Oct 11 10:31:03 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/vz",
+    "9486": "Sun Oct 11 10:31:03 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+  },
+  "detached_children": 6,
+  "service_present_while_stopped": true,
+  "service_resumed_after_seconds": 4.0194490840658545,
+  "service_gone_before_cleanup": true,
+  "service_gone_seconds": 4.026120875030756,
+  "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 642}\n",
+  "stdout_before_cleanup": "DETACHED 3\nDETACHED 5\nDETACHED 6\nREADY\nDETACHED 7\nDETACHED 4\nTICK 21748282843\nDETACHED 8\nTICK 21848456385\n",
+  "emergency_cleanup_used": false,
+  "service_absent_after_cleanup": true
+}

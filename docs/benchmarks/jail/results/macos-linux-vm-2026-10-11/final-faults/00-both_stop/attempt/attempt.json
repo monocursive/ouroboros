@@ -1,0 +1,41 @@
+{
+  "schema": "ouro.vm.attempt/1",
+  "status": "failed",
+  "host": [
+    "Darwin",
+    "monocursives-macbook-pro.home",
+    "27.0.0",
+    "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050",
+    "arm64"
+  ],
+  "guest_os": "linux",
+  "native_macos_execution": false,
+  "network": false,
+  "shared_directories": [],
+  "workspace": "/Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/final-faults/00-both_stop/input",
+  "profile": "tool",
+  "argv_base64": [
+    "L3Vzci9iaW4vcHl0aG9uMw==",
+    "Zml4dHVyZS5weQ=="
+  ],
+  "wall_seconds": 30,
+  "image_sha256": "56379cfaf19716abbfba5a764e34cdfeb5ee5a60dd4ef24ed3b75431a77d8c4b",
+  "input_files": 1,
+  "excluded_names": [
+    ".DS_Store",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target"
+  ],
+  "launcher_pid": 13005,
+  "helper_pid": 13009,
+  "guest_kernel": "7.0.0-38-generic",
+  "boot_seconds": 20.07002579199616,
+  "supervisor_pid": 622,
+  "helper_exit_code": 125,
+  "vm_stop_acknowledged": false,
+  "error": "VM ended without guest completion and acknowledged stop",
+  "elapsed_seconds": 28.48598033399321
+}

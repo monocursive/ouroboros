@@ -1,0 +1,990 @@
+{
+  "case": "both-death",
+  "lifetime_contract_verified": false,
+  "anchors": {
+    "host": {
+      "role": "host",
+      "pid": 1951,
+      "ppid": 1,
+      "pgid": 1951,
+      "sid": 1,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1951,
+      "pidversion": 4479,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        501,
+        501,
+        20,
+        501,
+        20,
+        1951,
+        100002,
+        4479
+      ]
+    },
+    "service": {
+      "role": "service",
+      "pid": 1952,
+      "ppid": 1,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1952,
+      "pidversion": 4482,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1952,
+        100094,
+        4482
+      ]
+    }
+  },
+  "faulted": [
+    "host",
+    "service"
+  ],
+  "signal": 9,
+  "anchors_after": {
+    "host": {
+      "role": "snapshot",
+      "pid": 1951,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "service": {
+      "role": "snapshot",
+      "pid": 1952,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    }
+  },
+  "after": {
+    "root": {
+      "role": "snapshot",
+      "pid": 1953,
+      "ppid": 1,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1953,
+      "pidversion": 4485,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "same_process": true,
+      "alive": true
+    },
+    "plain": {
+      "role": "snapshot",
+      "pid": 1954,
+      "ppid": 1953,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1954,
+      "pidversion": 4486,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "same_process": true,
+      "alive": true
+    },
+    "setsid": {
+      "role": "snapshot",
+      "pid": 1955,
+      "ppid": 1953,
+      "pgid": 1955,
+      "sid": 1955,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1955,
+      "pidversion": 4487,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "same_process": true,
+      "alive": true
+    },
+    "double-fork": {
+      "role": "snapshot",
+      "pid": 1957,
+      "ppid": 1,
+      "pgid": 1956,
+      "sid": 1956,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1957,
+      "pidversion": 4489,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "same_process": true,
+      "alive": true
+    },
+    "stubborn": {
+      "role": "snapshot",
+      "pid": 1958,
+      "ppid": 1953,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1958,
+      "pidversion": 4490,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "same_process": true,
+      "alive": true
+    },
+    "spawn-group": {
+      "role": "snapshot",
+      "pid": 1959,
+      "ppid": 1953,
+      "pgid": 1959,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1959,
+      "pidversion": 4492,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "same_process": true,
+      "alive": true
+    },
+    "spawn-session": {
+      "role": "snapshot",
+      "pid": 1960,
+      "ppid": 1953,
+      "pgid": 1960,
+      "sid": 1960,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1960,
+      "pidversion": 4494,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "same_process": true,
+      "alive": true
+    }
+  },
+  "checkpoints": [
+    {
+      "elapsed_ms": 236.5366249999994,
+      "heartbeats": {
+        "spawn-group.heartbeat": 18,
+        "setsid.heartbeat": 21,
+        "plain.heartbeat": 21,
+        "spawn-session.heartbeat": 19,
+        "stubborn.heartbeat": 21,
+        "double-fork.heartbeat": 21
+      }
+    },
+    {
+      "elapsed_ms": 500.7487919999995,
+      "heartbeats": {
+        "spawn-group.heartbeat": 36,
+        "setsid.heartbeat": 40,
+        "plain.heartbeat": 41,
+        "spawn-session.heartbeat": 36,
+        "stubborn.heartbeat": 41,
+        "double-fork.heartbeat": 41
+      }
+    },
+    {
+      "elapsed_ms": 1125.4584580000007,
+      "heartbeats": {
+        "spawn-group.heartbeat": 75,
+        "setsid.heartbeat": 85,
+        "plain.heartbeat": 85,
+        "spawn-session.heartbeat": 77,
+        "stubborn.heartbeat": 86,
+        "double-fork.heartbeat": 84
+      }
+    },
+    {
+      "elapsed_ms": 2078.0689579999994,
+      "heartbeats": {
+        "spawn-group.heartbeat": 134,
+        "setsid.heartbeat": 154,
+        "plain.heartbeat": 156,
+        "spawn-session.heartbeat": 141,
+        "stubborn.heartbeat": 155,
+        "double-fork.heartbeat": 152
+      }
+    }
+  ],
+  "observation_ms": 2327.0694170000006,
+  "heartbeat_before": {
+    "spawn-group.heartbeat": 2,
+    "setsid.heartbeat": 3,
+    "plain.heartbeat": 3,
+    "spawn-session.heartbeat": 3,
+    "stubborn.heartbeat": 3,
+    "double-fork.heartbeat": 3
+  },
+  "heartbeat_after": {
+    "spawn-group.heartbeat": 150,
+    "setsid.heartbeat": 172,
+    "plain.heartbeat": 174,
+    "spawn-session.heartbeat": 157,
+    "stubborn.heartbeat": 173,
+    "double-fork.heartbeat": 169
+  },
+  "exec_probe": {
+    "spawn_errno": 0,
+    "reaped": true,
+    "wait_status": 0
+  },
+  "exec_marker_created": true,
+  "fixture_empty_before_runner_cleanup": false,
+  "cleanup_verified": true,
+  "fixture_processes": [
+    {
+      "role": "root",
+      "pid": 1953,
+      "ppid": 1952,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1953,
+      "pidversion": 4485,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1953,
+        100094,
+        4485
+      ]
+    },
+    {
+      "role": "plain",
+      "pid": 1954,
+      "ppid": 1953,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1954,
+      "pidversion": 4486,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1954,
+        100094,
+        4486
+      ]
+    },
+    {
+      "role": "setsid",
+      "pid": 1955,
+      "ppid": 1953,
+      "pgid": 1955,
+      "sid": 1955,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1955,
+      "pidversion": 4487,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1955,
+        100094,
+        4487
+      ]
+    },
+    {
+      "role": "double-fork",
+      "pid": 1957,
+      "ppid": 1,
+      "pgid": 1956,
+      "sid": 1956,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1957,
+      "pidversion": 4489,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1957,
+        100094,
+        4489
+      ]
+    },
+    {
+      "role": "stubborn",
+      "pid": 1958,
+      "ppid": 1953,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1958,
+      "pidversion": 4490,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1958,
+        100094,
+        4490
+      ]
+    },
+    {
+      "role": "spawn-group",
+      "pid": 1959,
+      "ppid": 1953,
+      "pgid": 1959,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1959,
+      "pidversion": 4492,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1959,
+        100094,
+        4492
+      ]
+    },
+    {
+      "role": "spawn-session",
+      "pid": 1960,
+      "ppid": 1953,
+      "pgid": 1960,
+      "sid": 1960,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1960,
+      "pidversion": 4494,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1960,
+        100094,
+        4494
+      ]
+    }
+  ],
+  "after_runner_cleanup": {
+    "root": {
+      "role": "snapshot",
+      "pid": 1953,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "plain": {
+      "role": "snapshot",
+      "pid": 1954,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "setsid": {
+      "role": "snapshot",
+      "pid": 1955,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "double-fork": {
+      "role": "snapshot",
+      "pid": 1957,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "stubborn": {
+      "role": "snapshot",
+      "pid": 1958,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "spawn-group": {
+      "role": "snapshot",
+      "pid": 1959,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "spawn-session": {
+      "role": "snapshot",
+      "pid": 1960,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "host": {
+      "role": "snapshot",
+      "pid": 1951,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    },
+    "service": {
+      "role": "snapshot",
+      "pid": 1952,
+      "ppid": 0,
+      "pgid": 0,
+      "sid": -1,
+      "status": 0,
+      "bsd_bytes": 0,
+      "unique_bytes": 0,
+      "coalition_bytes": 0,
+      "uniqueid": 0,
+      "pidversion": 0,
+      "coalitions": [
+        0,
+        0
+      ],
+      "same_process": false,
+      "alive": false
+    }
+  },
+  "host_events": [
+    {
+      "role": "host",
+      "pid": 1951,
+      "ppid": 1,
+      "pgid": 1951,
+      "sid": 1,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1951,
+      "pidversion": 4479,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        501,
+        501,
+        20,
+        501,
+        20,
+        1951,
+        100002,
+        4479
+      ]
+    },
+    {
+      "kind": "host_reply",
+      "started": true
+    }
+  ],
+  "service_events": [
+    {
+      "role": "service",
+      "pid": 1952,
+      "ppid": 1,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1952,
+      "pidversion": 4482,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1952,
+        100094,
+        4482
+      ]
+    },
+    {
+      "kind": "request_received",
+      "host_pid": 1951
+    },
+    {
+      "kind": "spawn",
+      "rc": 0,
+      "pid": 1953
+    },
+    {
+      "kind": "service_connection_error",
+      "description": "Connection invalid"
+    }
+  ],
+  "workload_events": [
+    {
+      "role": "root",
+      "pid": 1953,
+      "ppid": 1952,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1953,
+      "pidversion": 4485,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1953,
+        100094,
+        4485
+      ]
+    },
+    {
+      "probe": "custodian_signal",
+      "target": 1951,
+      "signal": 15,
+      "rc": -1,
+      "errno": 1
+    },
+    {
+      "probe": "custodian_signal",
+      "target": 1951,
+      "signal": 9,
+      "rc": -1,
+      "errno": 1
+    },
+    {
+      "probe": "custodian_signal",
+      "target": 1952,
+      "signal": 15,
+      "rc": -1,
+      "errno": 1
+    },
+    {
+      "probe": "custodian_signal",
+      "target": 1952,
+      "signal": 9,
+      "rc": -1,
+      "errno": 1
+    },
+    {
+      "role": "plain",
+      "pid": 1954,
+      "ppid": 1953,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1954,
+      "pidversion": 4486,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1954,
+        100094,
+        4486
+      ]
+    },
+    {
+      "role": "setsid",
+      "pid": 1955,
+      "ppid": 1953,
+      "pgid": 1955,
+      "sid": 1955,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1955,
+      "pidversion": 4487,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1955,
+        100094,
+        4487
+      ]
+    },
+    {
+      "role": "double-fork",
+      "pid": 1957,
+      "ppid": 1,
+      "pgid": 1956,
+      "sid": 1956,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1957,
+      "pidversion": 4489,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1957,
+        100094,
+        4489
+      ]
+    },
+    {
+      "role": "stubborn",
+      "pid": 1958,
+      "ppid": 1953,
+      "pgid": 1952,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1958,
+      "pidversion": 4490,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1958,
+        100094,
+        4490
+      ]
+    },
+    {
+      "role": "spawn-group",
+      "pid": 1959,
+      "ppid": 1953,
+      "pgid": 1959,
+      "sid": 1952,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1959,
+      "pidversion": 4492,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1959,
+        100094,
+        4492
+      ]
+    },
+    {
+      "role": "spawn-session",
+      "pid": 1960,
+      "ppid": 1953,
+      "pgid": 1960,
+      "sid": 1960,
+      "status": 2,
+      "bsd_bytes": 136,
+      "unique_bytes": 56,
+      "coalition_bytes": 40,
+      "uniqueid": 1960,
+      "pidversion": 4494,
+      "coalitions": [
+        1002,
+        1003
+      ],
+      "custody_fds_open": false,
+      "audit_token": [
+        4294967295,
+        501,
+        20,
+        501,
+        20,
+        1960,
+        100094,
+        4494
+      ]
+    },
+    {
+      "ready": true
+    }
+  ]
+}

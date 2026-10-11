@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>worker</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.monocursive.ouro.xpcresearch.8b1e571fb5fb4036bc5190e40da5f333.worker</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>XPCService</key>
+	<dict>
+		<key>JoinExistingSession</key>
+		<false/>
+		<key>RunLoopType</key>
+		<string>dispatch_main</string>
+		<key>ServiceType</key>
+		<string>Application</string>
+	</dict>
+</dict>
+</plist>

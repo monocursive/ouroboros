@@ -1,0 +1,3 @@
+{"role":"service","pid":3127,"ppid":1,"pgid":3127,"sid":3127,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":3127,"pidversion":6831,"coalitions":[1052,1053],"custody_fds_open":false,"audit_token":[501,501,20,501,20,3127,100002,6831]}
+{"kind":"request_received","host_pid":3126}
+{"kind":"spawn","rc":0,"pid":3128}

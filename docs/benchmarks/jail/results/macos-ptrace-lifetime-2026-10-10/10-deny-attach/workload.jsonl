@@ -1,0 +1,4 @@
+{"role":"root","pid":3032,"pidversion":6682,"uniqueid":3032,"pgid":1307,"sid":1,"bsd_flags":4210704,"audit_token":[501,0,0,0,0,3032,100002,6682]}
+{"kind":"before_fork"}
+{"kind":"deny_attach","rc":0,"errno":0}
+{"role":"late-child","pid":3035,"pidversion":6687,"uniqueid":3035,"pgid":3035,"sid":3035,"bsd_flags":4194352,"audit_token":[501,0,0,0,0,3035,100002,6687]}

@@ -1,0 +1,4 @@
+{"role":"service","pid":2131,"ppid":1,"pgid":2131,"sid":2131,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":2131,"pidversion":4835,"coalitions":[1008,1009],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,2131,100097,4835]}
+{"kind":"request_received","host_pid":2130}
+{"kind":"spawn","rc":0,"pid":2132}
+{"kind":"service_connection_error","description":"Connection invalid"}

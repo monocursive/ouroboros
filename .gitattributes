@@ -1,5 +1,8 @@
 # Preserve collected evidence bytes, including terminal CRs and aligned output.
 docs/benchmarks/jail/results/**/*.log -whitespace
+docs/benchmarks/jail/results/**/*.txt -whitespace
+docs/benchmarks/jail/results/**/*.stdout -whitespace
+docs/benchmarks/jail/results/**/*.stderr -whitespace
 docs/benchmarks/sandboxes/results/**/*.log -whitespace
 docs/benchmarks/sandboxes/results/**/*.txt -whitespace
 docs/specs/jail-v1/evidence/**/*.log -whitespace

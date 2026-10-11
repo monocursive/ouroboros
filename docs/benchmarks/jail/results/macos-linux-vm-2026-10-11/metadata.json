@@ -1,0 +1,36 @@
+{
+  "schema": "ouro.vm.prototype-evidence/1",
+  "date": "2026-10-11",
+  "macos": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
+  "cpu": "Apple M5 Pro",
+  "sip": "System Integrity Protection status: enabled.",
+  "source_sha256": {
+    "run.py": "ed7382bc96490fad0fc59ff859012393b1b154d31314da0c177c3d77ef713a82",
+    "check.py": "0cf96a9e7984d629aabf239d58a8c465b47ce2fb1ec1c172522ba4ebcc9406fd",
+    "entitlements.plist": "915e2b39357ecf8d211dc7fac43195c9cdcf55a0a1ecdbf931c116a4eac421f3",
+    "test_vm.py": "13833a80409614eef549e4fec909a0bf5c7c7931dd8e9342310e1535357e658e",
+    "guest.py": "d4311ae398794e3045839f76d1382f0de59d3210df7b0ae92166a9331f07396f",
+    "vz.swift": "1cf3583a9bfbcba24aa7a8d1f5eb9cd3e7579891abd33b3971410783f4a08666",
+    "prepare.py": "6682617455a86cc4d8c95812d29df47b04570fc5dd96355ce6c6e82a0ddf5db3"
+  },
+  "functional": {
+    "build-03": "completed",
+    "tool-final": "completed"
+  },
+  "source_workspace_unchanged": true,
+  "unit_tests": {
+    "passed": 9,
+    "failed": 0
+  },
+  "swift_compile": "warnings-as-errors passed",
+  "notarized": false,
+  "published": false,
+  "vm_service_teardown_gate": false,
+  "known_limit": "Both Mac controllers suspended: guest cgroup is empty, but VM service stays allocated until host controllers resume.",
+  "earlier_results": "faults-02 has 27 trials of the original image; final-faults uses the final image and includes simultaneous suspension.",
+  "evidence_omitted": [
+    "disk images",
+    "EFI variable stores",
+    "redundant encoded transport logs"
+  ]
+}

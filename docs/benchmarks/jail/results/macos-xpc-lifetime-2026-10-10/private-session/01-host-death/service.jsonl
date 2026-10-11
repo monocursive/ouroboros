@@ -1,0 +1,4 @@
+{"role":"service","pid":1533,"ppid":1,"pgid":1533,"sid":1533,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1533,"pidversion":3653,"coalitions":[988,989],"custody_fds_open":false,"audit_token":[4294967295,501,20,501,20,1533,100087,3653]}
+{"kind":"request_received","host_pid":1532}
+{"kind":"spawn","rc":0,"pid":1534}
+{"kind":"service_connection_error","description":"Connection invalid"}

@@ -1,0 +1,283 @@
+{
+  "schema": "ouro.vm.fault-check/1",
+  "results": [
+    {
+      "case": "wall",
+      "status": "passed",
+      "launcher_pid": 11322,
+      "helper_pid": 11341,
+      "service_pid": 11342,
+      "identities": {
+        "11322": "Sun Oct 11 10:35:22 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "11341": "Sun Oct 11 10:35:24 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "11342": "Sun Oct 11 10:35:24 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 2.75550458393991,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 634}\nOURO_VM {\"event\": \"done\", \"exit_code\": 143}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 4\nDETACHED 5\nDETACHED 3\nDETACHED 6\nDETACHED 7\nREADY\nTICK 21896661718\nDETACHED 8\nTICK 21998526635\nTICK 22099253968\nTICK 22199463926\nTICK 22299597510\nTICK 22399925426\nTICK 22501925177\nTICK 22602141593\nTICK 22702878885\nTICK 22803687218\nTICK 22905225552\nTICK 23005368135\nTICK 23105465093\nTICK 23205749469\nTICK 23306366510\nTICK 23406796802\nTICK 23508942010\nTICK 23611047719\nTICK 23711112010\nTICK 23812370344\nTICK 23913240511\nTICK 24013420344\nTICK 24114116219\nTICK 24216070302\nTICK 24317342677\nTICK 24418890969\nTICK 24520603969\nTICK 24621886594\nTICK 24723354428\nTICK 24824198511\n",
+      "guest_lifetime": {
+        "boundary": "pid_namespace",
+        "native": {
+          "os": "linux",
+          "details": {
+            "backend_exec_by": "descriptor",
+            "bwrap_pid": 664,
+            "cgroup_namespace": 4026532256,
+            "command_rules": {
+              "deny": 0,
+              "forbid": 0
+            },
+            "execution_cgroup": {
+              "charged_helpers": [
+                {
+                  "pid": 664,
+                  "role": "bubblewrap"
+                },
+                {
+                  "pid": 666,
+                  "role": "namespace_init"
+                }
+              ],
+              "device": 31,
+              "inode": 3886,
+              "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_6dad173c-764a-4a96-ad73-6c73a1467d4e.leaf",
+              "scope": "target_descendants_and_listed_helpers"
+            },
+            "filtered_readonly_opens": 0,
+            "launcher_pid": 667,
+            "mnt_namespace": 4026532252,
+            "namespace_init_pid": 666,
+            "narrowing_filter_digest": "sha256:f5353e3a8e29beeca5edb0e19952196e8c1b8b575c4d5aab1698a7017fefb56e",
+            "narrowing_filter_digest_installed": "sha256:42bf6cc2c509b165c04b53fe261a904b6d8bb9a6ea47324bf207363fce7ccd6d",
+            "net_namespace": 4026532257,
+            "observer_plan": {
+              "backend": "ptrace",
+              "event_bytes_max": 65536,
+              "in_flight_max": 16384,
+              "kernel_ring_bytes": null,
+              "path_snapshot_max": 4096,
+              "queue_bytes_max": 4194304,
+              "queue_events_max": 16384,
+              "queue_lifecycle_reserve_bytes": 65536,
+              "queue_result_bytes_max": 4128768,
+              "test_seams": {}
+            },
+            "path_claims_unverified": 0,
+            "pid_namespace": 4026532255,
+            "readonly_open_fast_path": true,
+            "requested_by_other_filters": 0,
+            "resolv_sanitization": "nameservers_only",
+            "seccomp_filters": {
+              "expected": 2,
+              "observed": 2
+            },
+            "supervisor_scope": {
+              "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-634-447b0bd393354414.scope",
+              "reason": null,
+              "reason_code": null,
+              "state": "entered",
+              "unit": "ouro-jail-634-447b0bd393354414.scope"
+            },
+            "user_namespace": 4026532310,
+            "watcher_pid": 665
+          }
+        },
+        "tree_empty": true,
+        "verified_at": "2026-10-11T08:35:50Z",
+        "verification_scope": "attempt_tree",
+        "integrity": "verified"
+      },
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "cancel",
+      "status": "passed",
+      "launcher_pid": 11534,
+      "helper_pid": 11542,
+      "service_pid": 11543,
+      "identities": {
+        "11534": "Sun Oct 11 10:35:50 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "11542": "Sun Oct 11 10:35:52 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "11543": "Sun Oct 11 10:35:52 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 0.064886917010881,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 639}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 3\nDETACHED 4\nDETACHED 5\nDETACHED 6\nDETACHED 7\nDETACHED 8\nREADY\nTICK 21379360967\nTICK 21480207384\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "launcher_kill",
+      "status": "passed",
+      "launcher_pid": 11637,
+      "helper_pid": 11654,
+      "service_pid": 11655,
+      "identities": {
+        "11637": "Sun Oct 11 10:36:14 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "11654": "Sun Oct 11 10:36:16 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "11655": "Sun Oct 11 10:36:17 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 0.12930725002661347,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 604}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 3\nREADY\nTICK 20955983092\nDETACHED 7\nDETACHED 8\nDETACHED 6\nDETACHED 4\nDETACHED 5\nTICK 21056566718\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "launcher_stop",
+      "status": "passed",
+      "launcher_pid": 11750,
+      "helper_pid": 11777,
+      "service_pid": 11778,
+      "identities": {
+        "11750": "Sun Oct 11 10:36:38 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "11777": "Sun Oct 11 10:36:41 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "11778": "Sun Oct 11 10:36:41 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 1.9511324169579893,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 639}\nOURO_VM {\"event\": \"workload_tree_empty\", \"boundary\": \"user.slice\", \"events_inode\": 271}\nOURO_VM {\"event\": \"poweroff\", \"reason\": \"lease_expired\"}\n",
+      "guest_tree_empty_before_cleanup": true,
+      "stdout_before_cleanup": "DETACHED 3\nDETACHED 4\nDETACHED 5\nDETACHED 6\nREADY\nTICK 21390959717\nDETACHED 8\nDETACHED 7\nTICK 21492459051\nTICK 21592824342\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "helper_kill",
+      "status": "passed",
+      "launcher_pid": 11945,
+      "helper_pid": 11952,
+      "service_pid": 11953,
+      "identities": {
+        "11945": "Sun Oct 11 10:37:05 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "11952": "Sun Oct 11 10:37:07 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "11953": "Sun Oct 11 10:37:07 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 0.011459709028713405,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 636}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 4\nDETACHED 5\nDETACHED 3\nDETACHED 7\nREADY\nTICK 21364759301\nDETACHED 6\nDETACHED 8\nTICK 21464954468\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "helper_stop",
+      "status": "passed",
+      "launcher_pid": 12069,
+      "helper_pid": 12080,
+      "service_pid": 12081,
+      "identities": {
+        "12069": "Sun Oct 11 10:37:29 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "12080": "Sun Oct 11 10:37:32 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "12081": "Sun Oct 11 10:37:32 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 6.707789250067435,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 637}\nOURO_VM {\"event\": \"workload_tree_empty\", \"boundary\": \"user.slice\", \"events_inode\": 271}\nOURO_VM {\"event\": \"poweroff\", \"reason\": \"lease_expired\"}\n",
+      "guest_tree_empty_before_cleanup": true,
+      "stdout_before_cleanup": "DETACHED 3\nDETACHED 4\nDETACHED 6\nDETACHED 5\nDETACHED 7\nREADY\nTICK 21358870843\nDETACHED 8\nTICK 21458985801\nTICK 21559046343\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "both_kill",
+      "status": "passed",
+      "launcher_pid": 12449,
+      "helper_pid": 12461,
+      "service_pid": 12466,
+      "identities": {
+        "12449": "Sun Oct 11 10:38:00 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "12461": "Sun Oct 11 10:38:03 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "12466": "Sun Oct 11 10:38:03 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 0.12802187504712492,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 606}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 4\nDETACHED 3\nDETACHED 5\nDETACHED 6\nDETACHED 7\nREADY\nDETACHED 8\nTICK 21395004218\nTICK 21495133468\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "service_kill",
+      "status": "passed",
+      "launcher_pid": 12721,
+      "helper_pid": 12778,
+      "service_pid": 12779,
+      "identities": {
+        "12721": "Sun Oct 11 10:38:25 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "12778": "Sun Oct 11 10:38:27 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "12779": "Sun Oct 11 10:38:27 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 0.011598333017900586,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 639}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 5\nDETACHED 3\nDETACHED 6\nDETACHED 4\nDETACHED 7\nREADY\nTICK 21365325301\nDETACHED 8\nTICK 21465414384\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "service_stop",
+      "status": "passed",
+      "launcher_pid": 12863,
+      "helper_pid": 12880,
+      "service_pid": 12881,
+      "identities": {
+        "12863": "Sun Oct 11 10:38:49 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "12880": "Sun Oct 11 10:38:52 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "12881": "Sun Oct 11 10:38:52 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_present_while_stopped": true,
+      "service_resumed_after_seconds": 4.0286950409645215,
+      "service_gone_before_cleanup": true,
+      "service_gone_seconds": 4.038804583018646,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 635}\n",
+      "guest_tree_empty_before_cleanup": false,
+      "stdout_before_cleanup": "DETACHED 3\nDETACHED 4\nDETACHED 5\nDETACHED 6\nDETACHED 7\nREADY\nTICK 21361025093\nDETACHED 8\nTICK 21461112593\n",
+      "emergency_cleanup_used": false,
+      "service_absent_after_cleanup": true
+    },
+    {
+      "case": "both_stop",
+      "status": "failed",
+      "launcher_pid": 13005,
+      "helper_pid": 13009,
+      "service_pid": 13010,
+      "identities": {
+        "13005": "Sun Oct 11 10:39:18 2026     /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "13009": "Sun Oct 11 10:39:20 2026     /Users/monocursive/code/ouroboros/evidence/macos-linux-vm-2026-10-11/image-v3/vz",
+        "13010": "Sun Oct 11 10:39:20 2026     /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+      },
+      "detached_children": 6,
+      "service_gone_before_cleanup": false,
+      "service_gone_seconds": null,
+      "console_before_cleanup": "OURO_VM {\"event\": \"ready\", \"kernel\": \"7.0.0-38-generic\"}\nOURO_VM {\"event\": \"running\", \"supervisor_pid\": 622}\nOURO_VM {\"event\": \"workload_tree_empty\", \"boundary\": \"user.slice\", \"events_inode\": 271}\nOURO_VM {\"event\": \"poweroff\", \"reason\": \"lease_expired\"}\n",
+      "guest_tree_empty_before_cleanup": true,
+      "stdout_before_cleanup": "DETACHED 3\nDETACHED 4\nDETACHED 6\nDETACHED 5\nREADY\nDETACHED 7\nTICK 19863388133\nDETACHED 8\nTICK 19964440008\n",
+      "service_gone_after_host_resume": true,
+      "host_resume_cleanup_seconds": 0.024012250010855496,
+      "error": "VM service survived the fault deadline",
+      "emergency_cleanup_used": true,
+      "service_absent_after_cleanup": true
+    }
+  ],
+  "passed": false
+}

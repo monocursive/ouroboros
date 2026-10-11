@@ -1,0 +1,3 @@
+{"role":"root","pid":843,"pidversion":2244,"uniqueid":843,"pgid":828,"sid":1,"bsd_flags":4194320,"audit_token":[501,501,20,501,20,843,100002,2244]}
+{"kind":"handler_lookup","rc":0,"count":3,"handler":1287,"type_rc":0,"type":65536}
+{"kind":"exception_installed","rc":17,"mask":448}

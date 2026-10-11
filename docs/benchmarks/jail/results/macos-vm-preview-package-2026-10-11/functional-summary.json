@@ -1,0 +1,28 @@
+{
+  "final-build": {
+    "status": "completed",
+    "profile": "build",
+    "guest_exit_code": 0,
+    "vm_stop_acknowledged": true,
+    "guest_receipt_sha256": "bee303bc75bf1a2bb3e977f8b9e9e6e59df8bd436865a7fcb15bee07dac20ed5",
+    "boot_seconds": 22.21350650000386,
+    "elapsed_seconds": 22.533102832967415,
+    "linux_lifetime": "verified",
+    "tree_empty": true,
+    "stdout": "FUNCTIONAL_OK\n",
+    "guest_disk_removed": true
+  },
+  "final-tool": {
+    "status": "completed",
+    "profile": "tool",
+    "guest_exit_code": 23,
+    "vm_stop_acknowledged": true,
+    "guest_receipt_sha256": "174f5e4e055ce4e6df63f4ee7c3e96c1e9e46bda5cf4885e6ccd4e8417f364b6",
+    "boot_seconds": 22.200134165934287,
+    "elapsed_seconds": 22.523771125008352,
+    "linux_lifetime": "verified",
+    "tree_empty": true,
+    "stdout": "PROTECTED_ROOT_VERIFIED\n",
+    "guest_disk_removed": true
+  }
+}

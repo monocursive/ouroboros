@@ -6,15 +6,32 @@ main() (
     export LC_ALL=C
     repository=https://github.com/monocursive/ouroboros
     version=0.1.0-rc.1
+    macos_version=0.1.0-preview.1
+    version_selected=false
     prefix=${HOME:?HOME must be set}/.local/bin
+    bin_selected=false
+    vm_prefix=${HOME}/.local
+    vm_prefix_selected=false
     base=
     source_dir=
     work=
     staged=
     notice=
     record=
+    mounted=
     allow_downgrade=false
-    trap 'rm -rf -- "${work:-}"; rm -f -- "${staged:-}" "${notice:-}" "${record:-}"' EXIT
+    # shellcheck disable=SC2329 # Invoked by the EXIT trap.
+    cleanup() {
+        if [ -n "$mounted" ]; then
+            hdiutil detach "$mounted" >/dev/null || {
+                printf 'Could not eject %s; temporary files retained at %s.\n' "$mounted" "$work" >&2
+                return
+            }
+        fi
+        rm -rf -- "${work:-}"
+        rm -f -- "${staged:-}" "${notice:-}" "${record:-}"
+    }
+    trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' HUP TERM
 
@@ -23,15 +40,22 @@ main() (
         cat <<EOF
 Usage: bash install.sh [--version VERSION] [--bin-dir /absolute/path]
                        [--allow-downgrade]
+       bash install.sh [--version VERSION] [--vm-prefix /absolute/path]
 
-Installs Ouroboros Jail's Linux developer preview into ~/.local/bin.
-The default version is $version; --version also accepts vVERSION or
-ouro-jail-vVERSION, but only releases with embedded SHA-256 pins are accepted.
-Run again to upgrade. Downgrades require --allow-downgrade.
+Linux: installs ouro-jail $version into ~/.local/bin (--bin-dir changes it).
+macOS: installs ouro-vm $macos_version into ~/.local/share/ouro-vm, with a
+command in ~/.local/bin. --vm-prefix changes the root containing bin and share.
+Apple Silicon and macOS 27+ are required; Intel Macs are unsupported.
+The Mac preview runs offline Linux commands in disposable VMs, not Mac programs
+or online agents. Allow 8 GiB free APFS space and 2 GiB RAM per running VM.
+Only releases with embedded SHA-256 pins are accepted. --version also accepts
+vVERSION, ouro-jail-vVERSION (Linux), or ouro-vm-vVERSION (Mac).
+Linux: run again to upgrade; downgrades require --allow-downgrade.
+Mac: an already installed version is preserved and a repeat install refuses.
 Requires curl, tar, and sha256sum or shasum. No sudo or Rust compiler.
 Linux binaries require glibc 2.39 or newer; Alpine/musl is unsupported.
 Execution requires a compatible Linux host and bubblewrap; check doctor after
-installation. macOS execution is not available in this preview.
+installation. Mac installation uses the system hdiutil and bundled runtime.
 
 Offline installation: --from-dir DIR
 Other mirrors: --base-url HTTPS_URL
@@ -40,11 +64,12 @@ EOF
     }
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --version|--bin-dir|--prefix|--base-url|--from-dir)
+            --version|--bin-dir|--prefix|--vm-prefix|--base-url|--from-dir)
                 if [ "$#" -lt 2 ] || [ -z "${2-}" ]; then fail "$1 needs a value"; fi
                 case "$1" in
-                    --version) version=$2 ;;
-                    --bin-dir|--prefix) prefix=$2 ;;
+                    --version) version=$2; version_selected=true ;;
+                    --bin-dir|--prefix) prefix=$2; bin_selected=true ;;
+                    --vm-prefix) vm_prefix=$2; vm_prefix_selected=true ;;
                     --base-url) base=$2 ;;
                     --from-dir) source_dir=$2 ;;
                 esac
@@ -54,7 +79,10 @@ EOF
             *) fail "unknown argument: $1 (see --help)" ;;
         esac
     done
+    system=$(uname -s)
+    if [ "$system" = Darwin ] && [ "$version_selected" = false ]; then version=$macos_version; fi
     version=${version#ouro-jail-v}
+    version=${version#ouro-vm-v}
     version=${version#v}
     number='(0|[1-9][0-9]*)'
     identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
@@ -62,16 +90,54 @@ EOF
     valid_version() { [[ "$1" =~ $pattern ]]; }
     valid_version "$version" || fail "invalid semantic version: $version"
     case "$prefix" in /*) ;; *) fail '--bin-dir must be an absolute path' ;; esac
+    case "$vm_prefix" in /*) ;; *) fail '--vm-prefix must be an absolute path' ;; esac
     [ -z "$base" ] || [ -z "$source_dir" ] || fail 'choose --base-url or --from-dir'
     case "$base" in ''|https://*) ;; *) fail '--base-url must use HTTPS' ;; esac
     for command in uname awk mktemp tar sed mkdir chmod cat mv; do
         command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
     done
-    case "$(uname -s):$(uname -m)" in
+    case "$system:$(uname -m)" in
         Linux:x86_64|Linux:amd64) target=x86_64-unknown-linux-gnu ;;
         Linux:aarch64|Linux:arm64) target=aarch64-unknown-linux-gnu ;;
-        *) fail 'this preview supports Linux x86_64 and ARM64; macOS sandbox execution is unavailable' ;;
+        Darwin:arm64) target=macos-arm64 ;;
+        *) fail 'supported hosts: Linux x86_64/ARM64 or Apple Silicon macOS 27+' ;;
     esac
+    if [ "$system" = Darwin ]; then
+        [ "$bin_selected" = false ] || fail 'on macOS use --vm-prefix (contains bin and share), not --bin-dir or --prefix'
+        [ "$allow_downgrade" = false ] || fail '--allow-downgrade applies only to the Linux installer'
+        for command in sw_vers hdiutil shasum; do
+            command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
+        done
+        macos_major=$(sw_vers -productVersion | awk -F. '{print $1}')
+        [[ "$macos_major" =~ ^[0-9]+$ ]] && [ "$macos_major" -ge 27 ] || fail 'macOS 27 or newer is required'
+        case "$version:$target" in
+            0.1.0-preview.1:macos-arm64) expected='f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0' ;;
+            *) fail "no pinned SHA-256 for $version ($target); download the current installer" ;;
+        esac
+        artifact="ouro-vm-$version-$target.dmg"
+        work=$(mktemp -d "${TMPDIR:-/tmp}/ouro-install.XXXXXX")
+        if [ -n "$source_dir" ]; then
+            cp -- "$source_dir/$artifact" "$work/$artifact" || fail "missing release asset: $artifact"
+        else
+            command -v curl >/dev/null 2>&1 || fail 'required command not found: curl'
+            base=${base:-$repository/releases/download/ouro-vm-v$version}
+            printf 'Downloading Ouro VM %s (about 512 MiB)...\n' "$version"
+            curl --disable --fail --silent --show-error --location \
+                --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --connect-timeout 15 --max-time 1800 --retry 3 \
+                "${base%/}/$artifact" --output "$work/$artifact" || fail "cannot download $artifact"
+        fi
+        actual=$(shasum -a 256 "$work/$artifact" | awk '{print $1}')
+        [ "$actual" = "$expected" ] || fail "checksum verification failed: $artifact"
+        mkdir "$work/mount"
+        hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$work/mount" "$work/$artifact" >/dev/null
+        mounted="$work/mount"
+        /bin/bash "$mounted/install.sh" --prefix "$vm_prefix"
+        printf '\nCheck your Mac: %s/bin/ouro-vm doctor\n' "$vm_prefix"
+        printf 'Usage and preview limits: https://ouroboros.monocursive.com/guide/#macos-vm-preview\n'
+        exit 0
+    fi
+    [ "$vm_prefix_selected" = false ] || fail '--vm-prefix applies only to the macOS VM preview'
     command -v getconf >/dev/null 2>&1 || fail 'glibc 2.39 or newer is required; getconf is missing'
     libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || fail 'glibc 2.39 or newer is required; Alpine/musl is unsupported'
     read -r libc_name libc_version <<<"$libc"

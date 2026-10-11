@@ -1,0 +1,15 @@
+ouro-vm-preview.dmg: accepted
+source=Notarized Developer ID
+origin=Developer ID Application: Monocursive (64SGQ348QJ)
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/bin/ouro-vm: valid on disk
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/bin/ouro-vm: satisfies its Designated Requirement
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/bin/ouro-vm: explicit requirement satisfied
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/bin/_internal/libpython3.13.dylib: valid on disk
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/bin/_internal/libpython3.13.dylib: satisfies its Designated Requirement
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/bin/_internal/libpython3.13.dylib: explicit requirement satisfied
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/image/vz: valid on disk
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/image/vz: satisfies its Designated Requirement
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/image/vz: explicit requirement satisfied
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/image/custodian: valid on disk
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/image/custodian: satisfies its Designated Requirement
+/Users/admin/ouro-preview-qualified/share/ouro-vm/0.1.0-preview.1/image/custodian: explicit requirement satisfied

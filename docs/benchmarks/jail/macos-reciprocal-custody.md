@@ -12,6 +12,11 @@ or a claim that an arbitrary process tree is empty. `ouro-jail run` remains
 unsupported on macOS. Apple's [existing entitlement request](endpoint-security-request.md)
 is reused; no new request, identifier registration or host provisioning was made.
 
+The [2026-10-10 kernel lifetime follow-up](macos-kernel-lifetime-2026-10-10.md)
+tested debugger-death enforcement as a possible independent boundary. Attached
+members died, but the protection was not inherited by later fork/spawn children.
+It does not close the simultaneous-custodian-loss gate.
+
 ## Implementation and boundaries
 
 [macos_es_pair.c](macos_es_pair.c) runs a guardian and its ward. Each creates

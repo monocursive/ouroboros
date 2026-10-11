@@ -1,0 +1,4 @@
+{"role": "custodian", "pid": 3994, "ppid": 1, "pgid": 3994, "sid": 3994, "status": 2, "bsd_bytes": 136, "unique_bytes": 56, "coalition_bytes": 40, "uniqueid": 3994, "pidversion": 8597, "coalitions": [1077, 1078], "audit_token": [4294967295, 0, 0, 0, 0, 3994, 100114, 8597], "uid": 0, "euid": 0}
+{"kind": "custodian_ready", "child_pid": 4000}
+{"role": "custodian", "pid": 4017, "ppid": 1, "pgid": 4017, "sid": 4017, "status": 2, "bsd_bytes": 136, "unique_bytes": 56, "coalition_bytes": 40, "uniqueid": 4017, "pidversion": 8642, "coalitions": [1077, 1078], "audit_token": [4294967295, 0, 0, 0, 0, 4017, 100115, 8642], "uid": 0, "euid": 0}
+{"kind": "known_recovery_complete", "known_processes": 7}

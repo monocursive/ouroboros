@@ -1,0 +1,16 @@
+{"audit_token":[501,501,20,501,20,19815,100015,4817362],"event":"owner","pid":19815}
+{"event":"booted","network":false,"pid":19815}
+{"event":"connected"}
+{"data":"eyJldmVudCI6InJlYWR5Iiwia2VybmVsIjoiNy4wLjAtMzgtZ2VuZXJpYyIsImxlYXNlX3NlY29uZHMiOjIuMH0K","event":"data"}
+{"data":"eyJldmVudCI6InBvbmciLCJzZXF1ZW5jZSI6MH0K","event":"data"}
+{"data":"eyJldmVudCI6InB1dCIsInBhdGgiOiJmaXh0dXJlLnB5In0K","event":"data"}
+{"data":"eyJldmVudCI6InJ1bm5pbmciLCJzdXBlcnZpc29yX3BpZCI6NjQwfQo=","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdOUW89In0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJVa1ZCUkZrS1ZFbERTeUF5TWpNNU5qSTJNamc0TlFvPSJ9Cg==","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdPQW89In0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdOd289In0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdOZ289In0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJSRVZVUVVOSVJVUWdOQXBFUlZSQlEwaEZSQ0F6Q2c9PSJ9Cg==","event":"data"}
+{"data":"eyJldmVudCI6InBvbmciLCJzZXF1ZW5jZSI6MX0K","event":"data"}
+{"data":"eyJldmVudCI6InN0ZG91dCIsImRhdGEiOiJWRWxEU3lBeU1qUTVOak0yTWpBNU13bz0ifQo=","event":"data"}
+{"error":"Error Domain=VZErrorDomain Code=1 \"The virtual machine stopped unexpectedly.\" UserInfo={NSLocalizedFailure=Internal Virtualization error., NSLocalizedFailureReason=The virtual machine stopped unexpectedly.}","event":"error"}

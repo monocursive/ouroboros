@@ -1,0 +1,2 @@
+{"role":"host","pid":1714,"ppid":1,"pgid":1714,"sid":1,"status":2,"bsd_bytes":136,"unique_bytes":56,"coalition_bytes":40,"uniqueid":1714,"pidversion":4012,"coalitions":[994,995],"custody_fds_open":false,"audit_token":[501,501,20,501,20,1714,100002,4012]}
+{"kind":"host_reply","started":true}

@@ -1,0 +1,52 @@
+[
+  {
+    "path": "bsd/kern/sys_coalition.c",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sys_coalition.c",
+    "sha256": "1f252b9329751286f670a8d6824117c2712b4bf20bbf82376fe12c3d39835545"
+  },
+  {
+    "path": "osfmk/kern/coalition.c",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/kern/coalition.c",
+    "sha256": "244a162e8d29296b766c4dae07f7c8072bf67a742d8be5f233c71dae8e247976"
+  },
+  {
+    "path": "bsd/sys/coalition.h",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/coalition.h",
+    "sha256": "3df5cdf3fcb5f662437e694b2450b688672bcafbbdd0a867fae7253c05ca434c"
+  },
+  {
+    "path": "bsd/sys/spawn_internal.h",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/spawn_internal.h",
+    "sha256": "eb44e0877ec6ed3979017027ca815a2d4c0b124b97532babc19b00198c8e6871"
+  },
+  {
+    "path": "bsd/kern/kern_exit.c",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_exit.c",
+    "sha256": "fc38910a931d53441b4863c4fa2a463e680c5424b60d80ea79b0930d3d0fa747"
+  },
+  {
+    "path": "bsd/kern/kern_proc.c",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_proc.c",
+    "sha256": "34f745a213769ffa47b4edace6e3e158f654075def1b0fe50edf97f9bf53589d"
+  },
+  {
+    "path": "bsd/kern/proc_info.c",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/proc_info.c",
+    "sha256": "557092f14fbad3341100f59e0391d2e812c54b79a7404c89b2af97471ad67082"
+  },
+  {
+    "path": "doc/observability/coalitions.md",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/doc/observability/coalitions.md",
+    "sha256": "4f2b293f0fa0b2a3fafbe80eb404c5ca0f9f41d7f4c2fb93802f67d811aaadc1"
+  },
+  {
+    "path": "bsd/kern/kern_fork.c",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_fork.c",
+    "sha256": "73b578159deebc71434185d3638ab1468f995a19c882e1902d001994bb0391c3"
+  },
+  {
+    "path": "bsd/kern/mach_process.c",
+    "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/mach_process.c",
+    "sha256": "3e9808305a454ade2f7a9eaba70e0f163e7c46f98f9655349063b3d13fc6519d"
+  }
+]

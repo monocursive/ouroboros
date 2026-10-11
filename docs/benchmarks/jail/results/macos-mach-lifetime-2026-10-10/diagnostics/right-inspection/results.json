@@ -1,0 +1,41 @@
+{
+  "schema": "ouro.jail.macos-mach-lifetime/1",
+  "status": "experiment_failed",
+  "actor_uid": 501,
+  "actor_euid": 501,
+  "settings": {
+    "virtualized": true,
+    "sip": "System Integrity Protection status: disabled.",
+    "approved_entitlement": false,
+    "authenticated_root": "Authenticated Root status: enabled",
+    "boot_args": "boot-args"
+  },
+  "source_sha256": {
+    "macos_mach_lifetime.c": "c2f0bd4782f735c3aae8f8474de2e75c2beb4fdbec099ae15ced7b13bd44d05f",
+    "macos_mach_lifetime.py": "75e4fab6dc4746ea0952e5eccf73e2f3ee3e79dc77dcb5bf91c09add30ffe38b",
+    "macos_ptrace_lifetime.c": "9ba32e12f81c21474c43669e9b2f190347c887038d5da9d4075e189946a241c9",
+    "macos_ptrace_lifetime.py": "2e7eedc8dc2a3b271532e6e32976fec4ba8f0e0b39690d615d911f0bfc6fafe6",
+    "macos_native.c": "adc081414284414824be45471fd13e805093d9f00c99307d22f14be86b1777d1",
+    "macos_native.py": "7314cf7edd3186e8204e452c5811fbcc0a774fe7ac70353a935205eb2fcaddcc",
+    "macos_es.py": "38c9e73388a0d604a6f31ebad7cb45078b0e7044244b5c4887326b28bf2ae0a0"
+  },
+  "cases": [],
+  "native_execution_ready": false,
+  "lifetime_contract_verified": false,
+  "fatal_port_size_query": {
+    "rc": -1,
+    "errno": 2,
+    "size": 0,
+    "port_requested": false
+  },
+  "binary_sha256": {
+    "mach-research": "f2fdaae2d582a62a0db6810671cac21d915ec5da251cdae6df39b3cf17c1c05c",
+    "native-fixture": "908e5d64a0994439f19dbdffeeed5769ae85a139d929b4ba2b53ae9a7682bfd6"
+  },
+  "environment": {
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428",
+    "kernel": "Darwin Manageds-Virtual-Machine.local 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:00:07 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_VMAPPLE arm64",
+    "sdk": "27.0"
+  },
+  "error": "Exception installation refused: 17"
+}

@@ -1,0 +1,6 @@
+ouro-vm-preview.dmg: accepted
+source=Notarized Developer ID
+origin=Developer ID Application: Monocursive (64SGQ348QJ)
+hdiutil: WARNING: 'hdiutil attach -nobrowse -readonly -mountpoint ...' is deprecated. Please use 'diskutil image attach --mountOptions nobrowse --readOnly --mountPoint ...' instead.
+/Users/admin/ouro-preview-test/bin/ouro-vm: rejected (the code is valid but does not seem to be an app)
+origin=Developer ID Application: Monocursive (64SGQ348QJ)
