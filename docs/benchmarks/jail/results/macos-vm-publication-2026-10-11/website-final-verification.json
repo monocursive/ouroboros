@@ -1,0 +1,232 @@
+[
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "llms.txt",
+    "sha256": "6865d974c6a49ab5c6387efc8d52242ad85edbf19731fa7015836f7147425b35"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "index.html",
+    "sha256": "62c771b414019bfaf67225d1e082b288282717ec5ab8b8d3ef63c86786131dcc"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "install.sh",
+    "sha256": "b817557c25f1f4ea6cafaca96dbcfcbdd704ba1512888a3155f4c4603c47d96e"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "release.pub",
+    "sha256": "218b3005a943bf9641f42ece53e6a3ee2a8b3a12510db04d26477abefc8cfbd1"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "llms-full.txt",
+    "sha256": "26310037f1eee4f6c69f58a9b0193d0f305a80674da200b3027b4cb77548e967"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "roadmap.md",
+    "sha256": "2ea273ad753034747a1c6fd0f8c8e2657656a2685b5661214c510bbdd9de7cd2"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "guide.md",
+    "sha256": "0c51d03827b47084fe2863b1eb73568983406ab6f653c46f43580a93f8c2ef21"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "favicon.svg",
+    "sha256": "b44f18fb551be9e9a511e0758a6abd689fb6f89e31041a78daba20cf5af16176"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "guide/index.html",
+    "sha256": "f4e785a440582a1998566db46e330a8fe13fa22e3d821ab56f6506191c07d4d5"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "roadmap/index.html",
+    "sha256": "8e8b55105d0bd05e672c9f18595f8b83043ce297eabcca1ac072ad3794052ec3"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "brand/orbit-middle.svg",
+    "sha256": "d8a1c3024a8ace272426ebfddb9cca234772f23dba7914f8c42bd8408cec3be0"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "brand/orbit-inner.svg",
+    "sha256": "0bfea6ee101a13f27a6c3b039e791371d2358d0250485e723bf15bfdac1ad12a"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "brand/ouroboros.svg",
+    "sha256": "301fd92e8ffeb0982c0184dfdbc32cb129a92bd224ad1efce4a2ed671331668c"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "brand/orbit-outer.svg",
+    "sha256": "747caf409d06ccfcae01fe099d06b73c38d7e8ec810b3333823455b7fb6f38ca"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "brand/orbit-point.svg",
+    "sha256": "52a3eb19bf358a8cd04901a8fa41d61e08bf24b5eb3ecc2b4efd69b5b19725ab"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "_astro/manrope-cyrillic-wght-normal.Dvxsihut.woff2",
+    "sha256": "c268b459a9329e59fecf39a17618efd44c71735532048d60b12aab76a8c14914"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "_astro/manrope-vietnamese-wght-normal.usUDDRr7.woff2",
+    "sha256": "6bbb044ab420e07edb0a3042d2eb314b85e83a0182e945a15ab3b9092668dfd5"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "_astro/Site.CbKR_ixy.css",
+    "sha256": "c590abcab5a59f7a2db352d0d15d59b6eebd764150ba9c88080660a998139c08"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "_astro/manrope-greek-wght-normal.DL7QRZyv.woff2",
+    "sha256": "2fb2e8cbfd52ae46179a8b6024eb162f1f9c6de3d22d6e3a30d8f395de7220be"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "_astro/manrope-latin-wght-normal.DHIcAJRg.woff2",
+    "sha256": "a30ddcd349703aff7464c34bef3fffdff405ee50c113440d7c8693c02d210972"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "_astro/manrope-latin-ext-wght-normal.Ch3YOpNY.woff2",
+    "sha256": "3911b66d9f2e005a4b989223405d0e5032619c668597ba467cc76a23c8fffcfb"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "fonts/DepartureMono-Regular.woff2",
+    "sha256": "5b4fed1daa90708aa9c6ee1190abca9dc22164a1c1def0020386e46b61038cfb"
+  },
+  {
+    "origin": "https://95448181.ouroboros-84r.pages.dev",
+    "path": "fonts/DepartureMono-LICENSE.txt",
+    "sha256": "b65e42750f3cb65437a97f4dfd781c58f199259949db2341012be60e32500e83"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "llms.txt",
+    "sha256": "6865d974c6a49ab5c6387efc8d52242ad85edbf19731fa7015836f7147425b35"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "index.html",
+    "sha256": "62c771b414019bfaf67225d1e082b288282717ec5ab8b8d3ef63c86786131dcc"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "install.sh",
+    "sha256": "b817557c25f1f4ea6cafaca96dbcfcbdd704ba1512888a3155f4c4603c47d96e"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "release.pub",
+    "sha256": "218b3005a943bf9641f42ece53e6a3ee2a8b3a12510db04d26477abefc8cfbd1"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "llms-full.txt",
+    "sha256": "26310037f1eee4f6c69f58a9b0193d0f305a80674da200b3027b4cb77548e967"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "roadmap.md",
+    "sha256": "2ea273ad753034747a1c6fd0f8c8e2657656a2685b5661214c510bbdd9de7cd2"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "guide.md",
+    "sha256": "0c51d03827b47084fe2863b1eb73568983406ab6f653c46f43580a93f8c2ef21"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "favicon.svg",
+    "sha256": "b44f18fb551be9e9a511e0758a6abd689fb6f89e31041a78daba20cf5af16176"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "guide/index.html",
+    "sha256": "f4e785a440582a1998566db46e330a8fe13fa22e3d821ab56f6506191c07d4d5"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "roadmap/index.html",
+    "sha256": "8e8b55105d0bd05e672c9f18595f8b83043ce297eabcca1ac072ad3794052ec3"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "brand/orbit-middle.svg",
+    "sha256": "d8a1c3024a8ace272426ebfddb9cca234772f23dba7914f8c42bd8408cec3be0"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "brand/orbit-inner.svg",
+    "sha256": "0bfea6ee101a13f27a6c3b039e791371d2358d0250485e723bf15bfdac1ad12a"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "brand/ouroboros.svg",
+    "sha256": "301fd92e8ffeb0982c0184dfdbc32cb129a92bd224ad1efce4a2ed671331668c"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "brand/orbit-outer.svg",
+    "sha256": "747caf409d06ccfcae01fe099d06b73c38d7e8ec810b3333823455b7fb6f38ca"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "brand/orbit-point.svg",
+    "sha256": "52a3eb19bf358a8cd04901a8fa41d61e08bf24b5eb3ecc2b4efd69b5b19725ab"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "_astro/manrope-cyrillic-wght-normal.Dvxsihut.woff2",
+    "sha256": "c268b459a9329e59fecf39a17618efd44c71735532048d60b12aab76a8c14914"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "_astro/manrope-vietnamese-wght-normal.usUDDRr7.woff2",
+    "sha256": "6bbb044ab420e07edb0a3042d2eb314b85e83a0182e945a15ab3b9092668dfd5"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "_astro/Site.CbKR_ixy.css",
+    "sha256": "c590abcab5a59f7a2db352d0d15d59b6eebd764150ba9c88080660a998139c08"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "_astro/manrope-greek-wght-normal.DL7QRZyv.woff2",
+    "sha256": "2fb2e8cbfd52ae46179a8b6024eb162f1f9c6de3d22d6e3a30d8f395de7220be"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "_astro/manrope-latin-wght-normal.DHIcAJRg.woff2",
+    "sha256": "a30ddcd349703aff7464c34bef3fffdff405ee50c113440d7c8693c02d210972"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "_astro/manrope-latin-ext-wght-normal.Ch3YOpNY.woff2",
+    "sha256": "3911b66d9f2e005a4b989223405d0e5032619c668597ba467cc76a23c8fffcfb"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "fonts/DepartureMono-Regular.woff2",
+    "sha256": "5b4fed1daa90708aa9c6ee1190abca9dc22164a1c1def0020386e46b61038cfb"
+  },
+  {
+    "origin": "https://ouroboros.monocursive.com",
+    "path": "fonts/DepartureMono-LICENSE.txt",
+    "sha256": "b65e42750f3cb65437a97f4dfd781c58f199259949db2341012be60e32500e83"
+  }
+]

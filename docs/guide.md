@@ -279,7 +279,7 @@ into the writable tree; these seccomp denials have no observer event. Existing
 hard links within the admitted ownership rules remain usable. The storage ceiling covers
 allocated file data; use `mem` to bound charged RAM as well. A storage
 receipt's `hit=null` means saturation was not established, not that the limit
-was never reached. The [limit specification](specs/jail-v1.md#64-limits-and-errors)
+was never reached. The [limit specification](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1.md#64-limits-and-errors)
 defines the scope and remaining backend limitations. Project quotas and
 automatic volume provisioning are not implemented.
 
@@ -385,7 +385,7 @@ might ever need. Nothing is adopted automatically.
 ## When something doesn't work
 
 **The host check refuses the profile.** Read `doctor`'s missing requirements.
-Explicit resource limits need host support. On macOS, refusal is the current
+Explicit resource limits need host support. For native `ouro-jail` on macOS, refusal is the current
 expected behavior. Changing to `none` would remove containment.
 
 **The command cannot find a file, executable, or library.** Check `explain`

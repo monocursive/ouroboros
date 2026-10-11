@@ -1,0 +1,20 @@
+Downloading Ouro VM 0.1.0-preview.1 (about 512 MiB)...
+Ouro VM 0.1.0-preview.1 (offline Linux on Apple Silicon)
+{
+  "schema": "ouro.vm.install-check/1",
+  "ready": true,
+  "checks": {
+    "virtualization_supported": true,
+    "base.raw": true,
+    "seed.iso": true,
+    "vz": true,
+    "custodian": true
+  },
+  "scope": "package and host prerequisites; a real run still verifies the guest jail"
+}
+
+Installed /Users/monocursive/code/ouroboros/evidence/macos-vm-publication-2026-10-11/public install/bin/ouro-vm
+Add /Users/monocursive/code/ouroboros/evidence/macos-vm-publication-2026-10-11/public install/bin to PATH, then run ouro-vm doctor.
+
+Check your Mac: /Users/monocursive/code/ouroboros/evidence/macos-vm-publication-2026-10-11/public install/bin/ouro-vm doctor
+Usage and preview limits: https://ouroboros.monocursive.com/guide/#macos-vm-preview

@@ -39,12 +39,12 @@ You can [build the jail and try a small command](https://github.com/monocursive/
 today. [Signed Linux developer-preview packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
 are also available; a Homebrew tap remains unconfigured.
 
-The separate [Ouro VM preview for Apple Silicon](guide.md#macos-vm-preview)
+The separate [Ouro VM preview for Apple Silicon](https://ouroboros.monocursive.com/guide/#macos-vm-preview)
 is now available as a signed, notarized DMG through the same Bash installer.
 It runs offline Linux ARM64 `tool` and `build` commands in a disposable VM on
 macOS 27+. Inputs are copied and outputs returned for review. Native Mac
 programs, online agents and host directory sharing are outside this preview.
-The [qualification record](benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+The [qualification record](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
 documents the 14 measured teardown cases and the remaining fault-model limits.
 
 ## Next: make the first run easier

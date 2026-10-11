@@ -1,0 +1,68 @@
+{
+  "schema": "ouro.vm.publication/1",
+  "verified_at": "2026-10-11T09:56:29.906369+00:00",
+  "published": true,
+  "prerelease": true,
+  "release_url": "https://github.com/monocursive/ouroboros/releases/tag/ouro-vm-v0.1.0-preview.1",
+  "published_at": "2026-10-11T09:50:03Z",
+  "tag": "ouro-vm-v0.1.0-preview.1",
+  "tag_revision": "81a7096211689755d86907346d47792a29738cb3",
+  "installer_revision": "3d6b8fb5dad4dfb525f48bb97b33e31d83f368db",
+  "installer_sha256": "b817557c25f1f4ea6cafaca96dbcfcbdd704ba1512888a3155f4c4603c47d96e",
+  "assets": [
+    {
+      "name": "bootstrap.sh",
+      "sha256": "b817557c25f1f4ea6cafaca96dbcfcbdd704ba1512888a3155f4c4603c47d96e",
+      "bytes": 14982
+    },
+    {
+      "name": "build-provenance.json",
+      "sha256": "39be7e91a5adbe5a2cb6ca2cc815169dd354c34886a6f339a86f9405c5103ca7",
+      "bytes": 3452
+    },
+    {
+      "name": "ouro-vm-0.1.0-preview.1-macos-arm64.dmg",
+      "sha256": "f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0",
+      "bytes": 536341282
+    },
+    {
+      "name": "ouro-vm-0.1.0-preview.1-macos-arm64.dmg.sha256",
+      "sha256": "03444c6794f9ae33f6fe0988d8a4e6ff6e3286abece66594f5c353202bf9058d",
+      "bytes": 106
+    },
+    {
+      "name": "preview-source.tar.gz",
+      "sha256": "f83bac8b5d771ee0da8c11e277d82bb9f9f2195bf0bf38e5644fa5b160e4ba36",
+      "bytes": 29661
+    },
+    {
+      "name": "qualification.json",
+      "sha256": "d59fa38af8241c24d3f2063197bc1c05eec41f9371f9dcf2d884da658383579a",
+      "bytes": 1114
+    },
+    {
+      "name": "RELEASE_NOTES.md",
+      "sha256": "5396c362c864e140084ee1f00e57a2c98673aad31fcc948f25bca8a70d6e4d97",
+      "bytes": 4868
+    }
+  ],
+  "website": {
+    "deployment": "https://95448181.ouroboros-84r.pages.dev",
+    "canonical": "https://ouroboros.monocursive.com",
+    "served_files_verified_per_origin": 23
+  },
+  "public_install": {
+    "physical_mac": "passed; doctor ready",
+    "isolated_mac_vm": "passed; CLI works; nested execution unavailable",
+    "linux_x86_64": "passed; doctor ready"
+  },
+  "quickstart": {
+    "exit_code": 0,
+    "returned_output": "created in Linux\n",
+    "input_unchanged": true,
+    "linux_tree_empty_verified": true,
+    "vm_stop_acknowledged": true,
+    "private_disk_removed": true
+  },
+  "native_macos_execution": false
+}

@@ -22,6 +22,8 @@ selects it on Apple Silicon and pins the final stapled DMG SHA-256:
 Use the [Mac quickstart](guide.md#macos-vm-preview) for installation and limits.
 The DMG's build-time notes and original qualification metadata retain their
 unpublished state; publication does not modify the tested artifact.
+The [publication record](benchmarks/jail/macos-vm-publication-2026-10-11.md)
+adds verified public installation, live website delivery and quickstart proof.
 
 The Bash entry point adapts `legacy:install.sh`: explicit versions, HTTPS,
 architecture detection, no sudo or compiler, and installation to `~/.local/bin`.

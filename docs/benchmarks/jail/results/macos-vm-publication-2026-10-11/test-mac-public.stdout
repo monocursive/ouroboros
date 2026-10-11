@@ -1,0 +1,28 @@
+501
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A428
+System Integrity Protection status: enabled.
+assessments enabled
+Downloading Ouro VM 0.1.0-preview.1 (about 512 MiB)...
+Ouro VM 0.1.0-preview.1 (offline Linux on Apple Silicon)
+{
+  "schema": "ouro.vm.install-check/1",
+  "ready": false,
+  "checks": {
+    "virtualization_supported": false,
+    "base.raw": true,
+    "seed.iso": true,
+    "vz": true,
+    "custodian": true
+  },
+  "scope": "package and host prerequisites; a real run still verifies the guest jail"
+}
+
+Installed /Users/admin/ouro-public-preview/bin/ouro-vm
+Add /Users/admin/ouro-public-preview/bin to PATH, then run ouro-vm doctor.
+
+Check your Mac: /Users/admin/ouro-public-preview/bin/ouro-vm doctor
+Usage and preview limits: https://ouroboros.monocursive.com/guide/#macos-vm-preview
+{"component": "ouro-vm", "version": "0.1.0-preview.1", "execution": "linux-vm", "native_macos_execution": false}
+PUBLIC_MAC_INSTALL_PASSED
