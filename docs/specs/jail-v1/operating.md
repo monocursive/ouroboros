@@ -302,6 +302,48 @@ staged into the attempt's private vendor state, which the child sees at
   resumes it. Removal unlinks files; it does not erase disk blocks or copies
   made elsewhere.
 
+`vault` keeps a raw HTTP credential in supervisor memory instead of copying
+it into vendor state. Its source must satisfy the same private-file rules,
+contain 1–8192 printable ASCII bytes, and have no trailing newline. Omit
+`dest`, declare exact HTTP(S) origins in `hosts`, and optionally declare the
+header and prefix. For an Anthropic key:
+
+```toml
+[credentials.anthropic]
+mode = "vault"
+source = "~/.config/ouro/credentials/anthropic"
+hosts = ["https://api.anthropic.com"]
+header = { name = "x-api-key" }
+```
+
+The child receives `OURO_VAULT_ANTHROPIC`, an attempt-scoped placeholder.
+Map it to the client's expected variable inside the contained command, for
+example `/bin/sh -c 'export ANTHROPIC_API_KEY="$OURO_VAULT_ANTHROPIC";
+exec claude "$@"' vault-client -p '…'`. Review the binary/library read-only
+grants for your installation as for any launch profile. The source remains
+outside those grants. An `authorization` placement with `prefix = "Bearer "`
+supports clients sending bearer tokens.
+
+HTTPS vaulting installs a public per-attempt CA through conventional trust
+variables, verifies the upstream certificate and hostname before substitution,
+and records proxy outcomes without request headers or bodies. The receipt
+records `mode: "vault"`, `never_staged: true`, no digest, and the
+`never_staged` digest-unavailability reason. Plaintext origins require an
+explicit `allow_plaintext = true`.
+
+The vault snapshots each credential at preparation. Replacing the source
+affects subsequent attempts; running attempts retain their snapshot. There
+is no gateway-managed OAuth refresh, expiry schedule, live revocation, or
+path-specific credential binding. The TLS lane is HTTP/1.1, one request per
+connection, with content-length bodies; chunked uploads, `Expect`, HTTP/2,
+WebSocket upgrades, and certificate-pinning clients need separate compatibility
+evaluation. The measured Codex version passed through HTTPS fallback after
+WebSocket retries; see the saved benchmark diagnostics.
+Codex OAuth access placeholders require the client's external-token adapter;
+they do not provide refresh. See the
+[credential benchmark](../../benchmarks/credentials/2026-10-12/README.md)
+for the exact tested versions, adapters, outcomes, and measurement limits.
+
 ## doctor
 
 `doctor` runs short probes (5 seconds each, with owned temporary resources):

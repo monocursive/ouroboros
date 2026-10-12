@@ -1,0 +1,21 @@
+# Operator-owned starter; copy to <config-dir>/launch/claude-vault.toml,
+# mode 0600. The raw key source must be private, contain no trailing newline,
+# and stay outside all child grants. Grant your client and libraries read-only.
+# In the contained argv, map OURO_VAULT_ANTHROPIC to ANTHROPIC_API_KEY:
+# /bin/sh -c 'export ANTHROPIC_API_KEY="$OURO_VAULT_ANTHROPIC"; exec claude "$@"' vault-client ...
+# No automatic OAuth refresh. See the credential benchmark for measured builds.
+name = "claude-vault"
+jail = "agent"
+state_var = "CLAUDE_CONFIG_DIR"
+
+[environment]
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+
+[credentials.anthropic]
+mode = "vault"
+source = "~/.config/ouro/credentials/anthropic"
+hosts = ["https://api.anthropic.com"]
+header = { name = "x-api-key" }
+
+[network]
+allow = ["api.anthropic.com:443"]

@@ -5,6 +5,14 @@ file-denial/startup patch. This analysis covers the tested versions and
 configurations: Ouro 0.1.0 development source, Greywall 0.3.7/Greyproxy 0.4.5,
 OpenShell 0.1.3 and MXC 1.0.0. It does not describe every backend or newer release.
 
+Later follow-ups retain the [additional startup reductions and Pi write
+investigation](competitors-startup/2026-10-12/README.md) and the
+[vault credential benchmark](credentials/2026-10-12/README.md). The vault
+follow-up passed all 42 Linux coding calls with strict receipts and no raw-token
+hits in its bounded exposure checks. The performance tables below describe the
+first paired run; the credential conclusion below incorporates the later vault
+evidence.
+
 Ouro's clearest measured advantages are Linux execution evidence, explicit
 resource-limit refusal, and substantially lower launch latency than Greywall.
 MXC is usually faster; OpenShell offers a working retained container workflow
@@ -90,7 +98,7 @@ Evidence: [all workload medians/p95 and raw sources](competitors-after/2026-10-1
 | Resource ceilings | Explicit wall/PID/memory/swap/CPU limits have readbacks and refusal when required enforcement is unavailable. The VPS memory probe enforces its cap; Pi memory requests refuse instead of proceeding unbounded. | No automatic memory/CPU/storage/inode ceiling was added. Explicit storage/inode limits on the unbounded workspace refuse; this does not demonstrate a working quota there. OpenShell enforces requested CPU/memory through Docker on VPS/Mac. Greywall/MXC lack common memory/CPU/PID ceilings in these tested native interfaces. |
 | Process lifetime | Ouro settles an empty tree after root exit on Linux and records it. The Mac MXC heartbeat persists after wrapper return under Seatbelt. | Linux Greywall and MXC also stop the heartbeat. MXC's Mac descendant remains subject to Seatbelt; persistence is not an observed escape. OpenShell deliberately separates retained sandbox lifetime from exec return. |
 | Network | Tested host TCP/signals are denied; the offline tool policy also blocks the explicitly visible Unix socket that Greywall/MXC allow on Linux. | Host TCP/signals are also denied by the other native wrappers. A visible socket connection is not an ungranted-path escape. OpenShell's container egress restrictions work where provisioning succeeds. The desired IPC policy determines which behavior is appropriate. |
-| Credentials and operator workflow | The exercised Ouro profiles support all three clients using private state and required provider destinations. | Ouro used environment/staged credentials here. Greywall exercised automatic proxy placeholders; OpenShell exercised provider handles, endpoint binding and bootstrap/refresh. Ouro's optional vault was not measured, so superiority in secret brokerage or operator UI is not established. |
+| Credentials and operator workflow | The later vault follow-up passed all three clients on both Linux hosts: 42/42 coding calls, 42 verified strict receipts, 16/16 credential boundary checks, and no raw-token hits in bounded sampling. | The initial cohort used environment/staged credentials. Greywall exercised automatic proxy placeholders; OpenShell exercised provider handles, endpoint binding and bootstrap/refresh. Ouro now demonstrates origin/header-bound substitution; automatic refresh, live revocation, path/process credential binding and Codex WebSocket support remain gaps. All 14 vault Codex calls succeeded through HTTPS fallback. Comparative secret-brokerage or operator-UI superiority is not established. |
 | Platform and persistence | Linux x86_64 and ARM64 work, including the Pi where OpenShell fails startup. | Ouro has no tested native Mac/online Mac agent lane or Windows backend. MXC runs Claude/OpenCode natively on Mac; OpenShell runs all three via Docker/OrbStack. Ouro's offline Mac VM preview takes about 34 seconds and is not an online agent benchmark. Other documented competitor backends remain untested. |
 
 These are provisioned benchmark hosts: VPS AppArmor namespace overrides and a
@@ -146,9 +154,11 @@ Evidence: [native coding](competitors-after/2026-10-11/analysis/final/native-age
 3. Exercise an online Mac VM workflow and a retained environment if these are
    product goals. OpenShell currently demonstrates both client coverage on Mac
    and a faster retained exec lane in this test.
-4. Benchmark Ouro's vault/provider handling against Greywall substitution and
-   OpenShell providers. The current evidence does not settle secret exposure,
-   refresh reliability or operator effort.
+4. Close the demonstrated vault/provider gaps: automatic OAuth refresh and
+   live revocation, path/process credential binding, and Codex WebSocket
+   transport. The [completed vault benchmark](credentials/2026-10-12/README.md)
+   now measures current-token compatibility and bounded exposure; long-term
+   refresh reliability and timed operator effort remain unestablished.
 5. Refresh pinned-host conformance and release freeze evidence before making a
    readiness claim. Linux release builds, Clippy, 564 unit tests per host and
    all 46 VPS review tests pass, but the broader Linux run retains documented
