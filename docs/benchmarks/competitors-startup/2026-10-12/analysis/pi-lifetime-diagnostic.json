@@ -1,0 +1,27 @@
+{
+  "counts": {
+    "ouro-before": {
+      "calls": 30,
+      "exit_nonzero": 0,
+      "gaps": 0,
+      "tree_not_empty": 0,
+      "heartbeat_survived": 0
+    },
+    "ouro-jail": {
+      "calls": 30,
+      "exit_nonzero": 0,
+      "gaps": 0,
+      "tree_not_empty": 0,
+      "heartbeat_survived": 0
+    }
+  },
+  "witnessed_heartbeats": {
+    "ouro-before": 30,
+    "ouro-jail": 30
+  },
+  "journals": 60,
+  "source": "results/pi-lifetime-diagnostic/lifetime-diagnostic/summary.json",
+  "excluded_from_scores": true,
+  "original_failed_canary_retained": true,
+  "does_not_prove_equal_failure_rates": true
+}

@@ -1,0 +1,63 @@
+{
+  "sequence": 9,
+  "agent": "claude",
+  "mode": "docker",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 28311.274125,
+  "container_result": {
+    "agent": "claude",
+    "task": "fix-offbyone",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 27977.267344,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {
+      "total_cost_usd": 0.08009775,
+      "num_turns": 6,
+      "duration_api_ms": 27287
+    },
+    "peak_child_rss_kib": 292652,
+    "guest_kernel": [
+      "Linux",
+      "629e81627a06",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "max",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-agents-after:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "fix-offbyone"
+  ],
+  "load": [
+    2.42919921875,
+    2.0263671875,
+    1.94873046875
+  ],
+  "artifact": "runs/009-claude-docker-fix-offbyone-0"
+}

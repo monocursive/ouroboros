@@ -1,0 +1,21 @@
+{
+  "codex/docker": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      33739.649272,
+      29488.155068,
+      27302.456742,
+      32591.715567,
+      30876.533749,
+      32070.955655
+    ],
+    "median_ms": 31473.744702
+  },
+  "codex/openshell-ephemeral": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  }
+}

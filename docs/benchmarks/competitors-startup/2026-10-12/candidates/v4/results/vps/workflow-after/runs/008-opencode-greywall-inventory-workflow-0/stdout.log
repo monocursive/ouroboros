@@ -1,0 +1,44 @@
+I'll implement category summaries in the inventory CLI with the --group-by-category flag. Let me start by exploring the codebase structure and planning the implementation.
+Now I understand the codebase structure. Let me plan and implement the required changes:
+Let me start by creating the category_summary function in report.py:
+Now let me update cli.py to add the --group-by-category argument and use the new function:
+Now let me update the README.md with a grouped example:
+Now let's run the tests to see if everything works:
+Excellent! All tests pass. Let me mark the tasks as completed and verify the implementation works as expected:
+Let's verify the implementation with a quick manual test:
+Perfect! Let me also verify error handling for invalid CSV:
+Excellent! Let me verify the final implementation by reviewing the updated files:
+Perfect! All the requirements have been successfully implemented. Let me summarize what was done:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with the `--group-by-category` flag. Here's what was completed:
+
+### Changes made:
+
+1. **inventory/report.py:47** - Added `category_summary()` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Computes sum of quantities and stock value (quantity * unit_price)
+   - Returns JSON array sorted by category with exact decimal formatting (2 fractional digits)
+
+2. **inventory/cli.py:11** - Added `--group-by-category` argument as a boolean flag
+
+3. **inventory/cli.py:15-18** - Updated main() to conditionally use `category_summary()` or `item_report()` based on the flag
+
+4. **README.md:7-18** - Added documentation with grouped example and expected output
+
+### Key features:
+- CSV is loaded using the existing `load_items()` function
+- `--min-quantity` is applied **before** grouping as required
+- Stock value uses exact Decimal arithmetic and is formatted as a string with 2 decimal places
+- Ungrouped output maintains its current behavior
+- Invalid CSV produces exit code 2 with a useful error message on stderr (no traceback)
+- Processing logic is in `report.py`, argument parsing in `cli.py` (separate modules)
+- All 10 tests pass including the supplied tests which were not modified
+
+### Test results:
+```
+Ran 10 tests in 0.264s
+OK
+```

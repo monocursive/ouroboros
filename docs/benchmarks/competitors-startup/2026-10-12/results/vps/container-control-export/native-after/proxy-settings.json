@@ -1,0 +1,29 @@
+{
+  "theme": "system",
+  "notifications": {
+    "enabled": true,
+    "available": true,
+    "backend": "notify-send",
+    "supportsActions": true,
+    "activeClaims": 0
+  },
+  "mitm": {
+    "enabled": true,
+    "certGenerated": true,
+    "certExpiry": "2036-10-09",
+    "certPath": "/home/ubuntu/bench-ouro-startup-final/proxy/data/ca-cert.pem",
+    "installed": true
+  },
+  "conversations": {
+    "enabled": true
+  },
+  "redactedHeaders": [
+    "Authorization",
+    "Proxy-Authorization",
+    "Cookie",
+    "Set-Cookie",
+    "*api-key*",
+    "*token*",
+    "*secret*"
+  ]
+}

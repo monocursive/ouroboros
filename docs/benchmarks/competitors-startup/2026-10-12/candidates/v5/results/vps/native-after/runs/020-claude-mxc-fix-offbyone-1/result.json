@@ -1,0 +1,29 @@
+{
+  "sequence": 20,
+  "agent": "claude",
+  "mode": "mxc",
+  "task": "fix-offbyone",
+  "repetition": 1,
+  "started_utc": "2026-10-12T12:00:54Z",
+  "elapsed_ms": 20028.214603,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/ubuntu/bench-ouro-startup-native-final/bin/lxc-exec",
+    "/home/ubuntu/bench-ouro-startup-native-final/results/native-after/runs/020-claude-mxc-fix-offbyone-1/mxc-private.json"
+  ],
+  "load": [
+    0.24951171875,
+    0.3544921875,
+    0.68115234375
+  ],
+  "artifact": "runs/020-claude-mxc-fix-offbyone-1"
+}

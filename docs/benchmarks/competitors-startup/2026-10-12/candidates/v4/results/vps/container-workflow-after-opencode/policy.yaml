@@ -1,0 +1,5 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/opt/agents, /opt/bench]
+  read_write: [/tmp, /home/agent, /work]

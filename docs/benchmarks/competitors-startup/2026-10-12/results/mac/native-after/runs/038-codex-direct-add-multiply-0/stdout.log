@@ -1,0 +1,3 @@
+Added `multiply(a, b)` to `src/calc.py`, returning `a * b`.
+
+Ran `python3 -m unittest discover -s tests -v`: both tests passed. Tests were not modified.

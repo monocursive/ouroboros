@@ -1,0 +1,8 @@
+name="claude"
+jail="agent"
+state_var="CLAUDE_CONFIG_DIR"
+[environment]
+ANTHROPIC_API_KEY="<ANTHROPIC_API_KEY>"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+[network]
+allow=["api.anthropic.com:443"]

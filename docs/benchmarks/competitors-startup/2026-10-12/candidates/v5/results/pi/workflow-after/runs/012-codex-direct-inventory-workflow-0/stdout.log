@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted categories, summed quantities, and decimal stock values formatted as two-digit JSON strings.
+
+Preserved ungrouped output and separate parsing/reporting modules. Improved malformed CSV handling and added the README example.
+
+All 10 supplied tests passed; tests were unchanged. Additional large-decimal and empty-result checks passed.

@@ -183,18 +183,65 @@ pub fn run_one_backend(name: &str, jail_exe: &Path, bwrap: Backend<'_>) -> Probe
     run_one_for(name, std::env::consts::ARCH, jail_exe, bwrap)
 }
 
-/// Fresh probes for one preparation. The namespace probes consume the same
-/// status report, so one sandbox can provide it without changing any check.
+/// Fresh probes for one preparation. Namespace, read-only bind and baseline
+/// filter checks share a successful sandbox without changing any validator.
 /// No result survives this call; refusals and deadlines still apply per run.
 #[must_use]
 pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<ProbeResult> {
+    let shared_check = |name: &str| {
+        matches!(
+            name,
+            "user_namespace" | "pid_namespace" | "network_namespace" | "mount_readonly_bind"
+        )
+    };
+    // A working baseline filter leaves each namespace and EROFS check intact.
+    // Only use the combined answer when every requested validator succeeds;
+    // otherwise retain the unfiltered/individual probes below so a failed
+    // filter or bind does not turn another host capability into a guess.
+    let filtered = if names.contains(&"seccomp_filter_load")
+        && names.iter().any(|name| shared_check(name))
+        && seam_architecture_refusal("seccomp_filter_load").is_none()
+        && architecture_refusal("seccomp_filter_load", std::env::consts::ARCH).is_none()
+    {
+        bwrap
+            .ok()
+            .filter(|path| path.is_absolute())
+            .and_then(|path| {
+                let outside = ns_ids(own_pid());
+                let run =
+                    run_status_checks(jail_exe, path, names.contains(&"mount_readonly_bind"), true)
+                        .ok()?;
+                let results: Vec<_> = names
+                    .iter()
+                    .filter_map(|name| match *name {
+                        "user_namespace" => {
+                            Some(namespace_result(name, outside.user, &run.captured))
+                        }
+                        "pid_namespace" => Some(namespace_result(name, outside.pid, &run.captured)),
+                        "network_namespace" => Some(network_namespace_result(&run.captured)),
+                        "mount_readonly_bind" => Some(readonly_bind_result(&run.captured)),
+                        "seccomp_filter_load" => Some(seccomp_result(&run.captured)),
+                        _ => None,
+                    })
+                    .collect();
+                results
+                    .iter()
+                    .all(|result| result.status == ProbeStatus::Available)
+                    .then_some(results)
+            })
+    } else {
+        None
+    };
+    // Keep failed RO setup independent of namespace capability results.
+    // The fallback shares only the original namespace status sandbox;
+    // read-only and filter probes retain their individual setup paths.
     let namespace = |name: &str| {
         matches!(
             name,
             "user_namespace" | "pid_namespace" | "network_namespace"
         )
     };
-    let shared = if names.iter().filter(|name| namespace(name)).count() > 1 {
+    let shared = if filtered.is_none() && names.iter().filter(|name| namespace(name)).count() > 1 {
         bwrap.ok().filter(|path| path.is_absolute()).map(|path| {
             let outside = ns_ids(own_pid());
             (
@@ -208,6 +255,12 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
     names
         .iter()
         .map(|name| {
+            if let Some(result) = filtered
+                .as_ref()
+                .and_then(|results| results.iter().find(|result| result.name == *name))
+            {
+                return result.clone();
+            }
             if let Some((outside, run)) = &shared {
                 let result = match *name {
                     "user_namespace" | "pid_namespace" => Some(match run {
@@ -251,6 +304,27 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
             run_one_backend(name, jail_exe, bwrap)
         })
         .collect()
+}
+
+fn run_status_checks(
+    jail_exe: &Path,
+    bwrap: &Path,
+    readonly: bool,
+    with_seccomp: bool,
+) -> io::Result<SandboxRun> {
+    let source = readonly
+        .then(|| OwnedTempDir::new("probe-ro"))
+        .transpose()?;
+    let mut checks = vec!["status"];
+    let mut binds = Vec::new();
+    if let Some(source) = &source {
+        checks.push("ro=write:/probe-ro/probe.txt");
+        binds.push((source.path.clone(), PathBuf::from("/probe-ro")));
+    }
+    if with_seccomp {
+        checks.extend(["afunix=socket-afunix", "allowed=write:/tmp/probe.txt"]);
+    }
+    run_inside(jail_exe, bwrap, &checks, binds, with_seccomp)
 }
 
 // J5-D begin: probes that execute bubblewrap (review F1)
@@ -667,7 +741,16 @@ fn probe_readonly_bind(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         Ok(run) => run,
         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
     };
-    match run.captured.field("ro") {
+    readonly_bind_result(&run.captured)
+}
+
+fn readonly_bind_result(captured: &exec::Captured) -> ProbeResult {
+    const NAME: &str = "mount_readonly_bind";
+    const MECHANISM: &str = "bubblewrap-binds";
+    if captured.timed_out {
+        return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
+    }
+    match captured.field("ro") {
         Some("EROFS") => ProbeResult::new(
             NAME,
             ProbeStatus::Available,
@@ -685,7 +768,7 @@ fn probe_readonly_bind(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         None => ProbeResult::error(
             NAME,
             MECHANISM,
-            format!("sandbox reported nothing: {}", run.captured.stderr.trim()),
+            format!("sandbox reported nothing: {}", captured.stderr.trim()),
         ),
     }
 }
@@ -707,9 +790,18 @@ fn probe_seccomp(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         Ok(run) => run,
         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
     };
-    let mode = run.captured.field("seccomp").unwrap_or("?");
-    let denied = run.captured.field("afunix").unwrap_or("?");
-    let allowed = run.captured.field("allowed").unwrap_or("?");
+    seccomp_result(&run.captured)
+}
+
+fn seccomp_result(captured: &exec::Captured) -> ProbeResult {
+    const NAME: &str = "seccomp_filter_load";
+    const MECHANISM: &str = "seccomp-bpf";
+    if captured.timed_out {
+        return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
+    }
+    let mode = captured.field("seccomp").unwrap_or("?");
+    let denied = captured.field("afunix").unwrap_or("?");
+    let allowed = captured.field("allowed").unwrap_or("?");
     let digest = seccomp::tool_baseline()
         .map(|p| p.digest())
         .unwrap_or_else(|_| "unavailable".to_owned());
@@ -1597,9 +1689,13 @@ mod tests {
             network_namespace_result(&captured).status,
             ProbeStatus::Available
         );
-        captured.stdout = "ns_user=11\nns_pid=22\nnetdev=eth0,lo\n".into();
+        captured.stdout = "ns_user=11\nns_pid=22\nnetdev=eth0,lo\nro=ok\n".into();
         assert_eq!(
             network_namespace_result(&captured).status,
+            ProbeStatus::Unavailable
+        );
+        assert_eq!(
+            readonly_bind_result(&captured).status,
             ProbeStatus::Unavailable
         );
         captured.timed_out = true;
@@ -1611,6 +1707,7 @@ mod tests {
             network_namespace_result(&captured).status,
             ProbeStatus::Error
         );
+        assert_eq!(readonly_bind_result(&captured).status, ProbeStatus::Error);
         captured.timed_out = false;
         captured.stdout.clear();
         assert_eq!(
@@ -1632,7 +1729,7 @@ mod tests {
         std::fs::write(
             &backend,
             format!(
-                "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' ns_user=1 ns_pid=2 netdev=lo\n",
+                "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' ns_user=1 ns_pid=2 netdev=lo ro=EROFS\n",
                 calls.display()
             ),
         )
@@ -1653,6 +1750,81 @@ mod tests {
             |r| r.status == ProbeStatus::Unavailable && r.reason_code == "backend_unavailable"
         ));
         assert_eq!(std::fs::read(&calls).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn combined_filter_checks_fall_back_without_poisoning_other_capabilities() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let names = [
+            "user_namespace",
+            "pid_namespace",
+            "network_namespace",
+            "mount_readonly_bind",
+            "seccomp_filter_load",
+        ];
+        for fail_combination in [false, true] {
+            let temp = OwnedTempDir::new("combined-check-test").unwrap();
+            let backend = temp.path.join("bwrap");
+            let calls = temp.path.join("calls");
+            let failure = if fail_combination {
+                "case \"$*\" in *ro=write:*afunix=socket-afunix*) ro=EPERM;; esac\n"
+            } else {
+                ""
+            };
+            std::fs::write(
+                &backend,
+                format!(
+                    "#!/bin/sh\nprintf x >> '{}'\nro=EROFS\n{failure}printf '%s\\n' \
+                     ns_user=1 ns_pid=2 netdev=lo seccomp=2 afunix=EPERM allowed=ok ro=$ro\n",
+                    calls.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let results = run_selected(&names, Path::new("/unused-jail"), Ok(&backend));
+            assert_eq!(results.iter().map(|r| r.name).collect::<Vec<_>>(), names);
+            assert!(
+                results.iter().all(|r| r.status == ProbeStatus::Available),
+                "{results:?}"
+            );
+            assert_eq!(
+                std::fs::read(&calls).unwrap().len(),
+                if fail_combination { 4 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_setup_failure_does_not_poison_namespace_capabilities() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = OwnedTempDir::new("readonly-setup-fallback").unwrap();
+        let backend = temp.path.join("bwrap");
+        std::fs::write(
+            &backend,
+            "#!/bin/sh\ncase \"$*\" in *ro=write:*) exit 1;; esac\n\
+             printf '%s\\n' ns_user=1 ns_pid=2 netdev=lo seccomp=2 afunix=EPERM allowed=ok\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let names = [
+            "user_namespace",
+            "pid_namespace",
+            "network_namespace",
+            "mount_readonly_bind",
+            "seccomp_filter_load",
+        ];
+        let results = run_selected(&names, Path::new("/unused-jail"), Ok(&backend));
+        for result in results {
+            assert_eq!(
+                result.status,
+                if result.name == "mount_readonly_bind" {
+                    ProbeStatus::Error
+                } else {
+                    ProbeStatus::Available
+                },
+                "{result:?}"
+            );
+        }
     }
 
     #[test]

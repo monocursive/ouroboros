@@ -1,0 +1,9 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/bench-ouro-startup/src/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.79s
+     Running tests/linux_mechanisms.rs (target/debug/deps/linux_mechanisms-2bbd155009d9859d)
+
+running 1 test
+test ordinary_file_hints_keep_protected_file_identity_and_mutation_detection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+

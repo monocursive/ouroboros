@@ -1,0 +1,60 @@
+{
+  "j4_closed_set_linux": [
+    "j4_clone_untraced_refused_in_contained",
+    "j4_o01_every_variant_is_one_event_per_result_build",
+    "j4_o02_a_nested_pid_namespace_under_none_keeps_host_attribution",
+    "j4_o04_an_unrelated_host_process_is_never_observed",
+    "j4_o06_racing_pathname_is_only_a_literal_snapshot",
+    "j4_o06_renamed_cwd"
+  ],
+  "j5_boundary_linux": [
+    "f02_mount_replacement_of_a_protected_git_is_denied",
+    "n01_build_direct_egress_fails",
+    "n05_nested_sandbox_ipc_is_allowed",
+    "r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer",
+    "s02_a_host_namespace_fd_cannot_be_opened_or_entered",
+    "s02_no_cgroup_filesystem_is_reachable_in_the_child",
+    "s03_the_outer_boundaries_cannot_be_reversed_inside_agent",
+    "s04_agent_and_build_inherit_no_ring",
+    "s04_agent_and_build_refuse_every_io_uring_interface",
+    "x06_no_tracing_privilege_reaches_the_child"
+  ],
+  "j4_loss_linux": [
+    "j4_o03_a_class_never_returns_to_active_after_an_early_gap",
+    "j4_o03_exhaustion_through_the_product",
+    "j4_o03_unmatched_exit_is_unreachable",
+    "j4_o05_attach_failure_refuses_in_best_effort_none",
+    "j4_o05_attach_failure_refuses_in_best_effort_tool",
+    "j4_o05_denied_connect_counts_only_in_fs_deny_agent",
+    "j4_o05_denied_connect_counts_only_in_fs_deny_none",
+    "j4_o05_denied_connect_counts_only_in_fs_deny_tool",
+    "j4_o05_directory_operation_losses_degrade_fs_write",
+    "j4_observer_plan_is_recorded",
+    "j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none",
+    "j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool",
+    "j4_r04_a_call_in_flight_at_teardown_is_loss_none",
+    "j4_r04_a_call_in_flight_at_teardown_is_loss_tool",
+    "j4_r04_ptrace_loss_best_effort_none",
+    "j4_r04_ptrace_loss_best_effort_tool",
+    "j4_r04_ptrace_loss_strict_none",
+    "j4_r04_ptrace_loss_strict_tool",
+    "j4_w3_a_seam_set_twice_is_recorded_as_applied"
+  ],
+  "observer_j4_linux": [
+    "j4_d1_a_child_notification_listener_is_a_gap_in_every_class",
+    "j4_d1_a_child_trace_request_is_continued_not_mislabelled",
+    "j4_d1_exclusion_a_filter_that_refuses_a_call_is_not_a_gap",
+    "j4_d1_exclusion_holds_for_a_filter_installed_through_prctl",
+    "j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops",
+    "j4_d1_the_tool_baseline_refuses_a_notification_listener",
+    "j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap",
+    "j4_d2_none_a_foreign_abi_call_degrades_the_receipt",
+    "j4_d6_critical_facts_survive_a_full_lifecycle_backlog"
+  ],
+  "observer_regression_linux": [
+    "r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount"
+  ],
+  "review_linux": [
+    "r1_the_baseline_filter_denies_what_the_spec_lists"
+  ]
+}

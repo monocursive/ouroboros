@@ -1,0 +1,12 @@
+{
+  "reason": "Entire timing cohort excluded following recorded operator pause; baseline CPU preflight persistence failure retained separately. No model calls had started and no failed measured case is selectively retried.",
+  "owned_pids_signaled": [
+    597026,
+    597042,
+    606568,
+    606585,
+    606586,
+    606587
+  ],
+  "excluded_from_final_timing_comparison": true
+}

@@ -1,0 +1,26 @@
+{
+  "claude/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      77074.475407
+    ],
+    "median_ms": 77074.475407
+  },
+  "opencode/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      88996.593149
+    ],
+    "median_ms": 88996.593149
+  },
+  "codex/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      147778.782523
+    ],
+    "median_ms": 147778.782523
+  }
+}

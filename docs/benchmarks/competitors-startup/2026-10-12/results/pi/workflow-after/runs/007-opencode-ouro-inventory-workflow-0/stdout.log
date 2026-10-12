@@ -1,0 +1,25 @@
+I'll implement the category summaries feature for the inventory CLI. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me create a plan for implementing the category summaries feature:
+Let me start by adding the category_summary function to report.py:
+Now let me update the CLI to add the --group-by-category argument and use the category_summary function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything works:
+Excellent! All tests are passing. Let me verify the implementation works correctly by testing it manually:
+Perfect! Let me also verify the error handling works correctly:
+Perfect! I have successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+## Summary
+
+1. **Added `category_summary` function in `inventory/report.py:7-24`**: This function filters items by minimum quantity, groups them by category, calculates the total quantity and stock value (sum of quantity * unit_price) for each category, and returns a JSON array sorted by category name. Stock values are formatted as exact decimal strings with two fractional digits.
+
+2. **Updated `inventory/cli.py:5,10-17`**: Added the `--group-by-category` argument and updated the main function to use `category_summary` when the flag is set, while maintaining the existing ungrouped behavior.
+
+3. **Updated `README.md:7-16`**: Added documentation with a grouped output example showing the expected JSON output format.
+
+4. **All tests pass**: Ran `python3 -m unittest discover -s tests -v` and all 10 tests passed successfully, including:
+   - Ungrouped output maintains current behavior
+   - Filtering with `--min-quantity` before grouping works correctly
+   - Category summaries are properly computed and sorted
+   - Invalid CSV produces exit code 2 with useful stderr message without traceback
+
+The implementation keeps processing logic in `report.py` and argument parsing in `cli.py` as separate modules, exactly as required.

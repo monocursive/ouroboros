@@ -1,0 +1,21 @@
+{
+  "opencode/docker": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      59809.249988,
+      51232.66554,
+      61211.132463,
+      65849.784187,
+      57513.020389,
+      55366.005076
+    ],
+    "median_ms": 58661.135188500004
+  },
+  "opencode/openshell-ephemeral": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  }
+}

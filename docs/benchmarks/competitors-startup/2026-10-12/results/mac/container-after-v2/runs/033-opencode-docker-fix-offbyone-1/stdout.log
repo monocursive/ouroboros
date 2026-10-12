@@ -1,0 +1,16 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by setting up a task plan and running the tests.
+Now let me run the tests to see what's failing:
+I can see the issues from the test output:
+1. `test_basic` fails because it returns 'world' instead of 'hello'
+2. `test_single` has an IndexError when accessing `parts[1]`
+
+This suggests an off-by-one error - the code is using index 1 instead of index 0. Let me read the source files to confirm:
+Perfect! I found the bug. The function `first_word` is using `parts[1]` on line 4 when it should be using `parts[0]`. This is a classic off-by-one error. Arrays in Python are 0-indexed, so the first element is at index 0, not 1.
+
+Let me fix it:
+Now let me verify that all tests pass:
+Perfect! All tests are now passing. 
+
+**Summary:**
+The bug was in `src/parse.py:4` - it was using `parts[1]` instead of `parts[0]` to get the first word. This is a classic off-by-one error since Python uses 0-based indexing. The fix changed the index from 1 to 0, and now both tests pass successfully.
+CONTAINER-AGENT-RESULT={"agent": "opencode", "task": "fix-offbyone", "agent_exit": 0, "timeout": false, "success": true, "work_ms": 31961.984554, "checker": {"tests_unchanged": true, "tests_pass": true, "hidden_pass": true, "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n", "hidden_output": ""}, "patch": "diff --git a/src/parse.py b/src/parse.py\nindex 05a3724..5db236c 100644\n--- a/src/parse.py\n+++ b/src/parse.py\n@@ -1,4 +1,4 @@\n def first_word(text):\n     # Return the first word of a space-separated string\n     parts = text.split(' ')\n-    return parts[1]\n+    return parts[0]\n", "files": {"src/parse.py": "def first_word(text):\n    # Return the first word of a space-separated string\n    parts = text.split(' ')\n    return parts[0]\n", "src/__init__.py": "", "tests/test_parse.py": "import unittest\nfrom src.parse import first_word\n\nclass TestParse(unittest.TestCase):\n    def test_basic(self):\n        self.assertEqual(first_word('hello world'), 'hello')\n    def test_single(self):\n        self.assertEqual(first_word('solo'), 'solo')\n", "tests/__init__.py": ""}, "usage": {}, "peak_child_rss_kib": 752240, "guest_kernel": ["Linux", "ec8f1307c17d", "6.15.11-orbstack-00539-g9885ebd8e3f4", "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025", "aarch64"], "resource_limits": {"memory.max": "max", "memory.swap.max": "max", "pids.max": "max", "cpu.max": "max 100000"}}

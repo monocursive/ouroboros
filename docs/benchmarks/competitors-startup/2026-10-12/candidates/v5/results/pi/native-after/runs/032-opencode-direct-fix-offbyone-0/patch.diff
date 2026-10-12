@@ -1,0 +1,10 @@
+diff --git a/src/parse.py b/src/parse.py
+index 05a3724..5db236c 100644
+--- a/src/parse.py
++++ b/src/parse.py
+@@ -1,4 +1,4 @@
+ def first_word(text):
+     # Return the first word of a space-separated string
+     parts = text.split(' ')
+-    return parts[1]
++    return parts[0]

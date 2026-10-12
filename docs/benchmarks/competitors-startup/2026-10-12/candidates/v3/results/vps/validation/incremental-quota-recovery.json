@@ -1,0 +1,6 @@
+{
+  "removed_cache": "/dev/shm/ouro-startup-build/target/debug/incremental",
+  "files": 1178,
+  "bytes": 668035718,
+  "reason": "Incremental query caches exceed temporary build quota; Clippy and all 565 unit tests already pass, integration tests have not run."
+}

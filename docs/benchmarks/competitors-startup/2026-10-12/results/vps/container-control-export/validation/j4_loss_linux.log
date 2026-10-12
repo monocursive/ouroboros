@@ -1,0 +1,27 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 0.95s
+     Running tests/j4_loss_linux.rs (target/debug/deps/j4_loss_linux-163f639641561f55)
+
+running 19 tests
+test j4_o03_a_class_never_returns_to_active_after_an_early_gap ... ok
+test j4_o03_exhaustion_through_the_product ... ok
+test j4_o03_unmatched_exit_is_unreachable ... ok
+test j4_o05_attach_failure_refuses_in_best_effort_none ... ok
+test j4_o05_attach_failure_refuses_in_best_effort_tool ... ok
+test j4_o05_denied_connect_counts_only_in_fs_deny_agent ... ok
+test j4_o05_denied_connect_counts_only_in_fs_deny_none ... ok
+test j4_o05_denied_connect_counts_only_in_fs_deny_tool ... ok
+test j4_o05_directory_operation_losses_degrade_fs_write ... ok
+test j4_observer_plan_is_recorded ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_none ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_tool ... ok
+test j4_r04_ptrace_loss_best_effort_none ... ok
+test j4_r04_ptrace_loss_best_effort_tool ... ok
+test j4_r04_ptrace_loss_strict_none ... ok
+test j4_r04_ptrace_loss_strict_tool ... ok
+test j4_w3_a_seam_set_twice_is_recorded_as_applied ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.84s
+

@@ -1,0 +1,13 @@
+{
+  "reason": "Candidate version reuse is being removed to retain fresh backend-version evidence; this dataset is excluded from the final score",
+  "stopped": [
+    {
+      "pid": 3613721,
+      "kind": "owned isolated child group"
+    },
+    {
+      "pid": 3609279,
+      "kind": "native pilot runner"
+    }
+  ]
+}

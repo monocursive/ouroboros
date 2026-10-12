@@ -1,0 +1,13 @@
+I'll help you fix the failing tests. Let me start by creating a plan and then running the tests to see what's failing.
+Perfect! I can see the bug now. The issue is an off-by-one error in src/parse.py:4. The function is returning `parts[1]` (the second element) instead of `parts[0]` (the first element).
+
+The tests show:
+1. `test_basic`: expects 'hello' from 'hello world' but gets 'world' (because it's accessing index 1 instead of 0)
+2. `test_single`: expects 'solo' from 'solo' but gets an IndexError (because there's only one element at index 0, no index 1)
+Perfect! All tests are now passing. 
+
+The bug was an off-by-one error in src/parse.py:4. The function was returning `parts[1]` (the second element) instead of `parts[0]` (the first element). This caused:
+- `test_basic` to fail because it returned 'world' instead of 'hello'
+- `test_single` to crash with an IndexError because there was no second element
+
+I've fixed it by changing the index from 1 to 0, and both tests now pass successfully.

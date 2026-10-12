@@ -1,0 +1,111 @@
+diff --git a/README.md b/README.md
+index 06a1174..23fff62 100644
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,20 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group inventory by category (sorted by category):
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]
++```
++
++Combine with `--min-quantity 3` to filter individual items before grouping.
++This excludes the notebook, so the office quantity becomes `10` and its
++stock value becomes `"1.00"`. Stock values use exact decimal arithmetic and
++are formatted as strings with two fractional digits.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2..9d47505 100644
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -1,18 +1,22 @@
+ import argparse
++import csv
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true',
++                        help='Summarize quantity and stock value by category')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
+-    except (ValueError, OSError) as exc:
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
++    except (ValueError, OSError, csv.Error) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+     print(json.dumps(result, ensure_ascii=False))
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7..33e3ff2 100644
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,12 +5,14 @@ from .models import Item
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+         if not required.issubset(reader.fieldnames or []):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+         for line, row in enumerate(reader, 2):
+             try:
++                if None in row or any(row[field] is None for field in required):
++                    raise ValueError('missing or extra CSV fields')
+                 quantity = int(row['quantity'])
+                 price = Decimal(row['unit_price'])
+                 if quantity < 0 or price < 0 or not price.is_finite():
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803f..9c4e91c 100644
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,31 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to retain all digits, including cents,
++    # even when input prices exceed the default Decimal precision.
++    lowest_exponent = min(-2, *(item.unit_price.as_tuple().exponent for item in items))
++    highest_digit = max(item.unit_price.adjusted() + len(str(item.quantity))
++                        for item in items)
++    precision = max(28, highest_digit - lowest_exponent + len(str(len(items))) + 2)
++    categories = {}
++    with localcontext() as context:
++        context.prec = precision
++        for item in items:
++            summary = categories.setdefault(item.category, {
++                'category': item.category, 'quantity': 0, 'stock_value': Decimal(0)})
++            summary['quantity'] += item.quantity
++            summary['stock_value'] += item.quantity * item.unit_price
++        return [dict(categories[category],
++                     stock_value=format(categories[category]['stock_value'], '.2f'))
++                for category in sorted(categories)]

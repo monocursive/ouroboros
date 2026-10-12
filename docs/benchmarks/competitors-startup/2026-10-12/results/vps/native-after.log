@@ -1,0 +1,19 @@
+3/72 claude ouro add-multiply #0 20.0s exit=0 success=True
+6/72 claude ouro refactor-yaml-json #0 24.4s exit=0 success=True
+9/72 claude ouro fix-offbyone #0 19.1s exit=0 success=True
+16/72 claude ouro add-multiply #1 18.3s exit=0 success=True
+17/72 claude ouro fix-offbyone #1 21.9s exit=0 success=True
+24/72 claude ouro refactor-yaml-json #1 23.6s exit=0 success=True
+26/72 opencode ouro refactor-yaml-json #0 29.9s exit=0 success=True
+30/72 opencode ouro fix-offbyone #0 28.8s exit=0 success=True
+34/72 opencode ouro add-multiply #0 24.0s exit=0 success=True
+38/72 opencode ouro fix-offbyone #1 36.6s exit=0 success=True
+41/72 opencode ouro add-multiply #1 24.8s exit=0 success=True
+46/72 opencode ouro refactor-yaml-json #1 28.6s exit=0 success=True
+51/72 codex ouro add-multiply #0 28.9s exit=0 success=True
+53/72 codex ouro refactor-yaml-json #0 23.8s exit=0 success=True
+57/72 codex ouro fix-offbyone #0 31.9s exit=0 success=True
+62/72 codex ouro fix-offbyone #1 23.8s exit=0 success=True
+67/72 codex ouro refactor-yaml-json #1 30.7s exit=0 success=True
+70/72 codex ouro add-multiply #1 27.5s exit=0 success=True
+COMPLETE

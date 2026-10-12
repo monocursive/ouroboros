@@ -1,0 +1,38 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase to understand the current structure.
+Now I understand the structure. Let me create a plan for this task:
+First, let me add the category summary function to report.py:
+Now let me update the CLI to add the --group-by-category flag and use the category_summary function:
+Now let me update the README.md with the grouped example:
+Now let me run the tests to see if everything works:
+Excellent! All tests pass. Let me verify the implementation by testing it manually:
+Perfect! Let me also test the error handling with invalid CSV:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's a summary of what was done:
+
+## Changes Made
+
+1. **Added `category_summary` function to `inventory/report.py`** (inventory/report.py:8-28):
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and sums quantities
+   - Calculates stock_value as sum of (quantity × unit_price) with exact Decimal arithmetic
+   - Formats stock_value as a string with exactly 2 decimal places
+   - Returns JSON array sorted alphabetically by category
+
+2. **Updated `inventory/cli.py`** (inventory/cli.py:5,11,14-17):
+   - Added `--group-by-category` flag
+   - Imported `category_summary` function
+   - Conditionally uses `category_summary` when flag is set, otherwise uses existing `item_report`
+   - Maintains existing error handling (exit code 2 for invalid CSV with useful stderr message)
+
+3. **Updated README.md** with grouped example and expected output
+
+## Verification
+
+All tests pass successfully:
+- ✅ Ungrouped output maintains current behavior
+- ✅ Category summaries work correctly (kitchen: qty 3, value $12.75; office: qty 12, value $6.00)
+- ✅ `--min-quantity` filter is applied before grouping
+- ✅ Invalid CSV produces exit code 2 with useful error message (no traceback)
+- ✅ All existing loader tests pass
+- ✅ Processing logic is in `report.py`, argument parsing is in `cli.py` (separate modules)
+
+The implementation uses exact Decimal arithmetic throughout and formats stock values as JSON strings with exactly 2 decimal places as required.

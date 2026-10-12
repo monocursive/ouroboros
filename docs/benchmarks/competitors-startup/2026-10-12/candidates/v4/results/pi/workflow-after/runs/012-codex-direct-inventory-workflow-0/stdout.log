@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted categories, summed quantities, and exact decimal stock values formatted as two-digit strings.
+
+Processing remains separate from argument parsing. Ungrouped output is preserved, invalid CSV exits with code 2 without a traceback, and README includes a grouped example.
+
+All 10 supplied tests pass. Tests were unchanged.

@@ -1,0 +1,20 @@
+[
+  {
+    "host": "vps",
+    "kind": "container controls reused unchanged",
+    "source_root": "results/vps/container-control-export",
+    "archive": "archives/vps-candidate-v4-evidence.tar.gz",
+    "archive_sha256": "4eadf4223296429fe1adcbca5e98c686a106b9e3bc7c078966909d811a869da9",
+    "contains_superseded_native_data": true,
+    "superseded_native_selection": false
+  },
+  {
+    "host": "pi",
+    "kind": "container controls reused unchanged",
+    "source_root": "results/pi/container-control-export",
+    "archive": "archives/pi-candidate-v4-evidence.tar.gz",
+    "archive_sha256": "3e5981742bc6b07dac51cfdd5f2682c4e9d26d2b4a68859e0d5f164f241d90df",
+    "contains_superseded_native_data": true,
+    "superseded_native_selection": false
+  }
+]

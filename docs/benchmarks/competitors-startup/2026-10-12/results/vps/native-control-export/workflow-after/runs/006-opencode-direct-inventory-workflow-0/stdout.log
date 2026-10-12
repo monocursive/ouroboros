@@ -1,0 +1,38 @@
+I'll implement category summaries in the inventory CLI with the specified requirements. Let me start by exploring the codebase structure and then planning the implementation.
+Now I'll implement the category summaries feature. Let me start by creating the category_summary function in report.py:
+Excellent! All tests pass. Let me verify the implementation by running the CLI with the example data to ensure it works as expected:
+Perfect! All the features are working correctly. Let me verify the final implementation by checking the key files:
+Perfect! I have successfully implemented the category summaries feature for the inventory CLI. Here's a summary of what was accomplished:
+
+## Implementation Summary
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary` function (lines 8-30):
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and computes totals
+   - Returns JSON array sorted by category name
+   - Each object contains: `category` (string), `quantity` (sum of quantities), and `stock_value` (sum of quantity * unit_price formatted as a two-decimal string)
+   - Uses `Decimal` for exact arithmetic
+
+2. **inventory/cli.py** - Added `--group-by-category` flag (line 11):
+   - Imports the new `category_summary` function
+   - Adds boolean flag to argument parser
+   - Routes to appropriate report function based on flag
+   - Maintains existing ungrouped behavior when flag is not present
+
+3. **README.md** - Added documentation with example:
+   - Shows how to use `--group-by-category`
+   - Includes expected output
+   - Notes that `--min-quantity` is applied before grouping
+
+### Features Verified:
+
+- Ungrouped output preserves current behavior
+- `--group-by-category` produces sorted JSON array with category summaries
+- `--min-quantity` filtering applied before grouping
+- Invalid CSV produces exit code 2 with useful stderr message (no traceback)
+- Processing logic in report.py, argument parsing in cli.py (separate modules)
+- All 10 tests pass including the supplied tests (unchanged)
+
+The implementation correctly handles decimal precision using Python's `Decimal` type and formats stock values with exactly two fractional digits as JSON strings.

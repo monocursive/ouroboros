@@ -1,0 +1,8 @@
+{
+  "excluded_from_final_timing": true,
+  "reason": "Recorded operator SIGSTOP/SIGCONT can contaminate in-flight sample. Entire timing cohort excluded; all raw rows retained. Baseline CPU preflight persistence failure remains reported.",
+  "measurement_rows_retained": 123,
+  "replacement": "Entire seeded timing protocol in fresh perf-after directory, identical binaries/settings; no selective case retry.",
+  "host_settings_changed": false,
+  "observer_settings_changed": false
+}

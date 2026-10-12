@@ -1,0 +1,56 @@
+[
+  {
+    "tool": "direct",
+    "variant": "truncate",
+    "n": 6,
+    "wall_median_ms": 877.8675405,
+    "open_median_ms": 31.3401195,
+    "write_median_ms": 14.31203,
+    "close_median_ms": 821.9905475
+  },
+  {
+    "tool": "direct",
+    "variant": "overwrite",
+    "n": 6,
+    "wall_median_ms": 14.933508,
+    "open_median_ms": 4.0264755,
+    "write_median_ms": 6.470041500000001,
+    "close_median_ms": 1.605741
+  },
+  {
+    "tool": "direct",
+    "variant": "fresh",
+    "n": 6,
+    "wall_median_ms": 62.294135,
+    "open_median_ms": 43.099719,
+    "write_median_ms": 13.862102,
+    "close_median_ms": 2.149192
+  },
+  {
+    "tool": "ouro-jail",
+    "variant": "truncate",
+    "n": 6,
+    "wall_median_ms": 1155.2418605,
+    "open_median_ms": 121.266692,
+    "write_median_ms": 15.69486,
+    "close_median_ms": 681.934236
+  },
+  {
+    "tool": "ouro-jail",
+    "variant": "overwrite",
+    "n": 6,
+    "wall_median_ms": 351.1815615,
+    "open_median_ms": 77.14173249999999,
+    "write_median_ms": 11.695432499999999,
+    "close_median_ms": 2.1893089999999997
+  },
+  {
+    "tool": "ouro-jail",
+    "variant": "fresh",
+    "n": 6,
+    "wall_median_ms": 395.2767585,
+    "open_median_ms": 123.8533095,
+    "write_median_ms": 15.536814,
+    "close_median_ms": 2.6258955
+  }
+]

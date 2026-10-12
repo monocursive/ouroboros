@@ -1,0 +1,49 @@
+{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "/home/ubuntu/bench-ouro-startup-final/bin/opencode run --dir /home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/workspace/fix-offbyone --model anthropic/claude-sonnet-4-5 'The tests are failing. Run python3 -m unittest discover -s tests -v, find the bug in src/parse.py, and fix it so all tests pass. Do not modify the tests.'",
+    "cwd": "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/workspace/fix-offbyone",
+    "timeout": 240000,
+    "inheritDefaultEnv": true,
+    "env": [
+      "HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home",
+      "PATH=/home/ubuntu/bench-ouro-startup-final/bin:/home/ubuntu/bench-ouro-startup-final/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/sbin:/sbin",
+      "TMPDIR=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/tmp",
+      "ANTHROPIC_API_KEY=<ANTHROPIC_API_KEY>",
+      "CODEX_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/state",
+      "CLAUDE_CONFIG_DIR=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/.claude",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "DISABLE_TELEMETRY=1",
+      "OPENCODE_DISABLE_AUTOUPDATE=true",
+      "XDG_CONFIG_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/.config",
+      "XDG_DATA_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/.local/share",
+      "XDG_STATE_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/.local/state",
+      "XDG_CACHE_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/.cache",
+      "NODE_EXTRA_CA_CERTS=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/proxy-ca.pem",
+      "SSL_CERT_FILE=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/proxy-ca.pem",
+      "REQUESTS_CA_BUNDLE=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home/proxy-ca.pem",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_CONFIG_GLOBAL=/dev/null"
+    ]
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/home/ubuntu/.opencode/bin",
+      "/home/ubuntu/bench-ouro-startup-final/bin"
+    ],
+    "readwritePaths": [
+      "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/workspace/fix-offbyone",
+      "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/home",
+      "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/037-opencode-mxc-fix-offbyone-1/state"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43051"
+  }
+}

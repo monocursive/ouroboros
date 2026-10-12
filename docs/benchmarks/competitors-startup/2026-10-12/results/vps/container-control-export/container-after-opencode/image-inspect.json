@@ -1,0 +1,57 @@
+[
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "/bin/sleep",
+                "infinity"
+            ],
+            "Env": [
+                "PATH=/opt/agents/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "HOME=/home/agent"
+            ],
+            "Labels": {
+                "org.opencontainers.image.version": "24.04"
+            },
+            "User": "1000:1000",
+            "WorkingDir": "/work"
+        },
+        "Created": "2026-10-12T10:52:22.627187811Z",
+        "Descriptor": {
+            "digest": "sha256:fd15ab7f63be09e50e7f3a678e65d5945ee5df6c3d5b30b54ef5ab9cc54b9e75",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 3142
+        },
+        "Id": "sha256:fd15ab7f63be09e50e7f3a678e65d5945ee5df6c3d5b30b54ef5ab9cc54b9e75",
+        "Metadata": {
+            "LastTagTime": "2026-10-12T10:52:22.706690037Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:0cfa15372efe5b5888ac5bc417101057c613d50f9d746ba2ab33143134964465",
+        "RepoDigests": [
+            "ouro-comparison-opencode-startup@sha256:fd15ab7f63be09e50e7f3a678e65d5945ee5df6c3d5b30b54ef5ab9cc54b9e75"
+        ],
+        "RepoTags": [
+            "ouro-comparison-opencode-startup:20261012"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:d81fb2a7c6ee3be05fdefaa7fd223be219c1ab172083ec1b994c3ecda33ac0a8",
+                "sha256:26cec2ae79daedfd6c9a06e435403a04ec25bc8c469c84c7d43e57b962b086b5",
+                "sha256:e2e0cca81fc79c4637017923b47b1a02bc95ef6ee1d904ba410acfdbdfb171c3",
+                "sha256:9e80b40998bc65075e0334af0c2ab03d3c7dc0baef43d5a5a1d7f7696f9ea5e0",
+                "sha256:5edc45ffdd19e2b5c2e0ccfa904151b0c060cf08bd9bd5f4c183a16d86b81843",
+                "sha256:0a880dae75192d4d3b4ada68fbebc607b921372bcdaca8d76febf511571c83c7",
+                "sha256:0f7c3aae8082e5b429361c2a2455085ef15c3f648630c2a5fed33112c17f7947",
+                "sha256:8557a48daef956639ebaf384c0b8456e17a149dd403d1f30252df9db3eef68f9",
+                "sha256:9a78c0656971fe918dd010b51784dcb18a4c05866c5a03d88893736a3246c4d5",
+                "sha256:7a48b4d99e2ae925847159ad808f2da33f32129a1b01467f767a2997c3de6073",
+                "sha256:ed28976a57a777700006a2a362183aced20cb3ac2fae0d91c0bdbe87e6bc5126",
+                "sha256:d0dfe914070b449281479ae89048e1e0a19b1c8868b7646e21f2729ee88069d4",
+                "sha256:db2de385190db5e38851016ac98ca7518ae1195aba002fc5d014b42fed05e26d"
+            ],
+            "Type": "layers"
+        },
+        "Size": 204061160
+    }
+]

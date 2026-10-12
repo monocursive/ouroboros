@@ -1,0 +1,11 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task plan and running the tests.
+Now let me read the source file and the test file to understand what's expected:
+Perfect! I can see the bug now. The issue is a classic off-by-one error in src/parse.py:4. The function is returning `parts[1]` (the second element) when it should return `parts[0]` (the first element).
+
+This explains both test failures:
+- `first_word('hello world')` returns 'world' instead of 'hello' (index 1 instead of 0)
+- `first_word('solo')` causes an IndexError because there's only one element at index 0
+Perfect! All tests are now passing. The bug was an off-by-one error in src/parse.py:4 where the function was returning `parts[1]` instead of `parts[0]`. Since Python uses zero-based indexing, the first element of the list is at index 0, not index 1. This fix resolves both test failures:
+
+- `test_basic` now correctly returns 'hello' (the first word) instead of 'world'
+- `test_single` no longer crashes with an IndexError when there's only one word

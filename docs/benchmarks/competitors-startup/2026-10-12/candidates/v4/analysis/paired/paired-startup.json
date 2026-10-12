@@ -1,0 +1,1799 @@
+{
+  "schema": "ouro-paired-comparison/1",
+  "comparisons": [
+    {
+      "host": "vps",
+      "case": "noop",
+      "n_pairs": 30,
+      "old_median_ms": 108.9160755,
+      "after_median_ms": 88.123029,
+      "old_p95_ms": 119.812443,
+      "after_p95_ms": 99.920508,
+      "paired_median_delta_ms": -19.611323499999997,
+      "paired_delta_ci95_low_ms": -24.130576000000005,
+      "paired_delta_ci95_high_ms": -15.848185000000008,
+      "paired_median_reduction_percent": 17.73181183146488,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "vps/perf-after/launches.ndjson",
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb"
+    },
+    {
+      "host": "vps",
+      "case": "python",
+      "n_pairs": 30,
+      "old_median_ms": 145.75203649999997,
+      "after_median_ms": 123.489689,
+      "old_p95_ms": 162.397259,
+      "after_p95_ms": 142.611425,
+      "paired_median_delta_ms": -22.493756999999988,
+      "paired_delta_ci95_low_ms": -24.955037999999995,
+      "paired_delta_ci95_high_ms": -16.814767499999988,
+      "paired_median_reduction_percent": 15.219676716485885,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "vps/perf-after/launches.ndjson",
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb"
+    },
+    {
+      "host": "vps",
+      "case": "git",
+      "n_pairs": 30,
+      "old_median_ms": 150.1486305,
+      "after_median_ms": 135.89196149999998,
+      "old_p95_ms": 173.289397,
+      "after_p95_ms": 150.907246,
+      "paired_median_delta_ms": -12.744412499999981,
+      "paired_delta_ci95_low_ms": -24.1184565,
+      "paired_delta_ci95_high_ms": -7.298520999999994,
+      "paired_median_reduction_percent": 8.601694470772648,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "vps/perf-after/launches.ndjson",
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb"
+    },
+    {
+      "host": "vps",
+      "case": "reads",
+      "n_pairs": 30,
+      "old_median_ms": 115.1829875,
+      "after_median_ms": 91.9980355,
+      "old_p95_ms": 129.33717,
+      "after_p95_ms": 106.529395,
+      "paired_median_delta_ms": -21.898064000000005,
+      "paired_delta_ci95_low_ms": -24.705679000000003,
+      "paired_delta_ci95_high_ms": -16.855326499999997,
+      "paired_median_reduction_percent": 19.1580852600463,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "vps/perf-after/launches.ndjson",
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb"
+    },
+    {
+      "host": "vps",
+      "case": "writes",
+      "n_pairs": 30,
+      "old_median_ms": 240.63512550000002,
+      "after_median_ms": 224.604579,
+      "old_p95_ms": 267.891184,
+      "after_p95_ms": 251.509083,
+      "paired_median_delta_ms": -15.9926155,
+      "paired_delta_ci95_low_ms": -28.507666,
+      "paired_delta_ci95_high_ms": -10.382577499999996,
+      "paired_median_reduction_percent": 6.444027942999786,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "vps/perf-after/launches.ndjson",
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb"
+    },
+    {
+      "host": "vps",
+      "case": "spawn",
+      "n_pairs": 30,
+      "old_median_ms": 212.773611,
+      "after_median_ms": 192.7983175,
+      "old_p95_ms": 248.356749,
+      "after_p95_ms": 224.650015,
+      "paired_median_delta_ms": -19.447124500000015,
+      "paired_delta_ci95_low_ms": -25.80656049999999,
+      "paired_delta_ci95_high_ms": -11.695784500000002,
+      "paired_median_reduction_percent": 9.208151208164727,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "vps/perf-after/launches.ndjson",
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb"
+    },
+    {
+      "host": "vps",
+      "case": "cpu",
+      "n_pairs": 30,
+      "old_median_ms": 132.2666575,
+      "after_median_ms": 113.8121555,
+      "old_p95_ms": 156.718228,
+      "after_p95_ms": 129.247666,
+      "paired_median_delta_ms": -21.229211,
+      "paired_delta_ci95_low_ms": -26.461273499999997,
+      "paired_delta_ci95_high_ms": -15.177971,
+      "paired_median_reduction_percent": 15.508387325692352,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "vps/perf-after/launches.ndjson",
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb"
+    },
+    {
+      "host": "pi",
+      "case": "noop",
+      "n_pairs": 30,
+      "old_median_ms": 278.994371,
+      "after_median_ms": 234.187373,
+      "old_p95_ms": 324.723688,
+      "after_p95_ms": 314.482893,
+      "paired_median_delta_ms": -50.48365899999999,
+      "paired_delta_ci95_low_ms": -57.084993999999995,
+      "paired_delta_ci95_high_ms": -41.183689,
+      "paired_median_reduction_percent": 17.263242238901512,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "pi/perf-after/launches.ndjson",
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327"
+    },
+    {
+      "host": "pi",
+      "case": "python",
+      "n_pairs": 30,
+      "old_median_ms": 420.22581,
+      "after_median_ms": 373.912786,
+      "old_p95_ms": 591.029591,
+      "after_p95_ms": 451.546704,
+      "paired_median_delta_ms": -54.66781900000001,
+      "paired_delta_ci95_low_ms": -60.51446950000002,
+      "paired_delta_ci95_high_ms": -37.737254500000006,
+      "paired_median_reduction_percent": 12.803590409525956,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "pi/perf-after/launches.ndjson",
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327"
+    },
+    {
+      "host": "pi",
+      "case": "git",
+      "n_pairs": 30,
+      "old_median_ms": 427.1868365,
+      "after_median_ms": 390.30841999999996,
+      "old_p95_ms": 459.298217,
+      "after_p95_ms": 475.843896,
+      "paired_median_delta_ms": -41.906060999999994,
+      "paired_delta_ci95_low_ms": -51.41981750000002,
+      "paired_delta_ci95_high_ms": -35.34643600000004,
+      "paired_median_reduction_percent": 9.858538560791619,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "pi/perf-after/launches.ndjson",
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327"
+    },
+    {
+      "host": "pi",
+      "case": "reads",
+      "n_pairs": 30,
+      "old_median_ms": 292.068659,
+      "after_median_ms": 241.462892,
+      "old_p95_ms": 375.666066,
+      "after_p95_ms": 329.877786,
+      "paired_median_delta_ms": -51.508719,
+      "paired_delta_ci95_low_ms": -57.67448700000003,
+      "paired_delta_ci95_high_ms": -44.586481000000006,
+      "paired_median_reduction_percent": 17.140991391800895,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "pi/perf-after/launches.ndjson",
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327"
+    },
+    {
+      "host": "pi",
+      "case": "writes",
+      "n_pairs": 30,
+      "old_median_ms": 808.4954809999999,
+      "after_median_ms": 531.928369,
+      "old_p95_ms": 1413.387649,
+      "after_p95_ms": 1133.832976,
+      "paired_median_delta_ms": -144.76291350000002,
+      "paired_delta_ci95_low_ms": -407.209118,
+      "paired_delta_ci95_high_ms": -18.107545499999958,
+      "paired_median_reduction_percent": 20.98422925870831,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "pi/perf-after/launches.ndjson",
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327"
+    },
+    {
+      "host": "pi",
+      "case": "spawn",
+      "n_pairs": 30,
+      "old_median_ms": 478.2574065,
+      "after_median_ms": 442.7088585,
+      "old_p95_ms": 618.59333,
+      "after_p95_ms": 567.381583,
+      "paired_median_delta_ms": -27.609340500000002,
+      "paired_delta_ci95_low_ms": -42.520062499999995,
+      "paired_delta_ci95_high_ms": -22.50270950000001,
+      "paired_median_reduction_percent": 5.86248115459318,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "pi/perf-after/launches.ndjson",
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327"
+    },
+    {
+      "host": "pi",
+      "case": "cpu",
+      "n_pairs": 30,
+      "old_median_ms": 361.49141050000003,
+      "after_median_ms": 315.887411,
+      "old_p95_ms": 473.858802,
+      "after_p95_ms": 411.274294,
+      "paired_median_delta_ms": -47.25159400000001,
+      "paired_delta_ci95_low_ms": -54.29166950000001,
+      "paired_delta_ci95_high_ms": -36.71047600000003,
+      "paired_median_reduction_percent": 13.062005330728443,
+      "policy_digests_equal": true,
+      "strict_observation_and_containment_verified": true,
+      "source": "pi/perf-after/launches.ndjson",
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327"
+    }
+  ],
+  "validation": {
+    "vps": {
+      "source_sha256": "97e071ed5f543e4a36ea5297961605ace81d012df1c40cedd961d46ab7aa7bdb",
+      "rows": 1430,
+      "table": {
+        "direct/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 25.253958,
+            "p95_nearest_rank": 28.346759,
+            "min": 24.628572,
+            "max": 28.650463
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.1805165,
+            "p95_nearest_rank": 27.024274,
+            "min": 23.613972,
+            "max": 27.421348
+          }
+        },
+        "direct/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 41.5178225,
+            "p95_nearest_rank": 48.697889,
+            "min": 37.569731,
+            "max": 50.738585
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 3.773747,
+            "p95_nearest_rank": 4.421422,
+            "min": 3.145094,
+            "max": 4.628357
+          }
+        },
+        "direct/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1.0357385,
+            "p95_nearest_rank": 1.438457,
+            "min": 0.719781,
+            "max": 2.148141
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.00018,
+            "p95_nearest_rank": 0.000299,
+            "min": 0.00016,
+            "max": 0.000301
+          }
+        },
+        "direct/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 37.7049145,
+            "p95_nearest_rank": 44.886222,
+            "min": 32.941835,
+            "max": 45.630061
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0012044999999999998,
+            "p95_nearest_rank": 0.00177,
+            "min": 0.00097,
+            "max": 0.00179
+          }
+        },
+        "direct/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 5.486587,
+            "p95_nearest_rank": 6.871236,
+            "min": 4.978081,
+            "max": 8.047309
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 4.5102905,
+            "p95_nearest_rank": 5.74088,
+            "min": 4.092309,
+            "max": 6.52518
+          }
+        },
+        "direct/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 71.2825825,
+            "p95_nearest_rank": 78.566091,
+            "min": 64.700887,
+            "max": 78.970002
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 69.8475565,
+            "p95_nearest_rank": 77.264381,
+            "min": 63.621434,
+            "max": 78.0674
+          }
+        },
+        "direct/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 65.32821799999999,
+            "p95_nearest_rank": 93.193336,
+            "min": 57.699001,
+            "max": 94.190149
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 64.221964,
+            "p95_nearest_rank": 92.053343,
+            "min": 56.578209,
+            "max": 92.804872
+          }
+        },
+        "greywall/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1592.044284,
+            "p95_nearest_rank": 1631.250641,
+            "min": 1564.488021,
+            "max": 1653.275513
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.1243635,
+            "p95_nearest_rank": 24.558462,
+            "min": 23.66907,
+            "max": 25.803018
+          }
+        },
+        "greywall/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1608.7324385000002,
+            "p95_nearest_rank": 1655.155555,
+            "min": 1565.049289,
+            "max": 1759.413247
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 4.129156,
+            "p95_nearest_rank": 5.256645,
+            "min": 3.692266,
+            "max": 5.524618
+          }
+        },
+        "greywall/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1567.155614,
+            "p95_nearest_rank": 1639.794907,
+            "min": 1512.154451,
+            "max": 1666.84123
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0001795,
+            "p95_nearest_rank": 0.00026,
+            "min": 0.00016,
+            "max": 0.0003
+          }
+        },
+        "greywall/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1595.1685825,
+            "p95_nearest_rank": 1664.583451,
+            "min": 1558.80969,
+            "max": 1682.248869
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0012850000000000001,
+            "p95_nearest_rank": 0.002709,
+            "min": 0.00106,
+            "max": 0.00272
+          }
+        },
+        "greywall/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1568.22557,
+            "p95_nearest_rank": 1644.755095,
+            "min": 1517.970487,
+            "max": 1657.667677
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 5.2953205,
+            "p95_nearest_rank": 6.39925,
+            "min": 4.927991,
+            "max": 7.181488
+          }
+        },
+        "greywall/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1638.9433195000001,
+            "p95_nearest_rank": 1684.405924,
+            "min": 1610.514387,
+            "max": 1691.781427
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 71.89415550000001,
+            "p95_nearest_rank": 78.822903,
+            "min": 67.48069,
+            "max": 79.035827
+          }
+        },
+        "greywall/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1623.172781,
+            "p95_nearest_rank": 1683.046369,
+            "min": 1572.470154,
+            "max": 1698.70054
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 65.9493315,
+            "p95_nearest_rank": 100.152443,
+            "min": 53.877753,
+            "max": 110.64515
+          }
+        },
+        "mxc/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 67.525531,
+            "p95_nearest_rank": 68.317226,
+            "min": 35.329886,
+            "max": 68.583709
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.052556000000003,
+            "p95_nearest_rank": 24.585008,
+            "min": 23.548161,
+            "max": 24.640968
+          }
+        },
+        "mxc/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 68.17321100000001,
+            "p95_nearest_rank": 69.243102,
+            "min": 67.38948,
+            "max": 70.313394
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 3.888428,
+            "p95_nearest_rank": 4.543115,
+            "min": 3.441482,
+            "max": 4.747547
+          }
+        },
+        "mxc/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 19.432924,
+            "p95_nearest_rank": 22.165873,
+            "min": 11.471532,
+            "max": 22.209443
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.00018,
+            "p95_nearest_rank": 0.00029,
+            "min": 0.000151,
+            "max": 0.000339
+          }
+        },
+        "mxc/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 68.422156,
+            "p95_nearest_rank": 69.585626,
+            "min": 67.363678,
+            "max": 71.683452
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.001179,
+            "p95_nearest_rank": 0.00166,
+            "min": 0.001,
+            "max": 0.00172
+          }
+        },
+        "mxc/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 19.8425825,
+            "p95_nearest_rank": 21.385853,
+            "min": 19.099965,
+            "max": 23.152455
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 4.405189,
+            "p95_nearest_rank": 5.237154,
+            "min": 4.121137,
+            "max": 5.605469
+          }
+        },
+        "mxc/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 118.4999905,
+            "p95_nearest_rank": 121.021678,
+            "min": 117.635437,
+            "max": 121.186272
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 70.539222,
+            "p95_nearest_rank": 77.526965,
+            "min": 62.542039,
+            "max": 83.004812
+          }
+        },
+        "mxc/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 118.46350050000001,
+            "p95_nearest_rank": 120.753007,
+            "min": 117.469665,
+            "max": 121.715719
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 63.587627499999996,
+            "p95_nearest_rank": 79.897908,
+            "min": 57.214024,
+            "max": 81.636334
+          }
+        },
+        "ouro-before/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 132.2666575,
+            "p95_nearest_rank": 156.718228,
+            "min": 120.35782,
+            "max": 160.265524
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.275784,
+            "p95_nearest_rank": 25.403143,
+            "min": 23.707912,
+            "max": 25.620012
+          }
+        },
+        "ouro-before/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 150.1486305,
+            "p95_nearest_rank": 173.289397,
+            "min": 135.95568,
+            "max": 175.189467
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 5.108437,
+            "p95_nearest_rank": 6.157625,
+            "min": 4.598025,
+            "max": 6.433269
+          }
+        },
+        "ouro-before/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 108.9160755,
+            "p95_nearest_rank": 119.812443,
+            "min": 99.772158,
+            "max": 133.298721
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.00021,
+            "p95_nearest_rank": 0.00032,
+            "min": 0.00016,
+            "max": 0.00034
+          }
+        },
+        "ouro-before/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 145.75203649999997,
+            "p95_nearest_rank": 162.397259,
+            "min": 132.284219,
+            "max": 167.198602
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.00115,
+            "p95_nearest_rank": 0.00172,
+            "min": 0.000981,
+            "max": 0.00186
+          }
+        },
+        "ouro-before/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 115.1829875,
+            "p95_nearest_rank": 129.33717,
+            "min": 94.555903,
+            "max": 130.542547
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 4.835158,
+            "p95_nearest_rank": 5.567438,
+            "min": 4.378923,
+            "max": 5.968154
+          }
+        },
+        "ouro-before/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 212.773611,
+            "p95_nearest_rank": 248.356749,
+            "min": 198.167118,
+            "max": 258.38192
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 104.6280725,
+            "p95_nearest_rank": 118.053678,
+            "min": 98.891097,
+            "max": 133.469072
+          }
+        },
+        "ouro-before/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 240.63512550000002,
+            "p95_nearest_rank": 267.891184,
+            "min": 224.743865,
+            "max": 268.416553
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 130.976711,
+            "p95_nearest_rank": 147.525814,
+            "min": 123.238702,
+            "max": 154.492881
+          }
+        },
+        "ouro-jail/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 113.8121555,
+            "p95_nearest_rank": 129.247666,
+            "min": 98.376181,
+            "max": 131.869223
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 23.983016999999997,
+            "p95_nearest_rank": 24.609422,
+            "min": 23.474232,
+            "max": 24.620553
+          }
+        },
+        "ouro-jail/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 135.89196149999998,
+            "p95_nearest_rank": 150.907246,
+            "min": 115.526402,
+            "max": 152.267503
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 5.289239,
+            "p95_nearest_rank": 6.349729,
+            "min": 4.510845,
+            "max": 6.889777
+          }
+        },
+        "ouro-jail/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 88.123029,
+            "p95_nearest_rank": 99.920508,
+            "min": 78.429596,
+            "max": 110.599311
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0002045,
+            "p95_nearest_rank": 0.000339,
+            "min": 0.00016,
+            "max": 0.00066
+          }
+        },
+        "ouro-jail/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 123.489689,
+            "p95_nearest_rank": 142.611425,
+            "min": 111.534896,
+            "max": 147.400393
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0011805000000000001,
+            "p95_nearest_rank": 0.00162,
+            "min": 0.00097,
+            "max": 0.00194
+          }
+        },
+        "ouro-jail/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 91.9980355,
+            "p95_nearest_rank": 106.529395,
+            "min": 82.698608,
+            "max": 110.703632
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 4.784073,
+            "p95_nearest_rank": 7.151608,
+            "min": 4.339223,
+            "max": 7.37132
+          }
+        },
+        "ouro-jail/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 192.7983175,
+            "p95_nearest_rank": 224.650015,
+            "min": 173.361638,
+            "max": 227.871314
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 105.435632,
+            "p95_nearest_rank": 122.842831,
+            "min": 98.754015,
+            "max": 128.444541
+          }
+        },
+        "ouro-jail/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 224.604579,
+            "p95_nearest_rank": 251.509083,
+            "min": 202.766125,
+            "max": 258.3658
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 136.4368035,
+            "p95_nearest_rank": 156.621558,
+            "min": 119.542931,
+            "max": 159.101777
+          }
+        },
+        "ouro-obs-off/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 117.74979300000001,
+            "p95_nearest_rank": 130.650668,
+            "min": 111.055777,
+            "max": 132.280997
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.1648965,
+            "p95_nearest_rank": 25.142459,
+            "min": 23.737542,
+            "max": 25.711953
+          }
+        },
+        "ouro-obs-off/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 134.769702,
+            "p95_nearest_rank": 144.272485,
+            "min": 119.460698,
+            "max": 144.908472
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 3.9064680000000003,
+            "p95_nearest_rank": 4.439965,
+            "min": 3.529633,
+            "max": 4.778267
+          }
+        },
+        "ouro-obs-off/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 129.84636899999998,
+            "p95_nearest_rank": 143.199032,
+            "min": 119.555181,
+            "max": 154.173687
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.00118,
+            "p95_nearest_rank": 0.00169,
+            "min": 0.00095,
+            "max": 0.0018
+          }
+        },
+        "ouro-obs-off/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 166.7600205,
+            "p95_nearest_rank": 179.484949,
+            "min": 147.841277,
+            "max": 192.908304
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 71.9519555,
+            "p95_nearest_rank": 78.550526,
+            "min": 66.099454,
+            "max": 84.797705
+          }
+        },
+        "ouro-obs-off/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 159.769676,
+            "p95_nearest_rank": 184.095896,
+            "min": 143.982544,
+            "max": 186.294272
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 64.754076,
+            "p95_nearest_rank": 81.25395,
+            "min": 53.901291,
+            "max": 89.673943
+          }
+        }
+      },
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "pi": {
+      "source_sha256": "f03afe24307049931d30fdd960411d9810466e60efc65956e2bc9d4003c0e327",
+      "rows": 1463,
+      "table": {
+        "direct/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 82.198196,
+            "p95_nearest_rank": 82.444739,
+            "min": 82.01122,
+            "max": 106.81653
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 80.25484349999999,
+            "p95_nearest_rank": 80.441878,
+            "min": 80.134478,
+            "max": 104.768123
+          }
+        },
+        "direct/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 147.042527,
+            "p95_nearest_rank": 167.845129,
+            "min": 145.666026,
+            "max": 168.354526
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 8.3426825,
+            "p95_nearest_rank": 8.413386,
+            "min": 8.24061,
+            "max": 8.514293
+          }
+        },
+        "direct/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1.847363,
+            "p95_nearest_rank": 2.046815,
+            "min": 1.789817,
+            "max": 3.219322
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0014725,
+            "p95_nearest_rank": 0.001815,
+            "min": 0.001241,
+            "max": 0.0025
+          }
+        },
+        "direct/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 138.638283,
+            "p95_nearest_rank": 163.498752,
+            "min": 137.248198,
+            "max": 184.886073
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0037225,
+            "p95_nearest_rank": 0.004463,
+            "min": 0.002963,
+            "max": 0.004667
+          }
+        },
+        "direct/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 12.8299565,
+            "p95_nearest_rank": 18.077669,
+            "min": 12.5472,
+            "max": 23.213508
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 10.8573825,
+            "p95_nearest_rank": 15.596452,
+            "min": 10.576644,
+            "max": 20.292517
+          }
+        },
+        "direct/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 135.68204,
+            "p95_nearest_rank": 147.26376,
+            "min": 134.015591,
+            "max": 183.921976
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 133.77223500000002,
+            "p95_nearest_rank": 145.002985,
+            "min": 132.205052,
+            "max": 181.125039
+          }
+        },
+        "direct/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 879.7362375,
+            "p95_nearest_rank": 1241.495196,
+            "min": 423.210864,
+            "max": 1308.966738
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 877.5905735,
+            "p95_nearest_rank": 1238.631575,
+            "min": 421.224253,
+            "max": 1307.047274
+          }
+        },
+        "greywall/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1876.281103,
+            "p95_nearest_rank": 1917.970404,
+            "min": 1857.805328,
+            "max": 1925.511352
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 80.1546225,
+            "p95_nearest_rank": 123.341298,
+            "min": 80.113132,
+            "max": 132.700572
+          }
+        },
+        "greywall/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1942.863574,
+            "p95_nearest_rank": 2024.318154,
+            "min": 1927.941665,
+            "max": 2032.062775
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 8.5153485,
+            "p95_nearest_rank": 8.738808,
+            "min": 8.464756,
+            "max": 42.521387
+          }
+        },
+        "greywall/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1796.1393735,
+            "p95_nearest_rank": 1841.332808,
+            "min": 1784.283325,
+            "max": 1846.349048
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0015645,
+            "p95_nearest_rank": 0.002908,
+            "min": 0.001037,
+            "max": 0.003351
+          }
+        },
+        "greywall/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1930.2122140000001,
+            "p95_nearest_rank": 1974.220214,
+            "min": 1910.972869,
+            "max": 1979.254571
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0038885,
+            "p95_nearest_rank": 0.004351,
+            "min": 0.003037,
+            "max": 0.005833
+          }
+        },
+        "greywall/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1805.8346155,
+            "p95_nearest_rank": 1845.245329,
+            "min": 1794.800773,
+            "max": 1846.73296
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 11.1683785,
+            "p95_nearest_rank": 11.318471,
+            "min": 10.873567,
+            "max": 11.728448
+          }
+        },
+        "greywall/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1929.143712,
+            "p95_nearest_rank": 2022.780323,
+            "min": 1902.112001,
+            "max": 2023.389981
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 135.8361775,
+            "p95_nearest_rank": 217.719465,
+            "min": 133.557788,
+            "max": 217.836293
+          }
+        },
+        "greywall/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 2678.0021235,
+            "p95_nearest_rank": 3039.494843,
+            "min": 2135.706049,
+            "max": 3069.659492
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 865.0645885,
+            "p95_nearest_rank": 1216.056694,
+            "min": 335.17806,
+            "max": 1281.018323
+          }
+        },
+        "mxc/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 121.885848,
+            "p95_nearest_rank": 123.641397,
+            "min": 121.735499,
+            "max": 124.372401
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 80.21951,
+            "p95_nearest_rank": 80.334279,
+            "min": 80.166947,
+            "max": 81.124136
+          }
+        },
+        "mxc/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 172.0158315,
+            "p95_nearest_rank": 173.923552,
+            "min": 171.923974,
+            "max": 224.6611
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 8.56606,
+            "p95_nearest_rank": 8.690493,
+            "min": 8.452107,
+            "max": 8.754161
+          }
+        },
+        "mxc/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 23.661938499999998,
+            "p95_nearest_rank": 42.339593,
+            "min": 23.531395,
+            "max": 42.83275
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.001481,
+            "p95_nearest_rank": 0.002333,
+            "min": 0.001278,
+            "max": 0.002334
+          }
+        },
+        "mxc/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 172.0797005,
+            "p95_nearest_rank": 224.053457,
+            "min": 171.907718,
+            "max": 224.327879
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0038145,
+            "p95_nearest_rank": 0.004333,
+            "min": 0.003222,
+            "max": 0.004778
+          }
+        },
+        "mxc/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 39.7515605,
+            "p95_nearest_rank": 40.15245,
+            "min": 39.645489,
+            "max": 40.405236
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 10.877789499999999,
+            "p95_nearest_rank": 11.094399,
+            "min": 10.662607,
+            "max": 11.096861
+          }
+        },
+        "mxc/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 172.0843385,
+            "p95_nearest_rank": 223.799587,
+            "min": 171.926531,
+            "max": 230.831148
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 134.11585,
+            "p95_nearest_rank": 180.28198,
+            "min": 132.532039,
+            "max": 180.489446
+          }
+        },
+        "mxc/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 923.128705,
+            "p95_nearest_rank": 925.164355,
+            "min": 472.651063,
+            "max": 973.9484
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 851.9704409999999,
+            "p95_nearest_rank": 898.865289,
+            "min": 406.805629,
+            "max": 909.140496
+          }
+        },
+        "ouro-before/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 361.49141050000003,
+            "p95_nearest_rank": 473.858802,
+            "min": 334.387961,
+            "max": 586.968768
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 80.1969085,
+            "p95_nearest_rank": 120.551319,
+            "min": 80.158687,
+            "max": 128.956775
+          }
+        },
+        "ouro-before/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 427.1868365,
+            "p95_nearest_rank": 459.298217,
+            "min": 409.802034,
+            "max": 466.75004
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 9.8376135,
+            "p95_nearest_rank": 10.049221,
+            "min": 9.692652,
+            "max": 10.064075
+          }
+        },
+        "ouro-before/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 278.994371,
+            "p95_nearest_rank": 324.723688,
+            "min": 258.286852,
+            "max": 359.913872
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0017130000000000001,
+            "p95_nearest_rank": 0.002074,
+            "min": 0.001425,
+            "max": 0.002556
+          }
+        },
+        "ouro-before/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 420.22581,
+            "p95_nearest_rank": 591.029591,
+            "min": 393.711258,
+            "max": 740.958234
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0040184999999999995,
+            "p95_nearest_rank": 0.004426,
+            "min": 0.003463,
+            "max": 0.005426
+          }
+        },
+        "ouro-before/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 292.068659,
+            "p95_nearest_rank": 375.666066,
+            "min": 265.237889,
+            "max": 633.386863
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 11.7055775,
+            "p95_nearest_rank": 12.278184,
+            "min": 11.48732,
+            "max": 17.869912
+          }
+        },
+        "ouro-before/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 478.2574065,
+            "p95_nearest_rank": 618.59333,
+            "min": 451.116146,
+            "max": 623.961089
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 198.9830655,
+            "p95_nearest_rank": 264.086662,
+            "min": 196.436167,
+            "max": 272.503287
+          }
+        },
+        "ouro-before/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 808.4954809999999,
+            "p95_nearest_rank": 1413.387649,
+            "min": 499.736047,
+            "max": 1468.826611
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 492.7517365,
+            "p95_nearest_rank": 1148.273953,
+            "min": 193.642802,
+            "max": 1173.040388
+          }
+        },
+        "ouro-jail/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 315.887411,
+            "p95_nearest_rank": 411.274294,
+            "min": 284.357175,
+            "max": 601.391657
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 80.194864,
+            "p95_nearest_rank": 121.183225,
+            "min": 80.160146,
+            "max": 126.875587
+          }
+        },
+        "ouro-jail/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 390.30841999999996,
+            "p95_nearest_rank": 475.843896,
+            "min": 362.656319,
+            "max": 1183.987336
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 9.810521,
+            "p95_nearest_rank": 9.94554,
+            "min": 9.676374,
+            "max": 10.172166
+          }
+        },
+        "ouro-jail/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 234.187373,
+            "p95_nearest_rank": 314.482893,
+            "min": 211.959385,
+            "max": 315.919616
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.00163,
+            "p95_nearest_rank": 0.002296,
+            "min": 0.001426,
+            "max": 0.002315
+          }
+        },
+        "ouro-jail/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 373.912786,
+            "p95_nearest_rank": 451.546704,
+            "min": 341.095617,
+            "max": 463.268495
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0040555,
+            "p95_nearest_rank": 0.004593,
+            "min": 0.003519,
+            "max": 0.004648
+          }
+        },
+        "ouro-jail/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 241.462892,
+            "p95_nearest_rank": 329.877786,
+            "min": 219.469611,
+            "max": 341.261759
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 11.723577500000001,
+            "p95_nearest_rank": 19.212951,
+            "min": 11.33297,
+            "max": 21.858188
+          }
+        },
+        "ouro-jail/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 442.7088585,
+            "p95_nearest_rank": 567.381583,
+            "min": 419.819333,
+            "max": 658.410163
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 198.863386,
+            "p95_nearest_rank": 263.84337,
+            "min": 195.900808,
+            "max": 277.842849
+          }
+        },
+        "ouro-jail/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 531.928369,
+            "p95_nearest_rank": 1133.832976,
+            "min": 453.218936,
+            "max": 1146.135171
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 258.620435,
+            "p95_nearest_rank": 868.889453,
+            "min": 185.324002,
+            "max": 910.889914
+          }
+        },
+        "ouro-obs-off/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 312.0216515,
+            "p95_nearest_rank": 407.096388,
+            "min": 290.957713,
+            "max": 602.843959
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 80.1969795,
+            "p95_nearest_rank": 119.823429,
+            "min": 80.167274,
+            "max": 122.751064
+          }
+        },
+        "ouro-obs-off/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 376.725912,
+            "p95_nearest_rank": 407.418902,
+            "min": 350.630779,
+            "max": 691.510253
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 8.520828999999999,
+            "p95_nearest_rank": 12.706809,
+            "min": 8.394645,
+            "max": 12.769197
+          }
+        },
+        "ouro-obs-off/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 368.07352449999996,
+            "p95_nearest_rank": 464.190382,
+            "min": 344.005715,
+            "max": 608.975609
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.003981,
+            "p95_nearest_rank": 0.004445,
+            "min": 0.003407,
+            "max": 0.006666
+          }
+        },
+        "ouro-obs-off/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 241.8374195,
+            "p95_nearest_rank": 331.822411,
+            "min": 216.795525,
+            "max": 372.315926
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 11.194971500000001,
+            "p95_nearest_rank": 15.987095,
+            "min": 10.965973,
+            "max": 16.772439
+          }
+        },
+        "ouro-obs-off/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 370.68783399999995,
+            "p95_nearest_rank": 491.47053,
+            "min": 346.700168,
+            "max": 496.093473
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 139.438105,
+            "p95_nearest_rank": 191.683354,
+            "min": 137.91485,
+            "max": 197.805994
+          }
+        },
+        "ouro-obs-off/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1113.910287,
+            "p95_nearest_rank": 1428.165135,
+            "min": 461.915369,
+            "max": 1577.118771
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 863.3967015000001,
+            "p95_nearest_rank": 1199.176994,
+            "min": 177.683924,
+            "max": 1312.638058
+          }
+        }
+      },
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    }
+  },
+  "bootstrap": "10000 round-pair resamples; percentile 95% CI of median change; seed 20261011; descriptive, no multiple-test correction"
+}

@@ -1,0 +1,43 @@
+I'll implement category summaries in the inventory CLI with the specified requirements. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me plan and implement the changes:
+Let me start by creating the category_summary function in report.py:
+Now let's update the CLI to add the --group-by-category flag and use the category_summary function:
+Now let's update the README.md with a grouped example:
+Now let's run the tests to see if everything works correctly:
+Excellent! All tests pass. Let me verify the implementation with a few manual tests to ensure everything works as expected:
+Perfect! Let's also test the error handling for invalid CSV:
+Excellent! Let me verify the structure of the code to ensure processing and argument parsing are in separate modules as required:
+Perfect! I've successfully implemented category summaries in the inventory CLI. Here's a summary of what was done:
+
+## Implementation Summary
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary` function (inventory/report.py:8-29)
+   - Filters items by min_quantity before grouping
+   - Groups items by category and calculates totals
+   - Returns JSON array sorted by category name
+   - Each object contains: category (string), quantity (sum), stock_value (formatted decimal string with 2 decimals)
+
+2. **inventory/cli.py** - Added `--group-by-category` flag (inventory/cli.py:11)
+   - Argument parsing remains in cli.py module
+   - Processing logic delegated to report.py module
+   - Routes to `category_summary` when flag is set, otherwise uses `item_report`
+
+3. **README.md** - Added documentation with example
+   - Shows grouped output usage
+   - Provides expected output example
+
+### Verification:
+
+All requirements met:
+- ✅ `--group-by-category` flag added to CLI
+- ✅ Uses existing CSV loader
+- ✅ Applies `--min-quantity` filter before grouping
+- ✅ Emits JSON array sorted by category
+- ✅ stock_value is exact decimal with 2 fractional digits as JSON string
+- ✅ Ungrouped output maintains current behavior
+- ✅ Invalid CSV produces exit code 2 with useful stderr message (no traceback)
+- ✅ README.md updated with example
+- ✅ All 10 tests pass
+- ✅ Processing (report.py) and argument parsing (cli.py) in separate modules

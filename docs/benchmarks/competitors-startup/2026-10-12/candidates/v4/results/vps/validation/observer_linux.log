@@ -1,0 +1,25 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 1.01s
+     Running tests/observer_linux.rs (target/debug/deps/observer_linux-6ee960c723cbb60c)
+
+running 17 tests
+test attach_refuses_what_it_may_not_trace ... ok
+test o01_a_denied_write_keeps_its_own_operation_and_errno ... ok
+test o01_every_closed_set_result_matches_the_fixture ... ok
+test o01_through_bubblewrap_carries_host_pids_for_namespace_processes ... ok
+test o02_a_fork_child_that_never_execs_emits_no_exit ... ok
+test o02_a_leader_leaving_live_workers_emits_exactly_one_exit ... ok
+test o02_a_non_leader_exec_keeps_the_birth_identity ... ok
+test o02_an_exit_carries_the_raw_wait_status_of_a_signal_death ... ok
+test o02_exec_success_and_failure_are_distinct_events ... ok
+test o03_an_undecodable_open_how_is_never_a_covered_open ... ok
+test o03_queue_loss_is_bounded_counted_and_coalesced ... ok
+test o03_the_in_flight_bound_refuses_entries_and_reports_no_results ... ok
+test o04_write_read_and_mmap_produce_no_events_and_no_stops ... ok
+test o06_a_path_is_bytes_and_a_short_snapshot_declares_itself_incomplete ... ok
+test perf_the_j0_file_workload_costs_what_the_spike_cost ... ok
+test the_launcher_installs_the_published_filter ... ok
+test the_narrowing_filter_without_a_tracer_fails_closed_with_enosys ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.64s
+

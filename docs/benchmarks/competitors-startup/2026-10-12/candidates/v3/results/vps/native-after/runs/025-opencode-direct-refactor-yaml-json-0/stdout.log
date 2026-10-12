@@ -1,0 +1,3 @@
+I'll help you refactor src/store.py to use JSON instead of YAML while maintaining the same interface and ensuring all tests pass. Let me start by exploring the codebase structure and understanding the current implementation.
+Now let me use the TodoWrite tool to plan this refactoring task:
+Now let me refactor the store.py file to use JSON instead of YAML:

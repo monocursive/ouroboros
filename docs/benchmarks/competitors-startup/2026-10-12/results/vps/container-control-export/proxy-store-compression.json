@@ -1,0 +1,34 @@
+{
+  "stopped_pids": [
+    3643177
+  ],
+  "files": [
+    {
+      "name": "ca-cert.pem",
+      "bytes": 562,
+      "sha256": "29c99ba474d7305df644a3f01eb4491db7329635f28ac2a935b053366707c59f"
+    },
+    {
+      "name": "ca-key.pem",
+      "bytes": 227,
+      "sha256": "dc5e7b39932b8db3fb5dd30e1e8d9a65c257000a0ff43cc350a5e7d88b4ec839"
+    },
+    {
+      "name": "greyproxy.db",
+      "bytes": 489779200,
+      "sha256": "6c3fb1801aec8e8a5ca233bff5f9f8a77cd676d3b0b5a1d46d997b96a084e32c"
+    },
+    {
+      "name": "session.key",
+      "bytes": 32,
+      "sha256": "1144936732140fad0ecc4795d36163ce0aa240a6f8cba215d74b6550ac934b32"
+    }
+  ],
+  "original_bytes": 489780021,
+  "archive_bytes": 100215916,
+  "archive_sha256": "1cb26786beac7933a242f6ff95f91e045f89cc3c41a639649f582dfbb25071f3",
+  "private_archive": "/home/ubuntu/bench-ouro-startup-final/private-proxy-store.tar.gz",
+  "verified_before_removal": true,
+  "exported": false,
+  "reason": "Private credential-bearing proxy store; public evidence retains sanitized logs and results."
+}

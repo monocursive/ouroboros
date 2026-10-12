@@ -1,0 +1,9 @@
+[
+  {
+    "pid": 427077,
+    "kind": "proxy",
+    "signal": "SIGTERM",
+    "sent": true,
+    "exited_or_zombie": true
+  }
+]

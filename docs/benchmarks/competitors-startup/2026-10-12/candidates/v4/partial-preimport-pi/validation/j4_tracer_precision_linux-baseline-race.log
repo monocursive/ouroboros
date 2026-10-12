@@ -1,0 +1,22 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/bench-ouro-startup/src/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 13s
+     Running tests/j4_tracer_precision_linux.rs (target/debug/deps/j4_tracer_precision_linux-d2f9c666202718f1)
+
+running 1 test
+test j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss ... entry_abandoned across 40 runs: 77; killed at entry: 11
+
+thread 'j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss' (470464) panicked at crates/ouro-jail/tests/j4_tracer_precision_linux.rs:1319:5:
+assertion `left == right` failed: a thread killed at a stop it was never resumed from made no call
+  left: ["run 0: QueueFull OpSet(80) Some(4084)", "run 0: QueueFull OpSet(80) Some(205462)", "run 0: QueueFull OpSet(80) Some(541)", "run 2: QueueFull OpSet(80) Some(14233)", "run 2: QueueFull OpSet(80) Some(30783)", "run 2: QueueFull OpSet(80) Some(537)", "run 3: QueueFull OpSet(80) Some(321892)", "run 3: QueueFull OpSet(80) Some(539)", "run 4: QueueFull OpSet(80) Some(137641)", "run 4: QueueFull OpSet(80) Some(539)", "run 5: QueueFull OpSet(80) Some(106272)", "run 5: QueueFull OpSet(80) Some(501)", "run 6: QueueFull OpSet(80) Some(4340)", "run 6: QueueFull OpSet(80) Some(291277)", "run 6: QueueFull OpSet(80) Some(537)", "run 7: QueueFull OpSet(80) Some(25917)", "run 7: QueueFull OpSet(80) Some(61002)", "run 7: QueueFull OpSet(80) Some(533)", "run 8: QueueFull OpSet(80) Some(3234)", "run 8: QueueFull OpSet(80) Some(422620)", "run 8: QueueFull OpSet(80) Some(527)", "run 9: QueueFull OpSet(80) Some(181712)", "run 9: QueueFull OpSet(80) Some(503)", "run 10: QueueFull OpSet(80) Some(635348)", "run 10: QueueFull OpSet(80) Some(505)", "run 13: QueueFull OpSet(80) Some(15630)", "run 13: QueueFull OpSet(80) Some(245711)", "run 13: QueueFull OpSet(80) Some(540)", "run 14: QueueFull OpSet(80) Some(56787)", "run 14: QueueFull OpSet(80) Some(517)", "run 15: QueueFull OpSet(80) Some(5380)", "run 15: QueueFull OpSet(80) Some(317353)", "run 15: QueueFull OpSet(80) Some(544)", "run 16: QueueFull OpSet(80) Some(440842)", "run 16: QueueFull OpSet(80) Some(542)", "run 17: QueueFull OpSet(80) Some(303301)", "run 17: QueueFull OpSet(80) Some(535)", "run 18: QueueFull OpSet(80) Some(72095)", "run 18: QueueFull OpSet(80) Some(506)", "run 21: QueueFull OpSet(80) Some(3729)", "run 21: QueueFull OpSet(80) Some(516)", "run 24: QueueFull OpSet(80) Some(366)", "run 24: QueueFull OpSet(80) Some(508)"]
+ right: []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 263.78s
+
+error: test failed, to rerun pass `-p ouro-jail --test j4_tracer_precision_linux`

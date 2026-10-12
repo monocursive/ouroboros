@@ -1,0 +1,10 @@
+I'll help you add a multiply function to src/calc.py and ensure all tests pass. Let me start by planning this task.
+Now let me read the current code and check the test structure:
+Perfect! I can see that src/calc.py currently has an `add` function, and the tests expect a `multiply` function that returns the product of two numbers. Let me add the multiply function:
+Now let me run the tests:
+Perfect! All tasks completed successfully. I've added the `multiply(a, b)` function to src/calc.py:4 that returns the product of two numbers. The function passed all tests on the first try:
+
+- `test_add` - OK
+- `test_multiply` - OK (testing both `multiply(2, 3) = 6` and `multiply(-1, 5) = -5`)
+
+All 2 tests passed with no failures.

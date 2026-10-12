@@ -1,0 +1,20 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/Users/monocursive/bench-ouro-startup/bin",
+      "/Users/monocursive/bench-ouro/bin",
+      "/opt/homebrew"
+    ],
+    "allowWrite": [
+      "/Users/monocursive/bench-ouro-startup/results/workflow-after/runs/002-claude-greywall-inventory-workflow-0/workspace/inventory-workflow",
+      "/Users/monocursive/bench-ouro-startup/results/workflow-after/runs/002-claude-greywall-inventory-workflow-0/home",
+      "/Users/monocursive/bench-ouro-startup/results/workflow-after/runs/002-claude-greywall-inventory-workflow-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

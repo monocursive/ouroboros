@@ -1,0 +1,20 @@
+[
+  {
+    "agent": "claude",
+    "ready": false,
+    "exit": 1,
+    "elapsed_ms": 8510.308465
+  },
+  {
+    "agent": "opencode",
+    "ready": false,
+    "exit": 1,
+    "elapsed_ms": 8903.153997
+  },
+  {
+    "agent": "codex",
+    "ready": false,
+    "exit": 1,
+    "elapsed_ms": 8404.589692
+  }
+]

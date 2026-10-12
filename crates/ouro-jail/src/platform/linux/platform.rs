@@ -1733,7 +1733,17 @@ impl Boundary {
         }
 
         // Read back the boundary rather than trusting the flags we passed.
-        let status_field = |key: &str| identity::status_field(launcher, key).unwrap_or_default();
+        // The launcher is blocked: these facts come from one kernel status
+        // snapshot rather than reopening the same file for every field.
+        let launcher_status =
+            std::fs::read_to_string(format!("/proc/{launcher}/status")).unwrap_or_default();
+        let status_field = |key: &str| {
+            launcher_status
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+                .unwrap_or("")
+                .trim()
+        };
         let no_new_privs = status_field("NoNewPrivs");
         let cap_eff = status_field("CapEff");
         let seccomp_mode = status_field("Seccomp");
@@ -1743,7 +1753,7 @@ impl Boundary {
                 format!("no_new_privs is {no_new_privs:?} inside the boundary, not 1"),
             ));
         }
-        if !cap_eff.chars().all(|character| character == '0') {
+        if cap_eff.is_empty() || !cap_eff.chars().all(|character| character == '0') {
             return Err(preparing(
                 ErrorCode::BackendUnavailable,
                 format!("the boundary retains capabilities: CapEff {cap_eff}"),
@@ -1762,7 +1772,7 @@ impl Boundary {
         let expected =
             super::agent::expected_launcher_filters(self.agent.is_some(), self.observe_on);
         self.seccomp_filters = Some(
-            super::agent::verify_filter_count(&status_field("Seccomp_filters"), expected).map_err(
+            super::agent::verify_filter_count(status_field("Seccomp_filters"), expected).map_err(
                 |mut error| {
                     error.message = format!("the launcher: {}", error.message);
                     error
@@ -1806,6 +1816,8 @@ impl Boundary {
         }
         // J3-agent end
 
+        // Keep this fresh readback: a process can create a new platform after
+        // a backend upgrade, while its minimum-version decision is cached.
         self.backend_version = bwrap::bwrap_version(bwrap_path)
             .map(|version| version.raw)
             .unwrap_or_default();

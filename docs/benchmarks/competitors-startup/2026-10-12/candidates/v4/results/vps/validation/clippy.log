@@ -1,0 +1,4 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Checking ouro-records v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-records)
+    Checking ouro-fixture v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-fixture)
+    Finished `dev` profile [unoptimized] target(s) in 16.18s

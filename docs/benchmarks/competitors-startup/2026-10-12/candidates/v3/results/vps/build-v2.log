@@ -1,0 +1,11 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+warning: unused variable: `bwrap_path`
+    --> crates/ouro-jail/src/platform/linux/platform.rs:1595:9
+     |
+1595 |         bwrap_path: &Path,
+     |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bwrap_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ouro-jail` (lib) generated 1 warning (run `cargo fix --lib -p ouro-jail` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 44.09s

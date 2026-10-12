@@ -1,0 +1,62 @@
+{
+  "bin/mxc-exec-mac": {
+    "target": "/Users/monocursive/bench-ouro/bin/mxc-exec-mac",
+    "sha256": "df1a01bff34eaaa76c8e047e3ac4c8ede5ca2d642c96f6086d4234190495425e"
+  },
+  "bin/LICENSE": {
+    "target": "/Users/monocursive/bench-ouro/bin/LICENSE",
+    "sha256": "4326f1b06bfe45be486cf117bd14630629eb5d3329fdf21f52194c221ebee90a"
+  },
+  "bin/greyproxy": {
+    "target": "/Users/monocursive/bench-ouro/bin/greyproxy",
+    "sha256": "aadef1a38b71a36d2ad4fcd916ded9586f3d11b0c112fb6847f6d50e48001505"
+  },
+  "bin/claude": {
+    "target": "/Users/monocursive/bench-ouro/bin/claude",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "bin/openshell-gateway": {
+    "target": "/Users/monocursive/bench-ouro/bin/openshell-gateway",
+    "sha256": "c1836ce4f16ae4088eba17809e1ba6b8f0c08614702aa42486b1701f6fc9d328"
+  },
+  "bin/codex": {
+    "target": "/Users/monocursive/.codex/packages/standalone/releases/0.159.2-aarch64-apple-darwin/bin/codex",
+    "sha256": "16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704"
+  },
+  "bin/README.md": {
+    "target": "/Users/monocursive/bench-ouro/bin/README.md",
+    "sha256": "7db9af5c2234e7d08f58da92509305e73400cc14b857ba0e0afeb220c6b112b4"
+  },
+  "bin/openshell": {
+    "target": "/Users/monocursive/bench-ouro/bin/openshell",
+    "sha256": "18263d5083bfcac277d79074984b0a3218ba05f3d96d58acfdf2311edd7f9fcb"
+  },
+  "bin/codex-code-mode-host": {
+    "target": "/Users/monocursive/.codex/packages/standalone/releases/0.159.2-aarch64-apple-darwin/bin/codex-code-mode-host",
+    "sha256": "ed79fbc9e1683feb29d73fb421f3e16932d178a459f63741754014c6c7ea6107"
+  },
+  "bin/opencode": {
+    "target": "/Users/monocursive/bench-ouro/bin/opencode",
+    "sha256": "476151a6c8b56e084d223d71a9312479e3b95547f8d8649b3489577059f9c5b4"
+  },
+  "bin/greywall": {
+    "target": "/Users/monocursive/bench-ouro/bin/greywall",
+    "sha256": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c"
+  },
+  "linux-bin/claude": {
+    "target": "/Users/monocursive/bench-ouro/linux-bin/claude",
+    "sha256": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b"
+  },
+  "linux-bin/codex": {
+    "target": "/Users/monocursive/bench-ouro/linux-bin/codex",
+    "sha256": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3"
+  },
+  "linux-bin/codex-code-mode-host": {
+    "target": "/Users/monocursive/bench-ouro/linux-bin/codex-code-mode-host",
+    "sha256": "6979f2fea8cb1d5d72614abfe2f42b16727cdce2c356cc6af933157e732a7277"
+  },
+  "linux-bin/opencode": {
+    "target": "/Users/monocursive/bench-ouro/linux-bin/opencode",
+    "sha256": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df"
+  }
+}

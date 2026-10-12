@@ -1,0 +1,21 @@
+{
+  "runs": [
+    {
+      "suite": "j4_tracer_precision_linux",
+      "exit": 101,
+      "baseline_source_hashes": {
+        "crates/ouro-jail/src/platform/linux/fs.rs": "2bcd33d2ae650174e9728b5aa7ac18dd0bf9a3a740aa2360febf5f66caf03dd1",
+        "crates/ouro-jail/src/platform/linux/platform.rs": "dbedb4d10af49737501ff28a63c97e60ab9653144164c11b4ce51a87ae8e6be5",
+        "crates/ouro-jail/src/platform/linux/probe.rs": "fe1c0af14ab3aec21f3f20ffb1c327223226f40ddf27b50c89037f58f0fda20f",
+        "crates/ouro-jail/src/platform/linux/tracer/mod.rs": "d6bc452113b27bd5441d80655cafaf840e8512c0c2b35f116a22c47f2fc292dd"
+      }
+    }
+  ],
+  "current_source_restored": true,
+  "current_source_hashes": {
+    "crates/ouro-jail/src/platform/linux/fs.rs": "b8726db1fd1594171508e2c2ca519512de9eb0e11bf7c2ed8beea6b593db1b30",
+    "crates/ouro-jail/src/platform/linux/platform.rs": "8cb94909fa9af78e64f619885d6191f8baadf6136dcc4f9182a253d0465ebb9c",
+    "crates/ouro-jail/src/platform/linux/probe.rs": "236d351e847ed5336d0d64a37b251c4a1b39178f0c791d4845c780277908dcee",
+    "crates/ouro-jail/src/platform/linux/tracer/mod.rs": "bb8a01cc89605dc170bd1b877812aa8dac9d3bfa402a6065f51e38b8a5c54075"
+  }
+}

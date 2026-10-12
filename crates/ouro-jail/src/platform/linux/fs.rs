@@ -357,6 +357,15 @@ fn walk(
             errno: e.raw_os_error().unwrap_or(libc::EIO),
         })?,
     );
+    // A recent directory can change type within one filesystem clock tick
+    // without a distinguishable timestamp. Keep the original stat checks in
+    // that case and on filesystems whose timestamp clock is not local.
+    let ordinary_hint_safe = dir.stable_regular_file_hints(
+        state
+            .directories
+            .last()
+            .expect("directory stamp just recorded"),
+    );
     state.max_depth_seen = state.max_depth_seen.max(depth);
     let entries = dir
         .entries(state.limits.max_entries.saturating_sub(state.entries_seen))
@@ -374,7 +383,8 @@ fn walk(
         })?;
 
     let mut subdirs: Vec<(CString, Vec<u8>)> = Vec::new();
-    for name in entries {
+    for entry in entries {
+        let name = entry.name;
         state.entries_seen += 1;
         if state.entries_seen > state.limits.max_entries {
             return Err(ScanError::EntryLimit {
@@ -388,13 +398,6 @@ fn walk(
             child_relative.push(b'/');
         }
         child_relative.extend_from_slice(name.to_bytes());
-        let meta = dir
-            .stat_child_nofollow(&name)
-            .map_err(|errno| ScanError::Unreadable {
-                path: child_path.clone(),
-                errno,
-            })?;
-
         // A single-component name matches any directory entry; a
         // multi-component name (audit 2026-10-08 M5) matches the entry's
         // whole path beneath the writable root, so `.git/hooks` protects a
@@ -408,6 +411,22 @@ fn walk(
                 name_os == OsStr::new(*literal)
             }
         });
+
+        // readdir already identifies ordinary regular files. Their identity
+        // is irrelevant unless their name is protected: they cannot contain
+        // deeper segments and are never followed. Unknown types, directories,
+        // symlinks and every protected name still get the no-follow stat.
+        // The existing directory stamps and mount-handoff verification remain
+        // responsible for a rename/type swap after enumeration.
+        if ordinary_hint_safe && literal.is_none() && entry.kind == libc::DT_REG {
+            continue;
+        }
+        let meta = dir
+            .stat_child_nofollow(&name)
+            .map_err(|errno| ScanError::Unreadable {
+                path: child_path.clone(),
+                errno,
+            })?;
 
         if let Some(literal) = literal {
             if meta.is_symlink {
@@ -490,6 +509,35 @@ struct DirHandle {
     fd: OwnedFd,
 }
 
+fn stable_hint_clock(fs_type: libc::c_long, changed_second: i64, now_second: Option<i64>) -> bool {
+    // The ext family may store only whole-second timestamps. A strictly newer
+    // local clock second ensures a subsequent type swap changes the stamp.
+    matches!(fs_type, libc::EXT4_SUPER_MAGIC | libc::TMPFS_MAGIC)
+        && now_second.is_some_and(|now| now > changed_second)
+}
+
+#[cfg(test)]
+mod hint_clock_tests {
+    use super::stable_hint_clock;
+
+    #[test]
+    fn regular_hint_requires_a_known_local_filesystem_and_an_older_change_second() {
+        for kind in [libc::EXT4_SUPER_MAGIC, libc::TMPFS_MAGIC] {
+            assert!(!stable_hint_clock(kind, 100, None));
+            assert!(!stable_hint_clock(kind, 100, Some(99)));
+            assert!(!stable_hint_clock(kind, 100, Some(100)));
+            assert!(stable_hint_clock(kind, 100, Some(101)));
+        }
+        assert!(!stable_hint_clock(0, 100, Some(101)));
+        assert!(!stable_hint_clock(libc::NFS_SUPER_MAGIC, 100, Some(101)));
+    }
+}
+
+struct DirectoryEntry {
+    name: CString,
+    kind: u8,
+}
+
 #[derive(Clone, Copy)]
 struct ChildMeta {
     is_dir: bool,
@@ -567,8 +615,26 @@ impl DirHandle {
         })
     }
 
+    fn stable_regular_file_hints(&self, stamp: &DirectoryStamp) -> bool {
+        // SAFETY: statfs consists only of C integer fields; the kernel fills
+        // this live output storage, using a live directory descriptor.
+        let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatfs(self.fd.as_raw_fd(), &raw mut filesystem) } != 0 {
+            return false;
+        }
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: now is live writable storage for this clock result.
+        let clock = (unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &raw mut now) }
+            == 0)
+            .then_some(now.tv_sec);
+        stable_hint_clock(filesystem.f_type, stamp.modified.2, clock)
+    }
+
     /// Every entry name in this directory except `.` and `..`.
-    fn entries(&self, remaining: usize) -> Result<Vec<CString>, i32> {
+    fn entries(&self, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
         // `fdopendir` takes ownership of the fd it is given, so hand it a
         // duplicate and keep ours for `openat`.
         // SAFETY: `self.fd` is a live directory fd; F_DUPFD_CLOEXEC returns a
@@ -612,7 +678,11 @@ impl DirHandle {
                 result = Err(libc::E2BIG);
                 break;
             }
-            out.push(name.to_owned());
+            out.push(DirectoryEntry {
+                name: name.to_owned(),
+                // SAFETY: the dirent is still live until the next readdir.
+                kind: unsafe { (*entry).d_type },
+            });
         }
         // SAFETY: `dirp` was created above and is closed exactly once here.
         unsafe { libc::closedir(dirp) };

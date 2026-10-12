@@ -1,0 +1,28 @@
+{
+  "excluded_candidates": [
+    {
+      "candidate": "v3",
+      "reason": "Cached backend-version readback may go stale in a long-lived process. Fresh receipt readback restored.",
+      "source": "source-candidate-v3.patch",
+      "data": "candidates/v3",
+      "all_data_retained": true
+    },
+    {
+      "candidate": "v4 native",
+      "reason": "Shared read-only fallback may poison namespace capabilities if bind setup fails without fixture output. Independent namespace-only fallback restored and covered by a regression.",
+      "source": "source-candidate-v4.patch",
+      "data": "candidates/v4",
+      "all_data_retained": true
+    },
+    {
+      "candidate": "v5 Ouro",
+      "reason": "Guard regular-file hints against coalesced recent directory changes and non-local filesystem clocks. Preserve original stat behavior for these cases.",
+      "source": "candidates/v5/source.patch",
+      "data": "candidates/v5",
+      "all_data_retained": true
+    }
+  ],
+  "final_source": "source.patch (v6)",
+  "final_scored_native_roots": "~/bench-ouro-startup-stable-final",
+  "unchanged_controls": "Complete v5 direct/Greywall/MXC native calls, v4 containers and complete Mac rerun"
+}

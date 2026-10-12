@@ -1,0 +1,66 @@
+{
+  "date_utc": "2026-10-12T13:37:59Z",
+  "host": {
+    "system": "Linux",
+    "node": "raspberrypi",
+    "release": "6.18.50+rpt-rpi-v8",
+    "version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "machine": "aarch64",
+    "processor": ""
+  },
+  "cpu_count": 4,
+  "bin_hashes": {
+    "bin/LICENSE": "4326f1b06bfe45be486cf117bd14630629eb5d3329fdf21f52194c221ebee90a",
+    "bin/README.md": "7db9af5c2234e7d08f58da92509305e73400cc14b857ba0e0afeb220c6b112b4",
+    "bin/claude": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+    "bin/codex": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+    "bin/codex-code-mode-host": "6979f2fea8cb1d5d72614abfe2f42b16727cdce2c356cc6af933157e732a7277",
+    "bin/greyproxy": "61f97f1d049c1fe18cc4ab623466d24c71dac652fd87dcdfaf26f0026c212a85",
+    "bin/greywall": "f307e14a8afafb69edb5cbda632c259e4af6a1359d41dd2d7818f40b136a30bc",
+    "bin/lxc-exec": "f1c8b9c6fc6450a75f5bf3adc6468da579a95ec6100dd85a50d390ac54c73d12",
+    "bin/opencode": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+    "bin/openshell": "9a0a6e0aaa0d036c0bdd55470d0916e7bb1906cb51d3c6c4f6c600500f66128a",
+    "bin/openshell-gateway": "cd55e5d4eea3f7aff089ed29609a4d75106e30fd7ad25738f7360a34367531fa",
+    "bin/ouro-fixture": "d86f3ceac0cfa2fee009619aa7400b69e344c0a0e6ebe53b50b6c6a09994c714",
+    "bin/ouro-jail": "d654d66f9c9d1b33f05f4f0c8a767f098019ba8a02c860bdc8b08cb37aa9238b",
+    "bin/ouro-jail-before": "60643f31dde7706010cbb319502a2a424da2e25cb2b1f06188a1d9e33502b093",
+    "bin/ouro-jail-v3": "b96f7b69decddb7130bde2c30c7aeb258380bd72a97e4cd4f8e9661c36a77a98"
+  },
+  "commands": {
+    "disk": {
+      "exit": 0,
+      "output": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/mmcblk0p2   58G   41G   16G  73% /\n"
+    },
+    "identity": {
+      "exit": 0,
+      "output": "uid=1000(monocursive) gid=1000(monocursive) groups=1000(monocursive),4(adm),20(dialout),24(cdrom),27(sudo),29(audio),44(video),46(plugdev),60(games),100(users),102(netdev),108(lpadmin),984(docker),986(gpio),988(i2c),989(spi),992(render),996(input)\n"
+    },
+    "python": {
+      "exit": 0,
+      "output": "Python 3.13.5\n"
+    },
+    "docker-info": {
+      "exit": 1,
+      "output": "{\"version\":\"29.1.3\",\"cpu\":4,\"memory\":3980124160,\"kernel\":\"6.18.50+rpt-rpi-v8\",\"memory_limit\":\ntemplate: :1:139: executing \"\" at <.MemLimit>: can't evaluate field MemLimit in type system.dockerInfo\n"
+    },
+    "openshell-status": {
+      "exit": 1,
+      "output": "Error:   \u00d7 client error (Connect)\n  \u251c\u2500\u25b6 tcp connect error\n  \u2570\u2500\u25b6 Connection refused (os error 111)\n\n"
+    },
+    "kernel": {
+      "exit": 0,
+      "output": "Linux raspberrypi 6.18.50+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11) aarch64 GNU/Linux\n"
+    },
+    "bwrap": {
+      "exit": 0,
+      "output": "bubblewrap 0.12.0\n"
+    },
+    "apparmor-userns": {
+      "exit": 1,
+      "output": "sysctl: cannot stat /proc/sys/kernel/apparmor_restrict_unprivileged_userns: No such file or directory\n"
+    }
+  },
+  "cpuinfo": "processor\t: 0\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm crc32 cpuid\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0xd08\nCPU revision\t: 3\n\nprocessor\t: 1\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm crc32 cpuid\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0xd08\nCPU revision\t: 3\n\nprocessor\t: 2\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm crc32 cpuid\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0xd08\nCPU revision\t: 3\n\nprocessor\t: 3\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm crc32 cpuid\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x0\nCPU part\t: 0xd08\nCPU revision\t: 3\n\nRevision\t: c03112\nModel\t\t: Raspberry Pi 4 Model B Rev 1.2\n",
+  "meminfo": "MemTotal:        3886840 kB\nMemFree:          467900 kB\nMemAvailable:    3179800 kB\nBuffers:          104820 kB\nCached:          2482904 kB\nSwapCached:          764 kB\nActive:          1028920 kB\nInactive:        1737764 kB\nActive(anon):     133660 kB\nInactive(anon):    91316 kB\nActive(file):     895260 kB\nInactive(file):  1646448 kB\nUnevictable:        9968 kB\nMlocked:               0 kB\nSwapTotal:       2097148 kB\nSwapFree:        1426872 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:              4348 kB\nWriteback:             0 kB\nAnonPages:        188452 kB\nMapped:            92676 kB\nShmem:             46140 kB\nKReclaimable:     240164 kB\nSlab:             301516 kB\nSReclaimable:     240164 kB\nSUnreclaim:        61352 kB\nKernelStack:        5760 kB\nPageTables:         8788 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:     4040568 kB\nCommitted_AS:    3017060 kB\nVmallocTotal:   261087232 kB\nVmallocUsed:       37628 kB\nVmallocChunk:          0 kB\nPercpu:              912 kB\nCmaTotal:         524288 kB\nCmaFree:            6480 kB\nBalloon:               0 kB\n",
+  "cgroup_controllers": "cpuset cpu io pids\n"
+}

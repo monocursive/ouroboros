@@ -1,0 +1,43 @@
+I'll implement category summaries in the inventory CLI with the --group-by-category flag. Let me start by exploring the codebase structure and planning the work.
+Now let me plan and implement the changes:
+Let me first create the category_summary function in report.py:
+Now let me update cli.py to add the argument and use the appropriate report function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to verify everything works:
+Excellent! All tests pass. Let me mark the task as complete and verify the implementation with a manual test:
+Let me verify the implementation with manual tests:
+Perfect! Let me verify the error handling for invalid CSV:
+Perfect! The implementation is complete and working correctly. Let me create a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary()` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and calculates total quantity and stock value
+   - Formats stock_value as a decimal string with exactly 2 fractional digits
+   - Returns a JSON array sorted by category name
+
+2. **inventory/cli.py** - Updated to:
+   - Add `--group-by-category` argument (boolean flag)
+   - Import and conditionally call `category_summary()` when flag is set
+   - Maintain existing ungrouped behavior when flag is not set
+   - Keep error handling with exit code 2 for invalid CSV
+
+3. **README.md** - Added documentation showing:
+   - How to use `--group-by-category` flag
+   - Example command and expected output
+
+### Verification:
+
+All tests pass (10/10):
+- Ungrouped output maintains current behavior
+- `--group-by-category` produces correct category summaries
+- `--min-quantity` is applied before grouping
+- Invalid CSV produces exit code 2 with useful error message (no traceback)
+- Processing logic is in `report.py`, argument parsing in `cli.py` (separate modules)
+
+The implementation correctly calculates stock values using exact Decimal arithmetic (quantity * unit_price) and formats them as strings with two decimal places.

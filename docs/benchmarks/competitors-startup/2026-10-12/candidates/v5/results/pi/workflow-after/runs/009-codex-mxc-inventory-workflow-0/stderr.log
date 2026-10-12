@@ -1,0 +1,951 @@
+Reading additional input from stdin...
+OpenAI Codex v0.159.2
+--------
+workdir: /home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+model: gpt-6.1-sol
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: low
+reasoning summaries: none
+session id: 01a1304e-8384-7543-a467-3cc44b05f48b
+--------
+user
+Implement category summaries in this inventory CLI. Add --group-by-category to python3 -m inventory.cli. Read the CSV using the existing loader, apply --min-quantity before grouping, and emit a JSON array sorted by category. Each object must have category (string), quantity (sum of quantities), and stock_value (sum of quantity * unit_price as an exact decimal formatted with two fractional digits, a JSON string). Ungrouped output must keep its current behavior. Invalid CSV must produce exit code 2 and a useful stderr message without a traceback. Update README.md with a grouped example and its expected output. Run python3 -m unittest discover -s tests -v and fix failures. Do not change the supplied tests. Keep processing and argument parsing in separate modules.
+2026-10-12T13:30:15.683660Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: Attack attempt detected, url: wss://chatgpt.com/backend-api/codex/responses
+2026-10-12T13:30:16.741328Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: Attack attempt detected, url: wss://chatgpt.com/backend-api/codex/responses
+2026-10-12T13:30:17.419150Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: Attack attempt detected, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 2/5
+2026-10-12T13:30:18.240510Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: Attack attempt detected, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 3/5
+2026-10-12T13:30:19.335389Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: Attack attempt detected, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 4/5
+2026-10-12T13:30:22.495975Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: Attack attempt detected, url: wss://chatgpt.com/backend-api/codex/responses
+ERROR: Reconnecting... 5/5
+2026-10-12T13:30:25.761502Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: Attack attempt detected, url: wss://chatgpt.com/backend-api/codex/responses
+warning: Falling back from WebSockets to HTTPS transport. stream disconnected before completion: Attack attempt detected
+ERROR: Reconnecting... 1/5
+codex
+I’ll inspect the loader and CLI, add category summaries while preserving ungrouped output, then update the README and run the tests.
+exec
+/bin/bash -lc "pwd; rg --files -g 'AGENTS.md' -g '*.py' -g 'README.md' -g 'pyproject.toml'" in /home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+ exited 127 in 0ms:
+/home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+/bin/bash: line 1: rg: command not found
+
+exec
+/bin/bash -lc 'find . -maxdepth 3 -type f; find .. -name AGENTS.md' in /home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+ succeeded in 0ms:
+./.git/description
+./.git/logs/HEAD
+./.git/COMMIT_EDITMSG
+./.git/config
+./.git/info/exclude
+./.git/hooks/commit-msg.sample
+./.git/hooks/pre-push.sample
+./.git/hooks/update.sample
+./.git/hooks/fsmonitor-watchman.sample
+./.git/hooks/applypatch-msg.sample
+./.git/hooks/pre-applypatch.sample
+./.git/hooks/pre-rebase.sample
+./.git/hooks/pre-receive.sample
+./.git/hooks/pre-commit.sample
+./.git/hooks/push-to-checkout.sample
+./.git/hooks/pre-merge-commit.sample
+./.git/hooks/sendemail-validate.sample
+./.git/hooks/post-update.sample
+./.git/hooks/prepare-commit-msg.sample
+./.git/index
+./.git/HEAD
+./examples/stock.csv
+./pyproject.toml
+./tests/__init__.py
+./tests/test_loader.py
+./tests/test_cli.py
+./README.md
+./inventory/__init__.py
+./inventory/report.py
+./inventory/models.py
+./inventory/cli.py
+./inventory/loader.py
+
+exec
+/bin/bash -lc 'cat inventory/cli.py inventory/report.py inventory/loader.py inventory/models.py README.md tests/test_cli.py tests/test_loader.py examples/stock.csv; git status --short' in /home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+ succeeded in 0ms:
+import argparse
+import json
+import sys
+from .loader import load_items
+from .report import item_report
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Report inventory from CSV')
+    parser.add_argument('csv_file')
+    parser.add_argument('--min-quantity', type=int, default=0)
+    args = parser.parse_args(argv)
+    try:
+        items = load_items(args.csv_file)
+        result = item_report(items, args.min_quantity)
+    except (ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())
+def item_report(items, min_quantity=0):
+    return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+             'unit_price': str(x.unit_price)}
+            for x in items if x.quantity >= min_quantity]
+import csv
+from decimal import Decimal, InvalidOperation
+from .models import Item
+
+def load_items(path):
+    items = []
+    with open(path, newline='', encoding='utf-8') as source:
+        reader = csv.DictReader(source)
+        required = {'sku', 'category', 'quantity', 'unit_price'}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError('CSV requires sku, category, quantity and unit_price')
+        for line, row in enumerate(reader, 2):
+            try:
+                quantity = int(row['quantity'])
+                price = Decimal(row['unit_price'])
+                if quantity < 0 or price < 0 or not price.is_finite():
+                    raise ValueError('negative or non-finite value')
+                items.append(Item(row['sku'], row['category'], quantity, price))
+            except (ValueError, InvalidOperation, TypeError) as exc:
+                raise ValueError(f'Invalid CSV row {line}: {exc}') from exc
+    return items
+from dataclasses import dataclass
+from decimal import Decimal
+
+@dataclass(frozen=True)
+class Item:
+    sku: str
+    category: str
+    quantity: int
+    unit_price: Decimal
+# Inventory CLI
+
+Run `python3 -m inventory.cli examples/stock.csv`.
+Use `--min-quantity 3` to filter before reporting.
+Prices are decimal strings. No third-party dependencies are required.
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+DATA = 'sku,category,quantity,unit_price\npen,office,10,0.10\nnotebook,office,2,2.50\nmug,kitchen,3,4.25\n'
+
+class CliTests(unittest.TestCase):
+    def cli(self, data=DATA, *flags):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'stock.csv'
+            p.write_text(data)
+            return subprocess.run([sys.executable, '-m', 'inventory.cli', str(p), *flags], capture_output=True, text=True)
+    def test_ungrouped(self):
+        r = self.cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(json.loads(r.stdout)), 3)
+        self.assertEqual(json.loads(r.stdout)[0]['unit_price'], '0.10')
+    def test_filter(self):
+        r = self.cli(DATA, '--min-quantity', '3')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([x['sku'] for x in json.loads(r.stdout)], ['pen', 'mug'])
+    def test_category_summaries(self):
+        r = self.cli(DATA, '--group-by-category')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [
+            {'category': 'kitchen', 'quantity': 3, 'stock_value': '12.75'},
+            {'category': 'office', 'quantity': 12, 'stock_value': '6.00'}])
+    def test_filter_before_group(self):
+        r = self.cli(DATA, '--group-by-category', '--min-quantity', '3')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)[1]['stock_value'], '1.00')
+    def test_bad_csv(self):
+        r = self.cli('sku,category,quantity,unit_price\na,b,invalid,2\n')
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn('Traceback', r.stderr)
+        self.assertIn('row', r.stderr.lower())
+import unittest
+import tempfile
+from pathlib import Path
+from decimal import Decimal
+from inventory.loader import load_items
+
+class LoaderTests(unittest.TestCase):
+    def load(self, text):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'stock.csv'
+            p.write_text(text)
+            return load_items(p)
+    def test_exact_prices(self):
+        x = self.load('sku,category,quantity,unit_price\na,tools,3,0.10\n')[0]
+        self.assertEqual(x.unit_price, Decimal('0.10'))
+    def test_missing_header(self):
+        with self.assertRaises(ValueError): self.load('name\na\n')
+    def test_invalid_quantity(self):
+        with self.assertRaises(ValueError):
+            self.load('sku,category,quantity,unit_price\na,tools,no,1\n')
+    def test_negative_quantity(self):
+        with self.assertRaises(ValueError):
+            self.load('sku,category,quantity,unit_price\na,tools,-1,1\n')
+    def test_nonfinite_price(self):
+        with self.assertRaises(ValueError):
+            self.load('sku,category,quantity,unit_price\na,tools,1,NaN\n')
+sku,category,quantity,unit_price
+pen,office,10,0.10
+notebook,office,2,2.50
+mug,kitchen,3,4.25
+
+codex
+The CLI already separates argument parsing from reporting. I’ll add grouping to the report module, keep decimal totals exact for large values, and make malformed CSV return a useful error without a traceback.
+apply patch
+patch: completed
+/home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/README.md
+/home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/inventory/cli.py
+/home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/inventory/loader.py
+/home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/inventory/report.py
+diff --git a/README.md b/README.md
+index 06a117463dab44bff6177c6e9e44a029f7e2371a..37333af8f2c92179bc042b74bd6a80bad793ce76
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,18 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group by category (sorted by category):
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]
++```
++
++Add `--min-quantity 3` to filter individual items before grouping. The office
++summary then has quantity `10` and stock_value `"1.00"`.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2be395fb00563c59c8bb9899270164c78f..a3818bd60c4e07874b87ab482c4639a260b9e54e
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -1,18 +1,22 @@
+ import argparse
++import csv
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true',
++                        help='sum quantities and stock values by category')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
+-    except (ValueError, OSError) as exc:
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
++    except (ValueError, OSError, csv.Error) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+     print(json.dumps(result, ensure_ascii=False))
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7c390feaa5d078d42172f709be8efc0e98..e0699ecdc48e32bd5428c52e07707b64becbbf6d
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,12 +5,14 @@
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+         if not required.issubset(reader.fieldnames or []):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+         for line, row in enumerate(reader, 2):
+             try:
++                if None in row or any(row[name] is None for name in required):
++                    raise ValueError('missing or extra fields')
+                 quantity = int(row['quantity'])
+                 price = Decimal(row['unit_price'])
+                 if quantity < 0 or price < 0 or not price.is_finite():
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803fe51f31cdb386b5cc698650f560d60dd0e..29c6ce6ed12a787b710e85d047994e5251cc6657
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,33 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to fit without decimal context rounding.
++    fractional_digits = max(0, -min(x.unit_price.as_tuple().exponent for x in items))
++    integer_digits = max(
++        1, max(x.unit_price.adjusted() + 1 + len(str(x.quantity)) for x in items)
++    )
++    with localcontext() as context:
++        context.prec = integer_digits + fractional_digits + len(str(len(items))) + 2
++        totals = {}
++        for item in items:
++            quantity, value = totals.get(item.category, (0, Decimal(0)))
++            totals[item.category] = (
++                quantity + item.quantity,
++                value + item.quantity * item.unit_price,
++            )
++        return [
++            {'category': category, 'quantity': totals[category][0],
++             'stock_value': format(totals[category][1], '.2f')}
++            for category in sorted(totals)
++        ]
+
+exec
+/bin/bash -lc 'python3 -m unittest discover -s tests -v' in /home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+ succeeded in 959ms:
+test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok
+test_category_summaries (test_cli.CliTests.test_category_summaries) ... ok
+test_filter (test_cli.CliTests.test_filter) ... ok
+test_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok
+test_ungrouped (test_cli.CliTests.test_ungrouped) ... ok
+test_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok
+test_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok
+test_missing_header (test_loader.LoaderTests.test_missing_header) ... ok
+test_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok
+test_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.848s
+
+OK
+
+diff --git a/README.md b/README.md
+index 06a117463dab44bff6177c6e9e44a029f7e2371a..37333af8f2c92179bc042b74bd6a80bad793ce76
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,18 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group by category (sorted by category):
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]
++```
++
++Add `--min-quantity 3` to filter individual items before grouping. The office
++summary then has quantity `10` and stock_value `"1.00"`.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2be395fb00563c59c8bb9899270164c78f..a3818bd60c4e07874b87ab482c4639a260b9e54e
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -1,18 +1,22 @@
+ import argparse
++import csv
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true',
++                        help='sum quantities and stock values by category')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
+-    except (ValueError, OSError) as exc:
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
++    except (ValueError, OSError, csv.Error) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+     print(json.dumps(result, ensure_ascii=False))
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7c390feaa5d078d42172f709be8efc0e98..e0699ecdc48e32bd5428c52e07707b64becbbf6d
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,12 +5,14 @@
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+         if not required.issubset(reader.fieldnames or []):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+         for line, row in enumerate(reader, 2):
+             try:
++                if None in row or any(row[name] is None for name in required):
++                    raise ValueError('missing or extra fields')
+                 quantity = int(row['quantity'])
+                 price = Decimal(row['unit_price'])
+                 if quantity < 0 or price < 0 or not price.is_finite():
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803fe51f31cdb386b5cc698650f560d60dd0e..29c6ce6ed12a787b710e85d047994e5251cc6657
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,33 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to fit without decimal context rounding.
++    fractional_digits = max(0, -min(x.unit_price.as_tuple().exponent for x in items))
++    integer_digits = max(
++        1, max(x.unit_price.adjusted() + 1 + len(str(x.quantity)) for x in items)
++    )
++    with localcontext() as context:
++        context.prec = integer_digits + fractional_digits + len(str(len(items))) + 2
++        totals = {}
++        for item in items:
++            quantity, value = totals.get(item.category, (0, Decimal(0)))
++            totals[item.category] = (
++                quantity + item.quantity,
++                value + item.quantity * item.unit_price,
++            )
++        return [
++            {'category': category, 'quantity': totals[category][0],
++             'stock_value': format(totals[category][1], '.2f')}
++            for category in sorted(totals)
++        ]
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from decimal import Decimal
+from inventory.models import Item
+from inventory.report import category_report
+from inventory.cli import main
+from pathlib import Path
+from tempfile import TemporaryDirectory
+assert category_report([Item('a', 'x', 3, Decimal('123456789012345678901234567890.12'))]) == [{'category': 'x', 'quantity': 3, 'stock_value': '370370367037037036703703703670.36'}]
+assert category_report([], 3) == []
+with TemporaryDirectory() as directory:
+    path = Path(directory) / 'bad.csv'
+    for data in ['sku,category,quantity,unit_price\\na,b,1\\n', 'sku,category,quantity,unit_price\\n\"unterminated,b,1,2\\n']:
+        path.write_text(data)
+        assert main([str(path), '--group-by-category']) == 2
+print('Additional precision, empty-report, and malformed-CSV checks passed.')
+PY
+ git diff --check; git status --short" in /home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+ succeeded in 96ms:
+Invalid CSV row 2: missing or extra fields
+unexpected end of data
+Additional precision, empty-report, and malformed-CSV checks passed.
+ M README.md
+ M inventory/cli.py
+ M inventory/loader.py
+ M inventory/report.py
+?? inventory/__pycache__/
+?? tests/__pycache__/
+
+diff --git a/README.md b/README.md
+index 06a117463dab44bff6177c6e9e44a029f7e2371a..37333af8f2c92179bc042b74bd6a80bad793ce76
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,18 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group by category (sorted by category):
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]
++```
++
++Add `--min-quantity 3` to filter individual items before grouping. The office
++summary then has quantity `10` and stock_value `"1.00"`.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2be395fb00563c59c8bb9899270164c78f..a3818bd60c4e07874b87ab482c4639a260b9e54e
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -1,18 +1,22 @@
+ import argparse
++import csv
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true',
++                        help='sum quantities and stock values by category')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
+-    except (ValueError, OSError) as exc:
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
++    except (ValueError, OSError, csv.Error) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+     print(json.dumps(result, ensure_ascii=False))
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7c390feaa5d078d42172f709be8efc0e98..e0699ecdc48e32bd5428c52e07707b64becbbf6d
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,12 +5,14 @@
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+         if not required.issubset(reader.fieldnames or []):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+         for line, row in enumerate(reader, 2):
+             try:
++                if None in row or any(row[name] is None for name in required):
++                    raise ValueError('missing or extra fields')
+                 quantity = int(row['quantity'])
+                 price = Decimal(row['unit_price'])
+                 if quantity < 0 or price < 0 or not price.is_finite():
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803fe51f31cdb386b5cc698650f560d60dd0e..29c6ce6ed12a787b710e85d047994e5251cc6657
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,33 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to fit without decimal context rounding.
++    fractional_digits = max(0, -min(x.unit_price.as_tuple().exponent for x in items))
++    integer_digits = max(
++        1, max(x.unit_price.adjusted() + 1 + len(str(x.quantity)) for x in items)
++    )
++    with localcontext() as context:
++        context.prec = integer_digits + fractional_digits + len(str(len(items))) + 2
++        totals = {}
++        for item in items:
++            quantity, value = totals.get(item.category, (0, Decimal(0)))
++            totals[item.category] = (
++                quantity + item.quantity,
++                value + item.quantity * item.unit_price,
++            )
++        return [
++            {'category': category, 'quantity': totals[category][0],
++             'stock_value': format(totals[category][1], '.2f')}
++            for category in sorted(totals)
++        ]
+
+2026-10-12T13:31:44.136032Z ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "Rejected(\"`/bin/bash -lc 'rm -rf inventory/__pycache__ tests/__pycache__'` rejected: rm -f style commands are not permitted. Use a safer approach\")" }
+diff --git a/README.md b/README.md
+index 06a117463dab44bff6177c6e9e44a029f7e2371a..37333af8f2c92179bc042b74bd6a80bad793ce76
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,18 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group by category (sorted by category):
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]
++```
++
++Add `--min-quantity 3` to filter individual items before grouping. The office
++summary then has quantity `10` and stock_value `"1.00"`.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2be395fb00563c59c8bb9899270164c78f..a3818bd60c4e07874b87ab482c4639a260b9e54e
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -1,18 +1,22 @@
+ import argparse
++import csv
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true',
++                        help='sum quantities and stock values by category')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
+-    except (ValueError, OSError) as exc:
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
++    except (ValueError, OSError, csv.Error) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+     print(json.dumps(result, ensure_ascii=False))
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7c390feaa5d078d42172f709be8efc0e98..e0699ecdc48e32bd5428c52e07707b64becbbf6d
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,12 +5,14 @@
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+         if not required.issubset(reader.fieldnames or []):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+         for line, row in enumerate(reader, 2):
+             try:
++                if None in row or any(row[name] is None for name in required):
++                    raise ValueError('missing or extra fields')
+                 quantity = int(row['quantity'])
+                 price = Decimal(row['unit_price'])
+                 if quantity < 0 or price < 0 or not price.is_finite():
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803fe51f31cdb386b5cc698650f560d60dd0e..29c6ce6ed12a787b710e85d047994e5251cc6657
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,33 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to fit without decimal context rounding.
++    fractional_digits = max(0, -min(x.unit_price.as_tuple().exponent for x in items))
++    integer_digits = max(
++        1, max(x.unit_price.adjusted() + 1 + len(str(x.quantity)) for x in items)
++    )
++    with localcontext() as context:
++        context.prec = integer_digits + fractional_digits + len(str(len(items))) + 2
++        totals = {}
++        for item in items:
++            quantity, value = totals.get(item.category, (0, Decimal(0)))
++            totals[item.category] = (
++                quantity + item.quantity,
++                value + item.quantity * item.unit_price,
++            )
++        return [
++            {'category': category, 'quantity': totals[category][0],
++             'stock_value': format(totals[category][1], '.2f')}
++            for category in sorted(totals)
++        ]
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+for folder in (Path('inventory/__pycache__'), Path('tests/__pycache__')):
+    for file in folder.glob('*.pyc'):
+        file.unlink()
+    folder.rmdir()
+PY" in /home/monocursive/bench-ouro-startup-native-final/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow
+ succeeded in 0ms:
+diff --git a/README.md b/README.md
+index 06a117463dab44bff6177c6e9e44a029f7e2371a..37333af8f2c92179bc042b74bd6a80bad793ce76
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,18 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group by category (sorted by category):
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]
++```
++
++Add `--min-quantity 3` to filter individual items before grouping. The office
++summary then has quantity `10` and stock_value `"1.00"`.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2be395fb00563c59c8bb9899270164c78f..a3818bd60c4e07874b87ab482c4639a260b9e54e
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -1,18 +1,22 @@
+ import argparse
++import csv
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true',
++                        help='sum quantities and stock values by category')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
+-    except (ValueError, OSError) as exc:
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
++    except (ValueError, OSError, csv.Error) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+     print(json.dumps(result, ensure_ascii=False))
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7c390feaa5d078d42172f709be8efc0e98..e0699ecdc48e32bd5428c52e07707b64becbbf6d
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,12 +5,14 @@
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+         if not required.issubset(reader.fieldnames or []):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+         for line, row in enumerate(reader, 2):
+             try:
++                if None in row or any(row[name] is None for name in required):
++                    raise ValueError('missing or extra fields')
+                 quantity = int(row['quantity'])
+                 price = Decimal(row['unit_price'])
+                 if quantity < 0 or price < 0 or not price.is_finite():
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803fe51f31cdb386b5cc698650f560d60dd0e..29c6ce6ed12a787b710e85d047994e5251cc6657
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,33 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to fit without decimal context rounding.
++    fractional_digits = max(0, -min(x.unit_price.as_tuple().exponent for x in items))
++    integer_digits = max(
++        1, max(x.unit_price.adjusted() + 1 + len(str(x.quantity)) for x in items)
++    )
++    with localcontext() as context:
++        context.prec = integer_digits + fractional_digits + len(str(len(items))) + 2
++        totals = {}
++        for item in items:
++            quantity, value = totals.get(item.category, (0, Decimal(0)))
++            totals[item.category] = (
++                quantity + item.quantity,
++                value + item.quantity * item.unit_price,
++            )
++        return [
++            {'category': category, 'quantity': totals[category][0],
++             'stock_value': format(totals[category][1], '.2f')}
++            for category in sorted(totals)
++        ]
+
+codex
+Implemented `--group-by-category` with filtering before grouping, category sorting, and exact decimal totals formatted as two-digit JSON strings.
+
+Ungrouped output is preserved. Invalid CSV returns exit code 2 without a traceback. README includes the grouped example and expected output.
+
+All 10 supplied tests passed; tests were unchanged. Additional precision and malformed-CSV checks passed.
+diff --git a/README.md b/README.md
+index 06a117463dab44bff6177c6e9e44a029f7e2371a..37333af8f2c92179bc042b74bd6a80bad793ce76
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,18 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group by category (sorted by category):
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]
++```
++
++Add `--min-quantity 3` to filter individual items before grouping. The office
++summary then has quantity `10` and stock_value `"1.00"`.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2be395fb00563c59c8bb9899270164c78f..a3818bd60c4e07874b87ab482c4639a260b9e54e
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -1,18 +1,22 @@
+ import argparse
++import csv
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true',
++                        help='sum quantities and stock values by category')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
+-    except (ValueError, OSError) as exc:
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
++    except (ValueError, OSError, csv.Error) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+     print(json.dumps(result, ensure_ascii=False))
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7c390feaa5d078d42172f709be8efc0e98..e0699ecdc48e32bd5428c52e07707b64becbbf6d
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,12 +5,14 @@
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+         if not required.issubset(reader.fieldnames or []):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+         for line, row in enumerate(reader, 2):
+             try:
++                if None in row or any(row[name] is None for name in required):
++                    raise ValueError('missing or extra fields')
+                 quantity = int(row['quantity'])
+                 price = Decimal(row['unit_price'])
+                 if quantity < 0 or price < 0 or not price.is_finite():
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803fe51f31cdb386b5cc698650f560d60dd0e..29c6ce6ed12a787b710e85d047994e5251cc6657
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,33 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to fit without decimal context rounding.
++    fractional_digits = max(0, -min(x.unit_price.as_tuple().exponent for x in items))
++    integer_digits = max(
++        1, max(x.unit_price.adjusted() + 1 + len(str(x.quantity)) for x in items)
++    )
++    with localcontext() as context:
++        context.prec = integer_digits + fractional_digits + len(str(len(items))) + 2
++        totals = {}
++        for item in items:
++            quantity, value = totals.get(item.category, (0, Decimal(0)))
++            totals[item.category] = (
++                quantity + item.quantity,
++                value + item.quantity * item.unit_price,
++            )
++        return [
++            {'category': category, 'quantity': totals[category][0],
++             'stock_value': format(totals[category][1], '.2f')}
++            for category in sorted(totals)
++        ]
+
+tokens used
+9,592

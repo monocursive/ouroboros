@@ -1,0 +1,96 @@
+[0m
+> build · claude-sonnet-4-5
+[0m
+[0m# [0mTodos
+[ ] Run python3 -m unittest discover -s tests -v
+[ ] Analyze test failures to identify the bug
+[ ] Find and fix the bug in src/parse.py
+[ ] Verify all tests pass after the fix
+[0m
+[0m# [0mTodos
+[•] Run python3 -m unittest discover -s tests -v
+[ ] Analyze test failures to identify the bug
+[ ] Find and fix the bug in src/parse.py
+[ ] Verify all tests pass after the fix
+[0m
+[0m$ [0mpython3 -m unittest discover -s tests -v
+test_basic (test_parse.TestParse.test_basic) ... FAIL
+test_single (test_parse.TestParse.test_single) ... ERROR
+
+======================================================================
+ERROR: test_single (test_parse.TestParse.test_single)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/work/opencode-1791795178509819887/workspace/fix-offbyone/tests/test_parse.py", line 8, in test_single
+    self.assertEqual(first_word('solo'), 'solo')
+                     ^^^^^^^^^^^^^^^^^^
+  File "/work/opencode-1791795178509819887/workspace/fix-offbyone/src/parse.py", line 4, in first_word
+    return parts[1]
+           ~~~~~^^^
+IndexError: list index out of range
+
+======================================================================
+FAIL: test_basic (test_parse.TestParse.test_basic)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/work/opencode-1791795178509819887/workspace/fix-offbyone/tests/test_parse.py", line 6, in test_basic
+    self.assertEqual(first_word('hello world'), 'hello')
+AssertionError: 'world' != 'hello'
+- world
++ hello
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+FAILED (failures=1, errors=1)
+[0m
+[0m# [0mTodos
+[✓] Run python3 -m unittest discover -s tests -v
+[•] Analyze test failures to identify the bug
+[ ] Find and fix the bug in src/parse.py
+[ ] Verify all tests pass after the fix
+[0m
+[0m→ [0mRead src/parse.py
+[0m→ [0mRead tests/test_parse.py
+[0m
+[0m# [0mTodos
+[✓] Run python3 -m unittest discover -s tests -v
+[✓] Analyze test failures to identify the bug
+[•] Find and fix the bug in src/parse.py
+[ ] Verify all tests pass after the fix
+[0m
+[0m← [0mEdit src/parse.py
+Index: /work/opencode-1791795178509819887/workspace/fix-offbyone/src/parse.py
+===================================================================
+--- /work/opencode-1791795178509819887/workspace/fix-offbyone/src/parse.py
++++ /work/opencode-1791795178509819887/workspace/fix-offbyone/src/parse.py
+@@ -1,4 +1,4 @@
+ def first_word(text):
+     # Return the first word of a space-separated string
+     parts = text.split(' ')
+-    return parts[1]
++    return parts[0]
+
+[0m
+[0m# [0mTodos
+[✓] Run python3 -m unittest discover -s tests -v
+[✓] Analyze test failures to identify the bug
+[✓] Find and fix the bug in src/parse.py
+[•] Verify all tests pass after the fix
+[0m
+[0m$ [0mpython3 -m unittest discover -s tests -v
+test_basic (test_parse.TestParse.test_basic) ... ok
+test_single (test_parse.TestParse.test_single) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+OK
+[0m
+[0m# [0mTodos
+[✓] Run python3 -m unittest discover -s tests -v
+[✓] Analyze test failures to identify the bug
+[✓] Find and fix the bug in src/parse.py
+[✓] Verify all tests pass after the fix
+[0m

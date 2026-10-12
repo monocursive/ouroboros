@@ -1,0 +1,554 @@
+diff --git a/crates/ouro-jail/src/platform/linux/fs.rs b/crates/ouro-jail/src/platform/linux/fs.rs
+index cdd73e67..313e08ce 100644
+--- a/crates/ouro-jail/src/platform/linux/fs.rs
++++ b/crates/ouro-jail/src/platform/linux/fs.rs
+@@ -374,7 +374,8 @@ fn walk(
+         })?;
+ 
+     let mut subdirs: Vec<(CString, Vec<u8>)> = Vec::new();
+-    for name in entries {
++    for entry in entries {
++        let name = entry.name;
+         state.entries_seen += 1;
+         if state.entries_seen > state.limits.max_entries {
+             return Err(ScanError::EntryLimit {
+@@ -388,13 +389,6 @@ fn walk(
+             child_relative.push(b'/');
+         }
+         child_relative.extend_from_slice(name.to_bytes());
+-        let meta = dir
+-            .stat_child_nofollow(&name)
+-            .map_err(|errno| ScanError::Unreadable {
+-                path: child_path.clone(),
+-                errno,
+-            })?;
+-
+         // A single-component name matches any directory entry; a
+         // multi-component name (audit 2026-10-08 M5) matches the entry's
+         // whole path beneath the writable root, so `.git/hooks` protects a
+@@ -409,6 +403,22 @@ fn walk(
+             }
+         });
+ 
++        // readdir already identifies ordinary regular files. Their identity
++        // is irrelevant unless their name is protected: they cannot contain
++        // deeper segments and are never followed. Unknown types, directories,
++        // symlinks and every protected name still get the no-follow stat.
++        // The existing directory stamps and mount-handoff verification remain
++        // responsible for a rename/type swap after enumeration.
++        if literal.is_none() && entry.kind == libc::DT_REG {
++            continue;
++        }
++        let meta = dir
++            .stat_child_nofollow(&name)
++            .map_err(|errno| ScanError::Unreadable {
++                path: child_path.clone(),
++                errno,
++            })?;
++
+         if let Some(literal) = literal {
+             if meta.is_symlink {
+                 state.skipped_symlinks.push(child_path.clone());
+@@ -490,6 +500,11 @@ struct DirHandle {
+     fd: OwnedFd,
+ }
+ 
++struct DirectoryEntry {
++    name: CString,
++    kind: u8,
++}
++
+ #[derive(Clone, Copy)]
+ struct ChildMeta {
+     is_dir: bool,
+@@ -568,7 +583,7 @@ impl DirHandle {
+     }
+ 
+     /// Every entry name in this directory except `.` and `..`.
+-    fn entries(&self, remaining: usize) -> Result<Vec<CString>, i32> {
++    fn entries(&self, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
+         // `fdopendir` takes ownership of the fd it is given, so hand it a
+         // duplicate and keep ours for `openat`.
+         // SAFETY: `self.fd` is a live directory fd; F_DUPFD_CLOEXEC returns a
+@@ -612,7 +627,11 @@ impl DirHandle {
+                 result = Err(libc::E2BIG);
+                 break;
+             }
+-            out.push(name.to_owned());
++            out.push(DirectoryEntry {
++                name: name.to_owned(),
++                // SAFETY: the dirent is still live until the next readdir.
++                kind: unsafe { (*entry).d_type },
++            });
+         }
+         // SAFETY: `dirp` was created above and is closed exactly once here.
+         unsafe { libc::closedir(dirp) };
+diff --git a/crates/ouro-jail/src/platform/linux/platform.rs b/crates/ouro-jail/src/platform/linux/platform.rs
+index d244a0f4..e487bf2c 100644
+--- a/crates/ouro-jail/src/platform/linux/platform.rs
++++ b/crates/ouro-jail/src/platform/linux/platform.rs
+@@ -227,13 +227,13 @@ pub fn resolved_bwrap() -> Result<&'static Path, &'static str> {
+ 
+ /// Whether the resolved bubblewrap is new enough for the rendered argv,
+ /// computed once per process from the backend every run resolves anyway:
+-/// `Ok(())`, or a message naming the version it reports and the floor it
++/// `Ok(version)`, or a message naming the version it reports and the floor it
+ /// misses.
+-static BWRAP_MEETS_MINIMUM: std::sync::LazyLock<Result<(), String>> =
++static BWRAP_MEETS_MINIMUM: std::sync::LazyLock<Result<bwrap::BwrapVersion, String>> =
+     std::sync::LazyLock::new(|| {
+         let bwrap = resolved_bwrap().map_err(str::to_owned)?;
+         match bwrap::bwrap_version(bwrap) {
+-            Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => Ok(()),
++            Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => Ok(version),
+             Ok(version) => Err(format!(
+                 "the resolved bubblewrap ({}) reports {}; every contained run renders \
+                  --bind-fd/--ro-bind-fd, which need bubblewrap >= 0.10.0",
+@@ -1527,7 +1527,7 @@ impl Boundary {
+             }
+         }
+ 
+-        if let Err(err) = boundary.discover(bwrap_path, deadline, &filter_digest, &scan) {
++        if let Err(err) = boundary.discover(deadline, &filter_digest, &scan) {
+             boundary.teardown();
+             return Err(err);
+         }
+@@ -1592,7 +1592,6 @@ impl Boundary {
+     /// boundary actually applied.
+     fn discover(
+         &mut self,
+-        bwrap_path: &Path,
+         deadline: clock::Deadline,
+         filter_digest: &str,
+         scan: &jfs::ProtectedScan,
+@@ -1733,7 +1732,17 @@ impl Boundary {
+         }
+ 
+         // Read back the boundary rather than trusting the flags we passed.
+-        let status_field = |key: &str| identity::status_field(launcher, key).unwrap_or_default();
++        // The launcher is blocked: these facts come from one kernel status
++        // snapshot rather than reopening the same file for every field.
++        let launcher_status =
++            std::fs::read_to_string(format!("/proc/{launcher}/status")).unwrap_or_default();
++        let status_field = |key: &str| {
++            launcher_status
++                .lines()
++                .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
++                .unwrap_or("")
++                .trim()
++        };
+         let no_new_privs = status_field("NoNewPrivs");
+         let cap_eff = status_field("CapEff");
+         let seccomp_mode = status_field("Seccomp");
+@@ -1743,7 +1752,7 @@ impl Boundary {
+                 format!("no_new_privs is {no_new_privs:?} inside the boundary, not 1"),
+             ));
+         }
+-        if !cap_eff.chars().all(|character| character == '0') {
++        if cap_eff.is_empty() || !cap_eff.chars().all(|character| character == '0') {
+             return Err(preparing(
+                 ErrorCode::BackendUnavailable,
+                 format!("the boundary retains capabilities: CapEff {cap_eff}"),
+@@ -1762,7 +1771,7 @@ impl Boundary {
+         let expected =
+             super::agent::expected_launcher_filters(self.agent.is_some(), self.observe_on);
+         self.seccomp_filters = Some(
+-            super::agent::verify_filter_count(&status_field("Seccomp_filters"), expected).map_err(
++            super::agent::verify_filter_count(status_field("Seccomp_filters"), expected).map_err(
+                 |mut error| {
+                     error.message = format!("the launcher: {}", error.message);
+                     error
+@@ -1806,8 +1815,12 @@ impl Boundary {
+         }
+         // J3-agent end
+ 
+-        self.backend_version = bwrap::bwrap_version(bwrap_path)
+-            .map(|version| version.raw)
++        // Preparation already queried this process's resolved backend and
++        // checked its minimum version. Its pinned executable identity was
++        // verified at spawn; retain that measured version in the receipt.
++        self.backend_version = BWRAP_MEETS_MINIMUM
++            .as_ref()
++            .map(|version| version.raw.clone())
+             .unwrap_or_default();
+ 
+         if super::storage::requested(&self.snapshot.limits) {
+diff --git a/crates/ouro-jail/src/platform/linux/probe.rs b/crates/ouro-jail/src/platform/linux/probe.rs
+index fc4348ab..0a1d7924 100644
+--- a/crates/ouro-jail/src/platform/linux/probe.rs
++++ b/crates/ouro-jail/src/platform/linux/probe.rs
+@@ -183,23 +183,67 @@ pub fn run_one_backend(name: &str, jail_exe: &Path, bwrap: Backend<'_>) -> Probe
+     run_one_for(name, std::env::consts::ARCH, jail_exe, bwrap)
+ }
+ 
+-/// Fresh probes for one preparation. The namespace probes consume the same
+-/// status report, so one sandbox can provide it without changing any check.
++/// Fresh probes for one preparation. Namespace, read-only bind and baseline
++/// filter checks share a successful sandbox without changing any validator.
+ /// No result survives this call; refusals and deadlines still apply per run.
+ #[must_use]
+ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<ProbeResult> {
+-    let namespace = |name: &str| {
++    let shared_check = |name: &str| {
+         matches!(
+             name,
+-            "user_namespace" | "pid_namespace" | "network_namespace"
++            "user_namespace" | "pid_namespace" | "network_namespace" | "mount_readonly_bind"
+         )
+     };
+-    let shared = if names.iter().filter(|name| namespace(name)).count() > 1 {
++    // A working baseline filter leaves each namespace and EROFS check intact.
++    // Only use the combined answer when every requested validator succeeds;
++    // otherwise retain the unfiltered/individual probes below so a failed
++    // filter or bind does not turn another host capability into a guess.
++    let filtered = if names.contains(&"seccomp_filter_load")
++        && names.iter().any(|name| shared_check(name))
++        && seam_architecture_refusal("seccomp_filter_load").is_none()
++        && architecture_refusal("seccomp_filter_load", std::env::consts::ARCH).is_none()
++    {
++        bwrap
++            .ok()
++            .filter(|path| path.is_absolute())
++            .and_then(|path| {
++                let outside = ns_ids(own_pid());
++                let run =
++                    run_status_checks(jail_exe, path, names.contains(&"mount_readonly_bind"), true)
++                        .ok()?;
++                let results: Vec<_> = names
++                    .iter()
++                    .filter_map(|name| match *name {
++                        "user_namespace" => {
++                            Some(namespace_result(name, outside.user, &run.captured))
++                        }
++                        "pid_namespace" => Some(namespace_result(name, outside.pid, &run.captured)),
++                        "network_namespace" => Some(network_namespace_result(&run.captured)),
++                        "mount_readonly_bind" => Some(readonly_bind_result(&run.captured)),
++                        "seccomp_filter_load" => Some(seccomp_result(&run.captured)),
++                        _ => None,
++                    })
++                    .collect();
++                results
++                    .iter()
++                    .all(|result| result.status == ProbeStatus::Available)
++                    .then_some(results)
++            })
++    } else {
++        None
++    };
++    let shared = if filtered.is_none() && names.iter().filter(|name| shared_check(name)).count() > 1
++    {
+         bwrap.ok().filter(|path| path.is_absolute()).map(|path| {
+             let outside = ns_ids(own_pid());
+             (
+                 outside,
+-                run_inside(jail_exe, path, &["status"], Vec::new(), false),
++                run_status_checks(
++                    jail_exe,
++                    path,
++                    names.contains(&"mount_readonly_bind"),
++                    false,
++                ),
+             )
+         })
+     } else {
+@@ -208,6 +252,12 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
+     names
+         .iter()
+         .map(|name| {
++            if let Some(result) = filtered
++                .as_ref()
++                .and_then(|results| results.iter().find(|result| result.name == *name))
++            {
++                return result.clone();
++            }
+             if let Some((outside, run)) = &shared {
+                 let result = match *name {
+                     "user_namespace" | "pid_namespace" => Some(match run {
+@@ -242,6 +292,14 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
+                             error.to_string(),
+                         ),
+                     }),
++                    "mount_readonly_bind" => Some(match run {
++                        Ok(run) => readonly_bind_result(&run.captured),
++                        Err(error) => ProbeResult::error(
++                            "mount_readonly_bind",
++                            "bubblewrap-binds",
++                            error.to_string(),
++                        ),
++                    }),
+                     _ => None,
+                 };
+                 if let Some(result) = result {
+@@ -253,6 +311,27 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
+         .collect()
+ }
+ 
++fn run_status_checks(
++    jail_exe: &Path,
++    bwrap: &Path,
++    readonly: bool,
++    with_seccomp: bool,
++) -> io::Result<SandboxRun> {
++    let source = readonly
++        .then(|| OwnedTempDir::new("probe-ro"))
++        .transpose()?;
++    let mut checks = vec!["status"];
++    let mut binds = Vec::new();
++    if let Some(source) = &source {
++        checks.push("ro=write:/probe-ro/probe.txt");
++        binds.push((source.path.clone(), PathBuf::from("/probe-ro")));
++    }
++    if with_seccomp {
++        checks.extend(["afunix=socket-afunix", "allowed=write:/tmp/probe.txt"]);
++    }
++    run_inside(jail_exe, bwrap, &checks, binds, with_seccomp)
++}
++
+ // J5-D begin: probes that execute bubblewrap (review F1)
+ /// The probes that execute bubblewrap, with the mechanism each names. With
+ /// no resolved backend they report `unavailable` with `backend_unavailable`
+@@ -667,7 +746,16 @@ fn probe_readonly_bind(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+         Ok(run) => run,
+         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
+     };
+-    match run.captured.field("ro") {
++    readonly_bind_result(&run.captured)
++}
++
++fn readonly_bind_result(captured: &exec::Captured) -> ProbeResult {
++    const NAME: &str = "mount_readonly_bind";
++    const MECHANISM: &str = "bubblewrap-binds";
++    if captured.timed_out {
++        return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
++    }
++    match captured.field("ro") {
+         Some("EROFS") => ProbeResult::new(
+             NAME,
+             ProbeStatus::Available,
+@@ -685,7 +773,7 @@ fn probe_readonly_bind(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+         None => ProbeResult::error(
+             NAME,
+             MECHANISM,
+-            format!("sandbox reported nothing: {}", run.captured.stderr.trim()),
++            format!("sandbox reported nothing: {}", captured.stderr.trim()),
+         ),
+     }
+ }
+@@ -707,9 +795,18 @@ fn probe_seccomp(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+         Ok(run) => run,
+         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
+     };
+-    let mode = run.captured.field("seccomp").unwrap_or("?");
+-    let denied = run.captured.field("afunix").unwrap_or("?");
+-    let allowed = run.captured.field("allowed").unwrap_or("?");
++    seccomp_result(&run.captured)
++}
++
++fn seccomp_result(captured: &exec::Captured) -> ProbeResult {
++    const NAME: &str = "seccomp_filter_load";
++    const MECHANISM: &str = "seccomp-bpf";
++    if captured.timed_out {
++        return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
++    }
++    let mode = captured.field("seccomp").unwrap_or("?");
++    let denied = captured.field("afunix").unwrap_or("?");
++    let allowed = captured.field("allowed").unwrap_or("?");
+     let digest = seccomp::tool_baseline()
+         .map(|p| p.digest())
+         .unwrap_or_else(|_| "unavailable".to_owned());
+@@ -1597,11 +1694,15 @@ mod tests {
+             network_namespace_result(&captured).status,
+             ProbeStatus::Available
+         );
+-        captured.stdout = "ns_user=11\nns_pid=22\nnetdev=eth0,lo\n".into();
++        captured.stdout = "ns_user=11\nns_pid=22\nnetdev=eth0,lo\nro=ok\n".into();
+         assert_eq!(
+             network_namespace_result(&captured).status,
+             ProbeStatus::Unavailable
+         );
++        assert_eq!(
++            readonly_bind_result(&captured).status,
++            ProbeStatus::Unavailable
++        );
+         captured.timed_out = true;
+         assert_eq!(
+             namespace_result("user_namespace", Some(10), &captured).status,
+@@ -1611,6 +1712,7 @@ mod tests {
+             network_namespace_result(&captured).status,
+             ProbeStatus::Error
+         );
++        assert_eq!(readonly_bind_result(&captured).status, ProbeStatus::Error);
+         captured.timed_out = false;
+         captured.stdout.clear();
+         assert_eq!(
+@@ -1632,13 +1734,18 @@ mod tests {
+         std::fs::write(
+             &backend,
+             format!(
+-                "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' ns_user=1 ns_pid=2 netdev=lo\n",
++                "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' ns_user=1 ns_pid=2 netdev=lo ro=EROFS\n",
+                 calls.display()
+             ),
+         )
+         .unwrap();
+         std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+-        let names = ["user_namespace", "pid_namespace", "network_namespace"];
++        let names = [
++            "user_namespace",
++            "pid_namespace",
++            "network_namespace",
++            "mount_readonly_bind",
++        ];
+         for expected in [1, 2] {
+             let results = run_selected(&names, Path::new("/unused-jail"), Ok(&backend));
+             assert_eq!(results.iter().map(|r| r.name).collect::<Vec<_>>(), names);
+@@ -1655,6 +1762,48 @@ mod tests {
+         assert_eq!(std::fs::read(&calls).unwrap().len(), 2);
+     }
+ 
++    #[test]
++    fn combined_filter_checks_fall_back_without_poisoning_other_capabilities() {
++        use std::os::unix::fs::PermissionsExt as _;
++        let names = [
++            "user_namespace",
++            "pid_namespace",
++            "network_namespace",
++            "mount_readonly_bind",
++            "seccomp_filter_load",
++        ];
++        for fail_combination in [false, true] {
++            let temp = OwnedTempDir::new("combined-check-test").unwrap();
++            let backend = temp.path.join("bwrap");
++            let calls = temp.path.join("calls");
++            let failure = if fail_combination {
++                "case \"$*\" in *ro=write:*afunix=socket-afunix*) ro=EPERM;; esac\n"
++            } else {
++                ""
++            };
++            std::fs::write(
++                &backend,
++                format!(
++                    "#!/bin/sh\nprintf x >> '{}'\nro=EROFS\n{failure}printf '%s\\n' \
++                     ns_user=1 ns_pid=2 netdev=lo seccomp=2 afunix=EPERM allowed=ok ro=$ro\n",
++                    calls.display()
++                ),
++            )
++            .unwrap();
++            std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
++            let results = run_selected(&names, Path::new("/unused-jail"), Ok(&backend));
++            assert_eq!(results.iter().map(|r| r.name).collect::<Vec<_>>(), names);
++            assert!(
++                results.iter().all(|r| r.status == ProbeStatus::Available),
++                "{results:?}"
++            );
++            assert_eq!(
++                std::fs::read(&calls).unwrap().len(),
++                if fail_combination { 3 } else { 1 }
++            );
++        }
++    }
++
+     #[test]
+     fn every_name_has_a_probe() {
+         for name in PROBE_NAMES {
+diff --git a/crates/ouro-jail/src/platform/linux/tracer/mod.rs b/crates/ouro-jail/src/platform/linux/tracer/mod.rs
+index c820bd38..be5a474f 100644
+--- a/crates/ouro-jail/src/platform/linux/tracer/mod.rs
++++ b/crates/ouro-jail/src/platform/linux/tracer/mod.rs
+@@ -1227,7 +1227,19 @@ impl Tracer {
+             if target > 0 {
+                 let _ = sys::tgkill(target, sys::wake_signal());
+             }
+-            std::thread::sleep(Duration::from_millis(5));
++            // Delivery or channel closure can finish the wait immediately.
++            // A fixed sleep delayed every short-lived observer even when its
++            // final facts were already ready. Keep the same wake cadence for
++            // a blocked waitpid, and still consume every event before joining.
++            match self.events.recv_timeout(Duration::from_millis(5)) {
++                Ok(event) => consume(event),
++                Err(RecvTimeoutError::Timeout) => {}
++                Err(RecvTimeoutError::Disconnected) => {
++                    // The thread may be between closing its sender and
++                    // publishing its JoinHandle completion flag.
++                    std::thread::sleep(Duration::from_micros(200));
++                }
++            }
+         }
+         while let Ok(event) = self.events.try_recv() {
+             consume(event);
+diff --git a/crates/ouro-jail/tests/linux_mechanisms.rs b/crates/ouro-jail/tests/linux_mechanisms.rs
+index 703f9d1b..acd356ae 100644
+--- a/crates/ouro-jail/tests/linux_mechanisms.rs
++++ b/crates/ouro-jail/tests/linux_mechanisms.rs
+@@ -319,6 +319,71 @@ fn root_level_literals_are_reported_present_or_absent() {
+     assert_eq!(scan.absent_root_literals(), vec![".ouroboros"]);
+ }
+ 
++#[test]
++fn ordinary_file_hints_keep_protected_file_identity_and_mutation_detection() {
++    let dir = temp_dir("ordinary-file-hints");
++    let root = dir.path();
++    fs::write(root.join(".git"), b"gitdir: elsewhere\n").unwrap();
++    for index in 0..64 {
++        fs::write(root.join(format!("ordinary-{index}")), b"ordinary\n").unwrap();
++    }
++    // Make the pre-mutation timestamp distinct even when the filesystem uses
++    // a coarse current-time tick for several consecutive directory updates.
++    fs::File::open(root)
++        .unwrap()
++        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
++        .unwrap();
++    let pin = jfs::PinnedPath::open(root).unwrap();
++    let scan = jfs::scan_pinned(&pin, &jfs::PROTECTED_LITERALS, jfs::ScanLimits::DEFAULT)
++        .expect("complete scan");
++    assert_eq!(scan.entries_seen, 65);
++    assert_eq!(scan.segments.len(), 1);
++    assert_eq!(scan.segments[0].kind, jfs::SegmentKind::File);
++    let protected = fs::metadata(root.join(".git")).unwrap();
++    assert_eq!(
++        (scan.segments[0].dev, scan.segments[0].ino),
++        (protected.dev(), protected.ino())
++    );
++    assert!(scan.directories.iter().all(|stamp| stamp.verify().is_ok()));
++
++    // The regular entry observed by readdir can be replaced by a directory.
++    // The original snapshot must refuse that mutation at mount handoff.
++    fs::remove_file(root.join("ordinary-0")).unwrap();
++    fs::create_dir_all(root.join("ordinary-0/.git")).unwrap();
++    assert!(scan.directories.iter().any(|stamp| stamp.verify().is_err()));
++    let rescanned = jfs::scan_pinned(&pin, &jfs::PROTECTED_LITERALS, jfs::ScanLimits::DEFAULT)
++        .expect("fresh scan");
++    assert!(
++        rescanned
++            .segments
++            .iter()
++            .any(|segment| segment.path == root.join("ordinary-0/.git"))
++    );
++}
++
++#[test]
++fn shared_status_and_readonly_probes_match_individual_kernel_checks() {
++    if !live() {
++        return;
++    }
++    let backend = bwrap_path();
++    let names = [
++        "user_namespace",
++        "pid_namespace",
++        "network_namespace",
++        "mount_readonly_bind",
++        "seccomp_filter_load",
++    ];
++    let grouped = probe::run_selected(&names, &jail_exe(), Ok(&backend));
++    for (name, together) in names.into_iter().zip(grouped) {
++        let separate = probe::run_one(name, &jail_exe(), &backend);
++        assert_eq!(together.status, separate.status, "{name}");
++        assert_eq!(together.reason_code, separate.reason_code, "{name}");
++        assert_eq!(together.mechanism, separate.mechanism, "{name}");
++        assert_eq!(together.status, ProbeStatus::Available, "{together:?}");
++    }
++}
++
+ #[test]
+ fn a_symlink_named_git_is_not_reported_as_a_segment_inside_the_root() {
+     let outside = temp_dir("outside");

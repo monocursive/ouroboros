@@ -1,0 +1,221 @@
+{
+  "schema": "frozen-benchmark-inputs/1",
+  "checks": [
+    {
+      "host": "vps",
+      "input": "workflow_fixture.py",
+      "before_sha256": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+      "after_sha256": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "workload.c",
+      "before_sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+      "after_sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "syscalls.c",
+      "before_sha256": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+      "after_sha256": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "payload.py",
+      "before_sha256": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+      "after_sha256": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "agentbench.py:TASKS",
+      "ast_sha256": "1539432c5233666ced2dd82d9ee80e288c9bb1c4e5fbff51c8dd253e884d7fa0",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "agentbench.py:make_task_dir",
+      "ast_sha256": "3db3ba14a09da19a8598a8f20c174bda793bab32f1ee03ca22b75e31d4becfbd",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "agentbench_v2.py:SEED",
+      "ast_sha256": "9a24b8eb513526217e1a1e95dc8de3c5faed5e572a049b496fbb16aea75bc724",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "agentbench_v2.py:HOSTS",
+      "ast_sha256": "915d4d0df6698a81e945aec3bbd906d3852b571dd9f9eefb39d82ec2da53523c",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "agentbench_v2.py:independent_check",
+      "ast_sha256": "dd3c2012163dc51d011cbf95959090a1168d54c8fe8299db9906622c924b3135",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "agentbench_v2.py:execute",
+      "ast_sha256": "38f1f464bd1b6be5f832148ee641d70fb49a912900165e4a095e64a069555703",
+      "identical": true
+    },
+    {
+      "host": "vps",
+      "input": "agentbench_v2.py:client arguments/models/turn cap",
+      "sha256": "cce031f5e05c50c1718bef1df7a2ece939c64ad7bd634aeab9695b2fc07b5814",
+      "identical": true,
+      "whole_file_identical": false,
+      "non_input_difference": "VPS first-after snapshot predates inactive Darwin/Homebrew grant and appending already-present /usr/sbin:/sbin to PATH; native Linux argv/models/prompts/checkers unchanged"
+    },
+    {
+      "host": "pi",
+      "input": "workflow_fixture.py",
+      "before_sha256": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+      "after_sha256": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "workload.c",
+      "before_sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+      "after_sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "syscalls.c",
+      "before_sha256": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+      "after_sha256": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "payload.py",
+      "before_sha256": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+      "after_sha256": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "agentbench.py:TASKS",
+      "ast_sha256": "1539432c5233666ced2dd82d9ee80e288c9bb1c4e5fbff51c8dd253e884d7fa0",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "agentbench.py:make_task_dir",
+      "ast_sha256": "3db3ba14a09da19a8598a8f20c174bda793bab32f1ee03ca22b75e31d4becfbd",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "agentbench_v2.py:SEED",
+      "ast_sha256": "9a24b8eb513526217e1a1e95dc8de3c5faed5e572a049b496fbb16aea75bc724",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "agentbench_v2.py:HOSTS",
+      "ast_sha256": "915d4d0df6698a81e945aec3bbd906d3852b571dd9f9eefb39d82ec2da53523c",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "agentbench_v2.py:independent_check",
+      "ast_sha256": "dd3c2012163dc51d011cbf95959090a1168d54c8fe8299db9906622c924b3135",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "agentbench_v2.py:execute",
+      "ast_sha256": "38f1f464bd1b6be5f832148ee641d70fb49a912900165e4a095e64a069555703",
+      "identical": true
+    },
+    {
+      "host": "pi",
+      "input": "agentbench_v2.py:client arguments/models/turn cap",
+      "sha256": "cce031f5e05c50c1718bef1df7a2ece939c64ad7bd634aeab9695b2fc07b5814",
+      "identical": true,
+      "whole_file_identical": false,
+      "non_input_difference": "VPS first-after snapshot predates inactive Darwin/Homebrew grant and appending already-present /usr/sbin:/sbin to PATH; native Linux argv/models/prompts/checkers unchanged"
+    },
+    {
+      "host": "mac",
+      "input": "workflow_fixture.py",
+      "before_sha256": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+      "after_sha256": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "workload.c",
+      "before_sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+      "after_sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "syscalls.c",
+      "before_sha256": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+      "after_sha256": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "payload.py",
+      "before_sha256": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+      "after_sha256": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "agentbench.py:TASKS",
+      "ast_sha256": "1539432c5233666ced2dd82d9ee80e288c9bb1c4e5fbff51c8dd253e884d7fa0",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "agentbench.py:make_task_dir",
+      "ast_sha256": "3db3ba14a09da19a8598a8f20c174bda793bab32f1ee03ca22b75e31d4becfbd",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "agentbench_v2.py:SEED",
+      "ast_sha256": "9a24b8eb513526217e1a1e95dc8de3c5faed5e572a049b496fbb16aea75bc724",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "agentbench_v2.py:HOSTS",
+      "ast_sha256": "915d4d0df6698a81e945aec3bbd906d3852b571dd9f9eefb39d82ec2da53523c",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "agentbench_v2.py:independent_check",
+      "ast_sha256": "dd3c2012163dc51d011cbf95959090a1168d54c8fe8299db9906622c924b3135",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "agentbench_v2.py:execute",
+      "ast_sha256": "38f1f464bd1b6be5f832148ee641d70fb49a912900165e4a095e64a069555703",
+      "identical": true
+    },
+    {
+      "host": "mac",
+      "input": "agentbench_v2.py:client arguments/models/turn cap",
+      "sha256": "cce031f5e05c50c1718bef1df7a2ece939c64ad7bd634aeab9695b2fc07b5814",
+      "identical": true,
+      "whole_file_identical": true,
+      "non_input_difference": null
+    }
+  ]
+}

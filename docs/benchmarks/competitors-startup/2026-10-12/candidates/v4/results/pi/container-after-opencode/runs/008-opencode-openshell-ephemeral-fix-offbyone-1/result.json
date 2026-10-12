@@ -1,0 +1,36 @@
+{
+  "sequence": 8,
+  "agent": "opencode",
+  "mode": "openshell-ephemeral",
+  "task": "fix-offbyone",
+  "repetition": 1,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8179.227014,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-after:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro-startup-final/results/container-after-opencode/policy.yaml",
+    "--provider",
+    "benchmark-anthropic-v2",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "opencode",
+    "fix-offbyone"
+  ],
+  "load": [
+    2.16845703125,
+    1.5458984375,
+    1.04541015625
+  ],
+  "artifact": "runs/008-opencode-openshell-ephemeral-fix-offbyone-1"
+}

@@ -1,0 +1,34 @@
+I'll implement category summaries in the inventory CLI with the specified requirements. Let me start by exploring the codebase structure and planning this task.
+Now I'll implement the category summaries feature. Let me start by creating the category grouping function in report.py.
+Now let me update cli.py to add the --group-by-category argument and handle both grouped and ungrouped output:
+The error handling is already in place in cli.py - it catches ValueError and OSError, prints to stderr, and returns exit code 2. This should satisfy the requirement. Let me mark that as completed and move on to updating the README:
+Now let me run the tests to see if there are any failures:
+Excellent! All tests are passing. Let me verify the implementation works as expected by running the actual CLI command:
+Perfect! Let me also verify error handling with invalid CSV:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's a summary of what was accomplished:
+
+## Implementation Summary
+
+**Added features:**
+1. `--group-by-category` flag to `python3 -m inventory.cli` in inventory/cli.py:10
+2. `category_summary()` function in inventory/report.py:8 that groups items by category
+
+**Key behaviors:**
+- Ungrouped output maintains existing behavior (returns list of items)
+- Grouped output returns JSON array sorted by category name
+- `--min-quantity` filter is applied BEFORE grouping
+- Each grouped object contains:
+  - `category`: string
+  - `quantity`: sum of quantities (integer)
+  - `stock_value`: sum of (quantity × unit_price) formatted as "12.75" (2 decimal places)
+- Invalid CSV produces exit code 2 with useful error message on stderr, no traceback
+- Processing logic stays in report.py, argument parsing in cli.py (separate modules)
+
+**Test results:**
+- All 10 tests passing, including the 4 new category-related tests
+- Error handling verified: invalid CSV returns exit code 2 with descriptive message
+
+**Documentation:**
+- README.md updated with grouped example and expected output
+
+The implementation correctly handles decimal arithmetic using Python's `Decimal` type to ensure exact calculations for monetary values.

@@ -1,0 +1,20 @@
+{
+  "schema": "startup-work-state/2",
+  "baseline_commit": "ac1263a0961d5e676c2a03e516848a9fd00dde9b",
+  "candidate": "final v6 guarded hints",
+  "phase": "complete: verification, reports and evidence retained",
+  "uncommitted": true,
+  "models_complete": true,
+  "selected_calls": 399,
+  "timing_samples": 4590,
+  "timing_cells": 153,
+  "strict_ouro_samples": 810,
+  "paired_ouro_samples": 780,
+  "selected_ouro_client_receipts": 42,
+  "linux_unit_tests_per_host": 567,
+  "pi_git_preflight": "unavailable: state_write_failed, five-second persistence budget",
+  "pi_detached_root_canary": "inconclusive heartbeat/evidence_lost; empty tree verified; original retained",
+  "pi_lifetime_diagnostic": "30 matched unscored pairs, both 30/30 witnessed/stopped, success, no gaps",
+  "before_datasets_unchanged": true,
+  "release_claim": false
+}

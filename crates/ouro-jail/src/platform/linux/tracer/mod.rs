@@ -1227,7 +1227,19 @@ impl Tracer {
             if target > 0 {
                 let _ = sys::tgkill(target, sys::wake_signal());
             }
-            std::thread::sleep(Duration::from_millis(5));
+            // Delivery or channel closure can finish the wait immediately.
+            // A fixed sleep delayed every short-lived observer even when its
+            // final facts were already ready. Keep the same wake cadence for
+            // a blocked waitpid, and still consume every event before joining.
+            match self.events.recv_timeout(Duration::from_millis(5)) {
+                Ok(event) => consume(event),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    // The thread may be between closing its sender and
+                    // publishing its JoinHandle completion flag.
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
         }
         while let Ok(event) = self.events.try_recv() {
             consume(event);

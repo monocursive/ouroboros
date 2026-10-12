@@ -1,0 +1,125 @@
+container reference established
+round -3 complete
+round -2 complete
+round -1 complete
+round 0 complete
+round 1 complete
+round 2 complete
+round 3 complete
+round 4 complete
+round 5 complete
+round 6 complete
+round 7 complete
+round 8 complete
+round 9 complete
+round 10 complete
+round 11 complete
+round 12 complete
+round 13 complete
+round 14 complete
+round 15 complete
+round 16 complete
+round 17 complete
+round 18 complete
+round 19 complete
+round 20 complete
+round 21 complete
+round 22 complete
+round 23 complete
+round 24 complete
+round 25 complete
+round 26 complete
+round 27 complete
+round 28 complete
+round 29 complete
+{
+ "docker-run": {
+  "noop": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1017.29,
+   "work_ms_median": 0.0
+  },
+  "python": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1175.89,
+   "work_ms_median": 0.0
+  },
+  "git": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1277.35,
+   "work_ms_median": 86.08
+  },
+  "reads": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1039.89,
+   "work_ms_median": 28.11
+  },
+  "writes": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1458.56,
+   "work_ms_median": 114.2
+  },
+  "spawn": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1145.55,
+   "work_ms_median": 181.74
+  },
+  "cpu": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1083.73,
+   "work_ms_median": 81.4
+  }
+ },
+ "docker-warm": {
+  "noop": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 155.15,
+   "work_ms_median": 0.0
+  },
+  "python": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 283.12,
+   "work_ms_median": 0.0
+  },
+  "git": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 285.44,
+   "work_ms_median": 9.34
+  },
+  "reads": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 140.61,
+   "work_ms_median": 16.36
+  },
+  "writes": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 1018.2,
+   "work_ms_median": 867.55
+  },
+  "spawn": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 292.61,
+   "work_ms_median": 145.73
+  },
+  "cpu": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 229.55,
+   "work_ms_median": 80.46
+  }
+ }
+}
+egress: [{"tool": "docker-run", "host_accepts_during_probe": 1}, {"tool": "docker-warm", "host_accepts_during_probe": 1}]

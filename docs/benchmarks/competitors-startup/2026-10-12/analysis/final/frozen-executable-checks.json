@@ -1,0 +1,138 @@
+{
+  "vps": {
+    "bin/claude": {
+      "before": "4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358",
+      "after": "4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358",
+      "equal": true
+    },
+    "bin/codex": {
+      "before": "1748767b230ebfc3d4ab7e4e254920d0c0ad9691fd8c11f190e7d44511a4a92e",
+      "after": "1748767b230ebfc3d4ab7e4e254920d0c0ad9691fd8c11f190e7d44511a4a92e",
+      "equal": true
+    },
+    "bin/greyproxy": {
+      "before": "29d3771355b03a8c3563e39aecf86b6f3e9fa6ec40939ba67fc10f4254db7747",
+      "after": "29d3771355b03a8c3563e39aecf86b6f3e9fa6ec40939ba67fc10f4254db7747",
+      "equal": true
+    },
+    "bin/greywall": {
+      "before": "9968afd25b7b4b9f16ce5b868115e108e4ea856f5d62bc3ee6be78eb20e8f950",
+      "after": "9968afd25b7b4b9f16ce5b868115e108e4ea856f5d62bc3ee6be78eb20e8f950",
+      "equal": true
+    },
+    "bin/lxc-exec": {
+      "before": "b4628bbb3bf714af95ac53d9630299e5dbd37635b9d1e36bf2015731e0d64ad1",
+      "after": "b4628bbb3bf714af95ac53d9630299e5dbd37635b9d1e36bf2015731e0d64ad1",
+      "equal": true
+    },
+    "bin/opencode": {
+      "before": "135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd",
+      "after": "135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd",
+      "equal": true
+    },
+    "bin/openshell": {
+      "before": "557f8e2af1d91221211bb29cc7152d975084d2a8c9ab8c549d46c4370ccf492e",
+      "after": "557f8e2af1d91221211bb29cc7152d975084d2a8c9ab8c549d46c4370ccf492e",
+      "equal": true
+    },
+    "bin/openshell-gateway": {
+      "before": "a6d230ccf79f777602e5a7d101775edcb8f59a29dc569d8cd41544ebb8e44fda",
+      "after": "a6d230ccf79f777602e5a7d101775edcb8f59a29dc569d8cd41544ebb8e44fda",
+      "equal": true
+    }
+  },
+  "pi": {
+    "bin/claude": {
+      "before": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+      "after": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+      "equal": true
+    },
+    "bin/codex": {
+      "before": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+      "after": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+      "equal": true
+    },
+    "bin/greyproxy": {
+      "before": "61f97f1d049c1fe18cc4ab623466d24c71dac652fd87dcdfaf26f0026c212a85",
+      "after": "61f97f1d049c1fe18cc4ab623466d24c71dac652fd87dcdfaf26f0026c212a85",
+      "equal": true
+    },
+    "bin/greywall": {
+      "before": "f307e14a8afafb69edb5cbda632c259e4af6a1359d41dd2d7818f40b136a30bc",
+      "after": "f307e14a8afafb69edb5cbda632c259e4af6a1359d41dd2d7818f40b136a30bc",
+      "equal": true
+    },
+    "bin/lxc-exec": {
+      "before": "f1c8b9c6fc6450a75f5bf3adc6468da579a95ec6100dd85a50d390ac54c73d12",
+      "after": "f1c8b9c6fc6450a75f5bf3adc6468da579a95ec6100dd85a50d390ac54c73d12",
+      "equal": true
+    },
+    "bin/opencode": {
+      "before": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+      "after": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+      "equal": true
+    },
+    "bin/openshell": {
+      "before": "9a0a6e0aaa0d036c0bdd55470d0916e7bb1906cb51d3c6c4f6c600500f66128a",
+      "after": "9a0a6e0aaa0d036c0bdd55470d0916e7bb1906cb51d3c6c4f6c600500f66128a",
+      "equal": true
+    },
+    "bin/openshell-gateway": {
+      "before": "cd55e5d4eea3f7aff089ed29609a4d75106e30fd7ad25738f7360a34367531fa",
+      "after": "cd55e5d4eea3f7aff089ed29609a4d75106e30fd7ad25738f7360a34367531fa",
+      "equal": true
+    }
+  },
+  "mac": {
+    "bin/claude": {
+      "before": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "after": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "equal": true
+    },
+    "bin/codex": {
+      "before": "16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704",
+      "after": "16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704",
+      "equal": true
+    },
+    "bin/greyproxy": {
+      "before": "aadef1a38b71a36d2ad4fcd916ded9586f3d11b0c112fb6847f6d50e48001505",
+      "after": "aadef1a38b71a36d2ad4fcd916ded9586f3d11b0c112fb6847f6d50e48001505",
+      "equal": true
+    },
+    "bin/greywall": {
+      "before": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c",
+      "after": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c",
+      "equal": true
+    },
+    "bin/opencode": {
+      "before": "476151a6c8b56e084d223d71a9312479e3b95547f8d8649b3489577059f9c5b4",
+      "after": "476151a6c8b56e084d223d71a9312479e3b95547f8d8649b3489577059f9c5b4",
+      "equal": true
+    },
+    "bin/openshell": {
+      "before": "18263d5083bfcac277d79074984b0a3218ba05f3d96d58acfdf2311edd7f9fcb",
+      "after": "18263d5083bfcac277d79074984b0a3218ba05f3d96d58acfdf2311edd7f9fcb",
+      "equal": true
+    },
+    "bin/openshell-gateway": {
+      "before": "c1836ce4f16ae4088eba17809e1ba6b8f0c08614702aa42486b1701f6fc9d328",
+      "after": "c1836ce4f16ae4088eba17809e1ba6b8f0c08614702aa42486b1701f6fc9d328",
+      "equal": true
+    },
+    "linux-bin/claude": {
+      "before": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+      "after": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+      "equal": true
+    },
+    "linux-bin/codex": {
+      "before": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+      "after": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+      "equal": true
+    },
+    "linux-bin/opencode": {
+      "before": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+      "after": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+      "equal": true
+    }
+  }
+}

@@ -1,0 +1,44 @@
+I'll implement category summaries in the inventory CLI with the --group-by-category feature. Let me start by exploring the codebase structure and planning the implementation.
+Now I'll implement the category summary feature. Let me start by creating the grouping function in the report module.
+Perfect! All tests pass. Let me mark the remaining todos as completed and verify the implementation works as expected.
+Excellent! Let me verify one more scenario with an invalid CSV to ensure proper error handling:
+Perfect! All requirements have been successfully implemented. Let me provide a summary:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary` function that:
+   - Filters items by min_quantity before grouping
+   - Groups items by category
+   - Sums quantities and calculates stock_value (quantity * unit_price)
+   - Formats stock_value as a string with exactly 2 decimal places
+   - Returns a JSON array sorted alphabetically by category
+
+2. **inventory/cli.py** - Updated to:
+   - Add `--group-by-category` argument (boolean flag)
+   - Import and use `category_summary` when the flag is set
+   - Maintain existing ungrouped behavior when flag is not used
+   - Proper error handling with exit code 2 and stderr messages (no tracebacks)
+
+3. **README.md** - Added documentation with:
+   - Example command using `--group-by-category`
+   - Expected JSON output showing the grouped format
+
+### Verification:
+
+All 10 tests pass including:
+- `test_category_summaries` - validates grouped output format
+- `test_filter_before_group` - confirms --min-quantity is applied before grouping
+- `test_ungrouped` - ensures existing behavior unchanged
+- `test_bad_csv` - validates exit code 2 with useful stderr message (no traceback)
+
+The implementation correctly:
+- Uses the existing CSV loader (inventory/loader.py:5)
+- Applies --min-quantity filter before grouping (inventory/report.py:10)
+- Emits sorted JSON arrays (inventory/report.py:13-19)
+- Formats stock_value as decimal string with 2 digits (inventory/report.py:17)
+- Keeps processing (report.py) and argument parsing (cli.py) in separate modules
+- Preserves all existing functionality

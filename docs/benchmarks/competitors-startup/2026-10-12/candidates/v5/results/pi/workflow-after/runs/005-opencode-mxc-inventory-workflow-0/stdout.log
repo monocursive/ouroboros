@@ -1,0 +1,52 @@
+I'll implement the category summaries feature for the inventory CLI. Let me start by exploring the codebase structure and then plan the implementation.
+Now let me check the test files to understand what's already tested:
+Now I understand the codebase. Let me plan and implement the feature:
+Now let me implement the feature. First, I'll create the category_summary function in report.py:
+Now let me update the CLI to add the --group-by-category argument and use the category_summary function:
+Now let me update the README.md with an example:
+Now let me run the tests:
+Excellent! All tests pass. Let me mark the tasks as complete and verify the implementation works with a manual test:
+Let me verify the implementation with manual tests to ensure everything works correctly:
+Perfect! Let me also verify that invalid CSV produces the correct error behavior:
+Excellent! Let me verify the implementation one more time by reviewing the key files:
+Perfect! The implementation is complete and all requirements have been met. Let me summarize what was implemented:
+
+## Summary
+
+I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary` function (line 8-27):
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Calculates sum of quantities and stock values (quantity * unit_price) using Decimal for precision
+   - Returns JSON array sorted by category alphabetically
+   - Formats stock_value as a string with exactly two decimal places
+
+2. **inventory/cli.py** - Added `--group-by-category` flag (line 11):
+   - Added the argument parser flag as `action='store_true'`
+   - Imported `category_summary` function
+   - Routes to `category_summary` when flag is set, otherwise uses existing `item_report`
+   - Ungrouped output maintains its current behavior
+
+3. **README.md** - Added documentation:
+   - Included example command for grouped output
+   - Showed expected JSON output format
+
+### Verification:
+
+- All 10 tests pass successfully
+- Invalid CSV produces exit code 2 with a useful error message on stderr without traceback
+- Processing logic is in `report.py` module
+- Argument parsing is in `cli.py` module
+- Existing loader module is used for CSV reading
+- The supplied tests were not modified
+
+The implementation correctly:
+- Applies `--min-quantity` filtering before grouping
+- Sums quantities across items in each category
+- Calculates exact stock values using Decimal arithmetic
+- Formats stock_value as a string with two decimal places
+- Sorts output by category name
+- Preserves ungrouped behavior when flag is not used

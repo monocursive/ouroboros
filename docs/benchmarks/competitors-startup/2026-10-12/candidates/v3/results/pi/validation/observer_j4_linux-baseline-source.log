@@ -1,0 +1,321 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/bench-ouro-startup/src/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.91s
+     Running tests/observer_j4_linux.rs (target/debug/deps/observer_j4_linux-3a5d835eb43cbd0d)
+
+running 9 tests
+test j4_d1_a_child_notification_listener_is_a_gap_in_every_class ... FAILED
+test j4_d1_a_child_trace_request_is_continued_not_mislabelled ... FAILED
+test j4_d1_exclusion_a_filter_that_refuses_a_call_is_not_a_gap ... FAILED
+test j4_d1_exclusion_holds_for_a_filter_installed_through_prctl ... FAILED
+test j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops ... FAILED
+test j4_d1_the_tool_baseline_refuses_a_notification_listener ... FAILED
+test j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap ... FAILED
+test j4_d2_none_a_foreign_abi_call_degrades_the_receipt ... FAILED
+test j4_d6_critical_facts_survive_a_full_lifecycle_backlog ... FAILED
+
+failures:
+
+---- j4_d1_a_child_notification_listener_is_a_gap_in_every_class stdout ----
+
+thread 'j4_d1_a_child_notification_listener_is_a_gap_in_every_class' (422576) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d1-listener: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- j4_d1_a_child_trace_request_is_continued_not_mislabelled stdout ----
+
+thread 'j4_d1_a_child_trace_request_is_continued_not_mislabelled' (422579) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d1-trace: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+---- j4_d1_exclusion_a_filter_that_refuses_a_call_is_not_a_gap stdout ----
+
+thread 'j4_d1_exclusion_a_filter_that_refuses_a_call_is_not_a_gap' (422580) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d1-errno: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+---- j4_d1_exclusion_holds_for_a_filter_installed_through_prctl stdout ----
+
+thread 'j4_d1_exclusion_holds_for_a_filter_installed_through_prctl' (422581) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d1-prctl: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+---- j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops stdout ----
+
+thread 'j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops' (422582) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d1-none: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+---- j4_d1_the_tool_baseline_refuses_a_notification_listener stdout ----
+
+thread 'j4_d1_the_tool_baseline_refuses_a_notification_listener' (422584) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d1-tool: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+---- j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap stdout ----
+
+thread 'j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap' (422585) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d2-foreign: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+---- j4_d2_none_a_foreign_abi_call_degrades_the_receipt stdout ----
+
+thread 'j4_d2_none_a_foreign_abi_call_degrades_the_receipt' (422586) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d2-none: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+---- j4_d6_critical_facts_survive_a_full_lifecycle_backlog stdout ----
+
+thread 'j4_d6_critical_facts_survive_a_full_lifecycle_backlog' (422588) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: d6-backlog: gcc failed: /tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_listener’:
+/tmp/ouro-j4-observer-422575/j4.c:132:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  132 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c:132:17: note: each undeclared identifier is reported only once for each function it appears in
+In file included from /tmp/ouro-j4-observer-422575/j4.c:6:
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_errno_filter’:
+/tmp/ouro-j4-observer-422575/j4.c:146:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  146 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 2, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:156:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  156 |     r = syscall(SYS_mkdir, argv[3], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_foreign’:
+/tmp/ouro-j4-observer-422575/j4.c:193:82: error: ‘MAP_32BIT’ undeclared (first use in this function)
+  193 |     low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+      |                                                                                  ^~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c: In function ‘mode_trace_request’:
+/tmp/ouro-j4-observer-422575/j4.c:249:45: error: ‘__NR_mkdir’ undeclared (first use in this function)
+  249 |         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_mkdir, 1, 0),
+      |                                             ^~~~~~~~~~
+/tmp/ouro-j4-observer-422575/j4.c:260:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_mkdirat’?
+  260 |     r = syscall(SYS_mkdir, argv[2], 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_mkdirat
+
+
+
+failures:
+    j4_d1_a_child_notification_listener_is_a_gap_in_every_class
+    j4_d1_a_child_trace_request_is_continued_not_mislabelled
+    j4_d1_exclusion_a_filter_that_refuses_a_call_is_not_a_gap
+    j4_d1_exclusion_holds_for_a_filter_installed_through_prctl
+    j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops
+    j4_d1_the_tool_baseline_refuses_a_notification_listener
+    j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap
+    j4_d2_none_a_foreign_abi_call_degrades_the_receipt
+    j4_d6_critical_facts_survive_a_full_lifecycle_backlog
+
+test result: FAILED. 0 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p ouro-jail --test observer_j4_linux`

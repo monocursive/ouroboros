@@ -1,0 +1,21 @@
+I'll help you fix the failing tests. Let me start by running the tests to see what's failing.
+Now I can see the issue. Let me read the source file to understand the bug:
+Perfect! I found the bug. The issue is a classic **off-by-one error** in src/parse.py:4:
+
+The function is using `parts[1]` (index 1) when it should be using `parts[0]` (index 0) to get the first word. In Python, list indexing starts at 0, so:
+- `parts[0]` is the first word
+- `parts[1]` is the second word
+
+This explains both test failures:
+1. `test_basic`: Returns 'world' instead of 'hello' 
+2. `test_single`: Crashes with IndexError because there's only one word, so index 1 doesn't exist
+
+Let me fix this:
+Now let me verify the fix by running the tests again:
+Perfect! All tests are now passing. 
+
+**Summary:**
+- **Bug found**: Off-by-one error in src/parse.py:4
+- **Issue**: The function was using `parts[1]` instead of `parts[0]` to return the first word
+- **Fix applied**: Changed `return parts[1]` to `return parts[0]`
+- **Result**: Both tests now pass successfully

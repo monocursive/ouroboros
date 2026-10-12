@@ -1,0 +1,9 @@
+{
+  "reason": "Initial candidate retains cached version evidence; restore fresh readback before final score",
+  "owned_pids_signaled": [
+    427158,
+    427174,
+    461055
+  ],
+  "excluded_from_final_score": true
+}

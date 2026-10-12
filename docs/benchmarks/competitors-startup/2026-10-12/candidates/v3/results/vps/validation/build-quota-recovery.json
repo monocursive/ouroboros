@@ -1,0 +1,7 @@
+{
+  "removed_cache": "/dev/shm/ouro-startup-build/target/debug",
+  "files": 3430,
+  "bytes": 1300440758,
+  "release_binary_sha256": "a9bf2c0f74766105a0a5112001c59df2688f96a8a4d82f010cb72322d71e6d81",
+  "reason": "Unscored validation compilation exceeded temporary build user quota; no unit tests ran."
+}

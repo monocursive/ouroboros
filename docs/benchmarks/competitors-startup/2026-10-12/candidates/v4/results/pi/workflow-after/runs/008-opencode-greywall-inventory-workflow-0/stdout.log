@@ -1,0 +1,38 @@
+I'll implement category summaries for the inventory CLI with the specified requirements. Let me start by exploring the codebase structure and planning the implementation.
+Now let me check the tests to understand what behavior needs to be preserved:
+Perfect! Now I understand the requirements. Let me create a plan and implement the solution:
+Now let me start implementing. First, I'll create a new processing module to keep argument parsing separate from processing logic:
+Excellent! All tests pass. Let me verify the implementation by running a few manual tests to ensure everything works correctly:
+Perfect! Let me also test the error handling to ensure invalid CSV produces the correct exit code and error message:
+Excellent! The error handling works correctly - it produces exit code 2 and shows a useful error message without a traceback. Let me mark the final todo as completed:
+Perfect! I've successfully implemented category summaries for the inventory CLI. Here's what was done:
+
+## Summary
+
+**Created new module**: `inventory/processing.py` - Contains the `category_summary` function that handles grouping logic, keeping it separate from argument parsing in `cli.py`.
+
+**Updated `inventory/cli.py`**:
+- Added `--group-by-category` argument (inventory/cli.py:11)
+- Imported the new `category_summary` function (inventory/cli.py:6)
+- Added conditional logic to use grouped vs ungrouped output (inventory/cli.py:14-17)
+
+**Key features implemented**:
+1. CSV is loaded using the existing `load_items` function
+2. `--min-quantity` filter is applied before grouping
+3. Output is a JSON array sorted alphabetically by category
+4. Each grouped object contains:
+   - `category` (string)
+   - `quantity` (sum of quantities as integer)
+   - `stock_value` (sum of quantity × unit_price, formatted as exact decimal string with two fractional digits)
+5. Ungrouped output preserves its current behavior
+6. Invalid CSV produces exit code 2 with a useful stderr message, no traceback
+
+**Updated README.md** with a grouped example showing expected output.
+
+**All tests pass** (10/10), including:
+- Ungrouped output behavior preserved
+- Category summaries with correct calculations
+- Filter applied before grouping
+- Invalid CSV error handling
+
+The implementation keeps processing logic separate from argument parsing as requested, with `processing.py` handling the grouping logic and `cli.py` handling command-line arguments.

@@ -1,0 +1,10 @@
+I'll help you add a multiply function to src/calc.py and ensure all tests pass. Let me start by exploring the current state of the codebase.
+Now I can see the current state. The file src/calc.py has an add function, and the tests expect a multiply function that returns the product of two numbers. Let me add the multiply function.
+Perfect! All tests pass. Let me mark the final tasks as completed.
+Done! I've successfully added the `multiply(a, b)` function to src/calc.py:4 that returns the product of two numbers. 
+
+All tests now pass:
+- `test_add` - ok
+- `test_multiply` - ok
+
+The multiply function correctly handles both positive and negative numbers as verified by the test cases.

@@ -1,0 +1,10 @@
+{
+  "bin/claude": true,
+  "bin/codex": true,
+  "bin/greyproxy": true,
+  "bin/greywall": true,
+  "bin/lxc-exec": true,
+  "bin/opencode": true,
+  "bin/openshell": true,
+  "bin/openshell-gateway": true
+}

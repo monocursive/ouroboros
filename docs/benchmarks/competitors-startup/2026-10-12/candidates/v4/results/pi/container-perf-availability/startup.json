@@ -1,0 +1,17 @@
+{
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "bench-openshell:latest",
+    "--",
+    "/bin/true"
+  ],
+  "elapsed_ms": 8409.979735,
+  "exit": 1,
+  "stdout": "\nCreated sandbox: stellar-stint\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.1s] Image already present\n[0.7s] Starting sandbox Container created\n\u2713 Sandbox stellar-stint deletion accepted; cleanup is pending\n",
+  "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n"
+}

@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, category-sorted output, and exact decimal stock totals formatted as two-digit strings.
+
+Ungrouped behavior is preserved. Invalid CSV returns exit code 2 with a useful stderr message and no traceback. Processing and argument parsing remain in separate modules.
+
+Updated README with the grouped example and expected output. All 10 tests passed; supplied tests were unchanged.

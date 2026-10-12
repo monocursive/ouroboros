@@ -1,0 +1,121 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/bench-ouro-startup/src/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.94s
+     Running tests/j5_boundary_linux.rs (target/debug/deps/j5_boundary_linux-321a734b10746256)
+
+running 26 tests
+test f01_a_workspace_symlink_to_a_home_secret_reads_as_absent ... ok
+test f02_mount_replacement_of_a_protected_git_is_denied ... FAILED
+test f03_a_new_deep_protected_segment_is_outside_existing_and_root_coverage ... ok
+test f04_a_source_identity_swap_at_the_mount_handoff_refuses ... ok
+test f04_a_workspace_deeper_than_the_scan_limit_refuses_without_claiming_coverage ... ok
+test k04_backend_replacement_and_mode_change_refuse_before_spawn ... ok
+test k04_bootstrap_executes_the_descriptor_without_pathname_fallback ... ok
+test k07_new_nested_protected_directory_after_scan_refuses_before_spawn ... ok
+test n01_build_direct_egress_fails ... FAILED
+test n05_a_late_socket_in_an_extra_grant_is_unreachable ... ok
+test n05_nested_sandbox_ipc_is_allowed ... FAILED
+test o03_a_truncated_path_is_a_gap_not_a_result ... ok
+test o03_an_unmatched_exit_is_a_gap_not_a_result ... ok
+test r03_a_wall_expires_before_the_saturation_loss_is_declared ... ok
+test r03_a_wall_fires_on_time_under_a_saturated_trace ... ok
+test r05_forging_records_mid_run_is_outside_local_evidence_assurance ... ok
+test r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer ... ok
+test r06_a_detected_escaped_descendant_loses_integrity_and_retains_state ... ok
+test s02_a_host_namespace_fd_cannot_be_opened_or_entered ... FAILED
+test s02_no_cgroup_filesystem_is_reachable_in_the_child ... FAILED
+test s03_the_outer_boundaries_cannot_be_reversed_inside_agent ... FAILED
+test s04_agent_and_build_inherit_no_ring ... FAILED
+test s04_agent_and_build_refuse_every_io_uring_interface ... FAILED
+test s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec ... ok
+test s04_none_installs_no_io_uring_filter ... ok
+test x06_no_tracing_privilege_reaches_the_child ... FAILED
+
+failures:
+
+---- f02_mount_replacement_of_a_protected_git_is_denied stdout ----
+
+thread 'f02_mount_replacement_of_a_protected_git_is_denied' (468211) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:281:9:
+assertion `left == right` failed: mount_bind was not denied: {"fsopen":"EPERM","head":"ref: refs/heads/main\n","mount_bind":"EINVAL","move_mount":"EPERM","open_tree":"EPERM","umount2":"ok(2)","write":"EROFS"}
+  left: String("EINVAL")
+ right: "EPERM"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- n01_build_direct_egress_fails stdout ----
+
+thread 'n01_build_direct_egress_fails' (468339) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:1236:5:
+assertion `left == right` failed: build direct egress was not refused: stderr ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `limit:mem` (cgroup_unavailable)
+
+  left: Some(125)
+ right: Some(0)
+
+---- n05_nested_sandbox_ipc_is_allowed stdout ----
+
+thread 'n05_nested_sandbox_ipc_is_allowed' (468392) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:1406:5:
+assertion `left == right` failed: nested-sandbox IPC failed: stdout {"op":"prctl","args":{"arg2":1,"mechanism":"linux_raw_syscall","option":"PR_SET_NO_NEW_PRIVS"},"ret":0,"errno":null}
+{"op":"landlock_create_ruleset","args":{"flags":"LANDLOCK_CREATE_RULESET_VERSION","mechanism":"linux_raw_syscall","purpose":"abi_probe"},"ret":-1,"errno":"ENOSYS"}
+
+stderr 
+  left: Some(3)
+ right: Some(0)
+
+---- s02_a_host_namespace_fd_cannot_be_opened_or_entered stdout ----
+
+thread 's02_a_host_namespace_fd_cannot_be_opened_or_entered' (468565) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:687:9:
+assertion `left == right` failed: setns_self_net was not denied: {"proc_pids":[1,2],"setns_pid1_mnt":"ENOSYS","setns_self_net":"ENOSYS","setns_self_user":"ENOSYS"}
+  left: String("ENOSYS")
+ right: "EPERM"
+
+---- s02_no_cgroup_filesystem_is_reachable_in_the_child stdout ----
+
+thread 's02_no_cgroup_filesystem_is_reachable_in_the_child' (468586) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:749:9:
+assertion `left == right` failed: build: ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `limit:mem` (cgroup_unavailable)
+
+  left: Some(125)
+ right: Some(0)
+
+---- s03_the_outer_boundaries_cannot_be_reversed_inside_agent stdout ----
+
+thread 's03_the_outer_boundaries_cannot_be_reversed_inside_agent' (468624) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:921:9:
+assertion `left == right` failed: on: {"add_allow_filter":"ENOSYS","cgroup_procs":"ENOENT","clear_nnp":"EINVAL","filters":"3","keyctl_after_allow":"ENOSYS","landlock":"create:ENOSYS","nnp_after":"1","nnp_before":"1","ptrace_after_allow":"ok"}
+  left: String("ENOSYS")
+ right: "ok"
+
+---- s04_agent_and_build_inherit_no_ring stdout ----
+
+thread 's04_agent_and_build_inherit_no_ring' (468661) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:1177:9:
+assertion `left == right` failed: build: ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `limit:mem` (cgroup_unavailable)
+
+  left: Some(125)
+ right: Some(0)
+
+---- s04_agent_and_build_refuse_every_io_uring_interface stdout ----
+
+thread 's04_agent_and_build_refuse_every_io_uring_interface' (468712) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:985:9:
+assertion `left == right` failed: build: ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `limit:mem` (cgroup_unavailable)
+
+  left: Some(125)
+ right: Some(0)
+
+---- x06_no_tracing_privilege_reaches_the_child stdout ----
+
+thread 'x06_no_tracing_privilege_reaches_the_child' (468798) panicked at crates/ouro-jail/tests/j5_boundary_linux.rs:1979:9:
+assertion `left == right` failed: build: ouro-jail: error missing_capability at probing [host_setup]: the host does not provide `limit:mem` (cgroup_unavailable)
+
+  left: Some(125)
+ right: Some(0)
+
+
+failures:
+    f02_mount_replacement_of_a_protected_git_is_denied
+    n01_build_direct_egress_fails
+    n05_nested_sandbox_ipc_is_allowed
+    s02_a_host_namespace_fd_cannot_be_opened_or_entered
+    s02_no_cgroup_filesystem_is_reachable_in_the_child
+    s03_the_outer_boundaries_cannot_be_reversed_inside_agent
+    s04_agent_and_build_inherit_no_ring
+    s04_agent_and_build_refuse_every_io_uring_interface
+    x06_no_tracing_privilege_reaches_the_child
+
+test result: FAILED. 17 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.07s
+
+error: test failed, to rerun pass `-p ouro-jail --test j5_boundary_linux`

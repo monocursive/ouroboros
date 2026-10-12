@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/monocursive/.opencode/bin",
+      "/home/monocursive/bench-ouro-startup-final/bin"
+    ],
+    "allowWrite": [
+      "/home/monocursive/bench-ouro-startup-final/results/native-after/runs/043-opencode-greywall-add-multiply-1/workspace/add-multiply",
+      "/home/monocursive/bench-ouro-startup-final/results/native-after/runs/043-opencode-greywall-add-multiply-1/home",
+      "/home/monocursive/bench-ouro-startup-final/results/native-after/runs/043-opencode-greywall-add-multiply-1/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

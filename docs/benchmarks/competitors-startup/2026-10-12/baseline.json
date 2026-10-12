@@ -1,0 +1,6 @@
+{
+  "baseline_revision": "ac1263a0961d5e676c2a03e516848a9fd00dde9b",
+  "baseline_report": "../../competitors-after/2026-10-11/README.md",
+  "host_root": "~/bench-ouro-startup",
+  "policy": "Unchanged strict observation and containment; no scored profiling; same 30 samples, 3 warmups and seed 20261011."
+}

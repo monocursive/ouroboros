@@ -1,0 +1,37 @@
+{
+  "sequence": 13,
+  "agent": "claude",
+  "mode": "direct",
+  "task": "add-multiply",
+  "repetition": 1,
+  "started_utc": "2026-10-12T08:24:34Z",
+  "elapsed_ms": 18595.815125,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro-startup/bin/claude",
+    "-p",
+    "Add a function multiply(a, b) to src/calc.py that returns the product of two numbers. Then run the tests with: python3 -m unittest discover -s tests -v. Fix any failures until all tests pass. Do not modify the tests.",
+    "--model",
+    "claude-sonnet-4-5",
+    "--max-turns",
+    "15",
+    "--dangerously-skip-permissions",
+    "--output-format",
+    "json"
+  ],
+  "load": [
+    1.81591796875,
+    2.0693359375,
+    1.94970703125
+  ],
+  "artifact": "runs/013-claude-direct-add-multiply-1"
+}

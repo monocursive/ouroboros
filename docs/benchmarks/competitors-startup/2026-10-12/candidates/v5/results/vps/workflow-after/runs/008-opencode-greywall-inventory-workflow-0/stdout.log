@@ -1,0 +1,46 @@
+I'll implement category summaries in the inventory CLI with the --group-by-category feature. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me plan and implement the required changes:
+Let me first create the category_report function in report.py to handle the grouping logic:
+Now let me update cli.py to add the --group-by-category argument and use the appropriate report function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything works correctly:
+Excellent! All tests pass. Let me verify the implementation by running a quick manual test:
+Perfect! Let me also verify that invalid CSV handling works correctly:
+Perfect! Let me verify the final structure of the code to confirm everything is properly separated:
+Excellent! The implementation is complete and all requirements have been met. Let me provide a summary:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_report()` function (lines 8-29):
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and calculates totals
+   - Returns JSON array sorted by category name
+   - Each object contains: `category` (string), `quantity` (sum), and `stock_value` (formatted as "XX.XX" string with exactly two decimal places)
+
+2. **inventory/cli.py** - Added `--group-by-category` flag (line 11):
+   - Argument parsing handles the new flag
+   - Conditionally calls `category_report()` or `item_report()` based on flag (lines 15-18)
+   - Ungrouped output maintains current behavior
+   - Invalid CSV produces exit code 2 with useful error message on stderr without traceback
+
+3. **README.md** - Added documentation:
+   - Grouped example command
+   - Expected JSON output showing the format
+
+### Architecture:
+- **Processing logic**: Separated in `inventory/report.py` (category_report function)
+- **Argument parsing**: Handled in `inventory/cli.py` (main function)
+- **CSV loading**: Existing `inventory/loader.py` unchanged
+
+### Test Results:
+All 10 tests pass successfully:
+- ✅ test_category_summaries - Validates grouped output format
+- ✅ test_filter_before_group - Confirms min-quantity is applied before grouping
+- ✅ test_bad_csv - Verifies exit code 2 and error handling
+- ✅ All existing tests remain passing (ungrouped, filter, loader tests)
+
+The implementation correctly handles decimal precision using Python's Decimal type and formats the stock_value with exactly two fractional digits as required.

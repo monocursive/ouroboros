@@ -1,0 +1,42 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the structure. Let me create a plan and implement the category summaries feature.
+Let me first add the category grouping function to report.py:
+Now let me update cli.py to add the --group-by-category flag and use the grouping function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything works correctly:
+Perfect! All tests pass. Let me verify the actual CLI output matches the expected behavior:
+Let me also test the invalid CSV handling:
+Perfect! Let me verify the structure once more:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's what was accomplished:
+
+## Summary
+
+**Changes made:**
+
+1. **inventory/report.py:17** - Added `category_summary()` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Calculates total quantity and stock_value (quantity × unit_price) for each category
+   - Formats stock_value as a string with exactly 2 decimal places
+   - Returns results sorted alphabetically by category
+
+2. **inventory/cli.py:11** - Added `--group-by-category` flag argument
+
+3. **inventory/cli.py:15-18** - Updated main logic to use `category_summary()` when flag is set, preserving ungrouped behavior otherwise
+
+4. **README.md** - Added documentation with grouped output example showing expected JSON format
+
+**Key features implemented:**
+- `--group-by-category` flag produces JSON array sorted by category
+- Each object contains: `category` (string), `quantity` (sum), `stock_value` (formatted decimal string)
+- `--min-quantity` filters before grouping as required
+- Ungrouped output maintains current behavior
+- Invalid CSV produces exit code 2 with stderr message (no traceback)
+- Processing (report.py) and argument parsing (cli.py) remain in separate modules
+
+**Test results:**
+All 10 tests pass including:
+- Ungrouped output works as before
+- Category summaries with correct calculations
+- Filtering before grouping
+- Invalid CSV error handling

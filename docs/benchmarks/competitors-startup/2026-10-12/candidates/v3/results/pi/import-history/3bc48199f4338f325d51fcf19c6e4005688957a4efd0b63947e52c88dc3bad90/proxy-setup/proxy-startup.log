@@ -1,0 +1,18 @@
+{"level":"info","msg":"dns forwarder: upstream = 100.100.100.100:53","time":"2026-10-12T10:16:45.605+01:00"}
+{"handler":"http","kind":"service","level":"info","listener":"tcp","msg":"listening on 127.0.0.1:43051/tcp","service":"http-proxy","time":"2026-10-12T10:16:45.608+01:00"}
+{"handler":"socks5","kind":"service","level":"info","listener":"tcp","msg":"listening on 127.0.0.1:43052/tcp","service":"socks5-proxy","time":"2026-10-12T10:16:45.608+01:00"}
+{"handler":"dns","kind":"service","level":"info","listener":"dns","msg":"listening on 127.0.0.1:43053/udp","service":"dns-proxy-udp","time":"2026-10-12T10:16:45.609+01:00"}
+{"handler":"dns","kind":"service","level":"info","listener":"tcp","msg":"listening on 127.0.0.1:43053/tcp","service":"dns-proxy-tcp","time":"2026-10-12T10:16:45.609+01:00"}
+{"kind":"service","level":"info","msg":"database opened: /home/monocursive/bench-ouro-startup/proxy/data/greyproxy.db","service":"@greyproxy","time":"2026-10-12T10:16:46.166+01:00"}
+{"kind":"service","level":"info","msg":"credential store loaded: 0 mappings from 0 sessions","service":"@greyproxy","time":"2026-10-12T10:16:46.169+01:00"}
+{"kind":"service","level":"info","msg":"dns resolver: upstream connections will resolve via 100.100.100.100:53","service":"@greyproxy","time":"2026-10-12T10:16:46.231+01:00"}
+{"kind":"service","level":"info","msg":"plugins registered: auther=auther-0 admission=admission-0 bypass=bypass-0 resolver=resolver-0","service":"@greyproxy","time":"2026-10-12T10:16:46.231+01:00"}
+{"kind":"notifier","level":"warning","msg":"no notification backend found; desktop notifications disabled","time":"2026-10-12T10:16:46.231+01:00"}
+{"kind":"notifier","level":"info","msg":"notifier started (enabled=false, backend=none, actions=false)","time":"2026-10-12T10:16:46.232+01:00"}
+2026/10/12 10:16:46.232070 conversation_assembler.go:47: INFO assembler: conversation tracking enabled
+{"kind":"service","level":"info","msg":"listening on 127.0.0.1:43080","service":"@greyproxy","time":"2026-10-12T10:16:46.232+01:00"}
+2026/10/12 10:16:46.232773 conversation_assembler.go:91: INFO assembler: version changed, rebuilding all conversations stored=0 current=7
+2026/10/12 10:16:46.232818 conversation_assembler.go:76: INFO assembler: rebuild requested, clearing old conversations and resetting cursor
+2026/10/12 10:16:46.243901 conversation_assembler.go:325: INFO assembler: starting scan transactions_to_scan=0
+2026/10/12 10:16:46.250593 conversation_assembler.go:81: INFO assembler: rebuild complete
+2026/10/12 10:16:46.251040 conversation_assembler.go:325: INFO assembler: starting scan transactions_to_scan=0

@@ -1,0 +1,14 @@
+I'll help you fix the failing tests. Let me start by running the tests to see what's failing, then identify and fix the bug in src/parse.py.
+Now let me look at the test file and the source code to understand what's expected:
+Perfect! I can see the bug clearly. The function `first_word` is supposed to return the first word, but it's using `parts[1]` which is the **second** element (index 1), when it should be using `parts[0]` (the first element). This is a classic off-by-one error.
+
+Let me update the status and fix the bug:
+Now let me verify that all tests pass:
+Perfect! I've successfully fixed the bug. The issue was an off-by-one error in src/parse.py:4. The function was using `parts[1]` (the second element) instead of `parts[0]` (the first element) to return the first word.
+
+**Bug found and fixed:**
+- Location: src/parse.py:4
+- Issue: `return parts[1]` should be `return parts[0]`
+- Cause: Classic off-by-one indexing error
+
+All tests now pass successfully!

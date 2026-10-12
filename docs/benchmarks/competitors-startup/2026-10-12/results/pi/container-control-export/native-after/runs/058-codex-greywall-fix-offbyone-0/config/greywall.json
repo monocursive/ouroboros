@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/monocursive/bench-ouro-startup-final/bin",
+      "/home/monocursive/bench-ouro/bin"
+    ],
+    "allowWrite": [
+      "/home/monocursive/bench-ouro-startup-final/results/native-after/runs/058-codex-greywall-fix-offbyone-0/workspace/fix-offbyone",
+      "/home/monocursive/bench-ouro-startup-final/results/native-after/runs/058-codex-greywall-fix-offbyone-0/home",
+      "/home/monocursive/bench-ouro-startup-final/results/native-after/runs/058-codex-greywall-fix-offbyone-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

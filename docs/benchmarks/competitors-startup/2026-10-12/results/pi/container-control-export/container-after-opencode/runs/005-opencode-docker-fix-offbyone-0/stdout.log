@@ -1,0 +1,13 @@
+I'll help you fix the failing tests. Let me start by running the tests to see what's failing, then find and fix the bug in src/parse.py.
+Now let me read the src/parse.py file to see the bug:
+Let me also check the test file to understand what's expected:
+Perfect! I found the bug. The issue is in src/parse.py:4 - it's using `parts[1]` (the second element) instead of `parts[0]` (the first element). This is a classic off-by-one error. Let me fix it:
+Now let me verify that all tests pass:
+Perfect! I found and fixed the bug. The issue was an off-by-one error in src/parse.py:4 where the function was returning `parts[1]` (the second element) instead of `parts[0]` (the first element). 
+
+This caused:
+- `test_basic` to fail because it returned 'world' instead of 'hello'
+- `test_single` to error because there was no index 1 when splitting 'solo'
+
+After changing `parts[1]` to `parts[0]`, all tests now pass successfully.
+CONTAINER-AGENT-RESULT={"agent": "opencode", "task": "fix-offbyone", "agent_exit": 0, "timeout": false, "success": true, "work_ms": 53605.510825, "checker": {"tests_unchanged": true, "tests_pass": true, "hidden_pass": true, "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n", "hidden_output": ""}, "patch": "diff --git a/src/parse.py b/src/parse.py\nindex 05a3724..5db236c 100644\n--- a/src/parse.py\n+++ b/src/parse.py\n@@ -1,4 +1,4 @@\n def first_word(text):\n     # Return the first word of a space-separated string\n     parts = text.split(' ')\n-    return parts[1]\n+    return parts[0]\n", "files": {"tests/__init__.py": "", "tests/test_parse.py": "import unittest\nfrom src.parse import first_word\n\nclass TestParse(unittest.TestCase):\n    def test_basic(self):\n        self.assertEqual(first_word('hello world'), 'hello')\n    def test_single(self):\n        self.assertEqual(first_word('solo'), 'solo')\n", "src/__init__.py": "", "src/parse.py": "def first_word(text):\n    # Return the first word of a space-separated string\n    parts = text.split(' ')\n    return parts[0]\n"}, "usage": {}, "peak_child_rss_kib": 759028, "guest_kernel": ["Linux", "9b6ef739c23a", "6.18.50+rpt-rpi-v8", "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)", "aarch64"], "resource_limits": {"pids.max": "3967", "cpu.max": "max 100000"}}

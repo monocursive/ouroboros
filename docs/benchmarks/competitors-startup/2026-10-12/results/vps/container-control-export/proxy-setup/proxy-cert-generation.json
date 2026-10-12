@@ -1,0 +1,7 @@
+{
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 563.044233,
+  "stdout": "CA certificate: /home/ubuntu/bench-ouro-startup-final/proxy/data/ca-cert.pem\nCA private key: /home/ubuntu/bench-ouro-startup-final/proxy/data/ca-key.pem\n\nRun 'greyproxy cert install' to trust this CA on your system.\n",
+  "stderr": ""
+}

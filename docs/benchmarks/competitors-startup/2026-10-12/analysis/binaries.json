@@ -1,0 +1,52 @@
+[
+  {
+    "path": "binaries/pi/ouro-jail-after",
+    "bytes": 9408800,
+    "sha256": "17b38c82ec6b5b2a3b185aef88c5fddd94cd5f3471612be82860078486072929"
+  },
+  {
+    "path": "binaries/pi/ouro-jail-before",
+    "bytes": 9469968,
+    "sha256": "60643f31dde7706010cbb319502a2a424da2e25cb2b1f06188a1d9e33502b093"
+  },
+  {
+    "path": "binaries/pi/ouro-jail-candidate-v3",
+    "bytes": 9426600,
+    "sha256": "b96f7b69decddb7130bde2c30c7aeb258380bd72a97e4cd4f8e9661c36a77a98"
+  },
+  {
+    "path": "binaries/pi/ouro-jail-candidate-v4",
+    "bytes": 9426496,
+    "sha256": "18d05b418a72e27d5f5025d6f13d7a6084910b2f8db0c001182d9319d04fb7e5"
+  },
+  {
+    "path": "binaries/pi/ouro-jail-candidate-v5",
+    "bytes": 9428296,
+    "sha256": "d654d66f9c9d1b33f05f4f0c8a767f098019ba8a02c860bdc8b08cb37aa9238b"
+  },
+  {
+    "path": "binaries/vps/ouro-jail-after",
+    "bytes": 10002240,
+    "sha256": "23e210be33935986b5465a48912ca59d09b055bfea51093974e74c2984d7c38f"
+  },
+  {
+    "path": "binaries/vps/ouro-jail-before",
+    "bytes": 10063392,
+    "sha256": "3829f0f215f51d79cfbc95062670bff5fb9c6aeb7457996f1826a305988d800c"
+  },
+  {
+    "path": "binaries/vps/ouro-jail-candidate-v3",
+    "bytes": 10012144,
+    "sha256": "a9bf2c0f74766105a0a5112001c59df2688f96a8a4d82f010cb72322d71e6d81"
+  },
+  {
+    "path": "binaries/vps/ouro-jail-candidate-v4",
+    "bytes": 10011088,
+    "sha256": "76b0b2671a87ed8aa28b9814fe79283a33ea7bf92a5277583c34445a7147c6cf"
+  },
+  {
+    "path": "binaries/vps/ouro-jail-candidate-v5",
+    "bytes": 10005968,
+    "sha256": "a697e56477dcdc39312d476ba62662bb01e7897b8b64ba15773f1f9133463e0e"
+  }
+]

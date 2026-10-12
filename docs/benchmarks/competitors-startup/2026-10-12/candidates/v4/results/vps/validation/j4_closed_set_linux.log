@@ -1,0 +1,24 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 1.11s
+     Running tests/j4_closed_set_linux.rs (target/debug/deps/j4_closed_set_linux-a009ff6045dca732)
+
+running 16 tests
+test bless_the_published_closed_set_table ... ignored, writes the evidence file; run deliberately
+test j4_clone_untraced_is_a_gap_in_none ... ok
+test j4_clone_untraced_refused_in_contained ... ok
+test j4_closed_set_the_published_table_is_the_one_this_build_traces ... ok
+test j4_o01_every_variant_is_one_event_per_result_agent ... ok
+test j4_o01_every_variant_is_one_event_per_result_build ... ok
+test j4_o01_every_variant_is_one_event_per_result_none ... ok
+test j4_o01_every_variant_is_one_event_per_result_tool ... ok
+test j4_o02_a_nested_pid_namespace_under_none_keeps_host_attribution ... ok
+test j4_o02_every_audit_event_names_the_birth_of_its_process ... ok
+test j4_o04_an_unrelated_host_process_is_never_observed ... ok
+test j4_o06_foreign_dirfd ... ok
+test j4_o06_non_utf8_round_trip ... ok
+test j4_o06_racing_pathname_is_only_a_literal_snapshot ... ok
+test j4_o06_renamed_cwd ... ok
+test j4_o06_two_paths_independent ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.84s
+

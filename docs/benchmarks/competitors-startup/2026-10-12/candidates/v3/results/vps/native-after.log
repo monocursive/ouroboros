@@ -1,0 +1,26 @@
+1/72 claude direct add-multiply #0 17.2s exit=0 success=True
+2/72 claude greywall add-multiply #0 32.1s exit=0 success=True
+3/72 claude ouro add-multiply #0 19.3s exit=0 success=True
+4/72 claude mxc add-multiply #0 18.1s exit=0 success=True
+5/72 claude greywall refactor-yaml-json #0 40.4s exit=0 success=True
+6/72 claude ouro refactor-yaml-json #0 24.3s exit=0 success=True
+7/72 claude mxc refactor-yaml-json #0 22.7s exit=0 success=True
+8/72 claude direct refactor-yaml-json #0 23.3s exit=0 success=True
+9/72 claude ouro fix-offbyone #0 21.0s exit=0 success=True
+10/72 claude greywall fix-offbyone #0 38.0s exit=0 success=True
+11/72 claude direct fix-offbyone #0 23.1s exit=0 success=True
+12/72 claude mxc fix-offbyone #0 20.5s exit=0 success=True
+13/72 claude mxc add-multiply #1 19.0s exit=0 success=True
+14/72 claude direct add-multiply #1 19.4s exit=0 success=True
+15/72 claude greywall add-multiply #1 31.9s exit=0 success=True
+16/72 claude ouro add-multiply #1 18.0s exit=0 success=True
+17/72 claude ouro fix-offbyone #1 19.3s exit=0 success=True
+18/72 claude greywall fix-offbyone #1 33.2s exit=0 success=True
+19/72 claude direct fix-offbyone #1 19.8s exit=0 success=True
+20/72 claude mxc fix-offbyone #1 20.7s exit=0 success=True
+21/72 claude mxc refactor-yaml-json #1 21.7s exit=0 success=True
+22/72 claude greywall refactor-yaml-json #1 42.5s exit=0 success=True
+23/72 claude direct refactor-yaml-json #1 21.6s exit=0 success=True
+24/72 claude ouro refactor-yaml-json #1 24.4s exit=0 success=True
+25/72 opencode direct refactor-yaml-json #0 23.2s exit=-15 success=False
+Terminated

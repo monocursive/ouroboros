@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/ubuntu/bench-ouro-startup/bin",
+      "/usr/lib/node_modules/@anthropic-ai/claude-code/bin"
+    ],
+    "allowWrite": [
+      "/home/ubuntu/bench-ouro-startup/results/native-after/runs/002-claude-greywall-add-multiply-0/workspace/add-multiply",
+      "/home/ubuntu/bench-ouro-startup/results/native-after/runs/002-claude-greywall-add-multiply-0/home",
+      "/home/ubuntu/bench-ouro-startup/results/native-after/runs/002-claude-greywall-add-multiply-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

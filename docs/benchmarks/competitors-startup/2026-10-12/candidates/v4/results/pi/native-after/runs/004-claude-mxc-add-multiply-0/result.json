@@ -1,0 +1,29 @@
+{
+  "sequence": 4,
+  "agent": "claude",
+  "mode": "mxc",
+  "task": "add-multiply",
+  "repetition": 0,
+  "started_utc": "2026-10-12T10:13:22Z",
+  "elapsed_ms": 24160.921954,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro-startup-final/bin/lxc-exec",
+    "/home/monocursive/bench-ouro-startup-final/results/native-after/runs/004-claude-mxc-add-multiply-0/mxc-private.json"
+  ],
+  "load": [
+    0.388671875,
+    0.861328125,
+    1.2802734375
+  ],
+  "artifact": "runs/004-claude-mxc-add-multiply-0"
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "host": "vps",
+    "kind": "unchanged native competitor/direct client calls; unguarded Ouro rows excluded",
+    "archive": "archives/vps-candidate-v5-native-evidence.tar.gz",
+    "archive_sha256": "9ec1bc95cd72ab3aed27fc97da6c697bd32833bd4a4498de205fc6dc285d6afa",
+    "source_root": "results/vps/native-control-export",
+    "original_export_verified": true
+  },
+  {
+    "host": "pi",
+    "kind": "unchanged native competitor/direct client calls; unguarded Ouro rows excluded",
+    "archive": "archives/pi-candidate-v5-native-evidence.tar.gz",
+    "archive_sha256": "98918d6af7bcebba9c77e9b7ab94cb95c772a889973f12aa589cabf786b1b3d8",
+    "source_root": "results/pi/native-control-export",
+    "original_export_verified": true
+  }
+]

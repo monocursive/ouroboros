@@ -1,0 +1,1896 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/bench-ouro-startup/src/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.27s
+     Running tests/j4_loss_linux.rs (target/debug/deps/j4_loss_linux-de6c608af4c8b954)
+
+running 19 tests
+test j4_o03_a_class_never_returns_to_active_after_an_early_gap ... FAILED
+test j4_o03_exhaustion_through_the_product ... FAILED
+test j4_o03_unmatched_exit_is_unreachable ... FAILED
+test j4_o05_attach_failure_refuses_in_best_effort_none ... FAILED
+test j4_o05_attach_failure_refuses_in_best_effort_tool ... FAILED
+test j4_o05_denied_connect_counts_only_in_fs_deny_agent ... FAILED
+test j4_o05_denied_connect_counts_only_in_fs_deny_none ... FAILED
+test j4_o05_denied_connect_counts_only_in_fs_deny_tool ... FAILED
+test j4_o05_directory_operation_losses_degrade_fs_write ... FAILED
+test j4_observer_plan_is_recorded ... FAILED
+test j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none ... FAILED
+test j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool ... FAILED
+test j4_r04_a_call_in_flight_at_teardown_is_loss_none ... FAILED
+test j4_r04_a_call_in_flight_at_teardown_is_loss_tool ... FAILED
+test j4_r04_ptrace_loss_best_effort_none ... FAILED
+test j4_r04_ptrace_loss_best_effort_tool ... FAILED
+test j4_r04_ptrace_loss_strict_none ... FAILED
+test j4_r04_ptrace_loss_strict_tool ... FAILED
+test j4_w3_a_seam_set_twice_is_recorded_as_applied ... FAILED
+
+failures:
+
+---- j4_o03_a_class_never_returns_to_active_after_an_early_gap stdout ----
+
+thread 'j4_o03_a_class_never_returns_to_active_after_an_early_gap' (466405) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- j4_o03_exhaustion_through_the_product stdout ----
+
+thread 'j4_o03_exhaustion_through_the_product' (466411) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_o03_unmatched_exit_is_unreachable stdout ----
+
+thread 'j4_o03_unmatched_exit_is_unreachable' (466412) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_o05_attach_failure_refuses_in_best_effort_none stdout ----
+
+thread 'j4_o05_attach_failure_refuses_in_best_effort_none' (466413) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_o05_attach_failure_refuses_in_best_effort_tool stdout ----
+
+thread 'j4_o05_attach_failure_refuses_in_best_effort_tool' (466415) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_o05_denied_connect_counts_only_in_fs_deny_agent stdout ----
+
+thread 'j4_o05_denied_connect_counts_only_in_fs_deny_agent' (466416) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_o05_denied_connect_counts_only_in_fs_deny_none stdout ----
+
+thread 'j4_o05_denied_connect_counts_only_in_fs_deny_none' (466417) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_o05_denied_connect_counts_only_in_fs_deny_tool stdout ----
+
+thread 'j4_o05_denied_connect_counts_only_in_fs_deny_tool' (466419) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_o05_directory_operation_losses_degrade_fs_write stdout ----
+
+thread 'j4_o05_directory_operation_losses_degrade_fs_write' (466420) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_observer_plan_is_recorded stdout ----
+
+thread 'j4_observer_plan_is_recorded' (466421) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none stdout ----
+
+thread 'j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none' (466422) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool stdout ----
+
+thread 'j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool' (466424) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_a_call_in_flight_at_teardown_is_loss_none stdout ----
+
+thread 'j4_r04_a_call_in_flight_at_teardown_is_loss_none' (466425) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_a_call_in_flight_at_teardown_is_loss_tool stdout ----
+
+thread 'j4_r04_a_call_in_flight_at_teardown_is_loss_tool' (466427) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_ptrace_loss_best_effort_none stdout ----
+
+thread 'j4_r04_ptrace_loss_best_effort_none' (466428) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_ptrace_loss_best_effort_tool stdout ----
+
+thread 'j4_r04_ptrace_loss_best_effort_tool' (466430) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_ptrace_loss_strict_none stdout ----
+
+thread 'j4_r04_ptrace_loss_strict_none' (466431) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_r04_ptrace_loss_strict_tool stdout ----
+
+thread 'j4_r04_ptrace_loss_strict_tool' (466433) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+---- j4_w3_a_seam_set_twice_is_recorded_as_applied stdout ----
+
+thread 'j4_w3_a_seam_set_twice_is_recorded_as_applied' (466434) panicked at crates/ouro-fixture/src/harness/mod.rs:93:25:
+OURO_CONFORMANCE=1 forbids skipping: the loss fixture: gcc failed: /home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_early_loss’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  243 |         if (syscall(SYS_mkdir, d, 0700) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:243:21: note: each undeclared identifier is reported only once for each function it appears in
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:244:21: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  244 |         if (syscall(SYS_rmdir, d) == 0) made++;
+      |                     ^~~~~~~~~
+      |                     SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:247:21: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  247 |         if (syscall(SYS_unlink, f) == 0) made++;
+      |                     ^~~~~~~~~~
+      |                     SYS_unlinkat
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:283:25: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  283 |     OP("mkdir", syscall(SYS_mkdir, a, 0700), a);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:285:26: error: ‘SYS_rename’ undeclared (first use in this function); did you mean ‘SYS_uname’?
+  285 |     OP("rename", syscall(SYS_rename, a, a2), a2);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:288:25: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  288 |     OP("rmdir", syscall(SYS_rmdir, a3), a3);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:290:25: error: ‘SYS_creat’ undeclared (first use in this function); did you mean ‘SYS_read’?
+  290 |     OP("creat", syscall(SYS_creat, f, 0600), f);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:292:24: error: ‘SYS_open’ undeclared (first use in this function); did you mean ‘SYS_fsopen’?
+  292 |     OP("open", syscall(SYS_open, g, O_WRONLY | O_CREAT | O_CLOEXEC, 0600), g);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:302:24: error: ‘SYS_link’ undeclared (first use in this function); did you mean ‘SYS_bind’?
+  302 |     OP("link", syscall(SYS_link, f, l1), l1);
+      |                        ^~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:304:27: error: ‘SYS_symlink’ undeclared (first use in this function); did you mean ‘SYS_symlinkat’?
+  304 |     OP("symlink", syscall(SYS_symlink, "f", s1), s1);
+      |                           ^~~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:306:25: error: ‘SYS_mknod’ undeclared (first use in this function); did you mean ‘SYS_mknodat’?
+  306 |     OP("mknod", syscall(SYS_mknod, p1, S_IFIFO | 0600, 0), p1);
+      |                         ^~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:308:26: error: ‘SYS_unlink’ undeclared (first use in this function); did you mean ‘SYS_unlinkat’?
+  308 |     OP("unlink", syscall(SYS_unlink, l1), l1);
+      |                          ^~~~~~~~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:282:41: note: in definition of macro ‘OP’
+  282 | #define OP(label, call, path) do { r = (call); report(label, r, r < 0 ? errno : 0, path); } while (0)
+      |                                         ^~~~
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_queue’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:327:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  327 |     r = syscall(SYS_mkdir, q, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:457:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  457 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:458:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  458 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c: In function ‘mode_pairing_inflight’:
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:527:17: error: ‘SYS_mkdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  527 |         syscall(SYS_mkdir, m, 0700);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+/home/monocursive/bench-ouro-startup/src/target/tmp/j4-loss-466404/loss.c:528:17: error: ‘SYS_rmdir’ undeclared (first use in this function); did you mean ‘SYS_chdir’?
+  528 |         syscall(SYS_rmdir, m);
+      |                 ^~~~~~~~~
+      |                 SYS_chdir
+
+
+
+failures:
+    j4_o03_a_class_never_returns_to_active_after_an_early_gap
+    j4_o03_exhaustion_through_the_product
+    j4_o03_unmatched_exit_is_unreachable
+    j4_o05_attach_failure_refuses_in_best_effort_none
+    j4_o05_attach_failure_refuses_in_best_effort_tool
+    j4_o05_denied_connect_counts_only_in_fs_deny_agent
+    j4_o05_denied_connect_counts_only_in_fs_deny_none
+    j4_o05_denied_connect_counts_only_in_fs_deny_tool
+    j4_o05_directory_operation_losses_degrade_fs_write
+    j4_observer_plan_is_recorded
+    j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none
+    j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool
+    j4_r04_a_call_in_flight_at_teardown_is_loss_none
+    j4_r04_a_call_in_flight_at_teardown_is_loss_tool
+    j4_r04_ptrace_loss_best_effort_none
+    j4_r04_ptrace_loss_best_effort_tool
+    j4_r04_ptrace_loss_strict_none
+    j4_r04_ptrace_loss_strict_tool
+    j4_w3_a_seam_set_twice_is_recorded_as_applied
+
+test result: FAILED. 0 passed; 19 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+error: test failed, to rerun pass `-p ouro-jail --test j4_loss_linux`

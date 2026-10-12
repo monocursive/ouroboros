@@ -1,0 +1,17 @@
+I'll help you run the tests, find the bug in src/parse.py, and fix it. Let me start by creating a task plan.
+Now let me run the tests to see what's failing:
+Now let me read the test file and the source file to understand the bug:
+Perfect! I can see the bug now. The issue is a classic off-by-one error:
+The bug is in src/parse.py:4 - the function is returning `parts[1]` when it should return `parts[0]`. Arrays are 0-indexed, so the first element is at index 0, not index 1. This explains both test failures:
+- For 'hello world', it returns 'world' instead of 'hello'
+- For 'solo', it causes an IndexError because there's only one element at index 0
+
+Let me fix this:
+Now let me run the tests again to verify the fix:
+Perfect! All tests are now passing. 
+
+The bug was an off-by-one error in src/parse.py:4. The function was using `parts[1]` to return the first word, but it should have been `parts[0]` since Python lists are 0-indexed. This caused:
+- `test_basic` to fail because it returned 'world' instead of 'hello'
+- `test_single` to error because there's no index 1 when the string has only one word
+
+The fix was simple: change `return parts[1]` to `return parts[0]`.

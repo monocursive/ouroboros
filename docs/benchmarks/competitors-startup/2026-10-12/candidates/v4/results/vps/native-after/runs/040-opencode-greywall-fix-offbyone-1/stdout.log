@@ -1,0 +1,24 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task plan and running the tests.
+Now let me run the tests to see what's failing:
+I can see the issues from the test output:
+1. test_basic: Expected 'hello' but got 'world' - the function is returning the wrong word
+2. test_single: IndexError on `parts[1]` - trying to access index 1 when there's only one word
+
+Let me examine the source code and tests to understand the issue better:
+Perfect! I found the bug. The issue is in src/parse.py:4 - it's using `parts[1]` instead of `parts[0]`. This is a classic off-by-one error:
+
+- Arrays/lists are 0-indexed, so the first element is at index 0, not index 1
+- Using index 1 returns the second word instead of the first
+- When there's only one word, index 1 doesn't exist, causing an IndexError
+
+Let me fix this:
+Now let me verify all tests pass:
+Perfect! All tests are now passing. 
+
+## Summary
+
+I found and fixed the off-by-one error in src/parse.py:4. The bug was using `parts[1]` instead of `parts[0]` to access the first word. This caused:
+- The function to return the second word instead of the first ('world' instead of 'hello')
+- An IndexError when there was only one word (no index 1 exists)
+
+The fix was simple: change `return parts[1]` to `return parts[0]` since list indexing starts at 0. All tests now pass successfully.

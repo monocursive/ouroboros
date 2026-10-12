@@ -1,0 +1,42 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the structure. Let me plan and implement the changes:
+Let me start by creating the category grouping function in report.py:
+Now let me update the CLI to add the argument and use the new function:
+Now let me update the README with a grouped example:
+Now let's run the tests to verify everything works:
+Perfect! All tests pass. Let me verify the actual output matches the expected behavior:
+Excellent! Let me also verify the error handling works correctly:
+Perfect! The implementation is complete and all requirements have been met. Here's a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_report()` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Calculates total quantity per category
+   - Calculates stock_value as sum of (quantity × unit_price) using exact Decimal arithmetic
+   - Returns sorted JSON array by category name
+   - Formats stock_value with exactly 2 decimal places as a string
+
+2. **inventory/cli.py** - Updated to:
+   - Import the new `category_report` function
+   - Add `--group-by-category` argument flag (inventory/cli.py:10)
+   - Conditionally call `category_report` when flag is set, otherwise keep existing behavior (inventory/cli.py:14-17)
+
+3. **README.md** - Added documentation with:
+   - Example command showing grouped output usage
+   - Expected JSON output demonstrating the format
+
+### Verification:
+
+✓ All 10 tests pass (`python3 -m unittest discover -s tests -v`)  
+✓ Ungrouped output maintains current behavior  
+✓ `--min-quantity` filtering applied before grouping  
+✓ Invalid CSV produces exit code 2 with useful stderr message (no traceback)  
+✓ Category summaries output correct JSON with exact decimal formatting  
+✓ Processing logic kept separate in `report.py`, argument parsing in `cli.py`  
+✓ Supplied tests unchanged

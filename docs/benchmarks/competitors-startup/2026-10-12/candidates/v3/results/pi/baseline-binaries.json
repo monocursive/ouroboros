@@ -1,0 +1,54 @@
+{
+  "openshell": {
+    "target": "/usr/bin/openshell",
+    "sha256": "9a0a6e0aaa0d036c0bdd55470d0916e7bb1906cb51d3c6c4f6c600500f66128a"
+  },
+  "codex": {
+    "target": "/home/monocursive/bench-ouro/bin/codex",
+    "sha256": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3"
+  },
+  "codex-code-mode-host": {
+    "target": "/home/monocursive/bench-ouro/bin/codex-code-mode-host",
+    "sha256": "6979f2fea8cb1d5d72614abfe2f42b16727cdce2c356cc6af933157e732a7277"
+  },
+  "openshell-gateway": {
+    "target": "/usr/bin/openshell-gateway",
+    "sha256": "cd55e5d4eea3f7aff089ed29609a4d75106e30fd7ad25738f7360a34367531fa"
+  },
+  "lxc-exec": {
+    "target": "/home/monocursive/bench-ouro/bin/lxc-exec",
+    "sha256": "f1c8b9c6fc6450a75f5bf3adc6468da579a95ec6100dd85a50d390ac54c73d12"
+  },
+  "opencode": {
+    "target": "/home/monocursive/.opencode/bin/opencode",
+    "sha256": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df"
+  },
+  "README.md": {
+    "target": "/home/monocursive/bench-ouro/bin/README.md",
+    "sha256": "7db9af5c2234e7d08f58da92509305e73400cc14b857ba0e0afeb220c6b112b4"
+  },
+  "claude": {
+    "target": "/home/monocursive/bench-ouro/bin/claude",
+    "sha256": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b"
+  },
+  "greywall": {
+    "target": "/home/monocursive/bench-ouro/bin/greywall",
+    "sha256": "f307e14a8afafb69edb5cbda632c259e4af6a1359d41dd2d7818f40b136a30bc"
+  },
+  "ouro-jail": {
+    "target": "/home/monocursive/bench-ouro-after/bin/ouro-jail",
+    "sha256": "60643f31dde7706010cbb319502a2a424da2e25cb2b1f06188a1d9e33502b093"
+  },
+  "greyproxy": {
+    "target": "/home/monocursive/bench-ouro/bin/greyproxy",
+    "sha256": "61f97f1d049c1fe18cc4ab623466d24c71dac652fd87dcdfaf26f0026c212a85"
+  },
+  "LICENSE": {
+    "target": "/home/monocursive/bench-ouro/bin/LICENSE",
+    "sha256": "4326f1b06bfe45be486cf117bd14630629eb5d3329fdf21f52194c221ebee90a"
+  },
+  "ouro-fixture": {
+    "target": "/home/monocursive/bench-ouro-after/bin/ouro-fixture",
+    "sha256": "da3f9992e3b2a9e510b7313ec5dec5f017e43ccfbd115c6f103487b032ab06ca"
+  }
+}

@@ -1,0 +1,183 @@
+{
+  "schema": "startup-validation/1",
+  "release_readiness_claim": false,
+  "reference_host_conformance_claim": false,
+  "hosts": {
+    "vps": {
+      "final_validation": {
+        "unit-tests.log": {
+          "source": "results/vps/validation/unit-tests.log",
+          "sha256": "929d8e11919d5c699749ea7f5eace74c4818050ce8385d537997f368742e9e51",
+          "summaries": [
+            {
+              "passed": 567,
+              "failed": 0,
+              "ignored": 2
+            }
+          ],
+          "passed": 567,
+          "ignored": 2
+        },
+        "ordinary_file_hints.log": {
+          "source": "results/vps/validation/ordinary_file_hints.log",
+          "sha256": "07f2dc4e6901101b94b50e4d594a97b2cfe487e03b442b4a0ec1a422f24960b3",
+          "summaries": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "passed": 1,
+          "ignored": 0
+        },
+        "shared_status_and_readonly.log": {
+          "source": "results/vps/validation/shared_status_and_readonly.log",
+          "sha256": "1415ce8fcc3385580371977c31b74a9dc08a39cfbf7f53e8ab882877ae6c38b3",
+          "summaries": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "passed": 1,
+          "ignored": 0
+        },
+        "security-observer-tests.log": {
+          "source": "results/vps/validation/security-observer-tests.log",
+          "sha256": "2de02539a5623ddb13b8600d19ab69667713b603d11ec74ace6a85a930f050bb",
+          "summaries": [
+            {
+              "passed": 15,
+              "failed": 0,
+              "ignored": 1
+            },
+            {
+              "passed": 19,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 26,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 26,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 3,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 4,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 10,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 9,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 17,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 30,
+              "failed": 0,
+              "ignored": 1
+            },
+            {
+              "passed": 46,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 1
+            }
+          ],
+          "passed": 206,
+          "ignored": 3
+        }
+      },
+      "clippy": "passed with -D warnings",
+      "broader_pi_baseline_limits": null
+    },
+    "pi": {
+      "final_validation": {
+        "unit-tests.log": {
+          "source": "results/pi/validation/unit-tests.log",
+          "sha256": "8d84cb238db991d06eb9d973c8abcab37cb4a8f27ab03d9fb717054e9036fd50",
+          "summaries": [
+            {
+              "passed": 567,
+              "failed": 0,
+              "ignored": 2
+            }
+          ],
+          "passed": 567,
+          "ignored": 2
+        },
+        "ordinary_file_hints.log": {
+          "source": "results/pi/validation/ordinary_file_hints.log",
+          "sha256": "cf62fb9ee5dc5380b909d5f3582ebc499273284b6287e6356f0f466ff2ccdd6f",
+          "summaries": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "passed": 1,
+          "ignored": 0
+        },
+        "shared_status_and_readonly.log": {
+          "source": "results/pi/validation/shared_status_and_readonly.log",
+          "sha256": "d1ad1d4c15555489563f36faea1cdc40052bad97d2da8d575f6f8d580423fdb8",
+          "summaries": [
+            {
+              "passed": 1,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "passed": 1,
+          "ignored": 0
+        },
+        "observer-backend-tests.log": {
+          "source": "results/pi/validation/observer-backend-tests.log",
+          "sha256": "eb57607710617364de2d22abb37627ee0c94784fe33d8b0065c1afc5b14dba02",
+          "summaries": [
+            {
+              "passed": 3,
+              "failed": 0,
+              "ignored": 0
+            },
+            {
+              "passed": 17,
+              "failed": 0,
+              "ignored": 0
+            }
+          ],
+          "passed": 20,
+          "ignored": 0
+        }
+      },
+      "clippy": "passed with -D warnings",
+      "broader_pi_baseline_limits": "analysis/pi-validation-comparison.json and candidate archives; not a complete host conformance pass"
+    }
+  }
+}

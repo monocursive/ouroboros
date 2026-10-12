@@ -1,0 +1,30 @@
+{
+  "theme": "system",
+  "notifications": {
+    "enabled": true,
+    "available": false,
+    "backend": "none",
+    "installHint": "Install libnotify with: sudo apt install libnotify-bin (Debian/Ubuntu) or sudo dnf install libnotify-utils (Fedora)",
+    "supportsActions": false,
+    "activeClaims": 0
+  },
+  "mitm": {
+    "enabled": true,
+    "certGenerated": true,
+    "certExpiry": "2036-10-09",
+    "certPath": "/home/monocursive/bench-ouro-startup/proxy/data/ca-cert.pem",
+    "installed": false
+  },
+  "conversations": {
+    "enabled": true
+  },
+  "redactedHeaders": [
+    "Authorization",
+    "Proxy-Authorization",
+    "Cookie",
+    "Set-Cookie",
+    "*api-key*",
+    "*token*",
+    "*secret*"
+  ]
+}

@@ -1,0 +1,41 @@
+I'll implement category summaries in this inventory CLI with the specifications you've provided. Let me start by exploring the codebase structure and then planning the implementation.
+Now I understand the codebase structure. Let me plan and implement the feature:
+Perfect! All tests pass. Let me verify the implementation manually to ensure everything works as expected:
+Excellent! Let me verify the error handling for invalid CSV:
+Perfect! Let me also verify the final state of the modified files:
+Perfect! Let me create a summary of what was implemented:
+
+## Implementation Complete
+
+I've successfully implemented category summaries in the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/cli.py:11** - Added `--group-by-category` flag to argument parser
+2. **inventory/cli.py:5** - Imported `category_summary` from report module
+3. **inventory/cli.py:15-18** - Added conditional logic to use `category_summary` when flag is set
+4. **inventory/report.py:1-24** - Created new `category_summary` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups by category and sums quantities
+   - Calculates stock_value as sum of (quantity * unit_price)
+   - Formats stock_value as a string with exactly 2 decimal places
+   - Returns results sorted alphabetically by category
+5. **README.md** - Added documentation with example usage and expected output
+
+### Key Implementation Details:
+
+- CSV loading uses the existing `load_items` function
+- `--min-quantity` filter is applied before grouping
+- Output is JSON array sorted alphabetically by category
+- `stock_value` is calculated using `Decimal` for precision, formatted as a string with `.2f`
+- Invalid CSV produces exit code 2 with error message to stderr (no traceback)
+- Ungrouped output maintains existing behavior
+- Processing logic is in `report.py`, argument parsing in `cli.py` (separate modules)
+
+### Test Results:
+
+All 10 tests pass, including:
+- `test_category_summaries` - Validates grouped output format
+- `test_filter_before_group` - Confirms filtering happens before grouping
+- `test_bad_csv` - Verifies exit code 2 and clean error messages
+- Existing tests continue to pass without modification

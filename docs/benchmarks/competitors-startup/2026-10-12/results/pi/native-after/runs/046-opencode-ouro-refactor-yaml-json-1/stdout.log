@@ -1,0 +1,17 @@
+I'll help you refactor `src/store.py` to use JSON instead of YAML while keeping the same interface. Let me start by examining the current implementation and tests.
+Now let me run the tests to see the current state:
+Perfect! Now I'll refactor `src/store.py` to use the `json` module instead of `yaml`, keeping the same class name and method signatures:
+Now let's verify that all tests pass:
+Perfect! The refactoring is complete. Here's what I did:
+
+**Changes made to `src/store.py`:**
+- Replaced `import yaml` with `import json`
+- Changed `yaml.dump(data, f)` to `json.dump(data, f)` in the `save` method
+- Changed `yaml.safe_load(f)` to `json.load(f)` in the `load` method
+
+The `Store` class maintains the same:
+- Class name: `Store`
+- Method signatures: `__init__(self, path)`, `save(self, data)`, and `load(self)`
+- Functionality: saving and loading data to/from files
+
+All tests pass successfully! ✓

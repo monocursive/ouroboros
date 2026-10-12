@@ -1,0 +1,54 @@
+{
+  "vps": {
+    "safety_statuses": {
+      "private_read": "denied",
+      "private_write": "denied",
+      "readonly_write": "denied",
+      "symlink_read": "denied",
+      "symlink_write": "denied",
+      "hardlink_read": "denied",
+      "host_tcp": "denied",
+      "host_unix_socket": "denied",
+      "host_signal": "denied",
+      "detached_after_root_exit": "stopped",
+      "syscall_surface": "observed"
+    },
+    "syscall_records_equal": true,
+    "startup_medians_ms": {
+      "ouro-before": 108.9160755,
+      "ouro-jail": 88.123029,
+      "mxc": 19.432924,
+      "greywall": 1567.155614
+    },
+    "gap_to_mxc_before_ms": 89.4831515,
+    "gap_to_mxc_after_ms": 68.690105,
+    "ouro_after_to_mxc_ratio": 4.534728227208628,
+    "greywall_to_ouro_after_ratio": 17.783723866323296
+  },
+  "pi": {
+    "safety_statuses": {
+      "private_read": "denied",
+      "private_write": "denied",
+      "readonly_write": "denied",
+      "symlink_read": "denied",
+      "symlink_write": "denied",
+      "hardlink_read": "denied",
+      "host_tcp": "denied",
+      "host_unix_socket": "denied",
+      "host_signal": "denied",
+      "detached_after_root_exit": "stopped",
+      "syscall_surface": "observed"
+    },
+    "syscall_records_equal": true,
+    "startup_medians_ms": {
+      "ouro-before": 278.994371,
+      "ouro-jail": 234.187373,
+      "mxc": 23.661938499999998,
+      "greywall": 1796.1393735
+    },
+    "gap_to_mxc_before_ms": 255.3324325,
+    "gap_to_mxc_after_ms": 210.52543450000002,
+    "ouro_after_to_mxc_ratio": 9.897218395694843,
+    "greywall_to_ouro_after_ratio": 7.669667883844445
+  }
+}

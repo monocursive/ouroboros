@@ -1,0 +1,9 @@
+{
+  "reason": "Operator paused runner to inspect whether timing had started after baseline CPU preflight persistence failure; 34 measured rows had already been emitted. Runner resumed immediately. Pause can contaminate the in-flight sample; preserve the cohort, report its baseline failure, and exclude timing cohort for this operator intervention.",
+  "time_utc": "2026-10-12T12:06:09Z",
+  "rows_at_inspection": 210,
+  "measurement_rows_at_inspection": 35,
+  "pause_signal": "SIGSTOP then SIGCONT",
+  "pid": 597026,
+  "excluded_from_final_timing_comparison": true
+}

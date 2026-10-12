@@ -1,0 +1,42 @@
+[
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import pathlib,json\nfor name in ['/work/readonly-canary','/tmp/writable-canary']:\n try:\n  pathlib.Path(name).write_text('owned-fixture');print(json.dumps({'path':name,'wrote':True}))\n except OSError as e:print(json.dumps({'path':name,'wrote':False,'errno':e.errno}))"
+    ],
+    "elapsed_ms": 266.594459,
+    "exit": 0,
+    "stdout": "{\"path\": \"/work/readonly-canary\", \"wrote\": true}\n{\"path\": \"/tmp/writable-canary\", \"wrote\": true}\n",
+    "stderr": "",
+    "tool": "docker"
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--policy",
+      "/Users/monocursive/bench-ouro-startup/results/container-filesystem-after/policy.yaml",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import pathlib,json\nfor name in ['/work/readonly-canary','/tmp/writable-canary']:\n try:\n  pathlib.Path(name).write_text('owned-fixture');print(json.dumps({'path':name,'wrote':True}))\n except OSError as e:print(json.dumps({'path':name,'wrote':False,'errno':e.errno}))"
+    ],
+    "elapsed_ms": 698.111625,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: fair-squid\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"path\": \"/work/readonly-canary\", \"wrote\": false, \"errno\": 13}\n{\"path\": \"/tmp/writable-canary\", \"wrote\": true}\n\u2713 Deleted sandbox fair-squid\n",
+    "stderr": "",
+    "tool": "openshell"
+  }
+]

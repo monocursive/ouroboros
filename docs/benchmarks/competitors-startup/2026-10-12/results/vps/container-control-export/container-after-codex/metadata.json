@@ -1,0 +1,132 @@
+{
+  "schema": "container-agent-comparison/2",
+  "host": {
+    "system": "Linux",
+    "node": "vps-450b3fe8",
+    "release": "7.0.0-31-generic",
+    "version": "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "started_utc": "2026-10-12T11:06:30Z",
+  "image_id": "sha256:a65395c3cdf903d96e58b17a10035e97970a73d95164eae1ec068cae3253829a",
+  "schedule": [
+    [
+      "codex",
+      "add-multiply",
+      0,
+      "docker"
+    ],
+    [
+      "codex",
+      "add-multiply",
+      0,
+      "openshell-warm"
+    ],
+    [
+      "codex",
+      "add-multiply",
+      0,
+      "openshell-ephemeral"
+    ],
+    [
+      "codex",
+      "refactor-yaml-json",
+      0,
+      "openshell-warm"
+    ],
+    [
+      "codex",
+      "refactor-yaml-json",
+      0,
+      "docker"
+    ],
+    [
+      "codex",
+      "refactor-yaml-json",
+      0,
+      "openshell-ephemeral"
+    ],
+    [
+      "codex",
+      "fix-offbyone",
+      0,
+      "openshell-warm"
+    ],
+    [
+      "codex",
+      "fix-offbyone",
+      0,
+      "openshell-ephemeral"
+    ],
+    [
+      "codex",
+      "fix-offbyone",
+      0,
+      "docker"
+    ],
+    [
+      "codex",
+      "refactor-yaml-json",
+      1,
+      "openshell-ephemeral"
+    ],
+    [
+      "codex",
+      "refactor-yaml-json",
+      1,
+      "docker"
+    ],
+    [
+      "codex",
+      "refactor-yaml-json",
+      1,
+      "openshell-warm"
+    ],
+    [
+      "codex",
+      "add-multiply",
+      1,
+      "docker"
+    ],
+    [
+      "codex",
+      "add-multiply",
+      1,
+      "openshell-ephemeral"
+    ],
+    [
+      "codex",
+      "add-multiply",
+      1,
+      "openshell-warm"
+    ],
+    [
+      "codex",
+      "fix-offbyone",
+      1,
+      "openshell-ephemeral"
+    ],
+    [
+      "codex",
+      "fix-offbyone",
+      1,
+      "openshell-warm"
+    ],
+    [
+      "codex",
+      "fix-offbyone",
+      1,
+      "docker"
+    ]
+  ],
+  "seed": 20261011,
+  "harness_sha256": "4110bcab6602cb727295e863d5f1fdd99d4dbff79035a5ee350005957cd26a5a",
+  "single_agent_image": true,
+  "container_bin_hashes": {
+    "claude": "4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358",
+    "opencode": "135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd",
+    "codex": "1748767b230ebfc3d4ab7e4e254920d0c0ad9691fd8c11f190e7d44511a4a92e",
+    "codex-code-mode-host": "5b2c075ac2380fa04d76d7313fbc044d29c8d0a0d0b9138415acd4610211ca03"
+  }
+}

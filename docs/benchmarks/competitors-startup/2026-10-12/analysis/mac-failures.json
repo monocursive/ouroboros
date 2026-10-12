@@ -1,0 +1,22 @@
+{
+  "container_agent_failure": {
+    "agent": "codex",
+    "mode": "openshell-warm",
+    "task": "add-multiply",
+    "repetition": 1,
+    "exit": 1,
+    "reason_from_stderr": "Selected model is at capacity. Please try a different model.",
+    "source": "results/mac/container-after-v2/runs/049-codex-openshell-warm-add-multiply-1/stderr.log",
+    "retried": false,
+    "different_model_used": false
+  },
+  "native_unavailability": "Greywall Seatbelt syntax rejected; MXC Codex CFPreferences failure. Exact outputs retained.",
+  "container_small_tasks": {
+    "passed": 53,
+    "attempted": 54
+  },
+  "container_workflows": {
+    "passed": 9,
+    "attempted": 9
+  }
+}

@@ -1,0 +1,21 @@
+I'll help you fix the failing tests. Let me start by running the tests to see what's failing, then identify and fix the bug in src/parse.py.
+Now let me read the test file and the source file to understand the issue better:
+Perfect! I found the bug. The issue is an off-by-one error in src/parse.py:4. The function is returning `parts[1]` (the second element) instead of `parts[0]` (the first element).
+
+This explains both test failures:
+- For `'hello world'`, it returns `'world'` instead of `'hello'`
+- For `'solo'`, it throws an IndexError because there's only one element at index 0
+
+Let me fix this:
+Now let me verify that all tests pass:
+Perfect! All tests are now passing. 
+
+**Summary:**
+
+I found and fixed the off-by-one error in src/parse.py:4. The bug was that the function was returning `parts[1]` (the second element) instead of `parts[0]` (the first element) when splitting the text.
+
+This caused:
+- `test_basic` to fail: returned 'world' instead of 'hello'
+- `test_single` to error: tried to access index 1 in a single-element list
+
+The fix was simple: changed `return parts[1]` to `return parts[0]`. All tests now pass successfully.

@@ -1,0 +1,7 @@
+{
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 145.042709,
+  "stdout": "\u2713 Sandbox bench-v2-claude deletion accepted; cleanup is pending\n",
+  "stderr": ""
+}

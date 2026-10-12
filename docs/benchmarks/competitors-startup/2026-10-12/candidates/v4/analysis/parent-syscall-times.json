@@ -1,0 +1,254 @@
+[
+  {
+    "host": "vps",
+    "candidate": "v4",
+    "excluded_diagnostic": true,
+    "source": "candidates/v4/results/vps/profile-final/parent-1.strace",
+    "top_parent_syscall_elapsed_ms": [
+      [
+        "futex",
+        14.082000000000004
+      ],
+      [
+        "clock_nanosleep",
+        13.858999999999998
+      ],
+      [
+        "poll",
+        12.707999999999998
+      ],
+      [
+        "fcntl",
+        7.833999999999978
+      ],
+      [
+        "write",
+        7.133000000000001
+      ],
+      [
+        "close",
+        6.891999999999989
+      ],
+      [
+        "statx",
+        6.370999999999991
+      ],
+      [
+        "readlink",
+        5.58999999999999
+      ]
+    ],
+    "fsync_elapsed_ms": 0,
+    "fsync_calls": 0
+  },
+  {
+    "host": "vps",
+    "candidate": "v4",
+    "excluded_diagnostic": true,
+    "source": "candidates/v4/results/vps/profile-final/parent-0.strace",
+    "top_parent_syscall_elapsed_ms": [
+      [
+        "clock_nanosleep",
+        16.316
+      ],
+      [
+        "futex",
+        13.738999999999999
+      ],
+      [
+        "poll",
+        13.302000000000001
+      ],
+      [
+        "write",
+        7.661999999999999
+      ],
+      [
+        "fcntl",
+        7.505999999999983
+      ],
+      [
+        "close",
+        7.4659999999999656
+      ],
+      [
+        "statx",
+        6.560999999999994
+      ],
+      [
+        "read",
+        5.829999999999992
+      ]
+    ],
+    "fsync_elapsed_ms": 0,
+    "fsync_calls": 0
+  },
+  {
+    "host": "vps",
+    "candidate": "v4",
+    "excluded_diagnostic": true,
+    "source": "candidates/v4/results/vps/profile-final/parent-2.strace",
+    "top_parent_syscall_elapsed_ms": [
+      [
+        "clock_nanosleep",
+        14.686
+      ],
+      [
+        "futex",
+        13.782000000000002
+      ],
+      [
+        "poll",
+        11.900999999999998
+      ],
+      [
+        "fcntl",
+        8.64
+      ],
+      [
+        "write",
+        7.240000000000001
+      ],
+      [
+        "close",
+        6.965999999999972
+      ],
+      [
+        "statx",
+        6.2869999999999955
+      ],
+      [
+        "read",
+        5.431999999999992
+      ]
+    ],
+    "fsync_elapsed_ms": 0,
+    "fsync_calls": 0
+  },
+  {
+    "host": "pi",
+    "candidate": "v4",
+    "excluded_diagnostic": true,
+    "source": "candidates/v4/results/pi/profile-final/parent-1.strace",
+    "top_parent_syscall_elapsed_ms": [
+      [
+        "futex",
+        66.76299999999999
+      ],
+      [
+        "write",
+        33.464
+      ],
+      [
+        "ppoll",
+        32.748000000000005
+      ],
+      [
+        "clock_nanosleep",
+        24.871999999999996
+      ],
+      [
+        "fcntl",
+        21.488999999999976
+      ],
+      [
+        "read",
+        8.709999999999996
+      ],
+      [
+        "close",
+        7.554999999999986
+      ],
+      [
+        "statx",
+        7.058999999999995
+      ]
+    ],
+    "fsync_elapsed_ms": 0,
+    "fsync_calls": 0
+  },
+  {
+    "host": "pi",
+    "candidate": "v4",
+    "excluded_diagnostic": true,
+    "source": "candidates/v4/results/pi/profile-final/parent-0.strace",
+    "top_parent_syscall_elapsed_ms": [
+      [
+        "futex",
+        66.87000000000002
+      ],
+      [
+        "ppoll",
+        32.67100000000002
+      ],
+      [
+        "fcntl",
+        21.628999999999987
+      ],
+      [
+        "clock_nanosleep",
+        20.05099999999999
+      ],
+      [
+        "write",
+        8.58
+      ],
+      [
+        "read",
+        7.39999999999999
+      ],
+      [
+        "close",
+        7.254999999999985
+      ],
+      [
+        "statx",
+        7.01399999999999
+      ]
+    ],
+    "fsync_elapsed_ms": 0,
+    "fsync_calls": 0
+  },
+  {
+    "host": "pi",
+    "candidate": "v4",
+    "excluded_diagnostic": true,
+    "source": "candidates/v4/results/pi/profile-final/parent-2.strace",
+    "top_parent_syscall_elapsed_ms": [
+      [
+        "futex",
+        71.70800000000003
+      ],
+      [
+        "ppoll",
+        33.151
+      ],
+      [
+        "clock_nanosleep",
+        20.188
+      ],
+      [
+        "fcntl",
+        14.914999999999996
+      ],
+      [
+        "write",
+        10.122
+      ],
+      [
+        "close",
+        7.5669999999999895
+      ],
+      [
+        "read",
+        7.127999999999985
+      ],
+      [
+        "statx",
+        7.098999999999991
+      ]
+    ],
+    "fsync_elapsed_ms": 0,
+    "fsync_calls": 0
+  }
+]

@@ -1,0 +1,4 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+error: failed to write query cache to `/dev/shm/ouro-startup-build/target/debug/incremental/ouro_jail-32zz7977e3vzi/s-hn4z6gt8wr-0uh5z3v-working/query-cache.bin`: Disk quota exceeded (os error 122)
+
+error: could not compile `ouro-jail` (lib) due to 1 previous error

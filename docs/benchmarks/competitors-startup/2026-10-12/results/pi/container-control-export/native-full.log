@@ -1,0 +1,23 @@
+review_linux exit=101
+observer_linux exit=0
+observer_j4_linux exit=101
+observer_regression_linux exit=101
+j4_loss_linux exit=101
+j4_tracer_precision_linux exit=101
+j4_closed_set_linux exit=101
+j5_tracer_foreign_child_linux exit=0
+j5_boundary_linux exit=101
+j5_pseudofs_linux exit=0
+security_alias_linux exit=0
+j5_bwrap_resolution_linux exit=0
+Traceback (most recent call last):
+  File "/home/monocursive/bench-ouro-startup-final/harness/check_final_validation.py", line 11, in <module>
+    assert not unexpected,(suite,unexpected)
+           ^^^^^^^^^^^^^^
+AssertionError: ('j4_tracer_precision_linux', {'j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss'})
+Final validation completed; original host/test limitations retained
+All 30 doctor statuses identical; Rust 1.98.1 release build confirmed
+Host provenance saved
+LINUX-NATIVE-COMPLETE
+PROFILE-NATIVE-COMPLETE
+FINAL-PI-NATIVE-COMPLETE

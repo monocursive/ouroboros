@@ -1,0 +1,81 @@
+{
+  "host": "vps",
+  "suites": [
+    {
+      "suite": "review_linux",
+      "summary": "test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.34s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "observer_linux",
+      "summary": "test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.64s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "observer_j4_linux",
+      "summary": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.98s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "observer_regression_linux",
+      "summary": "test result: ok. 30 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 20.17s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "j4_loss_linux",
+      "summary": "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.84s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "j4_tracer_precision_linux",
+      "summary": "test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.27s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "j4_closed_set_linux",
+      "summary": "test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.84s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "j5_tracer_foreign_child_linux",
+      "summary": "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "j5_boundary_linux",
+      "summary": "test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.69s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "j5_pseudofs_linux",
+      "summary": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "security_alias_linux",
+      "summary": "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    },
+    {
+      "suite": "j5_bwrap_resolution_linux",
+      "summary": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s",
+      "failed_tests": [],
+      "unexpected_failed_tests": []
+    }
+  ],
+  "exercised_suites_pass": true,
+  "reference_host_conformance_pass": false,
+  "pi_failures_retained_without_relaxing_tests": false,
+  "release_readiness_claim": false
+}

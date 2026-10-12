@@ -1,0 +1,65 @@
+{
+  "date_utc": "2026-10-12T12:54:05Z",
+  "host": {
+    "system": "Linux",
+    "node": "vps-450b3fe8",
+    "release": "7.0.0-31-generic",
+    "version": "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "cpu_count": 4,
+  "bin_hashes": {
+    "bin/bwrap": "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6",
+    "bin/claude": "4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358",
+    "bin/codex": "1748767b230ebfc3d4ab7e4e254920d0c0ad9691fd8c11f190e7d44511a4a92e",
+    "bin/codex-code-mode-host": "5b2c075ac2380fa04d76d7313fbc044d29c8d0a0d0b9138415acd4610211ca03",
+    "bin/greyproxy": "29d3771355b03a8c3563e39aecf86b6f3e9fa6ec40939ba67fc10f4254db7747",
+    "bin/greywall": "9968afd25b7b4b9f16ce5b868115e108e4ea856f5d62bc3ee6be78eb20e8f950",
+    "bin/lxc-exec": "b4628bbb3bf714af95ac53d9630299e5dbd37635b9d1e36bf2015731e0d64ad1",
+    "bin/opencode": "135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd",
+    "bin/openshell": "557f8e2af1d91221211bb29cc7152d975084d2a8c9ab8c549d46c4370ccf492e",
+    "bin/openshell-gateway": "a6d230ccf79f777602e5a7d101775edcb8f59a29dc569d8cd41544ebb8e44fda",
+    "bin/ouro-fixture": "59faffae8896d3caf957bf45038d6de2a4059c172b35abe5c03ed7856faf5728",
+    "bin/ouro-jail": "a697e56477dcdc39312d476ba62662bb01e7897b8b64ba15773f1f9133463e0e",
+    "bin/ouro-jail-before": "3829f0f215f51d79cfbc95062670bff5fb9c6aeb7457996f1826a305988d800c",
+    "bin/ouro-jail-v3": "a9bf2c0f74766105a0a5112001c59df2688f96a8a4d82f010cb72322d71e6d81"
+  },
+  "commands": {
+    "disk": {
+      "exit": 0,
+      "output": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        77G   76G  846M  99% /\n"
+    },
+    "identity": {
+      "exit": 0,
+      "output": "uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),109(docker)\n"
+    },
+    "python": {
+      "exit": 0,
+      "output": "Python 3.14.4\n"
+    },
+    "docker-info": {
+      "exit": 1,
+      "output": "{\"version\":\"29.1.3\",\"cpu\":4,\"memory\":3999318016,\"kernel\":\"7.0.0-31-generic\",\"memory_limit\":\ntemplate: :1:139: executing \"\" at <.MemLimit>: can't evaluate field MemLimit in type system.dockerInfo\n"
+    },
+    "openshell-status": {
+      "exit": 1,
+      "output": "Error:   \u00d7 client error (Connect)\n  \u251c\u2500\u25b6 tcp connect error\n  \u2570\u2500\u25b6 Connection refused (os error 111)\n\n"
+    },
+    "kernel": {
+      "exit": 0,
+      "output": "Linux vps-450b3fe8 7.0.0-31-generic #31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026 x86_64 GNU/Linux\n"
+    },
+    "bwrap": {
+      "exit": 0,
+      "output": "bubblewrap 0.11.1\n"
+    },
+    "apparmor-userns": {
+      "exit": 0,
+      "output": "kernel.apparmor_restrict_unprivileged_userns = 0\n"
+    }
+  },
+  "cpuinfo": "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 1\nmodel name\t: AMD EPYC-Milan Processor\nstepping\t: 1\nmicrocode\t: 0x1000065\ncpu MHz\t\t: 2649.998\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\napicid\t\t: 0\ninitial apicid\t: 0\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 13\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl xtopology cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr wbnoinvd arat npt nrip_save umip pku ospke rdpid fsrm\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa\nbogomips\t: 5299.99\nTLB size\t: 1024 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 40 bits physical, 48 bits virtual\npower management:\n\nprocessor\t: 1\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 1\nmodel name\t: AMD EPYC-Milan Processor\nstepping\t: 1\nmicrocode\t: 0x1000065\ncpu MHz\t\t: 2649.998\ncache size\t: 512 KB\nphysical id\t: 1\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\napicid\t\t: 1\ninitial apicid\t: 1\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 13\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl xtopology cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr wbnoinvd arat npt nrip_save umip pku ospke rdpid fsrm\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa\nbogomips\t: 5299.99\nTLB size\t: 1024 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 40 bits physical, 48 bits virtual\npower management:\n\nprocessor\t: 2\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 1\nmodel name\t: AMD EPYC-Milan Processor\nstepping\t: 1\nmicrocode\t: 0x1000065\ncpu MHz\t\t: 2649.998\ncache size\t: 512 KB\nphysical id\t: 2\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\napicid\t\t: 2\ninitial apicid\t: 2\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 13\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl xtopology cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr wbnoinvd arat npt nrip_save umip pku ospke rdpid fsrm\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa\nbogomips\t: 5299.99\nTLB size\t: 1024 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 40 bits physical, 48 bits virtual\npower management:\n\nprocessor\t: 3\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 1\nmodel name\t: AMD EPYC-Milan Processor\nstepping\t: 1\nmicrocode\t: 0x1000065\ncpu MHz\t\t: 2649.998\ncache size\t: 512 KB\nphysical id\t: 3\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\napicid\t\t: 3\ninitial apicid\t: 3\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 13\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm rep_good nopl xtopology cpuid extd_apicid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext perfctr_core ssbd ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves clzero xsaveerptr wbnoinvd arat npt nrip_save umip pku ospke rdpid fsrm\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa\nbogomips\t: 5299.99\nTLB size\t: 1024 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 40 bits physical, 48 bits virtual\npower management:\n\n",
+  "meminfo": "MemTotal:        3905584 kB\nMemFree:         1108580 kB\nMemAvailable:    2842952 kB\nBuffers:           67612 kB\nCached:          1788620 kB\nSwapCached:        43048 kB\nActive:           415440 kB\nInactive:        1589328 kB\nActive(anon):     149484 kB\nInactive(anon):   238588 kB\nActive(file):     265956 kB\nInactive(file):  1350740 kB\nUnevictable:       10572 kB\nMlocked:            9632 kB\nSwapTotal:       8388604 kB\nSwapFree:        6584040 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:              4540 kB\nWriteback:             0 kB\nAnonPages:        143928 kB\nMapped:            81044 kB\nShmem:            232108 kB\nKReclaimable:     406292 kB\nSlab:             622916 kB\nSReclaimable:     406292 kB\nSUnreclaim:       216624 kB\nKernelStack:        4144 kB\nPageTables:         7628 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    10341396 kB\nCommitted_AS:    3392604 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       34316 kB\nVmallocChunk:          0 kB\nPercpu:             9008 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:     34816 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:            1780 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      229228 kB\nDirectMap2M:     3866624 kB\nDirectMap1G:           0 kB\n",
+  "cgroup_controllers": "cpuset cpu io memory hugetlb pids rdma misc dmem\n"
+}

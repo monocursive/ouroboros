@@ -1,0 +1,11 @@
+{
+  "commit": "ac1263a0961d5e676c2a03e516848a9fd00dde9b",
+  "source_files_verified_against_git": [
+    "crates/ouro-jail/src/platform/linux/bwrap.rs",
+    "crates/ouro-jail/src/platform/linux/platform.rs",
+    "crates/ouro-jail/src/platform/linux/probe.rs",
+    "crates/ouro-jail/tests/review_linux.rs"
+  ],
+  "prior_manifest": "../../competitors-after/2026-10-11/source-files.json",
+  "binary_source": "Retained first-after binaries, compiled before their source was committed; original embedded revision remains visible."
+}

@@ -1,0 +1,62 @@
+{
+  "baseline_commit": "ac1263a0961d5e676c2a03e516848a9fd00dde9b",
+  "candidate": "source-v3.patch",
+  "source_hashes": "source-v3-files.json",
+  "host_root": "~/bench-ouro-startup",
+  "mac_full_pid": 8407,
+  "pi_validation_pid": 407779,
+  "vps_validation_initial_pid": 3520589,
+  "local_validation_complete": true,
+  "pending": [
+    "Complete Linux validation and final doctor comparison",
+    "Run final startup diagnostics after validation",
+    "Start complete Linux native/container reruns with same protocol",
+    "Complete independent Mac rerun",
+    "Export and verify every journal and archive; audit credentials",
+    "Compare paired performance and latest historical baseline; write final reports and package results"
+  ],
+  "private_backup": "/Users/monocursive/.local/share/ouro-benchmark-private/vps-before-working-state-20261012.tar.gz",
+  "private_backup_public": false,
+  "final_linux_roots": {
+    "vps": {
+      "root": "~/bench-ouro-startup-final",
+      "pipeline_pid": 3614796,
+      "post_pid": 3615103
+    },
+    "pi": {
+      "root": "~/bench-ouro-startup-final",
+      "pipeline_pid": 471439,
+      "post_pid": 471543
+    }
+  },
+  "mac_status": "Complete, archived and imported",
+  "withdrawn_candidate": "v3: cached backend-version receipt evidence; preserved under candidates/v3 and candidate archives",
+  "phase": "Final Linux compatibility and container timings ongoing; code/timing optimization complete",
+  "completed": {
+    "linux_native_performance": "14 paired buckets / 840 strictly verified Ouro samples",
+    "vps_native_small": {
+      "passed": 72,
+      "attempted": 72
+    },
+    "pi_native_small": {
+      "passed": 72,
+      "attempted": 72
+    },
+    "vps_native_workflow": {
+      "passed": 10,
+      "attempted": 12,
+      "failures": "Claude direct and Ouro reach fixed 15-turn cap despite tests/hidden passing"
+    },
+    "vps_container_small": {
+      "passed": 54,
+      "attempted": 54
+    },
+    "mac": "Fully exported, imported and hash-verified"
+  },
+  "remaining": [
+    "Finish VPS container workflow/performance/resource/egress/export",
+    "Finish Pi native workflows and full available container protocol/export",
+    "Import final archives; select_startup.py, compare_paired.py, verify_startup.py, build_startup_report.py",
+    "Credential/pattern audit, prior manifests unchanged, final manifest/bundle, report review"
+  ]
+}

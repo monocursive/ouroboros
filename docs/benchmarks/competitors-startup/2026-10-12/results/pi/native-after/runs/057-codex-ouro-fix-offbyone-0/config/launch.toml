@@ -1,0 +1,10 @@
+name="codex"
+jail="agent"
+state_var="CODEX_HOME"
+home_is_state=true
+[credentials.auth]
+source="/home/monocursive/bench-ouro-startup-stable-final/results/native-after/runs/057-codex-ouro-fix-offbyone-0/state/auth.json"
+dest="auth.json"
+mode="copy_rw"
+[network]
+allow=["chatgpt.com:443","*.chatgpt.com:443","*.openai.com:443"]

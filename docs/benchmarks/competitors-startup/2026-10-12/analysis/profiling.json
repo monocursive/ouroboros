@@ -1,0 +1,104 @@
+[
+  {
+    "host": "vps",
+    "candidate": "before",
+    "excluded_from_score": true,
+    "n_untraced_controls": 3,
+    "untraced_controls_ms": [
+      111.000415,
+      94.569067,
+      98.636821
+    ],
+    "n_traces": 3,
+    "newfstatat_counts": [
+      2055,
+      2055,
+      2055
+    ]
+  },
+  {
+    "host": "vps",
+    "candidate": "v1",
+    "excluded_from_score": true,
+    "n_untraced_controls": 3,
+    "untraced_controls_ms": [
+      103.690419,
+      93.137555,
+      82.732673
+    ],
+    "n_traces": 3,
+    "newfstatat_counts": [
+      47,
+      47,
+      47
+    ]
+  },
+  {
+    "host": "vps",
+    "candidate": "v3",
+    "excluded_from_score": true,
+    "n_untraced_controls": 3,
+    "untraced_controls_ms": [
+      79.34594,
+      85.935395,
+      97.254328
+    ],
+    "n_traces": 3,
+    "newfstatat_counts": [
+      47,
+      47,
+      47
+    ]
+  },
+  {
+    "host": "pi",
+    "candidate": "before",
+    "excluded_from_score": true,
+    "n_untraced_controls": 3,
+    "untraced_controls_ms": [
+      414.832626,
+      264.442625,
+      269.876152
+    ],
+    "n_traces": 3,
+    "newfstatat_counts": [
+      2055,
+      2055,
+      2055
+    ]
+  },
+  {
+    "host": "pi",
+    "candidate": "v1",
+    "excluded_from_score": true,
+    "n_untraced_controls": 3,
+    "untraced_controls_ms": [
+      332.031988,
+      230.460593,
+      265.797336
+    ],
+    "n_traces": 3,
+    "newfstatat_counts": [
+      47,
+      47,
+      47
+    ]
+  },
+  {
+    "host": "pi",
+    "candidate": "v3",
+    "excluded_from_score": true,
+    "n_untraced_controls": 3,
+    "untraced_controls_ms": [
+      267.234581,
+      222.454308,
+      213.009513
+    ],
+    "n_traces": 3,
+    "newfstatat_counts": [
+      47,
+      47,
+      47
+    ]
+  }
+]

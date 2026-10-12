@@ -1,0 +1,11 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 0.52s
+     Running tests/j5_bwrap_resolution_linux.rs (target/debug/deps/j5_bwrap_resolution_linux-eae600db7f27a035)
+
+running 3 tests
+test j5_empty_and_relative_path_entries_never_resolve_bubblewrap ... ok
+test j5_the_resolved_backend_is_canonical ... ok
+test j5_without_a_resolvable_backend_doctor_is_not_ready_and_run_refuses ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+

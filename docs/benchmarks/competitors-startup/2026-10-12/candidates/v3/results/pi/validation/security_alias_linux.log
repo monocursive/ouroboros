@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running tests/security_alias_linux.rs (target/debug/deps/security_alias_linux-43b11d9c0b8e52e1)
+
+running 2 tests
+test guarded_aliases_are_detected_across_devices_and_below_mountpoints ... ok
+test private_mount_alias_fixture ... ignored, private mount namespace helper
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.08s
+

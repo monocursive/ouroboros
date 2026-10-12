@@ -1,0 +1,25 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task list and running the tests.
+Now let me run the tests:
+I can see the issue clearly from the test output:
+1. `test_basic` expects `first_word('hello world')` to return `'hello'` but it's returning `'world'`
+2. `test_single` has an IndexError when trying to get `parts[1]` on a single word
+
+Let me read the source code and tests to understand better:
+Perfect! I found the bug. In src/parse.py:4, the function is using `parts[1]` which is an off-by-one error. It should be `parts[0]` to get the first word since lists are 0-indexed in Python.
+
+The bug:
+- `parts[1]` returns the second element (index 1), not the first
+- For 'hello world'.split(' '), it returns 'world' instead of 'hello'
+- For 'solo'.split(' '), there's only one element at index 0, so index 1 causes an IndexError
+
+Let me fix it:
+Now let me verify all tests pass:
+Perfect! All tests now pass. 
+
+**Summary:**
+
+The bug was an off-by-one error in src/parse.py:4. The function was using `parts[1]` instead of `parts[0]` to get the first word from the split string. This caused:
+- `first_word('hello world')` to return 'world' instead of 'hello'
+- `first_word('solo')` to crash with an IndexError
+
+The fix was simple: change `return parts[1]` to `return parts[0]` to correctly access the first element of the list (index 0).

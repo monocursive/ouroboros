@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted categories, and exact decimal totals formatted to two digits.
+
+Processing remains separate from argument parsing. Ungrouped output is preserved, invalid CSV handling is strengthened, and README includes a verified example.
+
+All 10 tests pass. Supplied tests were unchanged.

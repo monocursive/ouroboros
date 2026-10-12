@@ -1,0 +1,6 @@
+{
+  "entry_sha256": "6c28a1123d737a1dc67189baf6f1d0fd911fde4cd27807dad3e8fa056999ce50",
+  "fixture_sha256": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+  "native_harness_sha256": "237117502197af54532be18c5084c2f9cfa8fbdebcd36532ba82a2eb68654358",
+  "description": "Synthetic multi-file CLI feature; one sample per configured lane, descriptive compatibility only"
+}

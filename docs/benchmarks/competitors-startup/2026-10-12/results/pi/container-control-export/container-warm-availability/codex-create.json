@@ -1,0 +1,26 @@
+{
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8404.589692,
+  "stdout": "\nCreated sandbox: pi-next-codex\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image ouro-comparison-agents-after:20261011\n[0.1s] Image already present\n[0.7s] Starting sandbox Container created\n",
+  "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n",
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--name",
+    "pi-next-codex",
+    "--detach",
+    "--from",
+    "ouro-comparison-agents-after:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro-startup-final/results/container-warm-availability/policy.yaml",
+    "--provider",
+    "benchmark-codex-startup",
+    "--env",
+    "BENCH_CODEX_ROUTING_ACCOUNT_ID=<CODEX_ACCOUNT_ID>",
+    "--",
+    "/bin/sleep",
+    "300"
+  ]
+}

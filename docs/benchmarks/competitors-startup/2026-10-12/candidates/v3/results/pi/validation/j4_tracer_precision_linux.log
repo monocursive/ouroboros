@@ -1,0 +1,33 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running tests/j4_tracer_precision_linux.rs (target/debug/deps/j4_tracer_precision_linux-d2f9c666202718f1)
+
+running 26 tests
+test j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_none ... ok
+test j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_tool ... ok
+test j4_o1_read_only_opens_are_never_inflight_loss ... ok
+test j4_o2_a_default_ignored_signal_restarts_the_call ... ok
+test j4_o2_a_fatal_signal_inside_the_call_is_no_result_and_no_loss ... ok
+test j4_o2_a_handler_s_own_call_follows_the_eintr_it_interrupted ... ok
+test j4_o2_a_handler_with_sa_restart_gives_the_restarted_result_connect ... ok
+test j4_o2_a_handler_with_sa_restart_gives_the_restarted_result_open ... ok
+test j4_o2_a_handler_without_sa_restart_makes_eintr_the_result_connect ... ok
+test j4_o2_a_handler_without_sa_restart_makes_eintr_the_result_open ... ok
+test j4_o2_a_restart_then_an_eintr_in_one_call_is_one_result ... ok
+test j4_o2_an_ignored_signal_restarts_the_call ... ok
+test j4_o2_eintr_is_counted_through_the_product_none ... ok
+test j4_o2_eintr_is_counted_through_the_product_tool ... ok
+test j4_o2_eintr_through_sa_siginfo_on_an_alternate_stack ... ok
+test j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss ... ok
+test j4_w3_a_leaders_entry_is_never_paired_with_a_non_leader_execs_exit ... ok
+test j4_w3_a_listener_refused_a_slot_is_the_open_ended_gap_of_its_kind ... ok
+test j4_w3_a_non_leader_exec_invents_no_result_through_the_product_none ... ok
+test j4_w3_a_non_leader_exec_invents_no_result_through_the_product_tool ... ok
+test j4_w3_an_untraced_clone_refused_a_slot_is_the_open_ended_gap_of_its_kind ... ok
+test j4_w3_r1_a_covered_call_inside_an_sa_restart_handler_costs_one_gap ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_another_call_is_a_gap_first ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_connect ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_open ... ok
+test j4_w3_the_queue_budget_bounds_what_is_held_for_a_consumer_not_reading ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.83s
+

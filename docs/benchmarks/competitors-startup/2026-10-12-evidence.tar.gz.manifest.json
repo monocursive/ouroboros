@@ -1,0 +1,30 @@
+{
+  "schema": "startup-evidence-split-bundle/2",
+  "root": "/Users/monocursive/code/ouroboros/docs/benchmarks/competitors-startup/2026-10-12",
+  "bundle": "/Users/monocursive/code/ouroboros/docs/benchmarks/competitors-startup/2026-10-12-evidence.tar.gz",
+  "files": 23758,
+  "uncompressed_bytes": 1002565322,
+  "archive_bytes": 147582850,
+  "archive_sha256": "9cbe8bb69cd7d345b398be9f462d2a12ad2a24275e998bbdfe5274d6fdac6152",
+  "root_manifest_sha256": "0b2f2698c99f74b0f7c27d2aaa8300eeb0079ba0e4d45cdf59675b83329d20a5",
+  "all_members_hash_verified": true,
+  "no_symlinks_or_appledouble": true,
+  "parts": [
+    {
+      "file": "2026-10-12-evidence.tar.gz.part00",
+      "bytes": 51380224,
+      "sha256": "0857c0187badfc68a75b47d2a13316470244dab2771bff0e203a1dd37d8c3714"
+    },
+    {
+      "file": "2026-10-12-evidence.tar.gz.part01",
+      "bytes": 51380224,
+      "sha256": "3a9aed0bef43d8748766c1dd0daeb7ebad292eff275061b60a04644a0e6f5cb5"
+    },
+    {
+      "file": "2026-10-12-evidence.tar.gz.part02",
+      "bytes": 44822402,
+      "sha256": "8ba30838cfd710f9dc4f36394dcf6b9b5aacdd861228037333162938f698a265"
+    }
+  ],
+  "reconstruction": "concatenate parts in listed order"
+}

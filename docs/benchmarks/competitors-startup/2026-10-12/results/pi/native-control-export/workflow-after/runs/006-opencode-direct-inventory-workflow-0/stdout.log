@@ -1,0 +1,40 @@
+I'll implement the category summaries feature for the inventory CLI. Let me start by exploring the codebase structure and then planning the implementation.
+Now I'll implement the feature. Let me start by creating the category grouping function in report.py.
+Now I'll update the CLI to add the --group-by-category argument and use the appropriate report function.
+Now I'll update the README.md with a grouped example.
+Now let me run the tests to see if they pass.
+Perfect! All tests pass. Let me verify the implementation by running a quick test of the grouped output:
+Let me also verify the ungrouped output still works:
+Excellent! The implementation is complete and all tests pass. Here's a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary()` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Calculates total quantity and stock value per category
+   - Returns a JSON array sorted by category name
+   - Formats stock_value as a decimal string with exactly two fractional digits
+
+2. **inventory/cli.py** - Updated to:
+   - Import the new `category_summary` function
+   - Add `--group-by-category` argument (boolean flag)
+   - Use `category_summary()` when flag is set, otherwise use `item_report()` (preserving existing behavior)
+   - Maintains existing error handling (exit code 2 for invalid CSV, stderr messages without traceback)
+
+3. **README.md** - Added documentation:
+   - Example command using `--group-by-category`
+   - Expected JSON output format
+   - Explanation of the stock_value calculation
+
+### Key Features:
+- Processing logic kept in `report.py` separate from argument parsing in `cli.py`
+- `--min-quantity` filter applied before grouping
+- Stock value calculated as sum of `quantity * unit_price` with exact decimal arithmetic
+- Output sorted alphabetically by category
+- All 10 tests pass, including the new grouped output tests
+- Existing ungrouped behavior unchanged

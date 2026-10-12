@@ -1,0 +1,14 @@
+[
+  {
+    "root": "docs/benchmarks/competitors",
+    "files_verified": 10192,
+    "manifest_sha256": "cd43a49a3d9e403ba6d8960c8cf195f7234fd2f2e963226cfde70b50b62287e0",
+    "unchanged": true
+  },
+  {
+    "root": "docs/benchmarks/competitors-after/2026-10-11",
+    "files_verified": 7122,
+    "manifest_sha256": "e3bab94e58013d8687b53b2cd8f1645c62bf77b847f3bc6a554298d49a0d89a0",
+    "unchanged": true
+  }
+]

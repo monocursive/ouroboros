@@ -1,0 +1,22 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 0.99s
+     Running tests/linux_mechanisms.rs (target/debug/deps/linux_mechanisms-d8244550cfdb64a8)
+
+running 1 test
+test ordinary_file_hints_keep_protected_file_identity_and_mutation_detection ... FAILED
+
+failures:
+
+---- ordinary_file_hints_keep_protected_file_identity_and_mutation_detection stdout ----
+
+thread 'ordinary_file_hints_keep_protected_file_identity_and_mutation_detection' (3559233) panicked at crates/ouro-jail/tests/linux_mechanisms.rs:347:5:
+assertion failed: scan.directories.iter().any(|stamp| stamp.verify().is_err())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ordinary_file_hints_keep_protected_file_identity_and_mutation_detection
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p ouro-jail --test linux_mechanisms`

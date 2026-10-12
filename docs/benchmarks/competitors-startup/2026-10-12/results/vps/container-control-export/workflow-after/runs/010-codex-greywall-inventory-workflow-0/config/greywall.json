@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/ubuntu/bench-ouro-startup-final/bin",
+      "/home/ubuntu/bench-ouro/bin"
+    ],
+    "allowWrite": [
+      "/home/ubuntu/bench-ouro-startup-final/results/workflow-after/runs/010-codex-greywall-inventory-workflow-0/workspace/inventory-workflow",
+      "/home/ubuntu/bench-ouro-startup-final/results/workflow-after/runs/010-codex-greywall-inventory-workflow-0/home",
+      "/home/ubuntu/bench-ouro-startup-final/results/workflow-after/runs/010-codex-greywall-inventory-workflow-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

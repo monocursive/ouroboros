@@ -1,0 +1,20 @@
+   Compiling ouro-jail v0.1.0 (/home/monocursive/bench-ouro-startup/src/crates/ouro-jail)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 10s
+     Running tests/observer_regression_linux.rs (target/debug/deps/observer_regression_linux-fd7230e925bfa674)
+
+running 1 test
+test r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount ... r13: untraced 321.60697ms; traced with a consumer that never reads 17.843791415s; dropped=19984 emitted=21
+
+thread 'r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount' (426496) panicked at crates/ouro-jail/tests/observer_regression_linux.rs:1791:5:
+a consumer that never reads must cost one bounded stall, not one per event
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 28 filtered out; finished in 18.92s
+
+error: test failed, to rerun pass `-p ouro-jail --test observer_regression_linux`

@@ -1,0 +1,18 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 0.83s
+     Running tests/j5_tracer_foreign_child_linux.rs (target/debug/deps/j5_tracer_foreign_child_linux-bf8f4b3781b4dce4)
+
+running 10 tests
+test j5t_a_child_it_does_not_trace_that_exits_while_traced_is_delivered_not_lost ... ok
+test j5t_a_strict_tool_run_traced_to_an_inherited_reader_settles_verified ... ok
+test j5t_doctor_reports_the_observer_available_beside_an_inherited_child ... ok
+test j5t_none_leaves_an_inherited_child_alone_observed ... ok
+test j5t_none_leaves_an_inherited_child_alone_unobserved ... ok
+test j5t_none_traced_to_an_inherited_reader_delivers_the_whole_stream ... ok
+test j5t_none_unobserved_an_inherited_child_ending_mid_run_is_not_an_escape ... ok
+test j5t_orphans_adopted_while_traced_are_reaped_before_finished ... ok
+test j5t_the_backend_the_launcher_descends_through_is_awaited_and_delivered ... ok
+test j5t_the_tracer_finishes_beside_a_live_child_it_does_not_trace ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s
+

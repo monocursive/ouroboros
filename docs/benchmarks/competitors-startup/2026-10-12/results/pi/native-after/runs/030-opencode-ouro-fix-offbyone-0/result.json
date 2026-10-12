@@ -1,0 +1,51 @@
+{
+  "sequence": 30,
+  "agent": "opencode",
+  "mode": "ouro",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "started_utc": "2026-10-12T14:07:48Z",
+  "elapsed_ms": 57749.022903,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro-startup-stable-final/bin/ouro-jail",
+    "run",
+    "--profile",
+    "agent",
+    "--launch",
+    "opencode",
+    "--workspace",
+    "/home/monocursive/bench-ouro-startup-stable-final/results/native-after/runs/030-opencode-ouro-fix-offbyone-0/workspace/fix-offbyone",
+    "--ro",
+    "/home/monocursive/.opencode/bin",
+    "--ro",
+    "/home/monocursive/bench-ouro-startup-stable-final/bin",
+    "--limit",
+    "wall=240s",
+    "--receipt",
+    "/home/monocursive/bench-ouro-startup-stable-final/results/native-after/runs/030-opencode-ouro-fix-offbyone-0/jail.json",
+    "--",
+    "/home/monocursive/bench-ouro-startup-stable-final/bin/opencode",
+    "run",
+    "--dir",
+    "/home/monocursive/bench-ouro-startup-stable-final/results/native-after/runs/030-opencode-ouro-fix-offbyone-0/workspace/fix-offbyone",
+    "--model",
+    "anthropic/claude-sonnet-4-5",
+    "The tests are failing. Run python3 -m unittest discover -s tests -v, find the bug in src/parse.py, and fix it so all tests pass. Do not modify the tests."
+  ],
+  "load": [
+    0.994140625,
+    0.97705078125,
+    1.171875
+  ],
+  "artifact": "runs/030-opencode-ouro-fix-offbyone-0"
+}

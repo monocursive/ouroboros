@@ -1,0 +1,49 @@
+{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "/home/ubuntu/bench-ouro-startup-final/bin/claude -p 'Refactor src/store.py to use the json module instead of yaml. Keep the same class names and method signatures. Make all tests pass: python3 -m unittest discover -s tests -v. Do not modify the tests.' --model claude-sonnet-4-5 --max-turns 15 --dangerously-skip-permissions --output-format json",
+    "cwd": "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json",
+    "timeout": 240000,
+    "inheritDefaultEnv": true,
+    "env": [
+      "HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home",
+      "PATH=/home/ubuntu/bench-ouro-startup-final/bin:/home/ubuntu/bench-ouro-startup-final/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/sbin:/sbin",
+      "TMPDIR=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/tmp",
+      "ANTHROPIC_API_KEY=<ANTHROPIC_API_KEY>",
+      "CODEX_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/state",
+      "CLAUDE_CONFIG_DIR=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/.claude",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "DISABLE_TELEMETRY=1",
+      "OPENCODE_DISABLE_AUTOUPDATE=true",
+      "XDG_CONFIG_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/.config",
+      "XDG_DATA_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/.local/share",
+      "XDG_STATE_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/.local/state",
+      "XDG_CACHE_HOME=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/.cache",
+      "NODE_EXTRA_CA_CERTS=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/proxy-ca.pem",
+      "SSL_CERT_FILE=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/proxy-ca.pem",
+      "REQUESTS_CA_BUNDLE=/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home/proxy-ca.pem",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_CONFIG_GLOBAL=/dev/null"
+    ]
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/home/ubuntu/bench-ouro-startup-final/bin",
+      "/usr/lib/node_modules/@anthropic-ai/claude-code/bin"
+    ],
+    "readwritePaths": [
+      "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json",
+      "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/home",
+      "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/021-claude-mxc-refactor-yaml-json-1/state"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43051"
+  }
+}

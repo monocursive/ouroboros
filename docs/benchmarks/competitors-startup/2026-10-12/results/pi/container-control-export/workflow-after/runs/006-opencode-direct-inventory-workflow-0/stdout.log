@@ -1,0 +1,38 @@
+I'll implement category summaries in the inventory CLI with the `--group-by-category` flag. Let me start by planning this work.
+Let me explore the codebase structure first:
+Now I understand the structure. Let me update the todo list and start implementing the changes:
+Now let me implement the changes. First, I'll update the CLI to add the `--group-by-category` flag and route to the appropriate report function:
+Now let me add the `category_summary_report` function to the report module:
+The invalid CSV error handling with exit code 2 is already implemented in the CLI. The loader raises ValueError for invalid CSV, and the CLI catches it and returns exit code 2. Let me verify this is working correctly by running the tests:
+Excellent! All tests pass. Now let me update the README with the grouped example and expected output:
+Let me first run the CLI with the grouped flag to see the actual output:
+Perfect! Now let me update the README:
+Perfect! Let me verify one more time that everything is working correctly by running the tests again and testing the CLI with various options:
+Excellent! All the functionality is working correctly. Let me verify the module separation as requested - argument parsing in CLI and processing in separate modules:
+Perfect! Let me verify the error handling with an invalid CSV:
+Perfect! All requirements have been met. Let me create a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with all the requested features:
+
+### Changes Made:
+
+1. **inventory/cli.py:11** - Added `--group-by-category` flag to argument parsing
+2. **inventory/cli.py:15-18** - Added conditional routing to use `category_summary_report` when flag is present
+3. **inventory/report.py:8-29** - Implemented `category_summary_report` function that:
+   - Filters items by `--min-quantity` before grouping
+   - Groups items by category
+   - Calculates sum of quantities and stock_value (quantity × unit_price) per category
+   - Formats stock_value as a decimal string with exactly two fractional digits
+   - Returns JSON array sorted alphabetically by category
+
+### Key Features:
+
+- **Ungrouped behavior preserved**: Without `--group-by-category`, output remains unchanged
+- **Invalid CSV handling**: Returns exit code 2 with clear error message on stderr, no traceback
+- **Module separation**: Argument parsing in `cli.py`, processing logic in `report.py` and `loader.py`
+- **README updated**: Added example showing grouped output with expected results
+- **All tests pass**: 10/10 tests passing, including the new category summary tests
+
+The implementation uses Python's Decimal type for exact arithmetic, ensuring precise calculations for financial values.

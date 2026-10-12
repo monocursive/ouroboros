@@ -1,0 +1,2077 @@
+[
+  {
+    "tool": "direct",
+    "resource": "wall",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 2,
+    "exit": 0,
+    "elapsed_ms": 3023.877286,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      },
+      {
+        "probe": "wall",
+        "completed": true
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 3,
+    "exit": 0,
+    "elapsed_ms": 281.087242,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 4,
+    "exit": 0,
+    "elapsed_ms": 834.773523,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 5,
+    "exit": 0,
+    "elapsed_ms": 225.520528,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.200343688,
+        "wall_s": 0.20050282310694456
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "ouro-jail",
+    "resource": "wall",
+    "requested_ceiling": [
+      "wall=1s"
+    ],
+    "ceiling_supported": true,
+    "sequence": 7,
+    "exit": 143,
+    "elapsed_ms": 1077.025594,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      }
+    ],
+    "stderr": "",
+    "receipt": {
+      "schema": "ouro.jail.receipt/1",
+      "attempt_id": "att_6d954ab8-b0f0-468c-9b24-0050beaeda21",
+      "revision": 3,
+      "phase": "settled",
+      "platform": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic"
+      },
+      "jail": {
+        "component": "ouro-jail",
+        "version": "0.1.0",
+        "backend": "bubblewrap",
+        "backend_version": "bubblewrap 0.11.1"
+      },
+      "policy": {
+        "name": "tool",
+        "digest": "sha256:5fbb6aef803d8f1779d2ec54e0fbfce1667136af8aafb992758dcef445a00a35",
+        "observe": "on",
+        "evidence": "strict",
+        "requirements": [
+          "tree_termination",
+          "closed_set_observation",
+          "filesystem_containment",
+          "syscall_filter",
+          "network_none",
+          "protected_coverage:existing_and_root",
+          "limit:wall"
+        ],
+        "grants": [
+          {
+            "kind": "read_only",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+            "by": "operator"
+          },
+          {
+            "kind": "deny_read",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+            "by": "operator"
+          }
+        ]
+      },
+      "containment": "enforced",
+      "child_protection": "enforced",
+      "exec_observed": true,
+      "argv_digest": "sha256:76b8dd3134c0fa33450ed3bdd2182022b860be046231a641b9b59246a2e5e1cf",
+      "applied": {
+        "filesystem": {
+          "mechanism": "bubblewrap-binds",
+          "protected_coverage": "existing_and_root",
+          "mounts": [
+            {
+              "path": "/",
+              "mode": "ro"
+            },
+            {
+              "path": "/usr",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ssl",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/resolv.conf",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/passwd",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/group",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/hosts",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/localtime",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ld.so.cache",
+              "mode": "ro"
+            },
+            {
+              "path": "/proc",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/null",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/zero",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/full",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/random",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/urandom",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/tty",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/pts",
+              "mode": "rw"
+            },
+            {
+              "path": "/tmp",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/run/ouro/jail",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+              "mode": "ro"
+            }
+          ]
+        },
+        "network": {
+          "mode": "none",
+          "mechanism": "network-namespace",
+          "allowed_hosts": []
+        },
+        "syscalls": {
+          "mechanism": "seccomp-bpf",
+          "digest": "sha256:6be154d0d902309f8918b03bddd6a3dae656926dbf827ccbbe551e5f73ffb2ec"
+        },
+        "limits": [
+          {
+            "key": "wall",
+            "requested": "1000",
+            "required": true,
+            "applied": true,
+            "mechanism": "boottime-deadline",
+            "scope": "tree",
+            "hit": true
+          },
+          {
+            "key": "pids",
+            "requested": "256",
+            "required": false,
+            "applied": true,
+            "mechanism": "pids.max",
+            "scope": "tree",
+            "hit": false
+          }
+        ],
+        "environment_names": [
+          "LANG",
+          "PATH",
+          "PWD",
+          "TMPDIR"
+        ],
+        "removed_environment_names": []
+      },
+      "observer": {
+        "backend": "ptrace",
+        "set": "linux-closed-v1",
+        "attached": true,
+        "sources": {
+          "wrapper": "active",
+          "audit": "active",
+          "proxy": "unsupported"
+        },
+        "gaps": []
+      },
+      "coverage": {
+        "exec": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 2,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "net": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "limits": {
+          "status": "active",
+          "sources": [
+            "wrapper"
+          ],
+          "observed_count": 1,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      "process": {
+        "pid": 364830,
+        "identity": {
+          "kind": "linux_boot_start",
+          "value": {
+            "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+            "pid": 364830,
+            "start_time_ticks": 176411596
+          }
+        }
+      },
+      "lifetime": {
+        "boundary": "pid_namespace",
+        "native": {
+          "os": "linux",
+          "details": {
+            "backend_exec_by": "descriptor",
+            "bwrap_pid": 364827,
+            "cgroup_namespace": 4026532406,
+            "command_rules": {
+              "deny": 0,
+              "forbid": 0
+            },
+            "execution_cgroup": {
+              "charged_helpers": [
+                {
+                  "pid": 364827,
+                  "role": "bubblewrap"
+                },
+                {
+                  "pid": 364829,
+                  "role": "namespace_init"
+                }
+              ],
+              "device": 29,
+              "inode": 12256253,
+              "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_6d954ab8-b0f0-468c-9b24-0050beaeda21.leaf",
+              "scope": "target_descendants_and_listed_helpers"
+            },
+            "filtered_readonly_opens": 0,
+            "launcher_pid": 364830,
+            "mnt_namespace": 4026532377,
+            "namespace_init_pid": 364829,
+            "narrowing_filter_digest": "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181",
+            "narrowing_filter_digest_installed": "sha256:57d05e80103b0a21e0f6eb843c478f9ec4caca934402e8093449c757664ddf71",
+            "net_namespace": 4026532407,
+            "observer_plan": {
+              "backend": "ptrace",
+              "event_bytes_max": 65536,
+              "in_flight_max": 16384,
+              "kernel_ring_bytes": null,
+              "path_snapshot_max": 4096,
+              "queue_bytes_max": 4194304,
+              "queue_events_max": 16384,
+              "queue_lifecycle_reserve_bytes": 65536,
+              "queue_result_bytes_max": 4128768,
+              "test_seams": {}
+            },
+            "path_claims_unverified": 0,
+            "pid_namespace": 4026532383,
+            "readonly_open_fast_path": true,
+            "requested_by_other_filters": 0,
+            "resolv_sanitization": "nameservers_only",
+            "seccomp_filters": {
+              "expected": 2,
+              "observed": 2
+            },
+            "supervisor_scope": {
+              "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-364816-bd6449af202a47c2.scope",
+              "reason": null,
+              "reason_code": null,
+              "state": "entered",
+              "unit": "ouro-jail-364816-bd6449af202a47c2.scope"
+            },
+            "user_namespace": 4026532404,
+            "watcher_pid": 364828
+          }
+        },
+        "tree_empty": true,
+        "verified_at": "2026-10-12T13:33:34Z",
+        "verification_scope": "attempt_tree",
+        "integrity": "verified"
+      },
+      "outcome": {
+        "kind": "signaled",
+        "code": null,
+        "signal": 15,
+        "cause": "wall_expiry",
+        "error": null
+      },
+      "state_cleanup": "complete",
+      "cleanup_error": null,
+      "created_at": "2026-10-12T13:33:33Z",
+      "updated_at": "2026-10-12T13:33:34Z",
+      "errors": [],
+      "credentials": []
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "resource": "memory",
+    "requested_ceiling": [
+      "mem=64MiB",
+      "swap=0"
+    ],
+    "ceiling_supported": true,
+    "sequence": 8,
+    "exit": 137,
+    "elapsed_ms": 140.305643,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      }
+    ],
+    "stderr": "",
+    "receipt": {
+      "schema": "ouro.jail.receipt/1",
+      "attempt_id": "att_f2909d6c-be20-474d-9308-c1fbc7e88c3f",
+      "revision": 3,
+      "phase": "settled",
+      "platform": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic"
+      },
+      "jail": {
+        "component": "ouro-jail",
+        "version": "0.1.0",
+        "backend": "bubblewrap",
+        "backend_version": "bubblewrap 0.11.1"
+      },
+      "policy": {
+        "name": "tool",
+        "digest": "sha256:59ea460126290669bd42ed6d4855bc72838c38b72ec1236e029f700b67d294fe",
+        "observe": "on",
+        "evidence": "strict",
+        "requirements": [
+          "tree_termination",
+          "closed_set_observation",
+          "filesystem_containment",
+          "syscall_filter",
+          "network_none",
+          "protected_coverage:existing_and_root",
+          "limit:wall",
+          "limit:mem",
+          "limit:swap",
+          "execution_boundary"
+        ],
+        "grants": [
+          {
+            "kind": "read_only",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+            "by": "operator"
+          },
+          {
+            "kind": "deny_read",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+            "by": "operator"
+          }
+        ]
+      },
+      "containment": "enforced",
+      "child_protection": "enforced",
+      "exec_observed": true,
+      "argv_digest": "sha256:8c86074566e31a7f57dfa2c6d89e6b1fcdca482dc2108620b75f40e5071d90c6",
+      "applied": {
+        "filesystem": {
+          "mechanism": "bubblewrap-binds",
+          "protected_coverage": "existing_and_root",
+          "mounts": [
+            {
+              "path": "/",
+              "mode": "ro"
+            },
+            {
+              "path": "/usr",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ssl",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/resolv.conf",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/passwd",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/group",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/hosts",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/localtime",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ld.so.cache",
+              "mode": "ro"
+            },
+            {
+              "path": "/proc",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/null",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/zero",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/full",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/random",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/urandom",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/tty",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/pts",
+              "mode": "rw"
+            },
+            {
+              "path": "/tmp",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/run/ouro/jail",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+              "mode": "ro"
+            }
+          ]
+        },
+        "network": {
+          "mode": "none",
+          "mechanism": "network-namespace",
+          "allowed_hosts": []
+        },
+        "syscalls": {
+          "mechanism": "seccomp-bpf",
+          "digest": "sha256:6be154d0d902309f8918b03bddd6a3dae656926dbf827ccbbe551e5f73ffb2ec"
+        },
+        "limits": [
+          {
+            "key": "wall",
+            "requested": "1800000",
+            "required": true,
+            "applied": true,
+            "mechanism": "boottime-deadline",
+            "scope": "tree",
+            "hit": false
+          },
+          {
+            "key": "pids",
+            "requested": "256",
+            "required": false,
+            "applied": true,
+            "mechanism": "pids.max",
+            "scope": "tree",
+            "hit": false
+          },
+          {
+            "key": "mem",
+            "requested": "67108864",
+            "required": true,
+            "applied": true,
+            "mechanism": "memory.max",
+            "scope": "tree",
+            "hit": true
+          },
+          {
+            "key": "swap",
+            "requested": "0",
+            "required": true,
+            "applied": true,
+            "mechanism": "memory.swap.max",
+            "scope": "tree",
+            "hit": null
+          }
+        ],
+        "environment_names": [
+          "LANG",
+          "PATH",
+          "PWD",
+          "TMPDIR"
+        ],
+        "removed_environment_names": []
+      },
+      "observer": {
+        "backend": "ptrace",
+        "set": "linux-closed-v1",
+        "attached": true,
+        "sources": {
+          "wrapper": "active",
+          "audit": "active",
+          "proxy": "unsupported"
+        },
+        "gaps": []
+      },
+      "coverage": {
+        "exec": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 2,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "net": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "limits": {
+          "status": "active",
+          "sources": [
+            "wrapper"
+          ],
+          "observed_count": 1,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      "process": {
+        "pid": 364856,
+        "identity": {
+          "kind": "linux_boot_start",
+          "value": {
+            "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+            "pid": 364856,
+            "start_time_ticks": 176411704
+          }
+        }
+      },
+      "lifetime": {
+        "boundary": "pid_namespace",
+        "native": {
+          "os": "linux",
+          "details": {
+            "backend_exec_by": "descriptor",
+            "bwrap_pid": 364853,
+            "cgroup_namespace": 4026532383,
+            "command_rules": {
+              "deny": 0,
+              "forbid": 0
+            },
+            "execution_cgroup": {
+              "charged_helpers": [
+                {
+                  "pid": 364853,
+                  "role": "bubblewrap"
+                },
+                {
+                  "pid": 364855,
+                  "role": "namespace_init"
+                }
+              ],
+              "device": 29,
+              "inode": 12256508,
+              "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_f2909d6c-be20-474d-9308-c1fbc7e88c3f.leaf",
+              "scope": "target_descendants_and_listed_helpers"
+            },
+            "filtered_readonly_opens": 0,
+            "launcher_pid": 364856,
+            "mnt_namespace": 4026532371,
+            "namespace_init_pid": 364855,
+            "narrowing_filter_digest": "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181",
+            "narrowing_filter_digest_installed": "sha256:b848190292784b69d19ed4b05a913530c41fb83438f5ecd87b3ef61de8a3b493",
+            "net_namespace": 4026532404,
+            "observer_plan": {
+              "backend": "ptrace",
+              "event_bytes_max": 65536,
+              "in_flight_max": 16384,
+              "kernel_ring_bytes": null,
+              "path_snapshot_max": 4096,
+              "queue_bytes_max": 4194304,
+              "queue_events_max": 16384,
+              "queue_lifecycle_reserve_bytes": 65536,
+              "queue_result_bytes_max": 4128768,
+              "test_seams": {}
+            },
+            "path_claims_unverified": 0,
+            "pid_namespace": 4026532382,
+            "readonly_open_fast_path": true,
+            "requested_by_other_filters": 0,
+            "resolv_sanitization": "nameservers_only",
+            "seccomp_filters": {
+              "expected": 2,
+              "observed": 2
+            },
+            "supervisor_scope": {
+              "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-364839-64cf3cabff674aa0.scope",
+              "reason": null,
+              "reason_code": null,
+              "state": "entered",
+              "unit": "ouro-jail-364839-64cf3cabff674aa0.scope"
+            },
+            "user_namespace": 4026532535,
+            "watcher_pid": 364854
+          }
+        },
+        "tree_empty": true,
+        "verified_at": "2026-10-12T13:33:34Z",
+        "verification_scope": "attempt_tree",
+        "integrity": "verified"
+      },
+      "outcome": {
+        "kind": "signaled",
+        "code": null,
+        "signal": 9,
+        "cause": "memory_oom",
+        "error": null
+      },
+      "state_cleanup": "complete",
+      "cleanup_error": null,
+      "created_at": "2026-10-12T13:33:34Z",
+      "updated_at": "2026-10-12T13:33:34Z",
+      "errors": [],
+      "credentials": []
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "resource": "pids",
+    "requested_ceiling": [
+      "pids=16"
+    ],
+    "ceiling_supported": true,
+    "sequence": 9,
+    "exit": 0,
+    "elapsed_ms": 922.499148,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 13,
+        "errno": 11
+      }
+    ],
+    "stderr": "",
+    "receipt": {
+      "schema": "ouro.jail.receipt/1",
+      "attempt_id": "att_22ce041c-3862-4ddc-ae04-43d12d33aafc",
+      "revision": 3,
+      "phase": "settled",
+      "platform": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic"
+      },
+      "jail": {
+        "component": "ouro-jail",
+        "version": "0.1.0",
+        "backend": "bubblewrap",
+        "backend_version": "bubblewrap 0.11.1"
+      },
+      "policy": {
+        "name": "tool",
+        "digest": "sha256:6797e47da13dd9cf998bc31ee4f297e771868e07a1f9aaeb5dc42ab81f8b00ec",
+        "observe": "on",
+        "evidence": "strict",
+        "requirements": [
+          "tree_termination",
+          "closed_set_observation",
+          "filesystem_containment",
+          "syscall_filter",
+          "network_none",
+          "protected_coverage:existing_and_root",
+          "limit:wall",
+          "limit:pids",
+          "execution_boundary"
+        ],
+        "grants": [
+          {
+            "kind": "read_only",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+            "by": "operator"
+          },
+          {
+            "kind": "deny_read",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+            "by": "operator"
+          }
+        ]
+      },
+      "containment": "enforced",
+      "child_protection": "enforced",
+      "exec_observed": true,
+      "argv_digest": "sha256:8223aed7bc34e8d5bee0822833ae4e7d285914bbcc9590d93072cc3eab01b7df",
+      "applied": {
+        "filesystem": {
+          "mechanism": "bubblewrap-binds",
+          "protected_coverage": "existing_and_root",
+          "mounts": [
+            {
+              "path": "/",
+              "mode": "ro"
+            },
+            {
+              "path": "/usr",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ssl",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/resolv.conf",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/passwd",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/group",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/hosts",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/localtime",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ld.so.cache",
+              "mode": "ro"
+            },
+            {
+              "path": "/proc",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/null",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/zero",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/full",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/random",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/urandom",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/tty",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/pts",
+              "mode": "rw"
+            },
+            {
+              "path": "/tmp",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/run/ouro/jail",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+              "mode": "ro"
+            }
+          ]
+        },
+        "network": {
+          "mode": "none",
+          "mechanism": "network-namespace",
+          "allowed_hosts": []
+        },
+        "syscalls": {
+          "mechanism": "seccomp-bpf",
+          "digest": "sha256:6be154d0d902309f8918b03bddd6a3dae656926dbf827ccbbe551e5f73ffb2ec"
+        },
+        "limits": [
+          {
+            "key": "wall",
+            "requested": "1800000",
+            "required": true,
+            "applied": true,
+            "mechanism": "boottime-deadline",
+            "scope": "tree",
+            "hit": false
+          },
+          {
+            "key": "pids",
+            "requested": "16",
+            "required": true,
+            "applied": true,
+            "mechanism": "pids.max",
+            "scope": "tree",
+            "hit": true
+          }
+        ],
+        "environment_names": [
+          "LANG",
+          "PATH",
+          "PWD",
+          "TMPDIR"
+        ],
+        "removed_environment_names": []
+      },
+      "observer": {
+        "backend": "ptrace",
+        "set": "linux-closed-v1",
+        "attached": true,
+        "sources": {
+          "wrapper": "active",
+          "audit": "active",
+          "proxy": "unsupported"
+        },
+        "gaps": []
+      },
+      "coverage": {
+        "exec": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 2,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "net": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "limits": {
+          "status": "active",
+          "sources": [
+            "wrapper"
+          ],
+          "observed_count": 1,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      "process": {
+        "pid": 364880,
+        "identity": {
+          "kind": "linux_boot_start",
+          "value": {
+            "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+            "pid": 364880,
+            "start_time_ticks": 176411719
+          }
+        }
+      },
+      "lifetime": {
+        "boundary": "pid_namespace",
+        "native": {
+          "os": "linux",
+          "details": {
+            "backend_exec_by": "descriptor",
+            "bwrap_pid": 364877,
+            "cgroup_namespace": 4026532404,
+            "command_rules": {
+              "deny": 0,
+              "forbid": 0
+            },
+            "execution_cgroup": {
+              "charged_helpers": [
+                {
+                  "pid": 364877,
+                  "role": "bubblewrap"
+                },
+                {
+                  "pid": 364879,
+                  "role": "namespace_init"
+                }
+              ],
+              "device": 29,
+              "inode": 12256712,
+              "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_22ce041c-3862-4ddc-ae04-43d12d33aafc.leaf",
+              "scope": "target_descendants_and_listed_helpers"
+            },
+            "filtered_readonly_opens": 0,
+            "launcher_pid": 364880,
+            "mnt_namespace": 4026532377,
+            "namespace_init_pid": 364879,
+            "narrowing_filter_digest": "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181",
+            "narrowing_filter_digest_installed": "sha256:8dbcdfb54dfdc858385e90e721f47ab59bd97f7ee97435a03e9094fa82800828",
+            "net_namespace": 4026532406,
+            "observer_plan": {
+              "backend": "ptrace",
+              "event_bytes_max": 65536,
+              "in_flight_max": 16384,
+              "kernel_ring_bytes": null,
+              "path_snapshot_max": 4096,
+              "queue_bytes_max": 4194304,
+              "queue_events_max": 16384,
+              "queue_lifecycle_reserve_bytes": 65536,
+              "queue_result_bytes_max": 4128768,
+              "test_seams": {}
+            },
+            "path_claims_unverified": 0,
+            "pid_namespace": 4026532383,
+            "readonly_open_fast_path": true,
+            "requested_by_other_filters": 0,
+            "resolv_sanitization": "nameservers_only",
+            "seccomp_filters": {
+              "expected": 2,
+              "observed": 2
+            },
+            "supervisor_scope": {
+              "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-364859-c4aa1560a1f7464d.scope",
+              "reason": null,
+              "reason_code": null,
+              "state": "entered",
+              "unit": "ouro-jail-364859-c4aa1560a1f7464d.scope"
+            },
+            "user_namespace": 4026532537,
+            "watcher_pid": 364878
+          }
+        },
+        "tree_empty": true,
+        "verified_at": "2026-10-12T13:33:35Z",
+        "verification_scope": "attempt_tree",
+        "integrity": "verified"
+      },
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      },
+      "state_cleanup": "complete",
+      "cleanup_error": null,
+      "created_at": "2026-10-12T13:33:34Z",
+      "updated_at": "2026-10-12T13:33:35Z",
+      "errors": [],
+      "credentials": []
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "resource": "cpu",
+    "requested_ceiling": [
+      "cpu=25"
+    ],
+    "ceiling_supported": true,
+    "sequence": 10,
+    "exit": 0,
+    "elapsed_ms": 956.507991,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.200337039,
+        "wall_s": 0.8007611599750817
+      }
+    ],
+    "stderr": "",
+    "receipt": {
+      "schema": "ouro.jail.receipt/1",
+      "attempt_id": "att_4dc84eb3-bc61-4f73-86d1-008f301d67d0",
+      "revision": 3,
+      "phase": "settled",
+      "platform": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic"
+      },
+      "jail": {
+        "component": "ouro-jail",
+        "version": "0.1.0",
+        "backend": "bubblewrap",
+        "backend_version": "bubblewrap 0.11.1"
+      },
+      "policy": {
+        "name": "tool",
+        "digest": "sha256:037cd61c1d620944caa9dcfd9d2db18e2a831b6227891735f6b4356f40e152f7",
+        "observe": "on",
+        "evidence": "strict",
+        "requirements": [
+          "tree_termination",
+          "closed_set_observation",
+          "filesystem_containment",
+          "syscall_filter",
+          "network_none",
+          "protected_coverage:existing_and_root",
+          "limit:wall",
+          "limit:cpu",
+          "execution_boundary"
+        ],
+        "grants": [
+          {
+            "kind": "read_only",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+            "by": "operator"
+          },
+          {
+            "kind": "deny_read",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+            "by": "operator"
+          }
+        ]
+      },
+      "containment": "enforced",
+      "child_protection": "enforced",
+      "exec_observed": true,
+      "argv_digest": "sha256:8d20ff91e03d8572f9b29cebf1e6bdba332039a42230e9c683900d147765c496",
+      "applied": {
+        "filesystem": {
+          "mechanism": "bubblewrap-binds",
+          "protected_coverage": "existing_and_root",
+          "mounts": [
+            {
+              "path": "/",
+              "mode": "ro"
+            },
+            {
+              "path": "/usr",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ssl",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/resolv.conf",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/passwd",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/group",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/hosts",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/localtime",
+              "mode": "ro"
+            },
+            {
+              "path": "/etc/ld.so.cache",
+              "mode": "ro"
+            },
+            {
+              "path": "/proc",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/null",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/zero",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/full",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/random",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/urandom",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/tty",
+              "mode": "rw"
+            },
+            {
+              "path": "/dev/pts",
+              "mode": "rw"
+            },
+            {
+              "path": "/tmp",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work",
+              "mode": "rw"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.git",
+              "mode": "ro"
+            },
+            {
+              "path": "/tmp/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/work/.ouroboros",
+              "mode": "ro"
+            },
+            {
+              "path": "/run/ouro/jail",
+              "mode": "ro"
+            },
+            {
+              "path": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+              "mode": "ro"
+            }
+          ]
+        },
+        "network": {
+          "mode": "none",
+          "mechanism": "network-namespace",
+          "allowed_hosts": []
+        },
+        "syscalls": {
+          "mechanism": "seccomp-bpf",
+          "digest": "sha256:6be154d0d902309f8918b03bddd6a3dae656926dbf827ccbbe551e5f73ffb2ec"
+        },
+        "limits": [
+          {
+            "key": "wall",
+            "requested": "1800000",
+            "required": true,
+            "applied": true,
+            "mechanism": "boottime-deadline",
+            "scope": "tree",
+            "hit": false
+          },
+          {
+            "key": "pids",
+            "requested": "256",
+            "required": false,
+            "applied": true,
+            "mechanism": "pids.max",
+            "scope": "tree",
+            "hit": false
+          },
+          {
+            "key": "cpu",
+            "requested": "25",
+            "required": true,
+            "applied": true,
+            "mechanism": "cpu.max",
+            "scope": "tree",
+            "hit": true
+          }
+        ],
+        "environment_names": [
+          "LANG",
+          "PATH",
+          "PWD",
+          "TMPDIR"
+        ],
+        "removed_environment_names": []
+      },
+      "observer": {
+        "backend": "ptrace",
+        "set": "linux-closed-v1",
+        "attached": true,
+        "sources": {
+          "wrapper": "active",
+          "audit": "active",
+          "proxy": "unsupported"
+        },
+        "gaps": []
+      },
+      "coverage": {
+        "exec": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 2,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "net": {
+          "status": "active",
+          "sources": [
+            "audit"
+          ],
+          "observed_count": 0,
+          "gaps": []
+        },
+        "limits": {
+          "status": "active",
+          "sources": [
+            "wrapper"
+          ],
+          "observed_count": 1,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      "process": {
+        "pid": 364915,
+        "identity": {
+          "kind": "linux_boot_start",
+          "value": {
+            "boot_id": "47a3956e-f44b-4139-a8fc-45418c38243f",
+            "pid": 364915,
+            "start_time_ticks": 176411811
+          }
+        }
+      },
+      "lifetime": {
+        "boundary": "pid_namespace",
+        "native": {
+          "os": "linux",
+          "details": {
+            "backend_exec_by": "descriptor",
+            "bwrap_pid": 364912,
+            "cgroup_namespace": 4026532404,
+            "command_rules": {
+              "deny": 0,
+              "forbid": 0
+            },
+            "execution_cgroup": {
+              "charged_helpers": [
+                {
+                  "pid": 364912,
+                  "role": "bubblewrap"
+                },
+                {
+                  "pid": 364914,
+                  "role": "namespace_init"
+                }
+              ],
+              "device": 29,
+              "inode": 12256916,
+              "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_4dc84eb3-bc61-4f73-86d1-008f301d67d0.leaf",
+              "scope": "target_descendants_and_listed_helpers"
+            },
+            "filtered_readonly_opens": 0,
+            "launcher_pid": 364915,
+            "mnt_namespace": 4026532377,
+            "namespace_init_pid": 364914,
+            "narrowing_filter_digest": "sha256:757f0b370264a99ee411f18be75e1c69b28366d75515ccbc94e3b086042d7181",
+            "narrowing_filter_digest_installed": "sha256:59f299a737db40c923c5c3f942ad24f64af090f6d9842570617db6988ee45d0f",
+            "net_namespace": 4026532406,
+            "observer_plan": {
+              "backend": "ptrace",
+              "event_bytes_max": 65536,
+              "in_flight_max": 16384,
+              "kernel_ring_bytes": null,
+              "path_snapshot_max": 4096,
+              "queue_bytes_max": 4194304,
+              "queue_events_max": 16384,
+              "queue_lifecycle_reserve_bytes": 65536,
+              "queue_result_bytes_max": 4128768,
+              "test_seams": {}
+            },
+            "path_claims_unverified": 0,
+            "pid_namespace": 4026532383,
+            "readonly_open_fast_path": true,
+            "requested_by_other_filters": 0,
+            "resolv_sanitization": "nameservers_only",
+            "seccomp_filters": {
+              "expected": 2,
+              "observed": 2
+            },
+            "supervisor_scope": {
+              "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-364899-417caa237f46485b.scope",
+              "reason": null,
+              "reason_code": null,
+              "state": "entered",
+              "unit": "ouro-jail-364899-417caa237f46485b.scope"
+            },
+            "user_namespace": 4026532537,
+            "watcher_pid": 364913
+          }
+        },
+        "tree_empty": true,
+        "verified_at": "2026-10-12T13:33:36Z",
+        "verification_scope": "attempt_tree",
+        "integrity": "verified"
+      },
+      "outcome": {
+        "kind": "exited",
+        "code": 0,
+        "signal": null,
+        "cause": null,
+        "error": null
+      },
+      "state_cleanup": "complete",
+      "cleanup_error": null,
+      "created_at": "2026-10-12T13:33:35Z",
+      "updated_at": "2026-10-12T13:33:36Z",
+      "errors": [],
+      "credentials": []
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "resource": "storage",
+    "requested_ceiling": [
+      "storage=8MiB"
+    ],
+    "ceiling_supported": true,
+    "sequence": 11,
+    "exit": 125,
+    "elapsed_ms": 88.715457,
+    "records": [],
+    "stderr": "ouro-jail: error missing_capability at preparing [host_setup]: storage ceiling unavailable: writable disk mount /tmp needs an enforced user hard quota: Function not implemented (os error 38)\n",
+    "receipt": {
+      "schema": "ouro.jail.receipt/1",
+      "attempt_id": "att_bfe0454a-e541-45e5-881d-37680b196cc8",
+      "revision": 1,
+      "phase": "refused",
+      "platform": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic"
+      },
+      "jail": {
+        "component": "ouro-jail",
+        "version": "0.1.0",
+        "backend": null,
+        "backend_version": null
+      },
+      "policy": {
+        "name": "tool",
+        "digest": "sha256:7bd9c685a946f4a92a34001a5a776e11df40c6e47204002b36d08c2958605d78",
+        "observe": "on",
+        "evidence": "strict",
+        "requirements": [
+          "tree_termination",
+          "closed_set_observation",
+          "filesystem_containment",
+          "syscall_filter",
+          "network_none",
+          "protected_coverage:existing_and_root",
+          "limit:wall",
+          "limit:storage"
+        ],
+        "grants": [
+          {
+            "kind": "read_only",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+            "by": "operator"
+          },
+          {
+            "kind": "deny_read",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+            "by": "operator"
+          }
+        ]
+      },
+      "containment": "pending",
+      "child_protection": "pending",
+      "exec_observed": false,
+      "argv_digest": "sha256:17a2b60973d9a382bca3689ffffcf3e70e09819cb5627735927e5f5424443505",
+      "applied": {
+        "filesystem": null,
+        "network": {
+          "mode": "pending",
+          "mechanism": null,
+          "allowed_hosts": []
+        },
+        "syscalls": null,
+        "limits": [],
+        "environment_names": [],
+        "removed_environment_names": []
+      },
+      "observer": {
+        "backend": null,
+        "set": null,
+        "attached": false,
+        "sources": {
+          "wrapper": "supported",
+          "audit": "unsupported",
+          "proxy": "unsupported"
+        },
+        "gaps": []
+      },
+      "coverage": {
+        "exec": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "limits": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      "process": null,
+      "lifetime": {
+        "boundary": "pending",
+        "native": null,
+        "tree_empty": null,
+        "verified_at": null,
+        "verification_scope": null,
+        "integrity": "pending"
+      },
+      "outcome": {
+        "kind": "refused",
+        "code": null,
+        "signal": null,
+        "cause": null,
+        "error": {
+          "code": "missing_capability",
+          "stage": "preparing",
+          "message": "storage ceiling unavailable: writable disk mount /tmp needs an enforced user hard quota: Function not implemented (os error 38)",
+          "remediation_category": "host_setup"
+        }
+      },
+      "state_cleanup": "not_needed",
+      "cleanup_error": null,
+      "created_at": "2026-10-12T13:33:36Z",
+      "updated_at": "2026-10-12T13:33:36Z",
+      "errors": [
+        {
+          "code": "missing_capability",
+          "stage": "preparing",
+          "message": "storage ceiling unavailable: writable disk mount /tmp needs an enforced user hard quota: Function not implemented (os error 38)",
+          "remediation_category": "host_setup"
+        }
+      ],
+      "credentials": []
+    }
+  },
+  {
+    "tool": "ouro-jail",
+    "resource": "inodes",
+    "requested_ceiling": [
+      "inodes=64"
+    ],
+    "ceiling_supported": true,
+    "sequence": 12,
+    "exit": 125,
+    "elapsed_ms": 89.625667,
+    "records": [],
+    "stderr": "ouro-jail: error missing_capability at preparing [host_setup]: storage ceiling unavailable: writable disk mount /tmp needs an enforced user hard quota: Function not implemented (os error 38)\n",
+    "receipt": {
+      "schema": "ouro.jail.receipt/1",
+      "attempt_id": "att_217863a1-a5ee-4b02-967f-23496bfb5457",
+      "revision": 1,
+      "phase": "refused",
+      "platform": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "Linux 7.0.0-31-generic"
+      },
+      "jail": {
+        "component": "ouro-jail",
+        "version": "0.1.0",
+        "backend": null,
+        "backend_version": null
+      },
+      "policy": {
+        "name": "tool",
+        "digest": "sha256:1e6f28e0f6fa89fe3d33924d3987864a8ef5d6dcbc188552353429be37f88430",
+        "observe": "on",
+        "evidence": "strict",
+        "requirements": [
+          "tree_termination",
+          "closed_set_observation",
+          "filesystem_containment",
+          "syscall_filter",
+          "network_none",
+          "protected_coverage:existing_and_root",
+          "limit:wall",
+          "limit:inodes"
+        ],
+        "grants": [
+          {
+            "kind": "read_only",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private",
+            "by": "operator"
+          },
+          {
+            "kind": "deny_read",
+            "value": "/home/ubuntu/bench-ouro-startup-stable-final/runs/resource-after/private/denied",
+            "by": "operator"
+          }
+        ]
+      },
+      "containment": "pending",
+      "child_protection": "pending",
+      "exec_observed": false,
+      "argv_digest": "sha256:ecb202ce6c0cb6e0d345da3e75d5c1dec80b829349beca9fa85774a6595c24f0",
+      "applied": {
+        "filesystem": null,
+        "network": {
+          "mode": "pending",
+          "mechanism": null,
+          "allowed_hosts": []
+        },
+        "syscalls": null,
+        "limits": [],
+        "environment_names": [],
+        "removed_environment_names": []
+      },
+      "observer": {
+        "backend": null,
+        "set": null,
+        "attached": false,
+        "sources": {
+          "wrapper": "supported",
+          "audit": "unsupported",
+          "proxy": "unsupported"
+        },
+        "gaps": []
+      },
+      "coverage": {
+        "exec": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "fs.write": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "fs.deny": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "limits": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        },
+        "proxy.net": {
+          "status": "unsupported",
+          "sources": [],
+          "observed_count": null,
+          "gaps": []
+        }
+      },
+      "process": null,
+      "lifetime": {
+        "boundary": "pending",
+        "native": null,
+        "tree_empty": null,
+        "verified_at": null,
+        "verification_scope": null,
+        "integrity": "pending"
+      },
+      "outcome": {
+        "kind": "refused",
+        "code": null,
+        "signal": null,
+        "cause": null,
+        "error": {
+          "code": "missing_capability",
+          "stage": "preparing",
+          "message": "storage ceiling unavailable: writable disk mount /tmp needs an enforced user hard quota: Function not implemented (os error 38)",
+          "remediation_category": "host_setup"
+        }
+      },
+      "state_cleanup": "not_needed",
+      "cleanup_error": null,
+      "created_at": "2026-10-12T13:33:36Z",
+      "updated_at": "2026-10-12T13:33:36Z",
+      "errors": [
+        {
+          "code": "missing_capability",
+          "stage": "preparing",
+          "message": "storage ceiling unavailable: writable disk mount /tmp needs an enforced user hard quota: Function not implemented (os error 38)",
+          "remediation_category": "host_setup"
+        }
+      ],
+      "credentials": []
+    }
+  },
+  {
+    "tool": "greywall",
+    "resource": "wall",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 14,
+    "exit": 0,
+    "elapsed_ms": 4582.758067,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      },
+      {
+        "probe": "wall",
+        "completed": true
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "greywall",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 15,
+    "exit": 0,
+    "elapsed_ms": 1828.096921,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "greywall",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 16,
+    "exit": 0,
+    "elapsed_ms": 2411.147698,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "greywall",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 17,
+    "exit": 0,
+    "elapsed_ms": 1873.904636,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.20075491600000006,
+        "wall_s": 0.20088891894556582
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "wall",
+    "requested_ceiling": [
+      "timeout=1000ms"
+    ],
+    "ceiling_supported": true,
+    "sequence": 19,
+    "exit": 255,
+    "elapsed_ms": 1005.843219,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      }
+    ],
+    "stderr": "{\"error\":{\"code\":\"backend_error\",\"message\":\"script timed out after 1000ms\"}}\n",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 20,
+    "exit": 0,
+    "elapsed_ms": 319.544769,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 21,
+    "exit": 0,
+    "elapsed_ms": 870.65617,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 22,
+    "exit": 0,
+    "elapsed_ms": 268.299546,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.20048855399999999,
+        "wall_s": 0.2006545269396156
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  }
+]

@@ -1,0 +1,4 @@
+Error:   × sandbox entered error phase while provisioning:
+  │ ControlSupervisorStartFailed: Docker sandbox exited before supervisor
+  │ became ready
+

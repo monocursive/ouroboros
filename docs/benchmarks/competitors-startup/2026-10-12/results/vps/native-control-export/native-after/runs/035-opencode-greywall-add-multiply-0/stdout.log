@@ -1,0 +1,17 @@
+I'll help you add the `multiply` function to `src/calc.py` and ensure all tests pass. Let me start by exploring the current code structure.
+Perfect! I can see that:
+- `src/calc.py` currently has only an `add` function
+- The tests expect a `multiply` function that returns the product of two numbers
+- The tests check `multiply(2, 3) = 6` and `multiply(-1, 5) = -5`
+
+Let me add the `multiply` function to `src/calc.py`.
+Great! Now let me run the tests to verify everything works.
+Perfect! All tests are passing. I've successfully:
+
+1. Added the `multiply(a, b)` function to `src/calc.py:4` that returns the product of two numbers
+2. Ran the tests using `python3 -m unittest discover -s tests -v`
+3. Both tests passed:
+   - `test_add` - OK
+   - `test_multiply` - OK
+
+The `multiply` function correctly handles both positive and negative numbers as expected by the tests.

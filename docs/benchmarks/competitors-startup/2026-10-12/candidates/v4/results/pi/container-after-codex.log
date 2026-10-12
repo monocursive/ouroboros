@@ -1,0 +1,13 @@
+1/12 codex docker add-multiply #0 33.7s exit=0 success=True
+2/12 codex openshell-ephemeral add-multiply #0 8.4s exit=1 success=False
+3/12 codex docker refactor-yaml-json #0 29.5s exit=0 success=True
+4/12 codex openshell-ephemeral refactor-yaml-json #0 8.7s exit=1 success=False
+5/12 codex docker fix-offbyone #0 27.3s exit=0 success=True
+6/12 codex openshell-ephemeral fix-offbyone #0 8.2s exit=1 success=False
+7/12 codex docker fix-offbyone #1 32.6s exit=0 success=True
+8/12 codex openshell-ephemeral fix-offbyone #1 8.8s exit=1 success=False
+9/12 codex docker refactor-yaml-json #1 30.9s exit=0 success=True
+10/12 codex openshell-ephemeral refactor-yaml-json #1 8.0s exit=1 success=False
+11/12 codex openshell-ephemeral add-multiply #1 9.2s exit=1 success=False
+12/12 codex docker add-multiply #1 32.1s exit=0 success=True
+COMPLETE

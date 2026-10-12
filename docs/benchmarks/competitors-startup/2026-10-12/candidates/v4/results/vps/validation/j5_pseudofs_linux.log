@@ -1,0 +1,12 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 0.54s
+     Running tests/j5_pseudofs_linux.rs (target/debug/deps/j5_pseudofs_linux-4f3f6239fb0b3633)
+
+running 4 tests
+test s02_a_contained_grant_of_proc_sys_or_cgroupfs_refuses_before_exec ... ok
+test s02_a_grant_of_dev_or_run_refuses_before_exec ... ok
+test s02_an_ancestor_of_a_pseudo_fs_mount_refuses_through_run ... ok
+test s02_the_pseudo_fs_refusal_follows_the_source_not_the_spelling ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+

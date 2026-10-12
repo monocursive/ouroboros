@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/ubuntu/bench-ouro-startup-native-final/bin",
+      "/home/ubuntu/bench-ouro/bin"
+    ],
+    "allowWrite": [
+      "/home/ubuntu/bench-ouro-startup-native-final/results/native-after/runs/054-codex-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json",
+      "/home/ubuntu/bench-ouro-startup-native-final/results/native-after/runs/054-codex-greywall-refactor-yaml-json-0/home",
+      "/home/ubuntu/bench-ouro-startup-native-final/results/native-after/runs/054-codex-greywall-refactor-yaml-json-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

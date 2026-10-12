@@ -1,0 +1,3 @@
+Updated `src/store.py` to use `json.dump` and `json.load`, preserving class names and method signatures. Tests were not modified.
+
+`python3 -m unittest discover -s tests -v` passed: 1 test, OK.

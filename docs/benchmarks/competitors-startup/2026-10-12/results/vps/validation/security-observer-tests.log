@@ -1,0 +1,285 @@
+   Compiling ouro-jail v0.1.0 (/dev/shm/ouro-startup-build/crates/ouro-jail)
+    Finished `test` profile [unoptimized] target(s) in 16.65s
+     Running tests/j4_closed_set_linux.rs (target/debug/deps/j4_closed_set_linux-a009ff6045dca732)
+
+running 16 tests
+test bless_the_published_closed_set_table ... ignored, writes the evidence file; run deliberately
+test j4_clone_untraced_is_a_gap_in_none ... ok
+test j4_clone_untraced_refused_in_contained ... ok
+test j4_closed_set_the_published_table_is_the_one_this_build_traces ... ok
+test j4_o01_every_variant_is_one_event_per_result_agent ... ok
+test j4_o01_every_variant_is_one_event_per_result_build ... ok
+test j4_o01_every_variant_is_one_event_per_result_none ... ok
+test j4_o01_every_variant_is_one_event_per_result_tool ... ok
+test j4_o02_a_nested_pid_namespace_under_none_keeps_host_attribution ... ok
+test j4_o02_every_audit_event_names_the_birth_of_its_process ... ok
+test j4_o04_an_unrelated_host_process_is_never_observed ... ok
+test j4_o06_foreign_dirfd ... ok
+test j4_o06_non_utf8_round_trip ... ok
+test j4_o06_racing_pathname_is_only_a_literal_snapshot ... ok
+test j4_o06_renamed_cwd ... ok
+test j4_o06_two_paths_independent ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.93s
+
+     Running tests/j4_loss_linux.rs (target/debug/deps/j4_loss_linux-163f639641561f55)
+
+running 19 tests
+test j4_o03_a_class_never_returns_to_active_after_an_early_gap ... ok
+test j4_o03_exhaustion_through_the_product ... ok
+test j4_o03_unmatched_exit_is_unreachable ... ok
+test j4_o05_attach_failure_refuses_in_best_effort_none ... ok
+test j4_o05_attach_failure_refuses_in_best_effort_tool ... ok
+test j4_o05_denied_connect_counts_only_in_fs_deny_agent ... ok
+test j4_o05_denied_connect_counts_only_in_fs_deny_none ... ok
+test j4_o05_denied_connect_counts_only_in_fs_deny_tool ... ok
+test j4_o05_directory_operation_losses_degrade_fs_write ... ok
+test j4_observer_plan_is_recorded ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_none ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_best_effort_tool ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_none ... ok
+test j4_r04_a_call_in_flight_at_teardown_is_loss_tool ... ok
+test j4_r04_ptrace_loss_best_effort_none ... ok
+test j4_r04_ptrace_loss_best_effort_tool ... ok
+test j4_r04_ptrace_loss_strict_none ... ok
+test j4_r04_ptrace_loss_strict_tool ... ok
+test j4_w3_a_seam_set_twice_is_recorded_as_applied ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.88s
+
+     Running tests/j4_tracer_precision_linux.rs (target/debug/deps/j4_tracer_precision_linux-fe6240ba7d33bc8d)
+
+running 26 tests
+test j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_none ... ok
+test j4_o1_inflight_loss_counts_only_covered_calls_through_the_product_tool ... ok
+test j4_o1_read_only_opens_are_never_inflight_loss ... ok
+test j4_o2_a_default_ignored_signal_restarts_the_call ... ok
+test j4_o2_a_fatal_signal_inside_the_call_is_no_result_and_no_loss ... ok
+test j4_o2_a_handler_s_own_call_follows_the_eintr_it_interrupted ... ok
+test j4_o2_a_handler_with_sa_restart_gives_the_restarted_result_connect ... ok
+test j4_o2_a_handler_with_sa_restart_gives_the_restarted_result_open ... ok
+test j4_o2_a_handler_without_sa_restart_makes_eintr_the_result_connect ... ok
+test j4_o2_a_handler_without_sa_restart_makes_eintr_the_result_open ... ok
+test j4_o2_a_restart_then_an_eintr_in_one_call_is_one_result ... ok
+test j4_o2_an_ignored_signal_restarts_the_call ... ok
+test j4_o2_eintr_is_counted_through_the_product_none ... ok
+test j4_o2_eintr_is_counted_through_the_product_tool ... ok
+test j4_o2_eintr_through_sa_siginfo_on_an_alternate_stack ... ok
+test j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss ... ok
+test j4_w3_a_leaders_entry_is_never_paired_with_a_non_leader_execs_exit ... ok
+test j4_w3_a_listener_refused_a_slot_is_the_open_ended_gap_of_its_kind ... ok
+test j4_w3_a_non_leader_exec_invents_no_result_through_the_product_none ... ok
+test j4_w3_a_non_leader_exec_invents_no_result_through_the_product_tool ... ok
+test j4_w3_an_untraced_clone_refused_a_slot_is_the_open_ended_gap_of_its_kind ... ok
+test j4_w3_r1_a_covered_call_inside_an_sa_restart_handler_costs_one_gap ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_another_call_is_a_gap_first ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_connect ... ok
+test j4_w3_r1_a_restart_the_handler_rewrote_then_the_threads_end_is_a_gap_open ... ok
+test j4_w3_the_queue_budget_bounds_what_is_held_for_a_consumer_not_reading ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.17s
+
+     Running tests/j5_boundary_linux.rs (target/debug/deps/j5_boundary_linux-5a90189cddeb0acd)
+
+running 26 tests
+test f01_a_workspace_symlink_to_a_home_secret_reads_as_absent ... ok
+test f02_mount_replacement_of_a_protected_git_is_denied ... ok
+test f03_a_new_deep_protected_segment_is_outside_existing_and_root_coverage ... ok
+test f04_a_source_identity_swap_at_the_mount_handoff_refuses ... ok
+test f04_a_workspace_deeper_than_the_scan_limit_refuses_without_claiming_coverage ... ok
+test k04_backend_replacement_and_mode_change_refuse_before_spawn ... ok
+test k04_bootstrap_executes_the_descriptor_without_pathname_fallback ... ok
+test k07_new_nested_protected_directory_after_scan_refuses_before_spawn ... ok
+test n01_build_direct_egress_fails ... ok
+test n05_a_late_socket_in_an_extra_grant_is_unreachable ... ok
+test n05_nested_sandbox_ipc_is_allowed ... ok
+test o03_a_truncated_path_is_a_gap_not_a_result ... ok
+test o03_an_unmatched_exit_is_a_gap_not_a_result ... ok
+test r03_a_wall_expires_before_the_saturation_loss_is_declared ... ok
+test r03_a_wall_fires_on_time_under_a_saturated_trace ... ok
+test r05_forging_records_mid_run_is_outside_local_evidence_assurance ... ok
+test r05_the_supervisors_own_proc_is_closed_to_a_same_uid_peer ... ok
+test r06_a_detected_escaped_descendant_loses_integrity_and_retains_state ... ok
+test s02_a_host_namespace_fd_cannot_be_opened_or_entered ... ok
+test s02_no_cgroup_filesystem_is_reachable_in_the_child ... ok
+test s03_the_outer_boundaries_cannot_be_reversed_inside_agent ... ok
+test s04_agent_and_build_inherit_no_ring ... ok
+test s04_agent_and_build_refuse_every_io_uring_interface ... ok
+test s04_an_io_uring_on_stdout_or_stderr_refuses_before_exec ... ok
+test s04_none_installs_no_io_uring_filter ... ok
+test x06_no_tracing_privilege_reaches_the_child ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.79s
+
+     Running tests/j5_bwrap_resolution_linux.rs (target/debug/deps/j5_bwrap_resolution_linux-eae600db7f27a035)
+
+running 3 tests
+test j5_empty_and_relative_path_entries_never_resolve_bubblewrap ... ok
+test j5_the_resolved_backend_is_canonical ... ok
+test j5_without_a_resolvable_backend_doctor_is_not_ready_and_run_refuses ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.62s
+
+     Running tests/j5_pseudofs_linux.rs (target/debug/deps/j5_pseudofs_linux-4f3f6239fb0b3633)
+
+running 4 tests
+test s02_a_contained_grant_of_proc_sys_or_cgroupfs_refuses_before_exec ... ok
+test s02_a_grant_of_dev_or_run_refuses_before_exec ... ok
+test s02_an_ancestor_of_a_pseudo_fs_mount_refuses_through_run ... ok
+test s02_the_pseudo_fs_refusal_follows_the_source_not_the_spelling ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+     Running tests/j5_tracer_foreign_child_linux.rs (target/debug/deps/j5_tracer_foreign_child_linux-bf8f4b3781b4dce4)
+
+running 10 tests
+test j5t_a_child_it_does_not_trace_that_exits_while_traced_is_delivered_not_lost ... ok
+test j5t_a_strict_tool_run_traced_to_an_inherited_reader_settles_verified ... ok
+test j5t_doctor_reports_the_observer_available_beside_an_inherited_child ... ok
+test j5t_none_leaves_an_inherited_child_alone_observed ... ok
+test j5t_none_leaves_an_inherited_child_alone_unobserved ... ok
+test j5t_none_traced_to_an_inherited_reader_delivers_the_whole_stream ... ok
+test j5t_none_unobserved_an_inherited_child_ending_mid_run_is_not_an_escape ... ok
+test j5t_orphans_adopted_while_traced_are_reaped_before_finished ... ok
+test j5t_the_backend_the_launcher_descends_through_is_awaited_and_delivered ... ok
+test j5t_the_tracer_finishes_beside_a_live_child_it_does_not_trace ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.20s
+
+     Running tests/observer_j4_linux.rs (target/debug/deps/observer_j4_linux-9708a0d05e6b358b)
+
+running 9 tests
+test j4_d1_a_child_notification_listener_is_a_gap_in_every_class ... ok
+test j4_d1_a_child_trace_request_is_continued_not_mislabelled ... ok
+test j4_d1_exclusion_a_filter_that_refuses_a_call_is_not_a_gap ... ok
+test j4_d1_exclusion_holds_for_a_filter_installed_through_prctl ... ok
+test j4_d1_none_a_child_listener_degrades_the_receipt_and_strict_stops ... ok
+test j4_d1_the_tool_baseline_refuses_a_notification_listener ... ok
+test j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap ... ok
+test j4_d2_none_a_foreign_abi_call_degrades_the_receipt ... ok
+test j4_d6_critical_facts_survive_a_full_lifecycle_backlog ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.87s
+
+     Running tests/observer_linux.rs (target/debug/deps/observer_linux-6ee960c723cbb60c)
+
+running 17 tests
+test attach_refuses_what_it_may_not_trace ... ok
+test o01_a_denied_write_keeps_its_own_operation_and_errno ... ok
+test o01_every_closed_set_result_matches_the_fixture ... ok
+test o01_through_bubblewrap_carries_host_pids_for_namespace_processes ... ok
+test o02_a_fork_child_that_never_execs_emits_no_exit ... ok
+test o02_a_leader_leaving_live_workers_emits_exactly_one_exit ... ok
+test o02_a_non_leader_exec_keeps_the_birth_identity ... ok
+test o02_an_exit_carries_the_raw_wait_status_of_a_signal_death ... ok
+test o02_exec_success_and_failure_are_distinct_events ... ok
+test o03_an_undecodable_open_how_is_never_a_covered_open ... ok
+test o03_queue_loss_is_bounded_counted_and_coalesced ... ok
+test o03_the_in_flight_bound_refuses_entries_and_reports_no_results ... ok
+test o04_write_read_and_mmap_produce_no_events_and_no_stops ... ok
+test o06_a_path_is_bytes_and_a_short_snapshot_declares_itself_incomplete ... ok
+test perf_the_j0_file_workload_costs_what_the_spike_cost ... ok
+test the_launcher_installs_the_published_filter ... ok
+test the_narrowing_filter_without_a_tracer_fails_closed_with_enosys ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.53s
+
+     Running tests/observer_regression_linux.rs (target/debug/deps/observer_regression_linux-a4202b5d53d3ebfc)
+
+running 31 tests
+test exitkill_child_supervisor ... ignored
+test j4_n8_execveat_failure_and_success_are_distinct_events ... ok
+test j4_n8_vfork_and_posix_spawn_children_keep_their_attribution ... ok
+test r10_the_queue_bound_is_the_four_mib_of_the_spec ... ok
+test r11_a_late_untraced_child_exit_is_still_reported ... ok
+test r12_finish_returns_even_when_a_tracee_will_not_die ... ok
+test r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount ... ok
+test r17_a_foreign_filter_is_named_not_guessed ... ok
+test r18_einprogress_is_the_raw_return ... ok
+test r19_two_paths_are_independent_evidence ... ok
+test r1_a_restarted_syscall_produces_exactly_one_result ... ok
+test r20_a_non_leader_exec_accounts_for_every_thread ... ok
+test r21_the_tool_baseline_denies_the_abi_the_observer_cannot_name ... ok
+test r22_a_read_only_open_costs_one_stop_and_no_event ... ok
+test r23_fork_names_the_thread_group_and_the_thread_that_forked ... ok
+test r24_a_queue_gap_names_what_it_lost_and_never_swallows_the_exit ... ok
+test r25_symlink_reports_the_link_it_creates_as_its_primary_path ... ok
+test r26_a_tracee_cannot_manufacture_the_observers_loss ... ok
+test r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table ... ok
+test r28_concurrent_threads_pair_their_own_entries_and_exits ... ok
+test r29_a_dead_supervisor_kills_its_traced_tree ... 
+running 1 test
+ok
+test r2_a_group_stop_during_a_covered_call_is_survived ... ok
+test r30_repeated_attach_and_finish_leaks_nothing ... ok
+test r31_an_entry_destroyed_by_an_exec_names_its_operation ... ok
+test r3_attaching_to_an_already_stopped_tracee_works ... ok
+test r4_an_exit_while_a_call_is_in_flight_is_a_gap_not_a_result ... ok
+test r5_a_fork_burst_keeps_attribution ... ok
+test r6_hostile_path_pointers_never_produce_a_confident_path ... ok
+test r7_a_lying_sockaddr_length_retains_only_the_family_it_names ... ok
+test r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi ... ok
+test r9_open_how_sizes_are_decoded_or_declared_unavailable ... ok
+
+test result: ok. 30 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 21.24s
+
+     Running tests/review_linux.rs (target/debug/deps/review_linux-f27c66c6342728b2)
+
+running 46 tests
+test a_file_denial_inside_a_visible_parent_is_unreadable_and_readonly ... ok
+test r1_a_placeholder_the_run_filled_is_kept_not_removed ... ok
+test r1_protected_segments_are_read_only_and_the_workspace_is_writable ... ok
+test r1_the_baseline_filter_denies_what_the_spec_lists ... ok
+test r1_the_child_cannot_reach_the_supervisors_state ... ok
+test r1_the_contained_child_sees_only_the_declared_roots ... ok
+test r2_a_proved_exec_failure_is_an_exec_error_outcome ... ok
+test r2_an_unrecognised_executable_is_not_handed_to_a_shell ... ok
+test r2_exec_failures_are_distinguishable_and_exit_125_is_an_exit ... ok
+test r2_observe_off_keeps_an_ambiguous_exit_unknown ... ok
+test r3_a_closed_stdin_is_not_silently_accepted ... ok
+test r3_a_shebang_target_confirms_and_runs_under_strict_evidence ... ok
+test r3_failed_regular_file_output_is_a_tool_error ... ok
+test r3_fd_and_environment_hygiene ... ok
+test r3_io_uring_as_stdio_refuses_before_exec ... ok
+test r3_regular_file_stdio_is_relayed_and_cannot_reopen_outside_the_plan ... ok
+test r3_script_replaced_by_fifo_does_not_block_the_next_exec ... ok
+test r3_stdio_into_the_state_root_outside_this_attempt ... ok
+test r3_stdio_kinds_are_validated ... ok
+test r3_tabbed_shebangs_confirm_under_strict_evidence ... ok
+test r4_a_fork_burst_is_fully_reaped ... ok
+test r4_a_sigterm_ignoring_descendant_dies_at_settlement ... ok
+test r4_killing_the_backend_leaves_an_honest_receipt ... ok
+test r4_killing_the_supervisor_takes_the_tree_down ... ok
+test r4_receipt_revisions_advance_and_phases_carry_their_tuples ... ok
+test r4_wall_expiry_records_its_hit_and_verifies_the_tree ... ok
+test r5_a_second_release_starts_no_second_child ... ok
+test r5_control_ordering_and_sequence ... ok
+test r5_malformed_gate_frames_refuse_without_running_the_target ... ok
+test r5_the_launcher_holds_no_supervisor_descriptor_at_the_block_point ... ok
+test r6_a_denied_connect_counts_under_fs_deny_only ... ok
+test r6_a_foreign_dirfd_is_not_resolved_against_a_cwd ... ok
+test r6_audit_mapping_matches_the_spec_table ... ok
+test r6_coverage_counts_equal_the_results_per_class ... ok
+test r6_observe_off_marks_every_audit_class_unsupported ... ok
+test r6_path_reporting_by_class ... ok
+test r7_doctor_is_read_only_and_its_exit_code_follows_readiness ... ok
+test r7_doctor_leaves_no_orphaned_fixture_process ... ok
+test r8_a_second_run_with_the_same_attempt_id_refuses ... ok
+test r8_scratch_and_workspace_after_a_normal_run ... ok
+test r9_a_large_option_tail_does_not_deadlock_the_supervisor ... ok
+test r9_a_mid_run_policy_edit_cannot_widen_the_attempt ... ok
+test r9_a_symlinked_root_git_refuses_rather_than_downgrade ... ok
+test r9_all_descendants_coverage_refuses_on_linux ... ok
+test r9_an_explicit_pids_ceiling_runs_only_when_enforced ... ok
+test r9_deny_read_grants_are_enforced_as_masks ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.12s
+
+     Running tests/security_alias_linux.rs (target/debug/deps/security_alias_linux-ce6c318294d16ae4)
+
+running 2 tests
+test guarded_aliases_are_detected_across_devices_and_below_mountpoints ... ok
+test private_mount_alias_fixture ... ignored, private mount namespace helper
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

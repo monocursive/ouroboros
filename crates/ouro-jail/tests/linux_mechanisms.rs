@@ -320,6 +320,71 @@ fn root_level_literals_are_reported_present_or_absent() {
 }
 
 #[test]
+fn ordinary_file_hints_keep_protected_file_identity_and_mutation_detection() {
+    let dir = temp_dir("ordinary-file-hints");
+    let root = dir.path();
+    fs::write(root.join(".git"), b"gitdir: elsewhere\n").unwrap();
+    for index in 0..64 {
+        fs::write(root.join(format!("ordinary-{index}")), b"ordinary\n").unwrap();
+    }
+    // Make the pre-mutation timestamp distinct even when the filesystem uses
+    // a coarse current-time tick for several consecutive directory updates.
+    fs::File::open(root)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let pin = jfs::PinnedPath::open(root).unwrap();
+    let scan = jfs::scan_pinned(&pin, &jfs::PROTECTED_LITERALS, jfs::ScanLimits::DEFAULT)
+        .expect("complete scan");
+    assert_eq!(scan.entries_seen, 65);
+    assert_eq!(scan.segments.len(), 1);
+    assert_eq!(scan.segments[0].kind, jfs::SegmentKind::File);
+    let protected = fs::metadata(root.join(".git")).unwrap();
+    assert_eq!(
+        (scan.segments[0].dev, scan.segments[0].ino),
+        (protected.dev(), protected.ino())
+    );
+    assert!(scan.directories.iter().all(|stamp| stamp.verify().is_ok()));
+
+    // The regular entry observed by readdir can be replaced by a directory.
+    // The original snapshot must refuse that mutation at mount handoff.
+    fs::remove_file(root.join("ordinary-0")).unwrap();
+    fs::create_dir_all(root.join("ordinary-0/.git")).unwrap();
+    assert!(scan.directories.iter().any(|stamp| stamp.verify().is_err()));
+    let rescanned = jfs::scan_pinned(&pin, &jfs::PROTECTED_LITERALS, jfs::ScanLimits::DEFAULT)
+        .expect("fresh scan");
+    assert!(
+        rescanned
+            .segments
+            .iter()
+            .any(|segment| segment.path == root.join("ordinary-0/.git"))
+    );
+}
+
+#[test]
+fn shared_status_and_readonly_probes_match_individual_kernel_checks() {
+    if !live() {
+        return;
+    }
+    let backend = bwrap_path();
+    let names = [
+        "user_namespace",
+        "pid_namespace",
+        "network_namespace",
+        "mount_readonly_bind",
+        "seccomp_filter_load",
+    ];
+    let grouped = probe::run_selected(&names, &jail_exe(), Ok(&backend));
+    for (name, together) in names.into_iter().zip(grouped) {
+        let separate = probe::run_one(name, &jail_exe(), &backend);
+        assert_eq!(together.status, separate.status, "{name}");
+        assert_eq!(together.reason_code, separate.reason_code, "{name}");
+        assert_eq!(together.mechanism, separate.mechanism, "{name}");
+        assert_eq!(together.status, ProbeStatus::Available, "{together:?}");
+    }
+}
+
+#[test]
 fn a_symlink_named_git_is_not_reported_as_a_segment_inside_the_root() {
     let outside = temp_dir("outside");
     fs::create_dir(outside.path().join(".git")).unwrap();

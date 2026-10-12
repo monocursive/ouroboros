@@ -1,0 +1,19 @@
+1/18 opencode docker add-multiply #0 23.8s exit=0 success=True
+2/18 opencode openshell-warm add-multiply #0 27.4s exit=0 success=True
+3/18 opencode openshell-ephemeral add-multiply #0 25.8s exit=0 success=True
+4/18 opencode openshell-warm refactor-yaml-json #0 23.7s exit=0 success=True
+5/18 opencode docker refactor-yaml-json #0 38.3s exit=0 success=True
+6/18 opencode openshell-ephemeral refactor-yaml-json #0 36.6s exit=0 success=True
+7/18 opencode openshell-warm fix-offbyone #0 32.7s exit=0 success=True
+8/18 opencode openshell-ephemeral fix-offbyone #0 37.0s exit=0 success=True
+9/18 opencode docker fix-offbyone #0 34.2s exit=0 success=True
+10/18 opencode openshell-ephemeral refactor-yaml-json #1 27.9s exit=0 success=True
+11/18 opencode docker refactor-yaml-json #1 24.6s exit=0 success=True
+12/18 opencode openshell-warm refactor-yaml-json #1 23.5s exit=0 success=True
+13/18 opencode docker add-multiply #1 25.1s exit=0 success=True
+14/18 opencode openshell-ephemeral add-multiply #1 27.0s exit=0 success=True
+15/18 opencode openshell-warm add-multiply #1 22.4s exit=0 success=True
+16/18 opencode openshell-ephemeral fix-offbyone #1 43.0s exit=0 success=True
+17/18 opencode openshell-warm fix-offbyone #1 39.0s exit=0 success=True
+18/18 opencode docker fix-offbyone #1 35.7s exit=0 success=True
+COMPLETE

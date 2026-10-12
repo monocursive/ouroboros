@@ -1,0 +1,42 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me create a plan for implementing the category summaries feature:
+Let me start by implementing the category_report function in report.py:
+Now let me update the CLI to add the --group-by-category argument and call the appropriate report function:
+Now let me update the README with an example of the grouped output:
+Now let me run the tests to see if everything works correctly:
+Excellent! All tests pass. Let me verify the implementation works as expected by testing it manually:
+Perfect! Let me also verify that invalid CSV produces the correct error behavior:
+Perfect! I've successfully implemented category summaries for the inventory CLI. Here's what was done:
+
+## Summary
+
+**Changes made:**
+
+1. **inventory/report.py** - Added `category_report` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and sums quantities and stock values
+   - Formats stock_value as a decimal string with exactly 2 fractional digits
+   - Returns results sorted alphabetically by category
+
+2. **inventory/cli.py** - Updated to:
+   - Add `--group-by-category` flag to the argument parser
+   - Call `category_report` when flag is set, otherwise use existing `item_report`
+   - Maintains existing error handling (exit code 2 for invalid CSV)
+
+3. **README.md** - Added documentation showing:
+   - Example command with `--group-by-category`
+   - Expected JSON output format
+
+**Test results:**
+All 10 tests pass, including:
+- `test_category_summaries` - Verifies grouped output format
+- `test_filter_before_group` - Confirms min_quantity is applied before grouping
+- `test_bad_csv` - Validates exit code 2 and useful error messages without tracebacks
+- Existing tests remain unchanged and passing
+
+**Key implementation details:**
+- Processing logic separated in `report.py`, argument parsing in `cli.py`
+- Uses Python's `Decimal` for exact arithmetic
+- Stock value calculated as `sum(quantity * unit_price)` formatted with `.2f`
+- Results sorted alphabetically by category name
+- Ungrouped output behavior unchanged

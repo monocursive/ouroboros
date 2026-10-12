@@ -1,0 +1,29 @@
+{
+  "sequence": 48,
+  "agent": "opencode",
+  "mode": "mxc",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "started_utc": "2026-10-12T10:07:22Z",
+  "elapsed_ms": 28367.351827,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_roundtrip (test_store.TestStore.test_roundtrip) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/ubuntu/bench-ouro-startup-final/bin/lxc-exec",
+    "/home/ubuntu/bench-ouro-startup-final/results/native-after/runs/048-opencode-mxc-refactor-yaml-json-1/mxc-private.json"
+  ],
+  "load": [
+    0.7392578125,
+    0.6259765625,
+    0.53857421875
+  ],
+  "artifact": "runs/048-opencode-mxc-refactor-yaml-json-1"
+}

@@ -1,0 +1,19 @@
+{
+  "host": "ubuntu@37.59.114.70",
+  "base": "/home/ubuntu/bench-ouro",
+  "paths": [
+    "runs",
+    "results",
+    "src",
+    "proxy/data"
+  ],
+  "entries_verified": 57339,
+  "source_bytes": 1665762532,
+  "private_archive": "/Users/monocursive/.local/share/ouro-benchmark-private/vps-before-working-state-20261012.tar.gz",
+  "archive_bytes": 435676021,
+  "archive_sha256": "e33b3ec16409993f9b4a271d21376a2519c8eeee42527c868568bbde439860c9",
+  "verified_before_removal": true,
+  "private_archive_exported": false,
+  "executables_and_authentication_retained": true,
+  "restore": "Upload the private archive and extract with tar -xzf ARCHIVE -C /home/ubuntu/bench-ouro"
+}

@@ -1,0 +1,39 @@
+I'll implement category summaries in the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now let me plan the implementation:
+Let me start implementing the changes:
+Perfect! All tests pass. Let me mark the tasks as completed and verify the implementation with a quick manual test:
+Excellent! The implementation is complete and working correctly. Let me verify the error handling as well:
+Perfect! The implementation is complete and all requirements have been met:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_report()` function:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Sums quantities and calculates stock values (quantity * unit_price)
+   - Formats stock_value as a decimal string with exactly 2 fractional digits
+   - Returns JSON array sorted by category name
+
+2. **inventory/cli.py** - Added `--group-by-category` flag:
+   - Added argument parser option for `--group-by-category`
+   - Conditionally calls `category_report()` when flag is present
+   - Otherwise maintains existing `item_report()` behavior
+   - Preserves error handling with exit code 2 for invalid CSV
+
+3. **README.md** - Added documentation:
+   - Example command using `--group-by-category`
+   - Expected JSON output format
+   - Explanation of stock_value calculation
+
+### Verified Behavior:
+
+- Ungrouped output maintains current behavior (inventory/cli.py:14-17)
+- `--min-quantity` filters before grouping (inventory/report.py:8)
+- Invalid CSV produces exit code 2 with useful stderr message, no traceback
+- All 10 tests pass successfully
+- Processing logic is in report.py, argument parsing is in cli.py (separate modules)
+- Stock values are exact decimals formatted with two fractional digits as JSON strings

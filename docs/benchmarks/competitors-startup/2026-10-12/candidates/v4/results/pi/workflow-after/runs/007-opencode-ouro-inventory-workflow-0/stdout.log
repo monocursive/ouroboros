@@ -1,0 +1,37 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the structure. Let me create a plan for implementing the category summary feature:
+Now let me implement the category summary feature. First, I'll add the `--group-by-category` argument and update the CLI logic:
+Now I'll implement the `category_summary` function in report.py:
+Now let me update the README.md with the grouped example:
+Now let's run the tests to verify everything works:
+Perfect! All tests pass. Let me verify the implementation works correctly by running it manually:
+Let me also test the invalid CSV error handling:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's a summary of what was done:
+
+## Implementation Summary
+
+**Added features:**
+- `--group-by-category` flag to `python3 -m inventory.cli` in inventory/cli.py:10
+- New `category_summary` function in inventory/report.py:8-31 for grouping logic
+- Processing logic keeps argument parsing in cli.py and grouping logic in report.py (separate modules)
+
+**Key implementation details:**
+- CSV is loaded using the existing `load_items` function from inventory/loader.py
+- `--min-quantity` filter is applied BEFORE grouping as required
+- Output is a JSON array sorted alphabetically by category
+- Each category object contains:
+  - `category` (string)
+  - `quantity` (sum of quantities as integer)
+  - `stock_value` (sum of quantity * unit_price, formatted as exact decimal string with 2 fractional digits)
+- Ungrouped output maintains its current behavior
+- Invalid CSV produces exit code 2 with useful stderr message without traceback
+- Updated README.md with grouped example and expected output
+
+**Test results:**
+All 10 tests pass, including:
+- Existing tests remain unchanged and passing
+- New tests for `--group-by-category` functionality
+- Filter before group test
+- Bad CSV error handling test
+
+The implementation correctly handles decimal precision using Python's `Decimal` type and formats the stock_value with exactly two fractional digits as required.

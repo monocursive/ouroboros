@@ -1,0 +1,61 @@
+{
+  "sequence": 7,
+  "agent": "claude",
+  "mode": "docker",
+  "task": "fix-offbyone",
+  "repetition": 1,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 27982.947754,
+  "container_result": {
+    "agent": "claude",
+    "task": "fix-offbyone",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 26225.588251,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {
+      "total_cost_usd": 0.08982299999999999,
+      "num_turns": 6,
+      "duration_api_ms": 23050
+    },
+    "peak_child_rss_kib": 270120,
+    "guest_kernel": [
+      "Linux",
+      "313ce0284fed",
+      "6.18.50+rpt-rpi-v8",
+      "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "pids.max": "3967",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-agents-after:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "fix-offbyone"
+  ],
+  "load": [
+    0.7529296875,
+    0.66796875,
+    0.66796875
+  ],
+  "artifact": "runs/007-claude-docker-fix-offbyone-1"
+}

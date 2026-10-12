@@ -1,0 +1,43 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the structure. Let me create a todo list and implement the feature:
+Now I'll create the category_summary function in report.py:
+Now I'll update cli.py to import and use the category_summary function:
+Now let me update the README.md with the grouped example:
+Now let me run the tests:
+Excellent! All tests pass. Let me mark the task as completed and verify the implementation manually:
+Let me verify the implementation works correctly with a manual test:
+Perfect! Let me verify the error handling for invalid CSV:
+Excellent! Let me review the final implementation to ensure all requirements are met:
+Perfect! Let me verify the README was updated correctly:
+Perfect! All requirements have been successfully implemented. Let me provide a summary:
+
+## Implementation Complete
+
+I've successfully implemented category summaries in the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/cli.py** (line 11):
+   - Added `--group-by-category` flag to the argument parser
+   - Added conditional logic (lines 15-18) to call `category_summary` when flag is set, otherwise `item_report`
+
+2. **inventory/report.py** (lines 8-24):
+   - Created `category_summary` function that:
+     - Filters items by `min_quantity` before grouping
+     - Groups items by category and calculates totals
+     - Returns JSON array sorted by category name
+     - Each object contains `category` (string), `quantity` (int), and `stock_value` (string with 2 decimal places)
+     - Uses `Decimal` for exact arithmetic
+
+3. **README.md** (lines 7-18):
+   - Added "Grouped by Category" section with example command and expected output
+
+### Verification:
+
+✅ All 10 tests pass, including the new category summary tests
+✅ `--group-by-category` produces correct grouped output sorted by category
+✅ `--min-quantity` is applied before grouping as required
+✅ Ungrouped output retains original behavior
+✅ Invalid CSV produces exit code 2 with useful error message (no traceback)
+✅ Processing logic remains in `report.py`, argument parsing in `cli.py` (separate modules)
+✅ Stock values are exact decimals formatted with 2 decimal places as JSON strings
